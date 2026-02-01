@@ -1,0 +1,34 @@
+npm warn Unknown user config "msvs_version". This will stop working in the next major version of npm.
+npm warn Unknown user config "python". This will stop working in the next major version of npm.
+
+> stremio-account-manager@0.1.0 lint
+> eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0
+
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\api\stremio-client.ts
+  244:51  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\components\accounts\AccountCard.tsx
+  24:21  error    Unexpected any. Specify a different type                                   @typescript-eslint/no-explicit-any
+  33:3   warning  'isFirst' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+  34:3   warning  'isLast' is defined but never used. Allowed unused args must match /^_/u   @typescript-eslint/no-unused-vars
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\components\addons\AddonCard.tsx
+  82:53  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\components\addons\InstallSavedAddonDialog.tsx
+  18:3   warning  'SelectValue' is defined but never used      @typescript-eslint/no-unused-vars
+  53:10  warning  'result' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\components\saved-addons\SavedAddonCard.tsx
+  13:3  warning  'SelectTrigger' is defined but never used  @typescript-eslint/no-unused-vars
+  14:3  warning  'SelectValue' is defined but never used    @typescript-eslint/no-unused-vars
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\components\saved-addons\SavedAddonLibrary.tsx
+  246:20  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+C:\Users\chris\.gemini\antigravity\scratch\stremio-manager-v4\src\store\addonStore.ts
+  201:26  error  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+Γ£û 11 problems (5 errors, 6 warnings)
+
