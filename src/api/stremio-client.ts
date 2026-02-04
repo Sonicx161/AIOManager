@@ -32,10 +32,19 @@ export interface LibraryItem {
 
 export class StremioClient {
   private client: AxiosInstance
+  private serverClient: AxiosInstance
 
   constructor() {
     this.client = axios.create({
       baseURL: API_BASE,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    })
+
+    this.serverClient = axios.create({
+      baseURL: '/api',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -112,24 +121,36 @@ export class StremioClient {
   /**
    * Get user's addon collection
    */
-  async getAddonCollection(authKey: string): Promise<AddonDescriptor[]> {
+  async getAddonCollection(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
     try {
-      const response = await this.client.post('/api/addonCollectionGet', {
+      // Use the server proxy for collection management to enable backend logging
+      const response = await this.serverClient.post('/stremio-proxy', {
         type: 'AddonCollectionGet',
         authKey,
         update: true,
+      }, {
+        headers: {
+          'x-account-context': accountContext
+        }
       })
 
       if (response.data?.error) {
         throw new Error(response.data.error.message || 'Failed to get addon collection')
       }
 
-      if (!response.data?.result?.addons) {
-        // If no addons, return empty array
+      const result = response.data?.result
+      if (!result?.addons) {
         return []
       }
 
-      return response.data.result.addons
+      return result.addons.map((addon: any) => ({
+        ...addon,
+        manifest: {
+          ...addon.manifest,
+          types: addon.manifest?.types || [],
+          resources: addon.manifest?.resources || []
+        }
+      }))
     } catch (error) {
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 401) {
@@ -149,20 +170,21 @@ export class StremioClient {
   /**
    * Update user's addon collection
    */
-  async setAddonCollection(authKey: string, addons: AddonDescriptor[]): Promise<void> {
+  async setAddonCollection(authKey: string, addons: AddonDescriptor[], accountContext: string = 'Unknown'): Promise<void> {
     try {
-      const response = await this.client.post('/api/addonCollectionSet', {
+      // Use the server proxy for collection management to enable backend logging
+      const response = await this.serverClient.post('/stremio-proxy', {
         type: 'AddonCollectionSet',
         authKey,
         addons,
+      }, {
+        headers: {
+          'x-account-context': accountContext
+        }
       })
 
       if (response.data?.error) {
-        throw new Error(response.data.error.message || 'Failed to set addon collection')
-      }
-
-      if (!response.data?.success && response.data?.result?.success === false) {
-        throw new Error('Failed to update addon collection')
+        throw new Error(response.data.error.message || 'Failed to update addon collection')
       }
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -173,7 +195,7 @@ export class StremioClient {
           throw new Error('Network error - check your internet connection or CORS configuration')
         }
         throw new Error(
-          error.response?.data?.error || error.message || 'Failed to set addon collection'
+          error.response?.data?.error || error.message || 'Failed to update addon collection'
         )
       }
       throw error
@@ -191,7 +213,7 @@ export class StremioClient {
    * Uses CORS proxy to avoid cross-origin issues with addon servers
    * Some domains (like official Stremio services) are fetched directly
    */
-  async fetchAddonManifest(transportUrl: string, retries = 2): Promise<AddonDescriptor> {
+  async fetchAddonManifest(transportUrl: string, accountContext: string = 'Unknown', retries = 2): Promise<AddonDescriptor> {
     // Determine the manifest URL
     let manifestUrl: string
     if (transportUrl.endsWith('/manifest.json') || transportUrl.includes('/manifest.json?')) {
@@ -215,10 +237,10 @@ export class StremioClient {
     const separator = manifestUrl.includes('?') ? '&' : '?'
     const finalManifestUrl = `${manifestUrl}${separator}${cacheBuster}`
 
-    // Use proxy only for URLs that need it (most addon servers don't have CORS headers)
+    // Use internal proxy only for URLs that need it (most addon servers don't have CORS headers)
     const fetchUrl = shouldFetchDirectly
       ? finalManifestUrl
-      : `https://api.allorigins.win/raw?url=${encodeURIComponent(finalManifestUrl)}`
+      : `/api/meta-proxy?url=${encodeURIComponent(finalManifestUrl)}`
 
     let lastError: unknown
     for (let i = 0; i <= retries; i++) {
@@ -235,6 +257,7 @@ export class StremioClient {
 
         const response = await axios.get(fetchUrl, {
           timeout: 15000,
+          headers: shouldFetchDirectly ? {} : { 'x-account-context': accountContext }
         })
 
         // allorigins might return the data as a string, so parse it if needed
@@ -256,9 +279,16 @@ export class StremioClient {
           throw new Error('Invalid addon manifest - missing required fields')
         }
 
+        // Sanitize manifest to ensure Stremio compliance (Fixes "missing field types")
+        const sanitizedManifest = {
+          ...manifestData,
+          types: manifestData.types || [],
+          resources: manifestData.resources || []
+        }
+
         return {
           transportUrl,
-          manifest: manifestData,
+          manifest: sanitizedManifest,
         }
       } catch (error) {
         lastError = error

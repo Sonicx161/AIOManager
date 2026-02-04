@@ -53,6 +53,8 @@ function App() {
 
     // Periodic Push (every 2 minutes)
     const interval = setInterval(() => {
+      // Idle Optimization: Skip auto-sync if tab is hidden
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
       syncToRemote(true).catch(console.error)
     }, 2 * 60 * 1000)
 

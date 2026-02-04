@@ -17,7 +17,8 @@ import { fetchAddonManifest } from '@/api/addons'
  */
 export async function mergeAddons(
   currentAddons: AddonDescriptor[],
-  savedAddons: SavedAddon[]
+  savedAddons: SavedAddon[],
+  accountId: string = 'Unknown'
 ): Promise<{ addons: AddonDescriptor[]; result: MergeResult }> {
   const result: MergeResult = {
     added: [],
@@ -33,8 +34,11 @@ export async function mergeAddons(
     const addonId = savedAddon.manifest.id
     const installUrl = savedAddon.installUrl
 
-    // 1. Check for literal same-URL duplicate to allow "updates"
-    const existingIndex = updatedAddons.findIndex((a) => a.transportUrl === installUrl)
+    // 1. Smart Swap: Check for same Addon ID OR literal same-URL 
+    // This prevents duplicates if the URL changed but it's the same addon
+    const existingIndex = updatedAddons.findIndex((a) =>
+      a.manifest.id === addonId || a.transportUrl === installUrl
+    )
 
     if (existingIndex >= 0) {
       const existing = updatedAddons[existingIndex]
@@ -50,16 +54,33 @@ export async function mergeAddons(
 
       // Update existing instance
       try {
-        const manifest = await fetchAddonManifest(installUrl)
-        updatedAddons[existingIndex] = manifest
+        // CRITICAL: We trust the saved manifest from the library if it exists.
+        // This ensures that custom-patched manifests (like Cinemeta) are preserved
+        // when installing the "saved" version.
+        const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
+
+        const updatedDescriptor: AddonDescriptor = {
+          transportUrl: installUrl, // Ensure we use the latest installUrl
+          manifest: manifestToApply,
+          metadata: savedAddon.metadata
+        }
+
+        updatedAddons[existingIndex] = updatedDescriptor
         result.updated.push({
           addonId,
-          oldUrl: installUrl,
-          newUrl: manifest.transportUrl,
+          oldUrl: existing.transportUrl,
+          newUrl: installUrl, // We already have the installUrl
         })
       } catch (error) {
         // Use cached manifest as fallback if fetch fails during update
         console.warn(`[Merger] Update fetch failed for ${savedAddon.name}, keeping current/cached`, error)
+
+        // Even if fetch fails, we still apply the metadata from the library
+        updatedAddons[existingIndex] = {
+          ...updatedAddons[existingIndex],
+          metadata: savedAddon.metadata
+        }
+
         result.skipped.push({
           addonId,
           reason: 'fetch-failed',
@@ -68,13 +89,21 @@ export async function mergeAddons(
     } else {
       // 2. New instance (Additive)
       try {
-        const manifest = await fetchAddonManifest(installUrl)
-        updatedAddons.push(manifest)
+        // Trust the saved manifest first to preserve patches
+        const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
+
+        const newDescriptor: AddonDescriptor = {
+          transportUrl: installUrl,
+          manifest: manifestToApply,
+          metadata: savedAddon.metadata
+        }
+
+        updatedAddons.push(newDescriptor)
 
         result.added.push({
           addonId,
-          name: manifest.manifest.name,
-          installUrl: manifest.transportUrl,
+          name: manifestToApply.name,
+          installUrl: installUrl,
         })
       } catch (error) {
         // Fallback to cached manifest
@@ -83,6 +112,7 @@ export async function mergeAddons(
         updatedAddons.push({
           transportUrl: installUrl,
           manifest: savedAddon.manifest,
+          metadata: savedAddon.metadata
         })
 
         result.added.push({
@@ -142,9 +172,10 @@ export function removeAddons(
  */
 export async function previewMerge(
   currentAddons: AddonDescriptor[],
-  savedAddons: SavedAddon[]
+  savedAddons: SavedAddon[],
+  accountId: string = 'Unknown'
 ): Promise<MergeResult> {
-  const { result } = await mergeAddons(currentAddons, savedAddons)
+  const { result } = await mergeAddons(currentAddons, savedAddons, accountId)
   return result
 }
 

@@ -106,7 +106,7 @@ export function CinemetaConfigurationDialog({
       const cleanManifest = await fetchOriginalCinemetaManifest(OFFICIAL_CINEMETA_URL)
 
       // 3. Get current addon collection
-      const currentAddons = await stremioClient.getAddonCollection(authKey)
+      const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
 
       // 4. Find Cinemeta index (match by ID is safest)
       const cinemetaIndex = currentAddons.findIndex((a) => a.manifest.id === addon.manifest.id)
@@ -129,7 +129,7 @@ export function CinemetaConfigurationDialog({
       }
 
       // 7. Sync to Stremio API (using wrapper to preserve metadata)
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
 
       // 8. Sync account state (refresh local data)
       await syncAccount(accountId)
@@ -170,7 +170,7 @@ export function CinemetaConfigurationDialog({
 
       // 2. Update addon collection with original manifest
       const authKey = await decrypt(accountAuthKey, encryptionKey)
-      const currentAddons = await stremioClient.getAddonCollection(authKey)
+      const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
       const cinemetaIndex = currentAddons.findIndex((a) => a.manifest.id === addon.manifest.id)
 
       if (cinemetaIndex === -1) {
@@ -184,7 +184,7 @@ export function CinemetaConfigurationDialog({
         metadata: addon.metadata, // Preserve custom name/logo on reset too
       }
 
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
       await syncAccount(accountId)
 
       // 4. Reset toggles

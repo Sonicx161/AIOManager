@@ -141,6 +141,7 @@ interface AddonStore {
   syncAccountState: (accountId: string, accountAuthKey: string) => Promise<void>
 
   syncAllAccountStates: (accounts: Array<{ id: string; authKey: string }>) => Promise<void>
+  lastHealthCheck?: number
 
   // === Import/Export ===
   exportLibrary: () => string
@@ -164,6 +165,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   loading: false,
   error: null,
   checkingHealth: false,
+  lastHealthCheck: undefined,
 
   deleteAccountState: async (accountId) => {
     const accountStates = { ...get().accountStates }
@@ -238,7 +240,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       // If no manifest provided, fetch it from the URL
       if (!manifest) {
-        const addonDescriptor = await fetchAddonManifest(installUrl)
+        const addonDescriptor = await fetchAddonManifest(installUrl, 'System-Check')
         manifest = addonDescriptor.manifest
       }
 
@@ -265,6 +267,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       set({ library })
 
       await saveAddonLibrary(library)
+
+      // Sync to cloud immediately
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
+
       return savedAddon.id
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to create saved addon'
@@ -317,12 +324,19 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const savedAddon = get().library[id]
       if (!savedAddon) throw new Error('Saved addon not found')
 
+      const cleanMetadata = { ...savedAddon.metadata }
+      Object.keys(metadata).forEach(key => {
+        const val = (metadata as any)[key]
+        if (val === undefined) {
+          delete (cleanMetadata as any)[key]
+        } else {
+          (cleanMetadata as any)[key] = val
+        }
+      })
+
       const updatedSavedAddon = {
         ...savedAddon,
-        metadata: {
-          ...savedAddon.metadata,
-          ...metadata
-        },
+        metadata: cleanMetadata,
         updatedAt: new Date()
       }
 
@@ -348,7 +362,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     const previousVersion = savedAddon.manifest.version
 
     // Fetch fresh manifest from the install URL
-    const addonDescriptor = await fetchAddonManifest(savedAddon.installUrl)
+    const addonDescriptor = await fetchAddonManifest(savedAddon.installUrl, 'System-Check')
     const freshManifest = addonDescriptor.manifest
 
     // Verify manifest ID matches (prevent replacing with wrong addon)
@@ -523,7 +537,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       // Get current addons from account
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-      const currentAddons = await getAddons(authKey)
+      const currentAddons = await getAddons(authKey, accountId)
 
       // Merge the saved addon (Purely Additive)
       const { addons: updatedAddons, result } = await mergeAddons(
@@ -532,7 +546,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       )
 
       // Update account addons
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
 
       // Update saved addon lastUsed
       const library = { ...get().library }
@@ -576,7 +590,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     try {
       // Get current addons from account
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-      const currentAddons = await getAddons(authKey)
+      const currentAddons = await getAddons(authKey, accountId)
 
       // Merge all saved addons with this tag
       const { addons: updatedAddons, result } = await mergeAddons(
@@ -585,7 +599,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       )
 
       // Update account addons
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
 
       // Update saved addon lastUsed for all applied saved addons
       const library = { ...get().library }
@@ -635,14 +649,15 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       for (const { id: accountId, authKey: accountAuthKey } of accountIds) {
         try {
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-          const currentAddons = await getAddons(authKey)
+          const currentAddons = await getAddons(authKey, accountId)
 
           const { addons: updatedAddons, result: mergeResult } = await mergeAddons(
             currentAddons,
-            savedAddons
+            savedAddons,
+            accountId
           )
 
-          await updateAddons(authKey, updatedAddons)
+          await updateAddons(authKey, updatedAddons, accountId)
 
           result.success++
           result.details.push({ accountId, result: mergeResult })
@@ -701,11 +716,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       for (const { id: accountId, authKey: accountAuthKey } of accountIds) {
         try {
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-          const currentAddons = await getAddons(authKey)
+          const currentAddons = await getAddons(authKey, accountId)
 
           const { addons: updatedAddons, protectedAddons } = removeAddons(currentAddons, addonIds)
 
-          await updateAddons(authKey, updatedAddons)
+          await updateAddons(authKey, updatedAddons, accountId)
 
           result.success++
           result.details.push({
@@ -784,7 +799,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
           for (const addonId of addonIds) {
             try {
-              const reinstallResult = await reinstallAddonApi(authKey, addonId)
+              const reinstallResult = await reinstallAddonApi(authKey, addonId, accountId)
               if (reinstallResult.updatedAddon) {
                 updateResults.push({
                   addonId,
@@ -845,7 +860,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     try {
       // 1. Fetch manifests for all URLs first
       const manifestsResults = await Promise.allSettled(
-        urls.map((url) => fetchAddonManifest(url))
+        urls.map((url) => fetchAddonManifest(url, 'Bulk-Pre-Install'))
       )
 
       const validDescriptors: any[] = [] // Type safety fallback
@@ -877,7 +892,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       for (const { id: accountId, authKey: accountAuthKey } of accountIds) {
         try {
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-          const currentAddons = await getAddons(authKey)
+          const currentAddons = await getAddons(authKey, accountId)
 
           const updatedAddons = [...currentAddons]
           const mergeResultDetails: MergeResult = {
@@ -924,7 +939,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             }
           }
 
-          await updateAddons(authKey, updatedAddons)
+          await updateAddons(authKey, updatedAddons, accountId)
 
           invalidUrls.forEach((url) => {
             mergeResultDetails.skipped.push({ addonId: url, reason: 'fetch-failed' })
@@ -965,7 +980,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       const localSourceAccount = useAccountStore.getState().accounts.find(a => a.id === sourceAccount.id)
 
-      const sourceAddons = localSourceAccount ? localSourceAccount.addons : await getAddons(await decrypt(sourceAccount.authKey, getEncryptionKey()))
+      const sourceAddons = localSourceAccount ? localSourceAccount.addons : await getAddons(await decrypt(sourceAccount.authKey, getEncryptionKey()), sourceAccount.id)
 
       const result: BulkResult = {
         success: 0,
@@ -983,7 +998,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
           // Get Target Addons (Use local state if available to be aware of local disabled/protected items)
           const localTargetAccount = useAccountStore.getState().accounts.find(a => a.id === accountId)
-          const targetAddons = localTargetAccount ? localTargetAccount.addons : await getAddons(authKey)
+          const targetAddons = localTargetAccount ? localTargetAccount.addons : await getAddons(authKey, accountId)
 
           // 1. Build the new addon list
           let newAddons: AddonDescriptor[] = []
@@ -1032,6 +1047,25 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             },
           })
 
+          // 3. Clone Failover Rules (ONLY in Overwrite Mode for environment parity)
+          if (overwrite) {
+            const { useFailoverStore } = await import('./failoverStore')
+            const failoverStore = useFailoverStore.getState()
+
+            // 1. Clear existing rules for target account
+            const existingTargetRules = failoverStore.rules.filter(r => r.accountId === accountId)
+            for (const rule of existingTargetRules) {
+              await failoverStore.removeRule(rule.id)
+            }
+
+            // 2. Clone rules from source account
+            const sourceRules = failoverStore.rules.filter(r => r.accountId === sourceAccount.id)
+            for (const rule of sourceRules) {
+              // Create a fresh copy with target accountId and new UUID
+              await failoverStore.addRule(accountId, [...rule.priorityChain])
+            }
+          }
+
           // Sync not needed as reorderAddons does it, but keeping it for safety
           await get().syncAccountState(accountId, accountAuthKey)
         } catch (error) {
@@ -1058,7 +1092,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     try {
       // Get current addons from Stremio
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-      const currentAddons = await getAddons(authKey)
+      const currentAddons = await getAddons(authKey, accountId)
 
       // Get existing state
       const existingState = get().accountStates[accountId]
@@ -1187,8 +1221,18 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   // === Health Checking ===
 
   checkAllHealth: async () => {
-    const { library, checkingHealth } = get()
+    // Idle Optimization: Skip health checks if the tab is hidden
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+
+    const { library, checkingHealth, lastHealthCheck } = get()
     if (checkingHealth) return
+
+    // Throttling: 3-minute cooldown for full health checks to prevent UI lag
+    const COOLDOWN = 3 * 60 * 1000
+    if (lastHealthCheck && (Date.now() - lastHealthCheck < COOLDOWN)) {
+      console.log(`[Health] Skipping checkAllHealth (Cooldown: ${Math.round((COOLDOWN - (Date.now() - lastHealthCheck)) / 1000)}s remaining)`)
+      return
+    }
 
     set({ checkingHealth: true })
     try {
@@ -1213,8 +1257,10 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       })
 
       if (hasChanges) {
-        set({ library: updatedLibrary })
+        set({ library: updatedLibrary, lastHealthCheck: Date.now() })
         saveAddonLibrary(updatedLibrary)
+      } else {
+        set({ lastHealthCheck: Date.now() })
       }
     } catch (error) {
       console.error('Health check failed:', error)

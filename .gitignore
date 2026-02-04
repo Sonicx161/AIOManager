@@ -65,3 +65,8 @@ CLAUDE.local.md
 # Temporary Reports
 *.txt
 *.ps1
+
+# AIOManager Data
+server/data/
+aio.db
+data/

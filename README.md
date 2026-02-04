@@ -65,16 +65,27 @@ The soul of AIOManager is giving you complete authority over your Stremio ecosys
 
 ---
 
-## 📦 Installation
+## [1.5.0] - The Sovereign Update 🚀
 
-### Docker (Recommended)
-This is the easiest way to run AIOManager on your home server.
+AIOManager v1.5.0 is a milestone release focused on **infrastructure independence** and **autonomous reliability**.
 
+### 📦 Installation
+
+#### Docker (Recommended)
+This is the easiest way to run AIOManager on your home server or VPS.
 1. Download the `docker-compose.yml` and create a `.env` file from the example.
 2. Run the following command:
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+#### Unraid Support 🛠️
+AIOManager is now optimized for **Unraid**! You can find the template in the [unraid-template.xml](unraid-template.xml) file or simply add it via the **Community Applications** (search for AIOManager).
+
+**Key Unraid Features:**
+- **Persistent AppData**: Standardized `/mnt/user/appdata/aiomanager` mapping.
+- **Auto-Update**: Compatible with Unraid's Docker update system.
+- **Port Flexibility**: Default port `1610` can be easily remapped in the template.
 
 ---
 

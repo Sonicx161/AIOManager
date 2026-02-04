@@ -428,7 +428,7 @@ export function AddonCard({
     const decryptedAuthKey = await decrypt(accountAuthKey, encryptionKey)
 
     // Get the current addon collection
-    const currentAddons = await stremioClient.getAddonCollection(decryptedAuthKey)
+    const currentAddons = await stremioClient.getAddonCollection(decryptedAuthKey, accountId)
 
     // Find and replace the addon we're editing
     const updatedAddons = currentAddons.map((a, i) => {
@@ -441,7 +441,7 @@ export function AddonCard({
     })
 
     // Sync back to Stremio (using wrapper to preserve metadata)
-    await updateAddons(decryptedAuthKey, updatedAddons)
+    await updateAddons(decryptedAuthKey, updatedAddons, accountId)
 
     // Trigger a refresh in the account store
     await useAccountStore.getState().syncAccount(accountId)

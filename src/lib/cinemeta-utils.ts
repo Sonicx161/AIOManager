@@ -212,9 +212,10 @@ export function applyCinemetaConfiguration(
  * Fetches the original Cinemeta manifest from the transport URL
  */
 export async function fetchOriginalCinemetaManifest(
-  transportUrl: string
+  transportUrl: string,
+  accountId: string = 'Unknown'
 ): Promise<CinemetaManifest> {
-  const descriptor = await stremioClient.fetchAddonManifest(transportUrl)
+  const descriptor = await stremioClient.fetchAddonManifest(transportUrl, accountId)
   return descriptor.manifest as CinemetaManifest
 }
 

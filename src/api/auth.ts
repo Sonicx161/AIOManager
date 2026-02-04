@@ -9,7 +9,7 @@ export async function loginWithCredentials(
 
 export async function validateAuthKey(authKey: string): Promise<boolean> {
   try {
-    await stremioClient.getAddonCollection(authKey)
+    await stremioClient.getAddonCollection(authKey, 'New-Login-Check')
     return true
   } catch {
     return false

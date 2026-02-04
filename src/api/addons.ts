@@ -2,39 +2,46 @@ import { AddonDescriptor } from '@/types/addon'
 import { stremioClient } from './stremio-client'
 import { checkAddonHealth } from '@/lib/addon-health'
 
-export async function getAddons(authKey: string): Promise<AddonDescriptor[]> {
-  return stremioClient.getAddonCollection(authKey)
+export async function getAddons(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
+  return stremioClient.getAddonCollection(authKey, accountContext)
 }
 
-export async function updateAddons(authKey: string, addons: AddonDescriptor[]): Promise<void> {
+export async function updateAddons(authKey: string, addons: AddonDescriptor[], accountContext: string = 'Unknown'): Promise<void> {
   // CRITICAL: Filter out disabled addons and apply manifest customizations (Raven fix)
   // This ensures that custom names, logos, and descriptions are pushed to Stremio.
   const preparedAddons = (addons || [])
     .filter((addon) => addon.flags?.enabled !== false)
     .map((addon) => {
+      // CRITICAL: Always ensure types and resources are present
+      const baseManifest = {
+        ...addon.manifest,
+        types: addon.manifest?.types || [],
+        resources: addon.manifest?.resources || []
+      }
+
       if (addon.metadata?.customName || addon.metadata?.customDescription || addon.metadata?.customLogo) {
         return {
           ...addon,
           manifest: {
-            ...addon.manifest,
-            name: addon.metadata.customName || addon.manifest?.name || '',
-            logo: addon.metadata.customLogo || addon.manifest?.logo || undefined,
-            description: addon.metadata.customDescription || addon.manifest?.description || '',
+            ...baseManifest,
+            name: addon.metadata.customName || baseManifest.name || '',
+            logo: addon.metadata.customLogo || baseManifest.logo || undefined,
+            description: addon.metadata.customDescription || baseManifest.description || '',
           },
         }
       }
-      return addon
+      return { ...addon, manifest: baseManifest }
     })
 
-  return stremioClient.setAddonCollection(authKey, preparedAddons)
+  return stremioClient.setAddonCollection(authKey, preparedAddons, accountContext)
 }
 
-export async function installAddon(authKey: string, addonUrl: string): Promise<AddonDescriptor[]> {
+export async function installAddon(authKey: string, addonUrl: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   // First, fetch the addon manifest
-  const newAddon = await stremioClient.fetchAddonManifest(addonUrl)
+  const newAddon = await stremioClient.fetchAddonManifest(addonUrl, accountContext)
 
   // Get current addons
-  const currentAddons = await getAddons(authKey)
+  const currentAddons = await getAddons(authKey, accountContext)
 
   // Check if addon already installed (by transportUrl to support duplicates with same ID)
   const existingIndex = currentAddons.findIndex(
@@ -53,14 +60,14 @@ export async function installAddon(authKey: string, addonUrl: string): Promise<A
   }
 
   // Update the collection
-  await updateAddons(authKey, updatedAddons)
+  await updateAddons(authKey, updatedAddons, accountContext)
 
   return updatedAddons
 }
 
-export async function removeAddon(authKey: string, transportUrl: string): Promise<AddonDescriptor[]> {
+export async function removeAddon(authKey: string, transportUrl: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   // Get current addons
-  const currentAddons = await getAddons(authKey)
+  const currentAddons = await getAddons(authKey, accountContext)
 
   // Check if addon is protected
   const addonToRemove = currentAddons.find((addon) => addon.transportUrl === transportUrl)
@@ -72,13 +79,13 @@ export async function removeAddon(authKey: string, transportUrl: string): Promis
   const updatedAddons = currentAddons.filter((addon) => addon.transportUrl !== transportUrl)
 
   // Update the collection
-  await updateAddons(authKey, updatedAddons)
+  await updateAddons(authKey, updatedAddons, accountContext)
 
   return updatedAddons
 }
 
-export async function fetchAddonManifest(url: string): Promise<AddonDescriptor> {
-  return stremioClient.fetchAddonManifest(url)
+export async function fetchAddonManifest(url: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor> {
+  return stremioClient.fetchAddonManifest(url, accountContext)
 }
 
 /**
@@ -87,7 +94,8 @@ export async function fetchAddonManifest(url: string): Promise<AddonDescriptor> 
  */
 export async function reinstallAddon(
   authKey: string,
-  transportUrl: string
+  transportUrl: string,
+  accountContext: string = 'Unknown'
 ): Promise<{
   addons: AddonDescriptor[]
   updatedAddon: AddonDescriptor | null
@@ -95,7 +103,7 @@ export async function reinstallAddon(
   newVersion?: string
 }> {
   // 1. Get current addons
-  const currentAddons = await getAddons(authKey)
+  const currentAddons = await getAddons(authKey, accountContext)
   const addonIndex = currentAddons.findIndex((addon) => addon.transportUrl === transportUrl)
   const existingAddon = currentAddons[addonIndex]
 
@@ -112,7 +120,7 @@ export async function reinstallAddon(
   // We fetch this BEFORE modifying the list. If it fails, we abort, leaving the list untouched.
   let newAddonDescriptor: AddonDescriptor
   try {
-    newAddonDescriptor = await stremioClient.fetchAddonManifest(addonUrl)
+    newAddonDescriptor = await stremioClient.fetchAddonManifest(addonUrl, accountContext)
   } catch (error) {
     console.error(`[Reinstall Failsafe] Failed to reach addon at ${transportUrl}`, error)
     throw new Error(`Cannot reach addon: ${error instanceof Error ? error.message : 'Unknown error'}. Aborting reinstall to save existing addon.`)
@@ -131,7 +139,7 @@ export async function reinstallAddon(
   }
 
   // 4. Save the updated collection (Atomic operation)
-  await updateAddons(authKey, updatedAddons)
+  await updateAddons(authKey, updatedAddons, accountContext)
 
   return {
     addons: updatedAddons,
@@ -154,32 +162,32 @@ export interface AddonUpdateInfo {
   isOnline: boolean
 }
 
+// --- Global Cache for Bursts (e.g. Sync All) ---
+const PENDING_CHECKS: Record<string, Promise<boolean>> = {}
+const PENDING_MANIFESTS: Record<string, Promise<AddonDescriptor>> = {}
+
 /**
  * Check which addons have updates available by comparing installed versions
  * with the latest versions from their transport URLs.
  * Fetches manifests sequentially to avoid overwhelming the server/proxy.
  */
-export async function checkAddonUpdates(addons: AddonDescriptor[]): Promise<AddonUpdateInfo[]> {
+export async function checkAddonUpdates(addons: AddonDescriptor[], accountContext: string = 'Update-Check'): Promise<AddonUpdateInfo[]> {
   // Filter out official addons only (protected addons can still be updated)
   const checkableAddons = addons.filter((addon) => !addon.flags?.official)
 
   console.log(`[Update Check] Checking ${checkableAddons.length} addons in batches with robust domain caching...`)
 
+  console.log(`[Update Check] Checking ${checkableAddons.length} addons in batches with robust domain caching...`)
+
   const results: AddonUpdateInfo[] = []
   const domainHealthCache: Record<string, boolean> = {}
-  const PENDING_CHECKS: Record<string, Promise<boolean>> = {}
   const batchSize = 10
 
   for (let i = 0; i < checkableAddons.length; i += batchSize) {
     const batch = checkableAddons.slice(i, i + batchSize)
     const batchPromises = batch.map(async (addon) => {
       try {
-        let origin = ''
-        try {
-          origin = new URL(addon.transportUrl).origin
-        } catch (e) {
-          origin = addon.transportUrl
-        }
+        const origin = new URL(addon.transportUrl).origin
 
         const healthPromise = domainHealthCache[origin] === true
           ? Promise.resolve(true)
@@ -187,16 +195,31 @@ export async function checkAddonUpdates(addons: AddonDescriptor[]): Promise<Addo
             if (!PENDING_CHECKS[origin]) {
               PENDING_CHECKS[origin] = checkAddonHealth(addon.transportUrl).then((status) => {
                 if (status) domainHealthCache[origin] = true
-                setTimeout(() => delete PENDING_CHECKS[origin], 2000)
+                setTimeout(() => delete PENDING_CHECKS[origin], 5000) // Cache health for 5s
                 return status
               })
             }
-            const sharedStatus = await PENDING_CHECKS[origin]
-            return sharedStatus || checkAddonHealth(addon.transportUrl)
+            return await PENDING_CHECKS[origin]
           })()
 
+        const manifestPromise = (async () => {
+          // Wait for health check before fetching manifest to save proxy bandwidth
+          const isOnline = await healthPromise
+          if (!isOnline) throw new Error('Addon is offline')
+
+          if (!PENDING_MANIFESTS[origin]) {
+            PENDING_MANIFESTS[origin] = stremioClient.fetchAddonManifest(addon.transportUrl, accountContext).catch(err => {
+              delete PENDING_MANIFESTS[origin]
+              throw err
+            })
+            // Manifest cache for 5s to sync burst requests
+            setTimeout(() => delete PENDING_MANIFESTS[origin], 5000)
+          }
+          return await PENDING_MANIFESTS[origin]
+        })()
+
         const [latestManifest, isOnline] = await Promise.all([
-          stremioClient.fetchAddonManifest(addon.transportUrl),
+          manifestPromise,
           healthPromise,
         ])
 
@@ -232,13 +255,12 @@ export async function checkSavedAddonUpdates(
     name: string
     installUrl: string
     manifest: { id: string; name: string; version: string }
-  }[]
+  }[],
+  accountContext: string = 'Library-Update-Check'
 ): Promise<AddonUpdateInfo[]> {
   console.log(`[Update Check] Checking ${savedAddons.length} saved addons with Domain+ID deduplication (v3)...`)
 
   const domainHealthCache: Record<string, boolean> = {}
-  const PENDING_CHECKS: Record<string, Promise<boolean>> = {}
-  const PENDING_MANIFESTS: Record<string, Promise<AddonDescriptor>> = {}
 
   // Group by Domain + Addon ID to handle UUID-based duplicates (AIOStreams style)
   const results: AddonUpdateInfo[] = []
@@ -248,48 +270,34 @@ export async function checkSavedAddonUpdates(
     const batch = savedAddons.slice(i, i + batchSize)
     const batchPromises = batch.map(async (addon) => {
       try {
-        let origin = ''
-        try {
-          origin = new URL(addon.installUrl).origin
-        } catch (e) {
-          origin = addon.installUrl
-        }
-
-        // Composite key for deduplication: Domain + Addon ID
-        // This ensures UUID-based variations of the same addon on the same domain are shared.
-        const groupKey = `${origin}:${addon.manifest.id}`
+        const origin = new URL(addon.installUrl).origin
 
         const healthPromise = domainHealthCache[origin] === true
           ? Promise.resolve(true)
           : (async () => {
-            // Use shared promise for in-flight checks to the same origin
             if (!PENDING_CHECKS[origin]) {
               PENDING_CHECKS[origin] = checkAddonHealth(addon.installUrl).then(status => {
                 if (status) domainHealthCache[origin] = true
-                setTimeout(() => delete PENDING_CHECKS[origin], 2000)
+                setTimeout(() => delete PENDING_CHECKS[origin], 5000)
                 return status
               })
             }
-            const sharedStatus = await PENDING_CHECKS[origin]
-            return sharedStatus || checkAddonHealth(addon.installUrl)
+            return await PENDING_CHECKS[origin]
           })()
 
-        // Deduplicate manifest fetch by Group Key
         const manifestResult = await (async () => {
-          if (!PENDING_MANIFESTS[groupKey]) {
-            PENDING_MANIFESTS[groupKey] = stremioClient.fetchAddonManifest(addon.installUrl).catch(async (err) => {
-              // Clean up immediately on error so next ones don't inherit the failure
-              delete PENDING_MANIFESTS[groupKey]
+          // Wait for health check before fetching manifest to save proxy bandwidth
+          const isOnline = await healthPromise
+          if (!isOnline) throw new Error('Addon is offline')
+
+          if (!PENDING_MANIFESTS[origin]) {
+            PENDING_MANIFESTS[origin] = stremioClient.fetchAddonManifest(addon.installUrl, accountContext).catch(async (err) => {
+              delete PENDING_MANIFESTS[origin]
               throw err
             })
+            setTimeout(() => delete PENDING_MANIFESTS[origin], 5000)
           }
-
-          try {
-            return await PENDING_MANIFESTS[groupKey]
-          } catch (e) {
-            // Fallback: try fetching specifically for THIS URL if the shared one failed
-            return await stremioClient.fetchAddonManifest(addon.installUrl)
-          }
+          return await PENDING_MANIFESTS[origin]
         })()
 
         const [isOnline] = await Promise.all([

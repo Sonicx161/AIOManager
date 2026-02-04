@@ -9,9 +9,10 @@ export interface HistoryLog {
     timestamp: Date
     type: 'failover' | 'recovery' | 'self-healing' | 'info'
     ruleId: string
-    primaryName: string
-    backupName: string
+    primaryName?: string
+    backupName?: string
     message: string
+    metadata?: any
 }
 
 interface HistoryStore {

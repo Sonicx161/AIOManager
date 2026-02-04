@@ -73,7 +73,7 @@ export function AddonMetadataDialog({
             setCustomName('')
             setCustomLogo('')
             setCustomDescription('')
-            onOpenChange(false)
+            // Keep open as requested
         } catch (err) {
             console.error(err)
             setError('Failed to reset defaults.')

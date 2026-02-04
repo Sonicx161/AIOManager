@@ -35,6 +35,7 @@ const sanitizeAddonManifest = (manifest: AddonDescriptor['manifest']) => {
       name: 'Unknown Addon',
       version: '0.0.0',
       description: '',
+      types: [], // CRITICAL: Stremio requires this field
       logo: undefined,
       background: undefined,
       idPrefixes: undefined,
@@ -42,6 +43,7 @@ const sanitizeAddonManifest = (manifest: AddonDescriptor['manifest']) => {
   }
   return {
     ...manifest,
+    types: manifest.types || [], // Ensure types exists
     logo: manifest.logo ?? undefined,
     background: manifest.background ?? undefined,
     idPrefixes: manifest.idPrefixes ?? undefined,
@@ -165,7 +167,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     set({ loading: true, error: null })
     try {
       // Validate auth key by fetching addons
-      const addons = await getAddons(authKey)
+      const addons = await getAddons(authKey, 'New-Login-Check')
 
       // Normalize addon manifests
       const normalizedAddons = addons.map((addon) => ({
@@ -224,7 +226,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       }
 
       // 3. Fetch addons
-      const addons = await getAddons(response.authKey)
+      const addons = await getAddons(response.authKey, 'New-Login-Check')
 
       // Normalize addon manifests
       const normalizedAddons = addons.map((addon) => ({
@@ -280,7 +282,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       }
 
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      const addons = await getAddons(authKey)
+      const addons = await getAddons(authKey, account.id)
 
       // Normalize addon manifests
       const normalizedAddons = addons.map((addon) => ({
@@ -316,7 +318,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             manifestRaw = cached.manifest
           } else {
             console.log(`[Sync] Fetching fresh manifest baseline for: ${addonName}`)
-            const { manifest } = await stremioClient.fetchAddonManifest(addon.transportUrl)
+            const { manifest } = await stremioClient.fetchAddonManifest(addon.transportUrl, account.id)
             manifestRaw = manifest
             MANIFEST_CACHE[addon.transportUrl] = { manifest: manifestRaw, timestamp: now }
           }
@@ -343,7 +345,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       // This saves a lot of time on simple refreshes
       if (forceRefresh) {
         console.log(`[Sync] Pushing state to Stremio (Repair/Deep Sync)...`)
-        await updateAddons(authKey, repairedAddons)
+        await updateAddons(authKey, repairedAddons, account.id)
       }
 
       const updatedAccount = {
@@ -382,6 +384,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
   },
 
   syncAllAccounts: async () => {
+    // Idle Optimization: Skip full sync if tab is hidden
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+
     set({ loading: true, error: null })
     const accounts = get().accounts
 
@@ -389,7 +394,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
     await Promise.all(accounts.map(async (account) => {
       try {
         const authKey = await decrypt(account.authKey, getEncryptionKey())
-        const addons = await getAddons(authKey)
+        const addons = await getAddons(authKey, account.id)
 
         // Normalize addon manifests
         const normalizedAddons = addons.map((addon) => ({
@@ -445,7 +450,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       }
 
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      const updatedAddons = await apiInstallAddon(authKey, addonUrl)
+      const updatedAddons = await apiInstallAddon(authKey, addonUrl, account.id)
 
       const normalizedAddons = updatedAddons.map((addon) => ({
         ...addon,
@@ -481,7 +486,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       }
 
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      const updatedAddons = await apiRemoveAddon(authKey, transportUrl)
+      const updatedAddons = await apiRemoveAddon(authKey, transportUrl, account.id)
 
       const normalizedAddons = updatedAddons.map((addon) => ({
         ...addon,
@@ -545,7 +550,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       // 3. Remote Sync (Push the entire collection to preserve order)
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, account.id)
 
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to remove addon'
@@ -565,7 +570,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       }
 
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      await updateAddons(authKey, newOrder)
+      await updateAddons(authKey, newOrder, account.id)
 
       const updatedAccount = {
         ...account,
@@ -983,7 +988,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
         }
 
         // Fetch addons with new key
-        const addons = await getAddons(authKey)
+        const addons = await getAddons(authKey, updatedAccount.id)
 
         // Normalize addon manifests
         const normalizedAddons = addons.map((addon) => ({
@@ -1041,7 +1046,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       // Sync to server to ensure API checks pass
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      await updateAddons(authKey, updatedAddons) // Store coordinator handles enabled flag
+      await updateAddons(authKey, updatedAddons, accountId) // Store coordinator handles enabled flag
 
     } catch (err) {
       console.error('Failed to toggle protection', err)
@@ -1088,7 +1093,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       // Sync to server if unlocked
       try {
         const authKey = await decrypt(account.authKey, getEncryptionKey())
-        await updateAddons(authKey, updatedAddons)
+        await updateAddons(authKey, updatedAddons, accountId)
       } catch (e) {
         console.warn('Could not sync enabled state to remote (likely locked)', e)
       }
@@ -1123,6 +1128,23 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       const account = get().accounts.find((acc) => acc.id === accountId)
       if (!account) throw new Error('Account not found')
 
+      // Detect if this is a "Full Reset" (all fields undefined)
+      const isReset = metadata.customName === undefined &&
+        metadata.customLogo === undefined &&
+        metadata.customDescription === undefined
+
+      let recoveredManifest: AddonDescriptor['manifest'] | null = null
+      if (isReset) {
+        // Re-fetch the original manifest to clear any patches (e.g. Cinemeta)
+        try {
+          const { fetchAddonManifest } = await import('@/api/addons')
+          const freshAddon = await fetchAddonManifest(transportUrl, accountId)
+          recoveredManifest = freshAddon.manifest
+        } catch (e) {
+          console.warn('[Metadata] Failed to re-fetch manifest for reset, falling back to local.', e)
+        }
+      }
+
       const updatedAddons = account.addons.map((addon, index) => {
         // If targetIndex provided, strict match. Otherwise, match all by URL.
         const shouldUpdate = typeof targetIndex === 'number'
@@ -1130,12 +1152,21 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
           : addon.transportUrl === transportUrl
 
         if (shouldUpdate) {
+          // CRITICAL: Clean metadata of undefined keys to allow manifest fallback
+          const cleanMetadata = { ...(addon.metadata || {}) }
+          Object.keys(metadata).forEach(key => {
+            const val = (metadata as any)[key]
+            if (val === undefined) {
+              delete (cleanMetadata as any)[key]
+            } else {
+              (cleanMetadata as any)[key] = val
+            }
+          })
+
           return {
             ...addon,
-            metadata: {
-              ...addon.metadata,
-              ...metadata
-            }
+            manifest: recoveredManifest || addon.manifest, // Restore manifest if we re-fetched it
+            metadata: cleanMetadata
           }
         }
         return addon
@@ -1149,7 +1180,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       // CRITICAL: Push to Stremio (Raven Method)
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update metadata'
       set({ error: message })
@@ -1181,7 +1212,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       // Sync to server
       const authKey = await decrypt(account.authKey, getEncryptionKey())
-      await updateAddons(authKey, updatedAddons)
+      await updateAddons(authKey, updatedAddons, accountId)
 
     } catch (err) {
       console.error('Failed to bulk protect addons', err)

@@ -30,7 +30,9 @@ export function MetricsPage() {
 
     useEffect(() => {
         initialize().then(() => {
-            fetchActivity()
+            // Background refresh if we already have history loaded from cache
+            const hasData = useActivityStore.getState().history.length > 0
+            fetchActivity(hasData)
         })
     }, [initialize, fetchActivity])
 
@@ -276,11 +278,19 @@ export function MetricsPage() {
     return (
         <div className="space-y-8 pb-32 animate-in fade-in duration-700">
             {/* HEADER */}
-            <div className="px-4">
-                <h1 className="text-3xl font-bold tracking-tight">Metrics</h1>
-                <p className="text-muted-foreground mt-1">
-                    Community Core insights and global statistics.
-                </p>
+            <div className="px-4 flex items-center justify-between">
+                <div>
+                    <h1 className="text-3xl font-bold tracking-tight">Metrics</h1>
+                    <p className="text-muted-foreground mt-1">
+                        Community Core insights and global statistics.
+                    </p>
+                </div>
+                {useActivityStore.getState().loading && (
+                    <div className="flex items-center gap-2 text-xs font-bold text-indigo-500 animate-pulse bg-indigo-500/10 px-3 py-1.5 rounded-full border border-indigo-500/20">
+                        <Activity className="h-3 w-3" />
+                        Syncing...
+                    </div>
+                )}
             </div>
 
             <Tabs defaultValue="pulse" className="w-full">

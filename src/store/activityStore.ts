@@ -58,7 +58,7 @@ interface ActivityState {
     initialized: boolean
 
     initialize: () => Promise<void>
-    fetchActivity: () => Promise<void>
+    fetchActivity: (silent?: boolean) => Promise<void>
     clearHistory: () => Promise<void>
     deleteItems: (itemIds: string[], removeFromLibrary?: boolean) => Promise<void>
     deleteActivityForAccount: (accountId: string) => Promise<void>
@@ -195,8 +195,8 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         }
     },
 
-    fetchActivity: async () => {
-        set({ loading: true, error: null })
+    fetchActivity: async (silent = false) => {
+        if (!silent) set({ loading: true, error: null })
         try {
             const { accounts } = useAccountStore.getState()
             const { encryptionKey } = useAuthStore.getState()
@@ -204,10 +204,8 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
 
             if (!encryptionKey) throw new Error('App is locked')
 
-            // Build fresh activity list from API
-            const freshItems: ActivityItem[] = []
-
-            for (const account of accounts) {
+            // Build fresh activity list from API - Parallelized for speed
+            const accountPromises = accounts.map(async account => {
                 try {
                     const authKey = await decrypt(account.authKey, encryptionKey)
                     const libraryItems = await stremioClient.getLibraryItems(authKey) as LibraryItem[]
@@ -230,11 +228,13 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
                             const timeOffset = item.state?.timeOffset || 0
                             const progress = duration > 0 ? (timeOffset / duration) * 100 : 0
 
+                            const accountColorIndex = accounts.indexOf(account) % 10
+
                             return {
                                 id: `${account.id}:${uniqueItemId}`,
                                 accountId: account.id,
                                 accountName: account.name || account.email || account.id,
-                                accountColorIndex: accounts.indexOf(account) % 10,
+                                accountColorIndex,
                                 itemId: item._id,
                                 uniqueItemId,
                                 name: item.name,
@@ -249,11 +249,15 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
                             }
                         })
 
-                    freshItems.push(...activityItems)
+                    return activityItems
                 } catch (err) {
                     console.warn(`Failed to fetch library for account ${account.id}:`, err)
+                    return []
                 }
-            }
+            })
+
+            const results = await Promise.all(accountPromises)
+            const freshItems = results.flat()
 
             // Sort history by timestamp (newest first)
             freshItems.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())

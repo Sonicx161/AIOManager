@@ -130,7 +130,7 @@ export function AddonList({ accountId }: AddonListProps) {
       // Trigger failover check immediately
       await checkRules()
 
-      const updateInfoList = await checkAddonUpdates(addons)
+      const updateInfoList = await checkAddonUpdates(addons, accountId)
       const versions: Record<string, string> = {}
       const health: Record<string, boolean> = {}
 
@@ -174,7 +174,7 @@ export function AddonList({ accountId }: AddonListProps) {
       if (!account || !encryptionKey) return
 
       const authKey = await decrypt(account.authKey, encryptionKey)
-      await reinstallAddon(authKey, transportUrl)
+      await reinstallAddon(authKey, transportUrl, accountId)
 
       // Sync account to refresh addon list
       await syncAccount(accountId)
@@ -214,7 +214,7 @@ export function AddonList({ accountId }: AddonListProps) {
       let successCount = 0
       for (const item of addonsToUpdate) {
         try {
-          await reinstallAddon(authKey, item.url)
+          await reinstallAddon(authKey, item.url, accountId)
           successCount++
         } catch (error) {
           console.warn(`Failed to update addon ${item.id}:`, error)
