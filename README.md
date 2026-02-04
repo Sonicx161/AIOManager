@@ -1,0 +1,110 @@
+<div align="center">
+  <img src="public/logo.png" width="128" alt="AIOManager Logo">
+  <h1>AIOManager</h1>
+  <p><strong>One Manager to rule them all.</strong></p>
+  
+  <p align="center">
+  AIOManager is the ultimate <strong>account management</strong> toolkit for Stremio. Built for power users who demand full functional and granular control, it allows you to sync multiple identities, backup complex addon configurations, and track your watch history with absolute privacy.
+  </p>
+
+  <br />
+
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
+  [![React](https://img.shields.io/badge/React-20232A?style=flat&logo=react&logoColor=61DAFB)](https://reactjs.org/)
+  [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
+  [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
+
+  <br />
+
+  <h3>Dashboard Overview</h3>
+  <img src="public/screenshots/accounts.png" width="100%" alt="AIOManager Multi-Account Dashboard">
+</div>
+
+---
+
+## ⚡ Features
+
+### 🛠️ Total Management
+The soul of AIOManager is giving you complete authority over your Stremio ecosystem.
+*   **Addon Snapshots**: Save configurations for complex addons like AIOStreams or AIOMetadata to your private library.
+*   **Account Sync**: Seamlessly switch between multiple Stremio logins without losing your place.
+*   **Bulk Actions**: Pick dozens of history items or addons to move, tag, or delete in one go.
+*   **Granular Control**: Reorder profiles, customize addon branding, and manage your sidebar exactly how you want it.
+*   **Failover Logic**: Automatically switch to backup addons if your primary provider goes offline.
+
+<div align="center">
+  <h4>Granular Addon Control</h4>
+  <img src="public/screenshots/addon-grid.png" width="100%" alt="Addon Management">
+  <br />
+  <h4>Advanced Failover Rules</h4>
+  <img src="public/screenshots/failover.png" width="100%" alt="Failover Rules">
+  <br />
+  <h4>Drag & Drop Reordering</h4>
+  <img src="public/screenshots/reorder.png" width="100%" alt="Reorder Addons">
+  <br />
+  <h4>Custom Addon Customization</h4>
+  <img src="public/screenshots/editor.png" width="100%" alt="Addon Editor">
+</div>
+
+### 📊 Mega Metrics
+*   **Pulse**: Real-time activity tracking, Trending Now clusters, and the **Streak Hall of Fame**.
+*   **Deep Dive**: Prime Time heatmaps, Retention Funnels, and "The Graveyard" for abandoned shows.
+
+### 🛡️ Privacy First Sync
+*   **Local First**: Your data stays in your browser via IndexedDB.
+*   **Encrypted Cloud**: Optional sync using AES-256-GCM encryption. Your keys never leave your device.
+
+---
+
+## 📦 Installation
+
+### Docker (Recommended)
+This is the easiest way to run AIOManager on your home server.
+1. Download the `docker-compose.yml` and create a `.env` file from the example.
+2. Run the following command:
+```bash
+docker compose pull && docker compose up -d
+```
+
+---
+
+## 🏁 Getting Started
+
+Once the app is running:
+1. Open the app in your browser (usually `http://localhost:5173` or your server IP).
+2. You will be greeted by the **Login** screen. Stay on the **New Account** tab to generate your unique **Account UUID**.
+3. Choose a strong password. This is the **only key** to your encrypted data.
+4. Once inside, go to **Settings** -> **Accounts** to link your Stremio identities and start managing.
+
+<div align="center">
+  <h4>Initial Setup & Login</h4>
+  <img src="public/screenshots/login.png" width="100%" alt="Login Screen">
+</div>
+
+---
+
+## ⚖️ Disclaimer
+
+AIOManager is not affiliated with Stremio. It is a secondary management tool developed by the community. All data is processed locally or through your own private sync keys.
+
+---
+
+<div align="center">
+  <h3>🤝 Credits & Acknowledgements</h3>
+  
+  AIOManager is a fork and major evolution of the original <b>Stremio Account Manager</b> by <b>Asymons</b>.  
+  Without the foundational work of the following projects and individuals, this would not exist:
+
+  <b>[pancake3000](https://github.com/pancake3000/stremio-addon-manager)</b> (The Original Creator)  
+  <b>[Asymons](https://github.com/Asymons/stremio-account-manager)</b> | <b>[Stremio](https://stremio.com)</b> | <b>[Syncio](https://github.com/iamneur0/syncio)</b> | <b>[CineBye](https://cinebye.dinsden.top/)</b>  
+
+  <br />
+
+  Special thanks to the community inspirations who made this journey possible:  
+  <b>redd-raven</b>, <b>Viren070</b>, <b>0xConstant1</b>, <b>Sleeyax</b> & <b>&lt;Code/&gt;</b>.
+
+  <br />
+
+  *Built with ❤️ for the Stremio Community.*
+</div>

@@ -1,0 +1,30 @@
+# Build artifacts
+dist
+node_modules
+
+# Development files
+.git
+.gitignore
+.vscode
+.husky
+*.log
+
+# Documentation (keep README.md)
+*.md
+!README.md
+
+# Config files not needed in container
+.eslintrc*
+.prettierrc*
+
+# Environment files
+.env*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore

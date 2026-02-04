@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<Container version="2.0">
+  <Name>AIOManager</Name>
+  <Repository>ghcr.io/sonicx161/aiomanager:latest</Repository>
+  <Registry>https://github.com/sonicx161/AIOManager/pkgs/container/aiomanager</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/sonicx161/AIOManager/issues</Support>
+  <Project>https://github.com/sonicx161/AIOManager</Project>
+  <Overview>AIOManager is the ultimate account management toolkit for Stremio. Built for power users who demand full functional and granular control, it allows you to sync multiple identities, backup complex addon configurations, and track your watch history with absolute privacy.</Overview>
+  <Category>Tools: MediaApp:Video Management:Web Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:Web Port]</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/sonicx161/AIOManager/main/public/logo.png</Icon>
+  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Ultimate account management toolkit for Stremio. Built for power users.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>1610</HostPort>
+        <ContainerPort>1610</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/aiomanager</HostDir>
+      <ContainerDir>/app/data</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>1610</Value>
+      <Name>PORT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>info</Value>
+      <Name>LOG_LEVEL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>true</Value>
+      <Name>LOG_PRETTY_PRINT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>production</Value>
+      <Name>NODE_ENV</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Labels/>
+  <Config Name="Web Port" Target="1610" Default="1610" Mode="tcp" Description="The host port AIOManager listens on." Type="Port" Display="always" Required="true" Mask="false">1610</Config>
+  <Config Name="App Data" Target="/app/data" Default="/mnt/user/appdata/aiomanager" Mode="rw" Description="Persistent storage for the AIO database and configuration." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/aiomanager</Config>
+  <Config Name="Log Level" Target="LOG_LEVEL" Default="info" Mode="" Description="Verbosity of server logs (fatal, error, warn, info, debug, trace)." Type="Variable" Display="always" Required="false" Mask="false">info</Config>
+  <Config Name="Log Pretty Print" Target="LOG_PRETTY_PRINT" Default="true" Mode="" Description="Enable colorful AIOStreams-style logs (set to false for JSON)." Type="Variable" Display="always" Required="false" Mask="false">true</Config>
+  <Config Name="Environment" Target="NODE_ENV" Default="production" Mode="" Description="Run mode (production or development)." Type="Variable" Display="advanced" Required="false" Mask="false">production</Config>
+</Container>

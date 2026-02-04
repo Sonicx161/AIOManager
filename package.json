@@ -1,0 +1,83 @@
+{
+  "name": "aiomanager",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "client": "vite",
+    "server": "node --env-file=.env server/index.js",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
+    "preview": "vite preview",
+    "prepare": "husky || true",
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "prettier --write",
+      "eslint --fix"
+    ],
+    "*.{css,json}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.1.0",
+    "@dnd-kit/sortable": "^8.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-checkbox": "^1.3.3",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-progress": "^1.1.8",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "axios": "^1.13.2",
+    "better-sqlite3": "^11.8.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "concurrently": "^9.2.1",
+    "crypto-js": "^4.2.0",
+    "date-fns": "^4.1.0",
+    "fastify": "^5.2.1",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/static": "^8.0.4",
+    "localforage": "^1.10.0",
+    "lucide-react": "^0.562.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.12.0",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss-animate": "^1.0.7",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.5",
+    "zustand": "^5.0.10"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^25.1.0",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@types/react-router-dom": "^5.3.3",
+    "@typescript-eslint/eslint-plugin": "^6.14.0",
+    "@typescript-eslint/parser": "^6.14.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.23",
+    "eslint": "^8.55.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "gh-pages": "^6.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "postcss": "^8.5.6",
+    "prettier": "^3.8.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.8"
+  }
+}

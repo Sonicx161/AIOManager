@@ -1,0 +1,67 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Build outputs
+dist
+dist-ssr
+build
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Testing
+coverage
+.nyc_output
+
+# Temporary files
+*.tmp
+*.temp
+.cache
+
+# Sensitive files
+*.pem
+*.key
+*.cert
+*.p12
+secrets.json
+config.local.json
+*.secret
+
+# Claude Code files
+CLAUDE.local.md
+
+# Temporary Reports
+*.txt
+*.ps1
