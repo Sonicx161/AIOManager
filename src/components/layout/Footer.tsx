@@ -1,4 +1,4 @@
-import { Github, Laptop, Heart, Box, FileText } from 'lucide-react'
+import { Github, Laptop, Heart, Box, FileText, Globe } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import React from 'react'
 import pkg from '../../../package.json'
@@ -82,20 +82,30 @@ export function Footer() {
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-primary hover:underline font-medium"
-                  title="Brand & Communities"
+                  title="Developer GitHub Profile"
                 >
                   Sonicx161
                 </a>
                 <span className="text-muted-foreground/30">•</span>
                 <div className="flex items-center gap-2">
                   <a
-                    href="https://github.com/sonicx161/AIOManager"
+                    href="https://chrise.vercel.app/"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-muted-foreground hover:text-primary transition-colors"
-                    title="Engineering Portfolio"
+                    title="Professional Portfolio (Chris E)"
                   >
                     <Laptop className="h-4 w-4" />
+                  </a>
+                  <span className="text-muted-foreground/30">•</span>
+                  <a
+                    href="https://sonicx161.vercel.app/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-muted-foreground hover:text-primary transition-colors"
+                    title="Project Brand & Community"
+                  >
+                    <Globe className="h-4 w-4" />
                   </a>
                   <span className="text-muted-foreground/30">•</span>
                   <div className="flex items-center gap-2">
