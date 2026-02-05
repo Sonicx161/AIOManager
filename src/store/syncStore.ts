@@ -75,7 +75,7 @@ export const useSyncStore = create<SyncState>()(
                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
                     const emptyState = {
                         accounts: [],
-                        addons: {},
+                        addons: { version: '1.0', savedAddons: [] },
                         profiles: [],
                         failover: [],
                         syncedAt: new Date().toISOString()

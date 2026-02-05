@@ -66,6 +66,17 @@ The soul of AIOManager is giving you complete authority over your Stremio ecosys
 
 ---
 
+## [1.5.3] - The Resilience Release 🛡️
+
+AIOManager v1.5.3 is an **important bug fix** release resolving critical sync issues.
+
+> [!IMPORTANT]
+> **Retroactive Fix**: If you were facing a `[object Object]` or `Invalid library format` error after signing out, you do **not** need to recreate your account. Simply update to v1.5.3 and log in again—the fix automatically repairs the corrupted state.
+
+- **🛡️ Sync Resilience**: Fixed a race condition where the library importer would crash when receiving unexpected objects from the cloud.
+- **🔄 Registration Parity**: Ensured fresh accounts are initialized with a standard empty library structure.
+- **✨ Robust Parsing**: Hardened all store importers to handle both JSON strings and plain objects gracefully.
+
 ## [1.5.2] - The Stabilization Sweep 🛡️
 
 AIOManager v1.5.2 is a maintenance release focused on **reliability, hardening, and UI synchronization**.

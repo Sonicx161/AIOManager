@@ -1171,7 +1171,14 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   importLibrary: async (json, merge) => {
     set({ loading: true, error: null })
     try {
-      const data = JSON.parse(json)
+      const data = typeof json === 'string' ? JSON.parse(json) : json
+
+      // Safety fallback: If data is empty or null, just treat as empty library
+      if (!data || (typeof data === 'object' && Object.keys(data).length === 0)) {
+        set({ library: {} })
+        await saveAddonLibrary({})
+        return
+      }
 
       // Support both old 'templates' and new 'savedAddons' format
       const savedAddons = data.savedAddons || data.templates
