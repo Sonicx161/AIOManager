@@ -187,9 +187,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   } catch (loginError: any) {
                         const isUserNotFound =
                               loginError.code === 'USER_NOT_FOUND' ||
-                              loginError.message?.includes('USER_NOT_FOUND') ||
-                              loginError.message?.includes('User not found') ||
-                              loginError.code?.includes('USER_NOT_FOUND')
+                              (typeof loginError.message === 'string' && loginError.message.includes('USER_NOT_FOUND')) ||
+                              (typeof loginError.message === 'string' && loginError.message.includes('User not found')) ||
+                              (typeof loginError.code === 'string' && loginError.code.includes('USER_NOT_FOUND'))
 
                         if (isUserNotFound) {
                               console.log(`[Auth] User not found. Attempting auto-registration for: ${email}`)

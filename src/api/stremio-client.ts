@@ -66,8 +66,10 @@ export class StremioClient {
       if (response.data?.error) {
         // Carry forward the specific error message from Stremio (e.g., USER_NOT_FOUND)
         const errData = response.data.error
-        const err = new Error(errData.message || 'Login failed')
-          ; (err as any).code = errData.code || errData.message // Sometimes code is in message field in older APIs
+        const message = typeof errData === 'string' ? errData : (errData.message || 'Login failed')
+        const err = new Error(typeof message === 'string' ? message : JSON.stringify(message))
+        const code = errData.code || errData.message
+          ; (err as any).code = typeof code === 'string' ? code : JSON.stringify(code)
         throw err
       }
 
@@ -84,7 +86,9 @@ export class StremioClient {
         if (error.code === 'ERR_NETWORK') {
           throw new Error('Network error - check your internet connection or CORS configuration')
         }
-        throw new Error(error.response?.data?.error || error.message || 'Login failed')
+        const apiError = error.response?.data?.error
+        const finalMessage = typeof apiError === 'string' ? apiError : (typeof apiError === 'object' ? JSON.stringify(apiError) : (error.message || 'Login failed'))
+        throw new Error(finalMessage)
       }
       throw error
     }
@@ -112,7 +116,9 @@ export class StremioClient {
       return response.data.result
     } catch (error) {
       if (axios.isAxiosError(error)) {
-        throw new Error(error.response?.data?.error || error.message || 'Registration failed')
+        const apiError = error.response?.data?.error
+        const finalMessage = typeof apiError === 'string' ? apiError : (typeof apiError === 'object' ? JSON.stringify(apiError) : (error.message || 'Registration failed'))
+        throw new Error(finalMessage)
       }
       throw error
     }

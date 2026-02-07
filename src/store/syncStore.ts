@@ -453,7 +453,7 @@ export const useSyncStore = create<SyncState>()(
                     }
                 } catch (e) {
                     const message = (e as Error).message
-                    const isNetworkError = message === 'Failed to fetch' || message.includes('Failed to reach server')
+                    const isNetworkError = message === 'Failed to fetch' || (typeof message === 'string' && message.includes('Failed to reach server'))
 
                     if (!isAuto) {
                         toast({

@@ -5,7 +5,7 @@ import ReactDOM from 'react-dom/client'
 // --- EMERGENCY DEBUG TRAP ---
 // Catches specific JSON errors that are hard to trace
 window.addEventListener('error', (event) => {
-  if (event.message.includes('valid JSON') || event.message.includes('object Object')) {
+  if (typeof event.message === 'string' && (event.message.includes('valid JSON') || event.message.includes('object Object'))) {
     document.body.innerHTML = `
       <div style="background:red; color:white; padding:20px; font-family:monospace; white-space:pre-wrap;">
         <h1>CRITICAL JSON ERROR TRAPPED</h1>
@@ -23,7 +23,7 @@ window.addEventListener('error', (event) => {
 
 window.addEventListener('unhandledrejection', (event) => {
   const reason = event.reason?.message || String(event.reason)
-  if (reason.includes('valid JSON') || reason.includes('object Object')) {
+  if (typeof reason === 'string' && (reason.includes('valid JSON') || reason.includes('object Object'))) {
     document.body.innerHTML = `
       <div style="background:darkred; color:white; padding:20px; font-family:monospace; white-space:pre-wrap;">
         <h1>UNHANDLED PROMISE REJECTION TRAPPED</h1>
@@ -41,7 +41,7 @@ const originalError = console.error
 console.error = (...args) => {
   originalError.apply(console, args)
   const msg = args.map(a => String(a)).join(' ')
-  if (msg.includes('valid JSON') || msg.includes('object Object')) {
+  if (typeof msg === 'string' && (msg.includes('valid JSON') || msg.includes('object Object'))) {
     document.body.innerHTML += `
         <div style="background:orange; color:black; padding:10px; font-family:monospace; margin-top:10px; border:2px solid black;">
             <h3>CONSOLE ERROR INTERCEPTED</h3>
