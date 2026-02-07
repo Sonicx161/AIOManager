@@ -223,12 +223,61 @@ export async function fetchOriginalCinemetaManifest(
  * Detects if an addon is Cinemeta
  */
 export function isCinemetaAddon(addon: AddonDescriptor): boolean {
+  if (!addon) return false
   const CINEMETA_IDS = ['com.linvo.cinemeta', 'org.stremio.cinemeta', 'cinemeta']
+  const transportUrl = addon.transportUrl?.toLowerCase() || ''
+
   return (
     CINEMETA_IDS.includes(addon.manifest.id) ||
-    addon.manifest.name.toLowerCase().includes('cinemeta') ||
+    addon.manifest.name.toLowerCase() === 'cinemeta' ||
+    transportUrl.includes('v3-cinemeta.strem.io') ||
     (addon.flags?.official === true && addon.manifest.name === 'Cinemeta')
   )
+}
+
+/**
+ * Detects if an addon is an internal/built-in Stremio addon that should often be filtered.
+ */
+export function isInternalAddon(addon: AddonDescriptor): boolean {
+  if (!addon) return false
+
+  // 1. Check Cinemeta
+  if (isCinemetaAddon(addon)) return true
+
+  const id = addon.manifest.id?.toLowerCase() || ''
+  const name = addon.manifest.name?.toLowerCase() || ''
+  const transportUrl = addon.transportUrl?.toLowerCase() || ''
+
+  // 2. Known Internal IDs
+  const INTERNAL_IDS = [
+    'com.linvo.cinemeta',
+    'org.stremio.cinemeta',
+    'cinemeta',
+    'local',
+    'watchhub',
+    'org.stremio.watchhub',
+    'com.stremio.youtube',
+    'youtube',
+    'com.stremio.opensubtitles',
+    'opensubtitles'
+  ]
+  if (INTERNAL_IDS.includes(id)) return true
+
+  // 3. Known Internal/Official URLs or Name patterns
+  if (transportUrl.includes('v3-cinemeta.strem.io')) return true
+  if (transportUrl.includes('127.0.0.1:11470/local-addon')) return true
+  if (transportUrl.includes('watchhub.strem.io')) return true
+  if (transportUrl.includes('v3-channels.strem.io')) return true // YouTube
+  if (transportUrl.includes('caching.stremio.net/publicdomainmovies')) return true
+  if (transportUrl.includes('opensubtitles-v3.strem.io')) return true
+
+  // 4. Name fallback for official ones
+  if (name === 'cinemeta') return true
+  if (name === 'watchhub') return true
+  if (name.includes('local files')) return true
+  if (name === 'youtube' && addon.flags?.official) return true
+
+  return false
 }
 
 /**

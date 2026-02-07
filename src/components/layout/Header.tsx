@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/contexts/ThemeContext'
 import { useSyncStore } from '@/store/syncStore'
-import { LogOut } from 'lucide-react'
+import { LogOut, LayoutDashboard, Package, Activity, BarChart3, Settings, HelpCircle } from 'lucide-react'
 import { SyncStatus } from '@/components/SyncStatus'
 
 export function Header() {
@@ -59,61 +59,67 @@ export function Header() {
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex gap-4 mt-4 border-b overflow-x-auto scrollbar-hide whitespace-nowrap">
+        <div className="flex gap-1 mt-4 border-b overflow-x-auto scrollbar-hide whitespace-nowrap -mx-4 px-4 sm:mx-0 sm:px-0">
           <Link
             to="/"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/' || location.pathname.startsWith('/account/')
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/' || location.pathname.startsWith('/account/')
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Accounts
+            <LayoutDashboard className="h-4 w-4" />
+            <span>Accounts</span>
           </Link>
           <Link
             to="/saved-addons"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/saved-addons'
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/saved-addons'
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Saved Addons
+            <Package className="h-4 w-4" />
+            <span>Saved Addons</span>
           </Link>
 
           <Link
             to="/activity"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/activity'
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/activity'
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Activity
+            <Activity className="h-4 w-4" />
+            <span>Activity</span>
           </Link>
           <Link
             to="/metrics"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/metrics'
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/metrics'
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Metrics
+            <BarChart3 className="h-4 w-4" />
+            <span>Metrics</span>
           </Link>
           <Link
             to="/settings"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/settings'
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/settings'
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Settings
+            <Settings className="h-4 w-4" />
+            <span>Settings</span>
           </Link>
           <Link
             to="/faq"
-            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 ${location.pathname === '/faq'
-              ? 'border-primary text-foreground font-medium'
+            className={`pb-2 px-3 border-b-2 transition-colors duration-150 shrink-0 flex items-center gap-2 ${location.pathname === '/faq'
+              ? 'border-primary text-foreground font-semibold'
               : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
               }`}
           >
-            Features & FAQ
+            <HelpCircle className="h-4 w-4" />
+            <span>FAQ</span>
           </Link>
         </div>
       </div>

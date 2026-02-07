@@ -49,3 +49,93 @@ export function normalizeAddonUrl(url: string): string {
   normalized = normalized.replace(/\/+$/, '')
   return normalized
 }
+
+/**
+ * Checks if a version string is strictly newer than the current version.
+ * Handles 'v' prefixes, varying segment lengths, and basic semver flags.
+ */
+export function isNewerVersion(current?: string, latest?: string): boolean {
+  if (!latest || !current) return false
+  if (latest === current) return false
+
+  const clean = (v: string) => v.toLowerCase().replace(/^v/, '').split('-')[0]
+  const cParts = clean(current).split('.').map(Number)
+  const lParts = clean(latest).split('.').map(Number)
+
+  const maxLength = Math.max(cParts.length, lParts.length)
+
+  for (let i = 0; i < maxLength; i++) {
+    const c = cParts[i] || 0
+    const l = lParts[i] || 0
+    if (l > c) return true
+    if (l < c) return false
+  }
+
+  return false
+}
+
+/**
+ * Helper: Merge remote addons with local addons, preserving order and flags.
+ * Source of Truth: Remote presence determines "enabled" status, but local flags and metadata are preserved.
+ */
+import { AddonDescriptor } from '@/types/addon'
+
+export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonDescriptor[]) {
+  // 1. Map remote addons for lookup (by normalized URL)
+  const remoteAddonMap = new Map()
+  remoteAddons.forEach((a) => {
+    const norm = normalizeAddonUrl(a.transportUrl).toLowerCase()
+    if (!remoteAddonMap.has(norm)) remoteAddonMap.set(norm, a)
+  })
+
+  const processedRemoteNormUrls = new Set<string>()
+  const finalAddons: AddonDescriptor[] = []
+
+  // 2. Iterate through LOCAL addons to preserve their order
+  localAddons.forEach((localAddon) => {
+    const normLocal = normalizeAddonUrl(localAddon.transportUrl).toLowerCase()
+    const remoteAddon = remoteAddonMap.get(normLocal)
+
+    if (remoteAddon) {
+      // Exists in both: Use Remote data + Local flags
+      // CRITICAL: If it exists in remote, it IS currently active/enabled in Stremio.
+      finalAddons.push({
+        ...remoteAddon,
+        flags: {
+          ...remoteAddon.flags,
+          protected: localAddon.flags?.protected,
+          enabled: true, // Trust remote presence
+        },
+        metadata: localAddon.metadata,
+      })
+      processedRemoteNormUrls.add(normLocal)
+    } else {
+      // Catch-all preservation: Keep ONLY if it is explicitly disabled locally, protected,
+      // or has custom metadata (managed/customized addon)
+      const hasMetadata =
+        localAddon.metadata &&
+        (localAddon.metadata.customName ||
+          localAddon.metadata.customLogo ||
+          localAddon.metadata.customDescription)
+      if (localAddon.flags?.enabled === false || localAddon.flags?.protected || hasMetadata) {
+        finalAddons.push({
+          ...localAddon,
+          flags: { ...(localAddon.flags || {}), enabled: false }, // If not in remote, it's disabled
+        })
+      }
+    }
+  })
+
+  // 3. Append any NEW remote addons that weren't in local list
+  remoteAddons.forEach((remoteAddon) => {
+    const normRemote = normalizeAddonUrl(remoteAddon.transportUrl).toLowerCase()
+    if (!processedRemoteNormUrls.has(normRemote)) {
+      finalAddons.push({
+        ...remoteAddon,
+        flags: { ...(remoteAddon.flags || {}), enabled: true },
+      })
+    }
+  })
+
+  return finalAddons
+}

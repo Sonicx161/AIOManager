@@ -218,6 +218,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       set({ library })
       await saveAddonLibrary(library)
       console.log(`[Rescue] Successfully rescued ${fixedCount} addons from the abyss!`)
+      // Sync fixed state back to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
   },
 
@@ -309,6 +312,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       set({ library })
 
       await saveAddonLibrary(library)
+      // Sync to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update saved addon'
       set({ error: message })
@@ -343,6 +349,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const library = { ...get().library, [id]: updatedSavedAddon }
       set({ library })
       await saveAddonLibrary(library)
+      // Sync to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update metadata'
       set({ error: message })
@@ -391,6 +400,10 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     console.log(
       `Updated saved addon "${savedAddon.name}" from v${previousVersion} to v${freshManifest.version}`
     )
+
+    // Sync to cloud immediately
+    const { useSyncStore } = await import('./syncStore')
+    useSyncStore.getState().syncToRemote(true).catch(console.error)
   },
 
   deleteSavedAddonsByProfile: async (profileId) => {
@@ -407,6 +420,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     if (hasChanges) {
       set({ library })
       await saveAddonLibrary(library)
+      // Sync to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
   },
 
@@ -415,6 +431,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     delete library[id]
     set({ library })
     await saveAddonLibrary(library)
+    // Sync to cloud immediately
+    const { useSyncStore } = await import('./syncStore')
+    useSyncStore.getState().syncToRemote(true).catch(console.error)
   },
 
   bulkDeleteSavedAddons: async (ids) => {
@@ -430,6 +449,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     if (hasChanges) {
       set({ library })
       await saveAddonLibrary(library)
+      // Sync to cloud immediately
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
   },
 
@@ -471,6 +493,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     if (hasChanges) {
       set({ library: updatedLibrary })
       await saveAddonLibrary(updatedLibrary)
+      // Sync to cloud immediately
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
   },
 
@@ -518,6 +543,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     if (hasChanges) {
       set({ library })
       await saveAddonLibrary(library)
+      // Sync to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
   },
 
@@ -1137,6 +1165,10 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       // CRITICAL: Trigger Dashboard Refresh
       const { useAccountStore } = await import('./accountStore')
       await useAccountStore.getState().syncAccount(accountId)
+
+      // Sync the new account state to cloud immediately
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
     } catch (error) {
       console.error('Failed to sync account state:', error)
       throw error
@@ -1170,36 +1202,102 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
   importLibrary: async (json, merge) => {
     set({ loading: true, error: null })
+    console.log("%c[AddonStore] Importing library with SECURE HARDENING", "color: green; font-weight: bold;")
     try {
-      const data = typeof json === 'string' ? JSON.parse(json) : json
+      // Resilience check: Handle already-parsed objects, strings, or nulls
+      let data: any
+      if (!json) {
+        data = {}
+      } else if (typeof json === 'object') {
+        data = json
+      } else if (typeof json === 'string') {
+        if (json.includes('[object Object]')) {
+          console.error('Critical: Received "[object Object]" string in importLibrary. Aborting to prevent data loss.')
+          throw new Error('Remote library data is corrupted (Double-encoded object). Aborting sync.')
+        } else {
+          try {
+            data = JSON.parse(json)
+          } catch (e) {
+            console.error('Failed to parse library JSON:', json ? json.substring(0, 100) : 'null')
+            throw new Error('Failed to parse library data. Aborting to prevent data loss.')
+          }
+        }
+      } else {
+        data = {}
+      }
 
       // Safety fallback: If data is empty or null, just treat as empty library
       if (!data || (typeof data === 'object' && Object.keys(data).length === 0)) {
-        set({ library: {} })
-        await saveAddonLibrary({})
+        if (!merge) {
+          set({ library: {} })
+          await saveAddonLibrary({})
+        }
         return
       }
 
-      // Support both old 'templates' and new 'savedAddons' format
-      const savedAddons = data.savedAddons || data.templates
+      // Support exhaustive legacy scavenging
+      // 1. Check for raw database dump key: 'stremio-manager:addon-library'
+      // 2. Check for legacy export keys: 'savedAddons', 'templates'
+      // 3. Check for new full-sync structure: 'addons.savedAddons'
+      let scavengedData = data.savedAddons ||
+        data['stremio-manager:addon-library'] ||
+        data.templates ||
+        data.addons?.savedAddons ||
+        (Array.isArray(data) ? data : null)
+
+      // If we found an object (raw database map), convert it to an array
+      if (scavengedData && !Array.isArray(scavengedData) && typeof scavengedData === 'object') {
+        scavengedData = Object.values(scavengedData)
+      }
+
+      const savedAddons = scavengedData || []
+
+      const manifestMap = data.manifests || data.addons?.manifests || {}
 
       if (!savedAddons || !Array.isArray(savedAddons)) {
-        throw new Error('Invalid library format')
+        console.warn('[AddonStore] No valid addon data found in import object.')
       }
 
       const currentLibrary = merge ? { ...get().library } : {}
 
       for (const newItem of savedAddons) {
         // Validate basic structure
-        if (!newItem.id || !newItem.manifest || !newItem.installUrl) {
-          console.warn('Skipping invalid item:', newItem)
+        if (!newItem.id || !newItem.installUrl) {
+          console.warn('Skipping invalid item (Missing ID or URL):', newItem)
           continue
+        }
+
+        // Inflate manifest from map if missing
+        if (!newItem.manifest && newItem.manifestId && manifestMap[newItem.manifestId]) {
+          newItem.manifest = manifestMap[newItem.manifestId]
+        }
+
+        // Final Manifest Resilience: If still missing, try to construct a minimal one or fetch it later
+        if (!newItem.manifest) {
+          console.warn(`[AddonStore] Item ${newItem.name || newItem.id} is missing a manifest. Attempting recovery...`)
+
+          // If we have an install URL, we can at least try to pull the manifest later via initialize()
+          // For now, we construct a "placeholder" manifest to allow the import to succeed
+          if (newItem.installUrl) {
+            newItem.manifest = {
+              id: 'pending-sync-' + newItem.id,
+              name: newItem.name || 'Recovering Addon...',
+              version: '0.0.0',
+              description: 'Manifest is being recovered from the source URL.',
+              types: [],
+              resources: [],
+              catalogs: []
+            } as any
+          } else {
+            console.error(`[AddonStore] Skipping item ${newItem.id} - No manifest and no installUrl for recovery.`)
+            continue
+          }
         }
 
         // Check if exists
         const existing = currentLibrary[newItem.id]
         if (existing) {
-          // Merge strategy: Overwrite manual fields, keep ID
+          // Merge strategy: Overwrite manual fields, keep local createdAt if possible
           currentLibrary[newItem.id] = {
             ...existing,
             ...newItem,
@@ -1208,7 +1306,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         } else {
           currentLibrary[newItem.id] = {
             ...newItem,
-            createdAt: new Date(),
+            createdAt: newItem.createdAt ? new Date(newItem.createdAt) : new Date(),
             updatedAt: new Date(),
           }
         }

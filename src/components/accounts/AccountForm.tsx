@@ -14,11 +14,13 @@ import { useUIStore } from '@/store/uiStore'
 import { AlertCircle, ChevronDown, ChevronUp, ExternalLink, HelpCircle, Rocket, RefreshCw, Lock } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useAuthStore } from '@/store/authStore'
 
 export function AccountForm() {
   const isOpen = useUIStore((state) => state.isAddAccountDialogOpen)
   const closeDialog = useUIStore((state) => state.closeAddAccountDialog)
   const editingAccount = useUIStore((state) => state.editingAccount)
+  const encryptionKey = useAuthStore((state) => state.encryptionKey)
   const { addAccountByAuthKey, addAccountByCredentials, updateAccount, loading } = useAccounts()
 
   const [mode, setMode] = useState<'authKey' | 'credentials'>('credentials')
@@ -61,6 +63,11 @@ export function AccountForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+
+    if (!encryptionKey) {
+      setError('Your vault is locked. Please refresh or unlock the app with your master password.')
+      return
+    }
 
     try {
       if (editingAccount) {
@@ -231,7 +238,7 @@ export function AccountForm() {
                         selection?.addRange(range)
                       }}
                     >
-                      JSON.parse(localStorage.getItem("profile")).auth.key
+                      localStorage.getItem("profile") || "No legacy profile found"
                     </pre>
                   </div>
                 </div>
@@ -288,14 +295,16 @@ export function AccountForm() {
             <Button type="button" variant="outline" onClick={handleClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || !encryptionKey}>
               {loading
                 ? isEditing
                   ? 'Updating...'
                   : 'Adding...'
-                : isEditing
-                  ? 'Update Account'
-                  : 'Add Account'}
+                : !encryptionKey
+                  ? 'Vault Locked'
+                  : isEditing
+                    ? 'Update Account'
+                    : 'Add Account'}
             </Button>
           </DialogFooter>
         </form>

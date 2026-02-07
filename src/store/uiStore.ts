@@ -52,7 +52,12 @@ export const useUIStore = create<UIStore>((set, get) => ({
   initialize: () => {
     const stored = localStorage.getItem(PRIVACY_MODE_KEY)
     if (stored !== null) {
-      set({ isPrivacyModeEnabled: JSON.parse(stored) })
+      try {
+        set({ isPrivacyModeEnabled: JSON.parse(stored) })
+      } catch (e) {
+        console.warn('Failed to parse privacy mode setting:', e)
+        localStorage.removeItem(PRIVACY_MODE_KEY)
+      }
     }
   },
 }))

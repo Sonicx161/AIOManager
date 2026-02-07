@@ -57,6 +57,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     } else {
       // No session key - user needs to unlock
       set({ isLocked: true })
+
+      // Critical: If we have an existing session key in storage but it failed to load,
+      // or if we are just starting up, we must ensure we don't accidentally leave it unlocked.
+      // But here we set isLocked: true, so we are safe.
     }
   },
 
@@ -78,11 +82,11 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     saveSalt(salt)
 
     // Hash and save password
-    const hash = await hashPassword(password, salt)
+    const hash = await hashPassword(String(password), salt)
     savePasswordHash(hash)
 
     // Derive encryption key
-    const key = await deriveKey(password, salt)
+    const key = await deriveKey(String(password), salt)
 
     // Save to session storage
     await saveSessionKey(key)
@@ -106,8 +110,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       throw new Error('Master password not set up')
     }
 
+
     // Hash provided password
-    const hash = await hashPassword(password, salt)
+    const hash = await hashPassword(String(password), salt)
 
     // Compare hashes
     if (hash !== storedHash) {

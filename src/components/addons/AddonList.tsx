@@ -4,7 +4,7 @@ import { useToast } from '@/hooks/use-toast'
 import { useAccounts } from '@/hooks/useAccounts'
 import { useAddons } from '@/hooks/useAddons'
 import { decrypt } from '@/lib/crypto'
-import { maskEmail } from '@/lib/utils'
+import { maskEmail, isNewerVersion } from '@/lib/utils'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useAuthStore } from '@/store/authStore'
@@ -126,7 +126,7 @@ export function AddonList({ accountId }: AddonListProps) {
 
   const updatesAvailable = addons.filter((addon) => {
     const latest = latestVersions[addon.manifest.id]
-    return latest && latest !== addon.manifest.version
+    return latest && isNewerVersion(addon.manifest.version, latest)
   })
 
   const handleCheckUpdates = useCallback(async () => {

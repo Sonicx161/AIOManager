@@ -21,7 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SavedAddonCard } from './SavedAddonCard'
 import { useProfileStore } from '@/store/profileStore'
 import { ProfileDialog } from '../profiles/ProfileDialog'
-import { cn } from '@/lib/utils'
+import { cn, isNewerVersion } from '@/lib/utils'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { BulkEditDialog } from './BulkEditDialog'
 
@@ -146,7 +146,7 @@ export function SavedAddonLibrary() {
   const handleUpdateAll = useCallback(async () => {
     const addonsWithUpdates = savedAddons.filter((addon) => {
       const latest = latestVersions[addon.manifest.id]
-      return latest && latest !== addon.manifest.version
+      return latest && isNewerVersion(addon.manifest.version, latest)
     })
 
     if (addonsWithUpdates.length === 0) return
@@ -517,7 +517,7 @@ export function SavedAddonLibrary() {
                     <RefreshCw className={`h-4 w-4 mr-2 ${checkingUpdates || checkingHealth ? 'animate-spin' : ''}`} />
                     Refresh
                   </Button>
-                  {savedAddons.some(a => latestVersions[a.manifest.id] && latestVersions[a.manifest.id] !== a.manifest.version) && (
+                  {savedAddons.some(a => latestVersions[a.manifest.id] && isNewerVersion(a.manifest.version, latestVersions[a.manifest.id])) && (
                     <Button
                       variant="default"
                       size="sm"

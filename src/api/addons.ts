@@ -1,6 +1,7 @@
 import { AddonDescriptor } from '@/types/addon'
 import { stremioClient } from './stremio-client'
 import { checkAddonHealth } from '@/lib/addon-health'
+import { isNewerVersion } from '@/lib/utils'
 
 export async function getAddons(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   return stremioClient.getAddonCollection(authKey, accountContext)
@@ -223,7 +224,7 @@ export async function checkAddonUpdates(addons: AddonDescriptor[], accountContex
           healthPromise,
         ])
 
-        const hasUpdate = latestManifest.manifest.version !== addon.manifest.version
+        const hasUpdate = isNewerVersion(addon.manifest.version, latestManifest.manifest.version)
 
         return {
           addonId: addon.manifest.id,
@@ -305,7 +306,7 @@ export async function checkSavedAddonUpdates(
           healthPromise,
         ])
 
-        const hasUpdate = latestManifest.manifest.version !== addon.manifest.version
+        const hasUpdate = isNewerVersion(addon.manifest.version, latestManifest.manifest.version)
 
         return {
           addonId: addon.id,

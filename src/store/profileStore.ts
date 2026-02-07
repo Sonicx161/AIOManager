@@ -59,6 +59,10 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         set(state => {
             const updated = [...state.profiles, newProfile]
             localforage.setItem(STORAGE_KEY, updated)
+            // Sync to cloud immediately
+            import('./syncStore').then(({ useSyncStore }) => {
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            })
             return { profiles: updated, error: null }
         })
 
@@ -73,6 +77,10 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
                     : p
             )
             localforage.setItem(STORAGE_KEY, updated)
+            // Sync to cloud immediately
+            import('./syncStore').then(({ useSyncStore }) => {
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            })
             return { profiles: updated, error: null }
         })
     },
@@ -81,6 +89,10 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         set(state => {
             const updated = state.profiles.filter(p => p.id !== id)
             localforage.setItem(STORAGE_KEY, updated)
+            // Sync to cloud immediately
+            import('./syncStore').then(({ useSyncStore }) => {
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            })
             return { profiles: updated, error: null }
         })
     },
@@ -88,6 +100,10 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     reorderProfiles: async (newOrder: Profile[]) => {
         set(() => {
             localforage.setItem(STORAGE_KEY, newOrder)
+            // Sync to cloud immediately
+            import('./syncStore').then(({ useSyncStore }) => {
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            })
             return { profiles: newOrder, error: null }
         })
     },

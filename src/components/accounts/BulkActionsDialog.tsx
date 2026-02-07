@@ -10,9 +10,10 @@ import {
 } from '@/components/ui/select'
 // import { Textarea } from '@/components/ui/textarea' 
 import { useAddonStore } from '@/store/addonStore'
+import { useAccountStore } from '@/store/accountStore'
 import { StremioAccount } from '@/types/account'
 import { BulkResult } from '@/types/saved-addon'
-import { Copy, Globe, LayoutGrid, Loader2, PlusCircle, RefreshCw, Tags, Trash2, AlertTriangle } from 'lucide-react'
+import { Copy, Globe, LayoutGrid, Loader2, PlusCircle, RefreshCw, Tags, Trash2, AlertTriangle, Shield, ShieldOff } from 'lucide-react'
 import { useState } from 'react'
 import { Switch } from '@/components/ui/switch'
 
@@ -38,6 +39,8 @@ type BulkAction =
   | 'update-addons'
   | 'install-from-url'
   | 'clone-account'
+  | 'protect-all'
+  | 'unprotect-all'
 
 export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose }: BulkActionsDialogProps) {
   const {
@@ -52,6 +55,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
     bulkCloneAccount,
     loading,
   } = useAddonStore()
+  const { bulkProtectAddons } = useAccountStore()
 
   const [action, setAction] = useState<BulkAction>('add-saved-addons')
   const [selectedSavedAddonIds, setSelectedSavedAddonIds] = useState<Set<string>>(new Set())
@@ -169,7 +173,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           bulkResult = await bulkReinstallAddons(Array.from(selectedUpdateAddonIds), accountsData)
           break
 
-        case 'install-from-url':
+        case 'install-from-url': {
           const urls = urlList.split('\n').map(u => u.trim()).filter(u => u.length > 0)
           if (urls.length === 0) {
             setError('Please enter at least one URL')
@@ -177,8 +181,9 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           }
           bulkResult = await bulkInstallFromUrls(urls, accountsData)
           break
+        }
 
-        case 'clone-account':
+        case 'clone-account': {
           if (!sourceAccountId) {
             setError('Please select a source account')
             return
@@ -193,6 +198,19 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             accountsData,
             overwriteClone
           )
+          break
+        }
+        case 'protect-all':
+          for (const acc of selectedAccounts) {
+            await bulkProtectAddons(acc.id, true)
+          }
+          bulkResult = { success: selectedAccounts.length, failed: 0, errors: [], details: [] }
+          break
+        case 'unprotect-all':
+          for (const acc of selectedAccounts) {
+            await bulkProtectAddons(acc.id, false)
+          }
+          bulkResult = { success: selectedAccounts.length, failed: 0, errors: [], details: [] }
           break
       }
 
@@ -317,6 +335,18 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                       <span>Remove Addons by Tag</span>
                     </div>
                   </SelectItem>
+                  <SelectItem value="protect-all">
+                    <div className="flex items-center gap-2">
+                      <Shield className="h-4 w-4 text-green-500" />
+                      <span>Protect All Addons</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="unprotect-all">
+                    <div className="flex items-center gap-2">
+                      <ShieldOff className="h-4 w-4 text-red-500" />
+                      <span>Unprotect All Addons</span>
+                    </div>
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -332,7 +362,9 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                   action.includes('update') ? <RefreshCw className="h-4 w-4" /> :
                     action === 'install-from-url' ? <Globe className="h-4 w-4" /> :
                       action === 'clone-account' ? <Copy className="h-4 w-4" /> :
-                        <PlusCircle className="h-4 w-4" />}
+                        action === 'protect-all' ? <Shield className="h-4 w-4" /> :
+                          action === 'unprotect-all' ? <ShieldOff className="h-4 w-4" /> :
+                            <PlusCircle className="h-4 w-4" />}
               Configuration
             </CardTitle>
           </CardHeader>
@@ -604,6 +636,20 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* Protect / Unprotect All */}
+            {(action === 'protect-all' || action === 'unprotect-all') && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-muted/30 border border-dashed text-center">
+                  <p className="text-sm font-medium">
+                    This will {action === 'protect-all' ? 'enable' : 'disable'} protection for ALL addons on the {selectedAccounts.length} selected accounts.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Protected addons cannot be removed or modified unless protection is disabled.
+                  </p>
                 </div>
               </div>
             )}

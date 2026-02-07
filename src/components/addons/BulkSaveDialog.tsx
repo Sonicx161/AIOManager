@@ -17,12 +17,17 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/hooks/use-toast'
+import { Checkbox } from '@/components/ui/checkbox'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
+import { isInternalAddon } from '@/lib/cinemeta-utils'
+import { TagInput } from '@/components/ui/tag-input'
 import { Loader2 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
+
+// Internal addon IDs are now handled by isInternalAddon in cinemeta-utils.ts
 
 interface BulkSaveDialogProps {
     open: boolean
@@ -46,8 +51,21 @@ export function BulkSaveDialog({
     const [saveProfileId, setSaveProfileId] = useState<string>('unassigned')
     const [isCreatingProfile, setIsCreatingProfile] = useState(false)
     const [newProfileName, setNewProfileName] = useState('')
-    const [saveTags, setSaveTags] = useState('')
-    const [skipDuplicates] = useState(true) // Retain state but remove setter if unused, or just default to true properly
+    const [saveTags, setSaveTags] = useState<string[]>([])
+    const [skipDuplicates] = useState(true)
+    const [excludeInternal, setExcludeInternal] = useState(true)
+
+    const filteredAddons = excludeInternal
+        ? addons.filter(a => !isInternalAddon(a))
+        : addons
+
+    const allKnownTags = useMemo(() => {
+        const tagsSet = new Set<string>()
+        Object.values(library).forEach((savedAddon) => {
+            savedAddon.tags.forEach((tag) => tagsSet.add(tag))
+        })
+        return Array.from(tagsSet).sort()
+    }, [library])
 
     // Smart Defaulting when dialog opens
     useEffect(() => {
@@ -72,7 +90,6 @@ export function BulkSaveDialog({
                 setSaveProfileId(matchingProfile.id)
                 setIsCreatingProfile(false)
             } else {
-                // Default to creating a new profile for "Save All" usually implies setting up a new user
                 setSaveProfileId('unassigned')
                 setNewProfileName(customName || emailName || 'My Profile')
                 setIsCreatingProfile(true)
@@ -84,7 +101,7 @@ export function BulkSaveDialog({
         onOpenChange(false)
         setIsCreatingProfile(false)
         setNewProfileName('')
-        setSaveTags('')
+        setSaveTags([])
         setSaving(false)
     }
 
@@ -110,18 +127,15 @@ export function BulkSaveDialog({
                 }
             }
 
-            // 2. Prepare Tags
+            // 2. Tags are already in array format
             const tags = saveTags
-                .split(',')
-                .map((t) => t.trim())
-                .filter(Boolean)
 
             let successCount = 0
             let skippedCount = 0
             let failCount = 0
 
             // 3. Iterate and Save
-            for (const addon of addons) {
+            for (const addon of filteredAddons) {
                 // Check duplicate
                 if (skipDuplicates) {
                     const isDuplicate = Object.values(library).some(
@@ -176,7 +190,7 @@ export function BulkSaveDialog({
                 <DialogHeader>
                     <DialogTitle>Save All Addons</DialogTitle>
                     <DialogDescription>
-                        Save {addons.length} installed addons to your library.
+                        Save {filteredAddons.length} installed addons to your library.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -227,10 +241,37 @@ export function BulkSaveDialog({
                                 </SelectContent>
                             </Select>
                         )}
+                        <Label className="text-xs font-medium">Tags (optional)</Label>
+                        <TagInput
+                            value={saveTags}
+                            onChange={setSaveTags}
+                            placeholder="Type and press Enter to add..."
+                            suggestions={allKnownTags}
+                        />
                         <Label>Merge Strategy</Label>
-                        <div className="text-sm text-muted-foreground mb-2">
+                        <div className="text-sm text-muted-foreground mb-4">
                             Addons will be added to your library. If an addon with the same ID already exists, it will be updated.
-                        </div>        </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 p-3 bg-muted/30 rounded-lg border border-dashed">
+                            <Checkbox
+                                id="exclude-internal"
+                                checked={excludeInternal}
+                                onCheckedChange={(checked) => setExcludeInternal(!!checked)}
+                            />
+                            <div className="grid gap-1.5 leading-none">
+                                <Label
+                                    htmlFor="exclude-internal"
+                                    className="text-sm font-medium leading-none cursor-pointer"
+                                >
+                                    Exclude internal Stremio addons
+                                </Label>
+                                <p className="text-[10px] text-muted-foreground">
+                                    Skip Cinemeta, Local, and other built-in addons.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <DialogFooter>

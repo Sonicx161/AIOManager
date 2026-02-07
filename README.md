@@ -14,6 +14,7 @@
   [![React](https://img.shields.io/badge/React-20232A?style=flat&logo=react&logoColor=61DAFB)](https://reactjs.org/)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
   [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
+  [![GitHub Stars](https://img.shields.io/github/stars/sonicx161/aiomanager?style=social)](https://github.com/sonicx161/aiomanager)
 
   <br />
 
@@ -66,38 +67,9 @@ The soul of AIOManager is giving you complete authority over your Stremio ecosys
 
 ---
 
-## [1.5.3] - The Resilience Release 🛡️
+##  Installation
 
-AIOManager v1.5.3 is an **important bug fix** release resolving critical sync issues.
-
-> [!IMPORTANT]
-> **Retroactive Fix**: If you were facing a `[object Object]` or `Invalid library format` error after signing out, you do **not** need to recreate your account. Simply update to v1.5.3 and log in again—the fix automatically repairs the corrupted state.
-
-- **🛡️ Sync Resilience**: Fixed a race condition where the library importer would crash when receiving unexpected objects from the cloud.
-- **🔄 Registration Parity**: Ensured fresh accounts are initialized with a standard empty library structure.
-- **✨ Robust Parsing**: Hardened all store importers to handle both JSON strings and plain objects gracefully.
-
-## [1.5.2] - The Stabilization Sweep 🛡️
-
-AIOManager v1.5.2 is a maintenance release focused on **reliability, hardening, and UI synchronization**.
-
-### 🛠️ Key Improvements
-- **Version Detection Fix**: Resolved a bug where multiple addons on the same domain (like AIOMetadata) would misreport version updates due to cache collisions.
-- **Autonomous Stabilization**: Hardened the Autopilot engine to trust the remote Stremio state as the definitive source of truth for addon enablement.
-- **Failover Hardening**: Squashed "priorityChain is not iterable" crashes during account cloning and implemented defensive array defaults.
-- **Silent Health Checks**: Standardized the "Silent Domain-Only" health check across both Autopilot and Saved Addons to prevent provider flood logs.
-- **URL Normalization**: Unified robust URL normalization logic to handle `stremio://` protocols and trailing slashes consistently across the stack.
-- **Postgres Support**: Fixed `JSONB` column strictness by converting to `TEXT` for encrypted string support.
-
----
-
-## [1.5.0] - The Sovereign Update 🚀
-
-AIOManager v1.5.x is a milestone series focused on **infrastructure independence** and **autonomous reliability**.
-
-### 📦 Installation
-
-#### Docker (Recommended)
+### Docker (Recommended)
 This is the easiest way to run AIOManager on your home server or VPS.
 1. Download the `docker-compose.yml` and create a `.env` file from the example.
 2. Run the following command:
@@ -105,7 +77,7 @@ This is the easiest way to run AIOManager on your home server or VPS.
 docker compose pull && docker compose up -d
 ```
 
-#### Unraid Support 🛠️
+### Unraid Support 🛠️
 AIOManager is now optimized for **Unraid**! You can find the template in the [unraid-template.xml](unraid-template.xml) file or simply add it via the **Community Applications** (search for AIOManager).
 
 **Key Unraid Features:**
@@ -115,26 +87,22 @@ AIOManager is now optimized for **Unraid**! You can find the template in the [un
 
 ---
 
-## 🚀 High Availability & Multi-Tenant (K8s/Clustered)
+## 🏁 Getting Started
 
-AIOManager is designed for high-scale environments like **Kubernetes** clusters or larger multi-tenant deployments.
+Once the app is running:
+1. Open the app in your browser (usually `http://localhost:5173` or your server IP).
+2. You will be greeted by the **Login** screen. Stay on the **New Account** tab to generate your unique **Account UUID**.
+3. Choose a strong password. This is the **only key** to your encrypted data.
+4. Once inside, use the **Accounts** page to link your Stremio identities. You can then go to **Settings** to customize your name for AIOManager or enable Auto-Save. (Note you still need to use your UUID to login) 
 
-### PostgreSQL Support (Recommended for Scale)
-For deployments with many users, switch from SQLite to **PostgreSQL** to unlock horizontal scaling and better concurrency:
-- Set `DB_TYPE=postgres`
-- Provide `DATABASE_URL=postgres://user:pass@host:5432/dbname`
-
-### Health & Readiness Probes
-The server includes a dedicated health endpoint for orchestrators:
-- **Endpoint**: `/api/health`
-- **Behavior**: Returns `200 OK` (ok) or `503 Service Unavailable` (degraded) if the database connection is lost. Use this for your K8s Liveness and Readiness probes.
-
-### Stateless Scaling
-With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `server_secret.key`), the API instances are stateless and can be scaled horizontally behind a load balancer.
+<div align="center">
+  <h4>Initial Setup & Login</h4>
+  <img src="public/screenshots/login.png" width="100%" alt="Login Screen">
+</div>
 
 ---
 
-## �🛡️ Security & Zero-Config Encryption
+## 🛡️ Security & Zero-Config Encryption
 
 AIOManager is designed to be **secure by default**, even in public instances with many users.
 
@@ -164,24 +132,84 @@ If you cannot set up a reverse proxy, you can force your browser to treat your s
 3. Change the dropdown to **Enabled**
 4. Relaunch your browser.
 
-## 🏁 Getting Started
+---
 
-Once the app is running:
-1. Open the app in your browser (usually `http://localhost:5173` or your server IP).
-2. You will be greeted by the **Login** screen. Stay on the **New Account** tab to generate your unique **Account UUID**.
-3. Choose a strong password. This is the **only key** to your encrypted data.
-4. Once inside, use the **Accounts** page to link your Stremio identities. You can then go to **Settings** to customize your name for AIOManager or enable Auto-Save. (Note you still need to use your UUID to login) 
+## 🚀 High Availability & Multi-Tenant (K8s/Clustered)
 
-<div align="center">
-  <h4>Initial Setup & Login</h4>
-  <img src="public/screenshots/login.png" width="100%" alt="Login Screen">
-</div>
+AIOManager is designed for high-scale environments like **Kubernetes** clusters or larger multi-tenant deployments.
+
+### PostgreSQL Support (Recommended for Scale)
+For deployments with many users, switch from SQLite to **PostgreSQL** to unlock horizontal scaling and better concurrency:
+- Set `DB_TYPE=postgres`
+- Provide `DATABASE_URL=postgres://user:pass@host:5432/dbname`
+
+### Health & Readiness Probes
+The server includes a dedicated health endpoint for orchestrators:
+- **Endpoint**: `/api/health`
+- **Behavior**: Returns `200 OK` (ok) or `503 Service Unavailable` (degraded) if the database connection is lost. Use this for your K8s Liveness and Readiness probes.
+
+### Stateless Scaling
+With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `server_secret.key`), the API instances are stateless and can be scaled horizontally behind a load balancer.
+
+---
+
+## [1.5.4] - The Final Polish 💎
+
+AIOManager v1.5.4 is the **Golden Build**, stabilizing the core experience and resolving critical authentication and sync edge cases.
+
+### 🛡️ Critical Fixes
+- **Sync Wipe Prevention**: Fixed a critical bug where corrupted remote data (or `[object Object]` strings) could wipe local accounts on login.
+- **Timestamp Conflict Resolution**: Implemented smart merging logic to prevent stale cloud data (from other devices) from overwriting newer local changes.
+    - *Logic:* `if (remote.syncedAt < local.lastSyncedAt) -> Merge (Preserve Local)`. `if (remote > local) -> Mirror (Trust Cloud)`.
+    - *Fix:* Explicitly triggers a cloud push after a Safe Merge to ensure mobile/remote devices get the recovered state.
+- **Cross-Device Mirroring**: Switched to a "Mirror Mode" sync strategy, ensuring that deleted addons/accounts are properly removed across all devices.
+- **Auth Race Condition**: Fixed "Database is locked" errors on refresh by implementing a smart lock-check during startup.
+- **Mobile FAQ**: Fixed code block overflow on small screens by enabling text wrapping and break-all.
+
+## [1.5.3] - The Resilience Release 🛡️
+
+AIOManager v1.5.3 is an **important bug fix** release resolving critical sync issues.
+
+> [!IMPORTANT]
+> **Retroactive Fix**: If you were facing a `[object Object]` or `Invalid library format` error after signing out, you do **not** need to recreate your account. Simply update to v1.5.3 and log in again—the fix automatically repairs the corrupted state.
+
+- **🛡️ Sync Resilience**: Fixed a race condition where the library importer would crash when receiving unexpected objects from the cloud.
+- **🔄 Registration Parity**: Ensured fresh accounts are initialized with a standard empty library structure.
+- **✨ Robust Parsing**: Hardened all store importers to handle both JSON strings and plain objects gracefully.
+
+## [1.5.2] - The Stabilization Sweep 🛡️
+
+AIOManager v1.5.2 is a maintenance release focused on **reliability, hardening, and UI synchronization**.
+
+### 🛠️ Key Improvements
+- **Version Detection Fix**: Resolved a bug where multiple addons on the same domain (like AIOMetadata) would misreport version updates due to cache collisions.
+- **Autonomous Stabilization**: Hardened the Autopilot engine to trust the remote Stremio state as the definitive source of truth for addon enablement.
+- **Failover Hardening**: Squashed "priorityChain is not iterable" crashes during account cloning and implemented defensive array defaults.
+- **Silent Health Checks**: Standardized the "Silent Domain-Only" health check across both Autopilot and Saved Addons to prevent provider flood logs.
+- **URL Normalization**: Unified robust URL normalization logic to handle `stremio://` protocols and trailing slashes consistently across the stack.
+- **Postgres Support**: Fixed `JSONB` column strictness by converting to `TEXT` for encrypted string support.
+
+## [1.5.0] - The Sovereign Update 🚀
+
+AIOManager v1.5.x is a milestone series focused on **infrastructure independence** and **autonomous reliability**.
 
 ---
 
 ## ⚖️ Disclaimer
 
 AIOManager is not affiliated with Stremio. It is a secondary management tool developed by the community. All data is processed locally or through your own private sync keys.
+
+---
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#sonicx161/aiomanager&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=sonicx161/aiomanager&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=sonicx161/aiomanager&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=sonicx161/aiomanager&type=Date" />
+ </picture>
+</a>
 
 ---
 

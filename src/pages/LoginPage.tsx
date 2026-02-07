@@ -8,19 +8,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Rocket, Lock, Key, LogIn, RefreshCw, Eye, EyeOff, ShieldAlert } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 import { useSearchParams } from 'react-router-dom'
+import { useAuthStore } from '@/store/authStore'
+import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import pkg from '../../package.json'
 
 export function LoginPage() {
-    const { register, login } = useSyncStore()
+    const { auth, register, login, logout } = useSyncStore()
+    const { isLocked, unlock } = useAuthStore()
     const [searchParams] = useSearchParams()
 
     // State
     const [mode, setMode] = useState<'login' | 'register'>('login')
     const [showPassword, setShowPassword] = useState(false)
     const [customHtml, setCustomHtml] = useState<string | null>(null)
+    const [isUnlocking, setIsUnlocking] = useState(false)
+    const [showSwitchConfirm, setShowSwitchConfirm] = useState(false)
 
     // Login Fields
-    const [loginId, setLoginId] = useState('')
+    const [loginId, setLoginId] = useState(auth.id || '')
     const [loginPass, setLoginPass] = useState('')
 
     // Register Fields
@@ -77,6 +82,28 @@ export function LoginPage() {
         }
     }
 
+    const handleUnlock = async () => {
+        if (!loginPass) {
+            toast({ variant: "destructive", title: "Password Required", description: "Please enter your master password." })
+            return
+        }
+
+        setIsUnlocking(true)
+        try {
+            const success = await unlock(loginPass)
+            if (!success) {
+                setLoginError('Invalid Password')
+            } else {
+                toast({ title: "Welcome Back", description: "Vault unlocked successfully." })
+            }
+        } catch (e) {
+            setLoginError((e as Error).message)
+            console.error("Unlock error:", e)
+        } finally {
+            setIsUnlocking(false)
+        }
+    }
+
     const handleLogin = async () => {
         if (!loginId || !loginPass) {
             toast({ variant: "destructive", title: "Missing Credentials", description: "ID and Password are required." })
@@ -90,7 +117,6 @@ export function LoginPage() {
         } catch (e) {
             setLoginError((e as Error).message)
             console.error("Login error:", e)
-            // Toast still handled in store
         } finally {
             setLoading(false)
         }
@@ -236,8 +262,12 @@ export function LoginPage() {
                     <TabsContent value="login">
                         <Card className="border-2 shadow-sm">
                             <CardHeader>
-                                <CardTitle>Welcome Back</CardTitle>
-                                <CardDescription>Enter your UUID to access your session.</CardDescription>
+                                <CardTitle>{isLocked && auth.isAuthenticated ? 'Unlock Vault' : 'Welcome Back'}</CardTitle>
+                                <CardDescription>
+                                    {isLocked && auth.isAuthenticated
+                                        ? 'Enter your master password to access your encrypted session.'
+                                        : 'Enter your UUID to access your session.'}
+                                </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-4">
                                 <div className="space-y-2">
@@ -249,6 +279,7 @@ export function LoginPage() {
                                             className={`pl-9 font-mono text-sm ${loginError === 'Account ID not found' ? 'border-destructive' : ''}`}
                                             value={loginId}
                                             onChange={(e) => { setLoginId(e.target.value.trim()); setLoginError(null); }}
+                                            disabled={isLocked && auth.isAuthenticated}
                                         />
                                     </div>
                                     {loginError === 'Account ID not found' && (
@@ -268,7 +299,7 @@ export function LoginPage() {
                                             className={`pl-9 pr-10 ${loginError === 'Invalid Password' ? 'border-destructive' : ''}`}
                                             value={loginPass}
                                             onChange={(e) => { setLoginPass(e.target.value); setLoginError(null); }}
-                                            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                                            onKeyDown={(e) => e.key === 'Enter' && (isLocked && auth.isAuthenticated ? handleUnlock() : handleLogin())}
                                         />
                                         <Button
                                             type="button"
@@ -294,19 +325,48 @@ export function LoginPage() {
                                     )}
                                 </div>
                             </CardContent>
-                            <CardFooter>
-                                <Button className="w-full h-11 text-base" variant="default" onClick={handleLogin} disabled={loading}>
-                                    {loading ? (
+                            <CardFooter className="flex flex-col gap-3">
+                                <Button
+                                    className="w-full h-11 text-base"
+                                    variant="default"
+                                    onClick={isLocked && auth.isAuthenticated ? handleUnlock : handleLogin}
+                                    disabled={loading || isUnlocking}
+                                >
+                                    {loading || isUnlocking ? (
                                         <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
                                     ) : (
-                                        <LogIn className="mr-2 h-4 w-4" />
+                                        isLocked && auth.isAuthenticated ? <Lock className="mr-2 h-4 w-4" /> : <LogIn className="mr-2 h-4 w-4" />
                                     )}
-                                    {loading ? 'Syncing...' : 'Login'}
+                                    {loading ? 'Syncing...' : isUnlocking ? 'Unlocking...' : isLocked && auth.isAuthenticated ? 'Unlock System' : 'Login'}
                                 </Button>
+
+                                {isLocked && auth.isAuthenticated && (
+                                    <Button
+                                        variant="link"
+                                        className="text-xs text-muted-foreground"
+                                        onClick={() => setShowSwitchConfirm(true)}
+                                    >
+                                        Switch Account?
+                                    </Button>
+                                )}
                             </CardFooter>
                         </Card>
                     </TabsContent>
                 </Tabs>
+
+                <ConfirmationDialog
+                    open={showSwitchConfirm}
+                    onOpenChange={setShowSwitchConfirm}
+                    title="Switch Account?"
+                    description="Clear local session and switch accounts?"
+                    confirmText="Switch"
+                    cancelText="Cancel"
+                    isDestructive={true}
+                    onConfirm={() => {
+                        logout()
+                        window.location.reload()
+                    }}
+                />
 
                 <p className="text-center text-xs text-muted-foreground">
                     AIOManager v{pkg.version}

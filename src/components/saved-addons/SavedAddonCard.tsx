@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useToast } from '@/hooks/use-toast'
-import { maskUrl, getAddonConfigureUrl } from '@/lib/utils'
+import { maskUrl, getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
 import { useAddonStore } from '@/store/addonStore'
 import { useUIStore } from '@/store/uiStore'
 import { SavedAddon } from '@/types/saved-addon'
@@ -43,7 +43,7 @@ export function SavedAddonCard({
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
   const [updating, setUpdating] = useState(false)
 
-  const hasUpdate = latestVersion ? latestVersion !== savedAddon.manifest.version : false
+  const hasUpdate = latestVersion ? isNewerVersion(savedAddon.manifest.version, latestVersion) : false
 
   const handleDelete = () => {
     setShowDeleteDialog(true)

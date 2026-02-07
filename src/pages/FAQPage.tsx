@@ -104,7 +104,7 @@ export function FAQPage() {
                   <li>Log into <a href="https://web.stremio.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">web.stremio.com</a>.</li>
                   <li>Press <kbd className="px-1 py-0.5 rounded bg-muted border text-[10px]">F12</kbd> & select the <strong>Console</strong> tab.</li>
                   <li>Paste this code and press Enter:
-                    <pre className="mt-2 text-xs bg-slate-950 p-3 rounded-md overflow-x-auto font-mono text-zinc-300 border border-white/10 select-all">
+                    <pre className="mt-2 text-xs bg-slate-950 p-3 rounded-md overflow-x-auto font-mono text-zinc-300 border border-white/10 select-all whitespace-pre-wrap break-all">
                       JSON.parse(localStorage.getItem("profile")).auth.key
                     </pre>
                   </li>

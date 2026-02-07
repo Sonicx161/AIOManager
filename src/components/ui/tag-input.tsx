@@ -1,4 +1,5 @@
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { X } from 'lucide-react'
 import { KeyboardEvent, useState } from 'react'
@@ -13,17 +14,41 @@ interface TagInputProps {
 export function TagInput({ value, onChange, placeholder, suggestions }: TagInputProps) {
     const [inputValue, setInputValue] = useState('')
 
+    const addTags = (input: string) => {
+        const newTags = input
+            .split(/[,,;]/)
+            .map((t) => t.trim().replace(/[,,;]$/, ''))
+            .filter((t) => t && !value.includes(t))
+
+        if (newTags.length > 0) {
+            onChange([...value, ...newTags])
+            setInputValue('')
+        } else if (!input.trim()) {
+            setInputValue('')
+        }
+    }
+
     const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter') {
-            e.preventDefault()
-            const newTag = inputValue.trim()
-            if (newTag && !value.includes(newTag)) {
-                onChange([...value, newTag])
-                setInputValue('')
+        if (e.key === 'Enter' || e.key === ',' || e.key === ';') {
+            if (e.key === ',' || e.key === ';') {
+                e.preventDefault()
             }
+            addTags(inputValue)
         } else if (e.key === 'Backspace' && !inputValue && value.length > 0) {
             onChange(value.slice(0, -1))
         }
+    }
+
+    const handleBlur = () => {
+        if (inputValue.trim()) {
+            addTags(inputValue)
+        }
+    }
+
+    const handlePaste = (e: React.ClipboardEvent) => {
+        e.preventDefault()
+        const paste = e.clipboardData.getData('text')
+        addTags(paste)
     }
 
     const removeTag = (tag: string) => {
@@ -50,6 +75,8 @@ export function TagInput({ value, onChange, placeholder, suggestions }: TagInput
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onBlur={handleBlur}
+                    onPaste={handlePaste}
                     placeholder={value.length === 0 ? placeholder : ''}
                     className="border-0 focus-visible:ring-0 px-0 h-6 text-sm bg-transparent placeholder:text-muted-foreground"
                     list={suggestions ? "tag-suggestions" : undefined}
@@ -60,6 +87,16 @@ export function TagInput({ value, onChange, placeholder, suggestions }: TagInput
                     </datalist>
                 )}
             </div>
+            {inputValue.trim() && (
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 px-2 text-xs text-primary"
+                    onClick={() => addTags(inputValue)}
+                >
+                    Add
+                </Button>
+            )}
         </div>
     )
 }

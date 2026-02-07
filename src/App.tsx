@@ -1,7 +1,6 @@
 import { AccountForm } from '@/components/accounts/AccountForm'
 import { AddonInstaller } from '@/components/addons/AddonInstaller'
 import { MasterPasswordSetup } from '@/components/auth/MasterPasswordSetup'
-import { UnlockDialog } from '@/components/auth/UnlockDialog'
 import { ExportDialog } from '@/components/ExportDialog'
 import { ImportDialog } from '@/components/ImportDialog'
 import { Layout } from '@/components/layout/Layout'
@@ -18,6 +17,8 @@ import { useSyncStore } from '@/store/syncStore'
 import { LoginPage } from '@/pages/LoginPage'
 import { useEffect, useState } from 'react'
 
+
+
 function App() {
   const initializeAccounts = useAccountStore((state) => state.initialize)
   const initializeAddons = useAddonStore((state) => state.initialize)
@@ -30,36 +31,38 @@ function App() {
   const isPasswordSet = useAuthStore((state) => state.isPasswordSet())
   const [isInitialized, setIsInitialized] = useState(false)
 
-  const { auth, autoSyncEnabled, syncToRemote } = useSyncStore()
+  const { auth } = useSyncStore()
 
   useEffect(() => {
-    initializeUI()
-    initializeAuth()
+    const init = async () => {
+      initializeUI()
+      await initializeAuth()
+      await initializeAccounts() // Critical: Must load accounts before failover/addons
 
-    Promise.all([
-      initializeAccounts(),
-      initializeAddons(),
-      initializeProfiles(),
-      initializeFailover()
-    ]).then(() => {
+      // These can run in parallel after accounts are loaded
+      await Promise.all([
+        initializeAddons(),
+        initializeProfiles(),
+        initializeFailover()
+      ])
+
       startFailoverAutomation()
       setIsInitialized(true)
-    })
+    }
+
+    init()
   }, [initializeAccounts, initializeAddons, initializeAuth, initializeUI, initializeProfiles, initializeFailover, startFailoverAutomation])
 
-  // Background Auto-Sync logic
+  // Trigger sync when app unlocks to ensure parity
   useEffect(() => {
-    if (!auth.isAuthenticated || !autoSyncEnabled || !isInitialized) return
-
-    // Periodic Push (every 2 minutes)
-    const interval = setInterval(() => {
-      // Idle Optimization: Skip auto-sync if tab is hidden
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-      syncToRemote(true).catch(console.error)
-    }, 2 * 60 * 1000)
-
-    return () => clearInterval(interval)
-  }, [auth.isAuthenticated, autoSyncEnabled, syncToRemote, isInitialized])
+    if (!isLocked && auth.isAuthenticated && isInitialized) {
+      console.log('[App] Vault unlocked. Triggering fresh sync.')
+      // 1. Sync Stremio -> App
+      useAccountStore.getState().syncAllAccounts()
+      // 2. Sync Cloud -> App (Pull latest changes)
+      useSyncStore.getState().syncFromRemote().catch(console.error)
+    }
+  }, [isLocked, auth.isAuthenticated, isInitialized])
 
   // Sync UUID to URL for easy bookmarking/sharing
   useEffect(() => {
@@ -83,8 +86,8 @@ function App() {
     )
   }
 
-  // Auth Guard
-  if (!auth.isAuthenticated) {
+  // Auth Guard: Force login if not authenticated OR if the local vault is locked
+  if (!auth.isAuthenticated || isLocked) {
     // Check for Deep Link (Parity with AIOStreams)
     // If user visits /account/<UUID> directly, we want to pre-fill that UUID
     const path = window.location.pathname
@@ -92,9 +95,7 @@ function App() {
 
     if (match && match[1]) {
       // Redirect to login with ID param
-      // We use window.location to ensure a hard redirect/reset of query params
       const uuid = match[1]
-      // Only redirect if we aren't already there (to prevent loop)
       const currentId = new URLSearchParams(window.location.search).get('id')
       if (currentId !== uuid) {
         window.location.href = `/?id=${uuid}`
@@ -105,16 +106,8 @@ function App() {
     return <LoginPage />
   }
 
-  // Bypass local password setup if authenticated via Sync
-  // This prevents double-setup screens
-  const isSyncAuthenticated = auth.isAuthenticated
-
-  if (!isPasswordSet && !isSyncAuthenticated) {
+  if (!isPasswordSet) {
     return <MasterPasswordSetup />
-  }
-
-  if (isLocked && !isSyncAuthenticated) {
-    return <UnlockDialog />
   }
 
   return (
@@ -130,5 +123,8 @@ function App() {
     </Layout>
   )
 }
+
+
+
 
 export default App

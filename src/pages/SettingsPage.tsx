@@ -24,7 +24,7 @@ import localforage from 'localforage'
 import { useSyncStore } from '@/store/syncStore'
 
 function AccountSection() {
-    const { auth, syncToRemote, syncFromRemote, isSyncing, lastSyncedAt, setDisplayName, autoSyncEnabled, setAutoSyncEnabled } = useSyncStore()
+    const { auth, syncToRemote, syncFromRemote, isSyncing, lastSyncedAt, setDisplayName } = useSyncStore()
 
     const [copied, setCopied] = useState(false)
 
@@ -97,20 +97,13 @@ function AccountSection() {
                 </div>
             </div>
 
-            {/* Auto-Sync Toggle */}
-            <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/20">
-                <div className="space-y-0.5">
-                    <Label className="text-sm font-medium">Automatic Cloud Sync</Label>
-                    <p className="text-[11px] text-muted-foreground">Keep your data backed up automatically.</p>
-                </div>
-                <Switch
-                    checked={autoSyncEnabled}
-                    onCheckedChange={setAutoSyncEnabled}
-                />
-            </div>
-
             {/* Actions */}
             <div className="space-y-3">
+                <div className="p-3 rounded-lg border bg-blue-500/10 border-blue-500/20">
+                    <p className="text-[11px] text-blue-600 dark:text-blue-400 font-medium">
+                        Cloud Sync is active. Every change you make is instantly saved to the server.
+                    </p>
+                </div>
                 <div className="grid grid-cols-2 gap-3">
                     <Button variant="default" onClick={() => syncToRemote()} disabled={isSyncing}>
                         {isSyncing ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
@@ -423,20 +416,20 @@ export function SettingsPage() {
 
                 <div className="flex flex-wrap gap-4 p-4 rounded-lg border bg-card items-center">
                     <div className="flex-1 space-y-1">
-                        <Label className="text-base">Backup & Restore</Label>
+                        <Label className="text-base">Full Backup & Restore</Label>
                         <p className="text-sm text-muted-foreground">
-                            Save your accounts to a JSON file or restore from a backup (including Stremio Account Manager exports).
+                            Save everything (Accounts, Profiles, Saved Addons, and Failover Rules) to a single file.
                         </p>
                     </div>
 
                     <div className="flex gap-2">
                         <Button variant="outline" onClick={handleExport} disabled={exporting || accounts.length === 0}>
                             <Download className="mr-2 h-4 w-4" />
-                            {exporting ? 'Backing up...' : 'Backup Accounts'}
+                            {exporting ? 'Backing up...' : 'Full Backup'}
                         </Button>
                         <Button variant="outline" onClick={handleImportClick} disabled={importing}>
                             <Upload className="mr-2 h-4 w-4" />
-                            {importing ? 'Restoring...' : 'Restore Accounts'}
+                            {importing ? 'Restoring...' : 'Restore from File'}
                         </Button>
                     </div>
                 </div>

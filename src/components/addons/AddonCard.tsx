@@ -28,7 +28,7 @@ import { Label } from '@/components/ui/label'
 import { useToast } from '@/hooks/use-toast'
 import { isCinemetaAddon, detectAllPatches } from '@/lib/cinemeta-utils'
 import { CinemetaManifest } from '@/types/cinemeta'
-import { getStremioLink, maskUrl } from '@/lib/utils'
+import { getStremioLink, maskUrl, isNewerVersion } from '@/lib/utils'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useProfileStore } from '@/store/profileStore'
@@ -230,7 +230,7 @@ export function AddonCard({
   }, [library, addon.manifest.id, addon.transportUrl])
 
   const canSaveToLibrary = !addon.flags?.protected && !addon.flags?.official && !isInLibrary
-  const hasUpdate = latestVersion ? latestVersion !== addon.manifest.version : false
+  const hasUpdate = latestVersion ? isNewerVersion(addon.manifest.version, latestVersion) : false
   const canUpdate = !!onUpdate
   const isCinemeta = useMemo(() => isCinemetaAddon(addon), [addon])
 

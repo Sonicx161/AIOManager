@@ -270,7 +270,7 @@ fastify.get('/api/health', {
     if (!dbHealthy) {
         return reply.code(503).send({
             status: 'degraded',
-            version: '1.5.3',
+            version: '1.5.4',
             mode: 'multi-tenant',
             optimized: true,
             database: { type: db.type, healthy: false }
@@ -279,7 +279,7 @@ fastify.get('/api/health', {
 
     return {
         status: overallStatus,
-        version: '1.5.3',
+        version: '1.5.4',
         mode: 'multi-tenant',
         optimized: true,
         database: { type: db.type, healthy: true }
@@ -400,7 +400,10 @@ fastify.get('/api/meta-proxy', {
             const contentType = response.headers.get('content-type')
             if (contentType) reply.type(contentType)
 
-            return reply.send(response.body)
+            // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
+            const arrayBuffer = await response.arrayBuffer()
+            const buffer = Buffer.from(arrayBuffer)
+            return reply.send(buffer)
         } catch (err) {
             if (err.name === 'AbortError') {
                 fastify.log.error({ category: 'MetaProxy' }, `Timeout after 5s: ${url}`)
@@ -472,6 +475,10 @@ fastify.post('/api/sync/:id', {
     // Check existing
     const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [id])
 
+    // SERVER-SIDE TIMESTAMPING (Single Source of Truth)
+    const serverTime = new Date().toISOString()
+    data.syncedAt = serverTime
+
     const encryptedVal = encrypt(JSON.stringify(data), PRIMARY_KEY)
     const encryptedPass = encrypt(password, PRIMARY_KEY)
 
@@ -496,7 +503,7 @@ fastify.post('/api/sync/:id', {
         `, [id, encryptedVal, encryptedPass, Date.now()])
     }
 
-    return { success: true }
+    return { success: true, syncedAt: serverTime }
 })
 
 // SYNC: Delete State (Deletion)
@@ -587,7 +594,10 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             // 5. Pass-through
             const contentType = response.headers.get('content-type')
             if (contentType) reply.type(contentType)
-            return reply.send(response.body)
+            // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
+            const arrayBuffer = await response.arrayBuffer()
+            const buffer = Buffer.from(arrayBuffer)
+            return reply.send(buffer)
 
         } catch (err) {
             fastify.log.error({ category: 'Proxy' }, `Fatal Error: ${err.message}`)
@@ -686,7 +696,6 @@ const mergeAddons = (localAddons, remoteAddons) => {
         const remoteAddon = remoteAddonMap.get(normLocal);
 
         if (remoteAddon) {
-            // Managed addon: Use remote data + local overrides
             finalAddons.push({
                 ...remoteAddon,
                 flags: {
@@ -970,7 +979,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.3
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.4
  ==============================================================================
 `;
         console.log(banner);
@@ -1092,4 +1101,3 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 start()
-

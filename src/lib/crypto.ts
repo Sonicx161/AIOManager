@@ -20,8 +20,10 @@ const STORAGE_KEYS = {
  */
 export async function deriveSyncToken(password: string): Promise<string> {
   const encoder = new TextEncoder()
+  // Ensure password is a string
+  const strPassword = String(password)
   // We use a fixed "pepper" to ensure sync tokens are different from other hashes
-  const data = encoder.encode(password + ':sync-auth-token')
+  const data = encoder.encode(strPassword + ':sync-auth-token')
   const hashBuffer = await crypto.subtle.digest('SHA-256', data)
   const hashArray = Array.from(new Uint8Array(hashBuffer))
   return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
@@ -32,7 +34,9 @@ export async function deriveSyncToken(password: string): Promise<string> {
  */
 export async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
   const encoder = new TextEncoder()
-  const passwordBuffer = encoder.encode(password)
+  // Ensure password is a string
+  const strPassword = String(password)
+  const passwordBuffer = encoder.encode(strPassword)
 
   // Import password as key material
   const keyMaterial = await crypto.subtle.importKey('raw', passwordBuffer, 'PBKDF2', false, [
@@ -61,7 +65,7 @@ export async function deriveKey(password: string, salt: Uint8Array): Promise<Cry
  */
 export async function encrypt(data: string, key: CryptoKey): Promise<string> {
   const encoder = new TextEncoder()
-  const dataBuffer = encoder.encode(data)
+  const dataBuffer = encoder.encode(String(data))
 
   // Generate random IV
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH))
@@ -104,7 +108,9 @@ export async function decrypt(encrypted: string, key: CryptoKey): Promise<string
  */
 export async function hashPassword(password: string, salt: Uint8Array): Promise<string> {
   const encoder = new TextEncoder()
-  const passwordBuffer = encoder.encode(password)
+  // Ensure password is a string
+  const strPassword = String(password)
+  const passwordBuffer = encoder.encode(strPassword)
 
   // Import password as key material
   const keyMaterial = await crypto.subtle.importKey('raw', passwordBuffer, 'PBKDF2', false, [

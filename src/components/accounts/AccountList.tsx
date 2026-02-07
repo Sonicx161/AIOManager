@@ -3,7 +3,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { RefreshCw, Users, GripHorizontal } from 'lucide-react'
+import { RefreshCw, Users, GripHorizontal, Search, X } from 'lucide-react'
+import { Input } from '@/components/ui/input'
 import { useState } from 'react'
 import { AccountCard } from './AccountCard'
 import { BulkActionsDialog } from './BulkActionsDialog'
@@ -29,6 +30,7 @@ export function AccountList() {
   const openAddAccountDialog = useUIStore((state) => state.openAddAccountDialog)
   const { accounts, error, clearError, syncAllAccounts, removeAccount, loading, reorderAccounts } = useAccounts()
   const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(new Set())
+  const [searchQuery, setSearchQuery] = useState('')
   const [showBulkActions, setShowBulkActions] = useState(false)
   const [isReorderMode, setIsReorderMode] = useState(false)
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
@@ -107,6 +109,15 @@ export function AccountList() {
     }
   }
 
+  const filteredAccounts = accounts.filter((a) => {
+    const query = searchQuery.toLowerCase().trim()
+    if (!query) return true
+    return (
+      a.name.toLowerCase().includes(query) ||
+      a.email?.toLowerCase().includes(query)
+    )
+  })
+
   const selectedAccounts = accounts.filter((a) => selectedAccountIds.has(a.id))
 
   const checkRules = useFailoverStore((state) => state.checkRules)
@@ -151,6 +162,25 @@ export function AccountList() {
           <span className="text-sm font-medium whitespace-nowrap text-foreground">
             {selectedAccountIds.size} of {accounts.length} selected
           </span>
+          <div className="relative w-full sm:w-64 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search accounts..."
+              className="pl-9 h-9 text-xs"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 hover:bg-transparent text-muted-foreground hover:text-foreground"
+                onClick={() => setSearchQuery('')}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         </div>
         <div className="flex flex-wrap gap-2 w-full sm:w-auto">
           {isSelectionMode && (
@@ -220,9 +250,9 @@ export function AccountList() {
           collisionDetection={closestCenter}
           onDragEnd={handleDragEnd}
         >
-          <SortableContext items={accounts.map(a => a.id)} strategy={rectSortingStrategy}>
+          <SortableContext items={filteredAccounts.map(a => a.id)} strategy={rectSortingStrategy}>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {accounts.map((account) => (
+              {filteredAccounts.map((account) => (
                 <SortableAccountCard
                   key={account.id}
                   account={account}
@@ -237,16 +267,29 @@ export function AccountList() {
         </DndContext>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {accounts.map((account) => (
-            <AccountCard
-              key={account.id}
-              account={account}
-              isSelected={selectedAccountIds.has(account.id)}
-              onToggleSelect={toggleAccountSelection}
-              onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
-              isSelectionMode={isSelectionMode}
-            />
-          ))}
+          {filteredAccounts.length === 0 && searchQuery ? (
+            <div className="col-span-full py-20 text-center animate-in fade-in zoom-in-95">
+              <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
+                <Search className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <h3 className="text-lg font-semibold">No accounts found</h3>
+              <p className="text-sm text-muted-foreground">No matches for "{searchQuery}"</p>
+              <Button variant="link" onClick={() => setSearchQuery('')} className="mt-2">
+                Clear search
+              </Button>
+            </div>
+          ) : (
+            filteredAccounts.map((account) => (
+              <AccountCard
+                key={account.id}
+                account={account}
+                isSelected={selectedAccountIds.has(account.id)}
+                onToggleSelect={toggleAccountSelection}
+                onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
+                isSelectionMode={isSelectionMode}
+              />
+            ))
+          )}
         </div>
       )}
 

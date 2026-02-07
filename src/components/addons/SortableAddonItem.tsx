@@ -53,7 +53,7 @@ export function SortableAddonItem({ addon, id }: SortableAddonItemProps) {
       {/* Addon Info */}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <h3 className="font-medium text-sm truncate">{addon.manifest.name}</h3>
+          <h3 className="font-medium text-sm truncate">{addon.metadata?.customName || addon.manifest.name}</h3>
           {(addon.flags?.protected || addon.flags?.official) && (
             <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded flex-shrink-0">
               {addon.flags?.protected ? 'Protected' : 'Official'}

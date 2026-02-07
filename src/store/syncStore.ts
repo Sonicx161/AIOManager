@@ -19,8 +19,6 @@ interface SyncState {
     serverUrl: string
     lastSyncedAt: string | null
     isSyncing: boolean
-    autoSyncEnabled: boolean
-
     // Actions
     register: (password: string, name?: string) => Promise<void>
     login: (id: string, password: string, isSilent?: boolean) => Promise<void>
@@ -29,7 +27,6 @@ interface SyncState {
     syncFromRemote: (isSilent?: boolean) => Promise<void>
     setServerUrl: (url: string) => void
     setDisplayName: (name: string) => void
-    setAutoSyncEnabled: (enabled: boolean) => void
     deleteRemoteAccount: () => Promise<void>
 }
 
@@ -47,15 +44,24 @@ export const useSyncStore = create<SyncState>()(
             serverUrl: '',
             lastSyncedAt: null,
             isSyncing: false,
-            autoSyncEnabled: true, // Default to true for convenience
 
             setServerUrl: (url) => set({ serverUrl: url }),
 
-            setDisplayName: (name) => set((state) => ({
-                auth: { ...state.auth, name }
-            })),
+            setDisplayName: (name) => {
+                set((state) => ({
+                    auth: { ...state.auth, name }
+                }))
+                // Immediate sync
+                get().syncToRemote(true).catch(console.error)
+            },
 
-            setAutoSyncEnabled: (enabled) => set({ autoSyncEnabled: enabled }),
+            // Helper to manually trigger a pull (useful for re-hydration)
+            syncFromRemote: async (isSilent: boolean = true) => {
+                const { auth } = get()
+                if (!auth.isAuthenticated) return
+                // Reuse login logic which performs the fetch & merge
+                await get().login(auth.id, auth.password, isSilent)
+            },
 
             register: async (password: string, name: string = '') => {
                 // Generate new Identity
@@ -73,11 +79,16 @@ export const useSyncStore = create<SyncState>()(
 
                 try {
                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
+                    const { loadSalt } = await import('@/lib/crypto')
+                    const salt = loadSalt()
+                    const saltBase64 = salt ? btoa(String.fromCharCode(...salt)) : undefined
+
                     const emptyState = {
                         accounts: [],
                         addons: { version: '1.0', savedAddons: [] },
                         profiles: [],
                         failover: [],
+                        salt: saltBase64,
                         syncedAt: new Date().toISOString()
                     }
 
@@ -133,6 +144,11 @@ export const useSyncStore = create<SyncState>()(
                         throw new Error("Server returned an empty response. Your data might not be initialized yet.")
                     }
 
+                    if (text.includes('[object Object]')) {
+                        console.warn("[Sync] Server returned '[object Object]'. Treating as corrupted/empty.")
+                        throw new Error("Server returned corrupted data ([object Object]). Please reset your account.")
+                    }
+
                     let data: any
                     try {
                         const raw = JSON.parse(text)
@@ -141,12 +157,41 @@ export const useSyncStore = create<SyncState>()(
                             const { AES, enc } = await import('crypto-js')
                             const bytes = AES.decrypt(raw.data, password)
                             const decryptedStr = bytes.toString(enc.Utf8)
+
                             if (!decryptedStr) throw new Error("Decryption failed. Wrong password?")
-                            data = JSON.parse(decryptedStr)
+
+                            // Ultra-Resilience: Attempt parsing first, don't just nuke everything on a partial match
+                            try {
+                                data = JSON.parse(decryptedStr)
+
+                                // Post-Parse Check: If it PARSED into a literal string "[object Object]", then it's bad.
+                                // But if it's a valid object that happens to CONTAIN that string somewhere, we keep it.
+                                if (data === '[object Object]') {
+                                    console.warn('[Sync] Decrypted data IS "[object Object]". Discarding.')
+                                    data = {}
+                                }
+                            } catch (parseErr) {
+                                console.error('[Sync] Parsing failed for decrypted string. Length:', decryptedStr.length)
+                                // Only logic to rescue if it WAS a double-serialized object? 
+                                // No, standard parse error handling is safer.
+                                throw parseErr // Let the outer catch handle it (which prompts wrong password)
+                            }
                         } else {
                             // Legacy: Plain text
                             data = raw
                         }
+
+                        // Final Sanity Check: Ensure all components are what we expect
+                        data = {
+                            accounts: data?.accounts || [], // Support direct array or object
+                            addons: data?.addons || { version: '1.0', savedAddons: [] },
+                            profiles: Array.isArray(data?.profiles) ? data.profiles : [],
+                            failover: data?.failover || [],
+                            salt: data?.salt,
+                            name: data?.name,
+                            syncedAt: data?.syncedAt
+                        }
+
                     } catch (e) {
                         console.error("[Sync] Decryption/Parsing Error:", e)
                         // If it's a JSON parse error (likely from getting HTML instead of JSON), show a better message
@@ -179,12 +224,75 @@ export const useSyncStore = create<SyncState>()(
                         }
                     }
 
-                    // 2. Import Data
+                    // 2. Import Data: Timestamp Conflict Resolution
+                    const localLastSync = get().lastSyncedAt
+                    const remoteLastSync = data.syncedAt
+
+                    const remoteTime = remoteLastSync ? new Date(remoteLastSync).getTime() : 0
+                    const localTime = localLastSync ? new Date(localLastSync).getTime() : 0
+
+                    const isRemoteNewer = remoteTime > localTime
+                    const isLocalNewer = localTime > remoteTime
+                    const isEqual = remoteTime === localTime
+
                     if (data.accounts) {
-                        await useAccountStore.getState().importAccounts(data.accounts, true)
+                        const localAccounts = useAccountStore.getState().accounts
+                        // Handle potential array vs object wrapper (legacy compatibility)
+                        const remoteAccountsRaw = Array.isArray(data.accounts) ? data.accounts : (data.accounts as any)?.accounts || []
+                        const remoteAccounts = remoteAccountsRaw as any[]
+
+                        const hasRemoteData = remoteAccounts.length > 0
+                        const hasLocalData = localAccounts.length > 0
+
+                        // ANTI-WIPE GUARD:
+                        // If remote is Empty, we NEVER Mirror. We treat it as "Server Needs Healing".
+                        // This overrides timestamp logic.
+                        if (!hasRemoteData && hasLocalData) {
+                            console.warn("[Sync] Anti-Wipe Triggered: Remote is empty. Pushing Local state.")
+                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
+                            setTimeout(() => get().syncToRemote(true), 1500)
+                        } else if (isLocalNewer) {
+                            // Local changes are strictly newer.
+                            console.log("[Sync] Local state is fresher. Merging remote changes safely & Pushing.")
+                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
+                            // Force push to update the stale server
+                            setTimeout(() => get().syncToRemote(true), 2000)
+                        } else if (isEqual) {
+                            // Perfect Sync. Passive Merge (Just in case).
+                            console.log("[Sync] State is synchronized. Passive merge.")
+                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
+                        } else {
+                            // Remote is newer.
+                            if (hasRemoteData) {
+                                console.log("[Sync] Remote is newer. Mirroring cloud state.")
+                                await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'mirror')
+                            } else {
+                                console.warn("[Sync] Remote is newer but EMPTY? Passive merging instead of mirroring to avoid wipe.")
+                                await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
+                            }
+                        }
                     }
+
                     if (data.addons) {
-                        await useAddonStore.getState().importLibrary(data.addons, true)
+                        const localAddons = Object.keys(useAddonStore.getState().library).length
+                        const remoteAddons = Array.isArray(data.addons) ? data.addons : (data.addons as any)?.savedAddons || []
+
+                        if ((!remoteAddons || remoteAddons.length === 0) && localAddons > 0) {
+                            console.warn(`[Sync] Remote has 0 addons (Safety net triggered). Switching to MERGE + PUSH.`)
+                            await useAddonStore.getState().importLibrary(data, true)
+                            setTimeout(() => get().syncToRemote(true), 1500)
+                        } else if (isLocalNewer) {
+                            console.log("[Sync] Local addons are fresher. Merging & Pushing.")
+                            await useAddonStore.getState().importLibrary(data, true)
+                            // Force push to update the stale server
+                            setTimeout(() => get().syncToRemote(true), 2000)
+                        } else if (isEqual) {
+                            console.log("[Sync] Addons synchronized. Passive import.")
+                            await useAddonStore.getState().importLibrary(data, true)
+                        } else {
+                            // Mirror
+                            await useAddonStore.getState().importLibrary(data, false)
+                        }
                         await useAddonStore.getState().initialize()
                     }
                     if (data.profiles && Array.isArray(data.profiles)) {
@@ -193,10 +301,11 @@ export const useSyncStore = create<SyncState>()(
                     if (data.failover) {
                         if (Array.isArray(data.failover)) {
                             // Legacy format: just rules
-                            await useFailoverStore.getState().importRules(data.failover)
+                            await useFailoverStore.getState().importRules(data.failover, isRemoteNewer ? 'mirror' : 'merge')
                         } else if (typeof data.failover === 'object') {
                             // New format: { rules, webhook }
-                            if (data.failover.rules) await useFailoverStore.getState().importRules(data.failover.rules)
+                            const strategy = isRemoteNewer ? 'mirror' : 'merge'
+                            if (data.failover.rules) await useFailoverStore.getState().importRules(data.failover.rules, strategy)
                             if (data.failover.webhook) {
                                 useFailoverStore.getState().setWebhook(data.failover.webhook.url, data.failover.webhook.enabled)
                             }
@@ -248,6 +357,18 @@ export const useSyncStore = create<SyncState>()(
                 const { isLocked } = useAuthStore.getState()
                 if (!auth.isAuthenticated || isSyncing || isLocked) return
 
+                // Server Protection: Debounce check
+                const now = Date.now()
+                const lastSync = (get() as any)._lastSyncTimestamp || 0
+                const COOLDOWN = 1000 // 1 second minimum between syncs
+
+                if (isAuto && now - lastSync < COOLDOWN) {
+                    // If it's an auto-sync and we just synced, skip
+                    return
+                }
+
+                (set as any)({ _lastSyncTimestamp: now })
+
                 set({ isSyncing: true })
                 const baseUrl = serverUrl || DEFAULT_SERVER
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
@@ -257,9 +378,31 @@ export const useSyncStore = create<SyncState>()(
                     const salt = loadSalt()
                     const saltBase64 = salt ? btoa(String.fromCharCode(...salt)) : undefined
 
+                    // Standardize: Ensure all exported components are objects before final stringification
+                    const rawAccounts = await useAccountStore.getState().exportAccounts(true)
+                    const rawAddons = useAddonStore.getState().exportLibrary()
+
+                    const safeParse = (val: any) => {
+                        if (!val) return {}
+                        if (typeof val === 'object') return val
+                        if (typeof val === 'string') {
+                            if (val.includes('[object Object]')) {
+                                console.warn(`[Sync] Discarding corrupted data checking for [object Object]`)
+                                return {}
+                            }
+                            try {
+                                return JSON.parse(val)
+                            } catch (e) {
+                                console.error(`[Sync] Failed to parse exported data:`, val.substring(0, 50))
+                                return {}
+                            }
+                        }
+                        return {}
+                    }
+
                     const state = {
-                        accounts: await useAccountStore.getState().exportAccounts(true),
-                        addons: useAddonStore.getState().exportLibrary(),
+                        accounts: safeParse(rawAccounts),
+                        addons: safeParse(rawAddons),
                         profiles: useProfileStore.getState().profiles,
                         failover: {
                             rules: useFailoverStore.getState().rules,
@@ -271,7 +414,13 @@ export const useSyncStore = create<SyncState>()(
                     }
 
                     const { AES } = await import('crypto-js')
-                    const encryptedState = AES.encrypt(JSON.stringify(state), auth.password).toString()
+                    const stringifiedState = JSON.stringify(state)
+
+                    if (stringifiedState === '[object Object]') {
+                        throw new Error('Sync corruption detected: State is not an object.')
+                    }
+
+                    const encryptedState = AES.encrypt(stringifiedState, auth.password).toString()
 
                     const res = await fetch(`${apiPath}/sync/${auth.id}`, {
                         method: 'POST',
@@ -287,7 +436,17 @@ export const useSyncStore = create<SyncState>()(
                         throw new Error(errorData.message || `Server Error: ${res.status}`)
                     }
 
-                    set({ lastSyncedAt: new Date().toISOString() })
+                    const resData = await res.json()
+
+                    // TRUST THE SERVER CLOCK (Fixes Clock Drift)
+                    // If server returns a timestamp, use it. Fallback to local only if missing.
+                    const serverTime = resData.syncedAt
+                    if (serverTime) {
+                        set({ lastSyncedAt: serverTime })
+                        console.log(`[Sync] Synced with server clock: ${serverTime}`)
+                    } else {
+                        set({ lastSyncedAt: new Date().toISOString() })
+                    }
 
                     if (!isAuto) {
                         toast({ title: "Saved", description: "Changes saved to cloud." })
@@ -311,11 +470,8 @@ export const useSyncStore = create<SyncState>()(
                 }
             },
 
-            syncFromRemote: async (isSilent: boolean = false) => {
-                const { auth } = get()
-                if (!auth.isAuthenticated) return
-                await get().login(auth.id, auth.password, isSilent)
-            },
+
+
 
             deleteRemoteAccount: async () => {
                 const { auth, serverUrl } = get()
@@ -333,12 +489,13 @@ export const useSyncStore = create<SyncState>()(
             }
         }),
         {
-            name: 'sync-storage',
+            name: 'stremio-manager-sync',
+            storage: createSafeStorage(),
             partialize: (state) => ({
-                serverUrl: state.serverUrl,
+                auth: state.auth,
                 lastSyncedAt: state.lastSyncedAt,
-                autoSyncEnabled: state.autoSyncEnabled
-            })
+            }),
         }
     )
 )
+import { createSafeStorage } from './safe-storage'

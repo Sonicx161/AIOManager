@@ -149,12 +149,44 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                     </div>
                                     <Select value={url} onValueChange={(val) => updateChainUrl(index, val)}>
                                         <SelectTrigger className="flex-1">
-                                            <SelectValue placeholder={`Select Tier ${index + 1} addon...`} />
+                                            <SelectValue placeholder={`Select Tier ${index + 1} addon...`}>
+                                                {(() => {
+                                                    const selectedAddon = addons.find(a => a.transportUrl === url)
+                                                    if (!selectedAddon) return null
+                                                    return (
+                                                        <div className="flex items-center gap-2">
+                                                            {(selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo) && (
+                                                                <img
+                                                                    src={selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo}
+                                                                    alt=""
+                                                                    className="w-4 h-4 rounded object-contain"
+                                                                    onError={(e) => {
+                                                                        e.currentTarget.style.display = 'none'
+                                                                    }}
+                                                                />
+                                                            )}
+                                                            <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
+                                                        </div>
+                                                    )
+                                                })()}
+                                            </SelectValue>
                                         </SelectTrigger>
                                         <SelectContent>
                                             {addons.map(addon => (
                                                 <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
-                                                    {addon.manifest.name}
+                                                    <div className="flex items-center gap-2">
+                                                        {(addon.metadata?.customLogo || addon.manifest.logo) && (
+                                                            <img
+                                                                src={addon.metadata?.customLogo || addon.manifest.logo}
+                                                                alt=""
+                                                                className="w-5 h-5 rounded object-contain bg-muted/50 p-0.5"
+                                                                onError={(e) => {
+                                                                    e.currentTarget.style.display = 'none'
+                                                                }}
+                                                            />
+                                                        )}
+                                                        <span>{addon.metadata?.customName || addon.manifest.name}</span>
+                                                    </div>
                                                 </SelectItem>
                                             ))}
                                         </SelectContent>
@@ -216,9 +248,21 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                     {!isPrimary ? <AlertTriangle className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
                                                 </div>
                                                 <div>
-                                                    <div className="font-bold flex items-center gap-2">
-                                                        {activeAddon?.manifest.name || 'Unknown'}
-                                                        {!isPrimary && <span className="text-[10px] bg-amber-500 text-white px-1.5 py-0.5 rounded uppercase font-bold">Failed Over</span>}
+                                                    <div className="flex items-center gap-2">
+                                                        {(activeAddon?.metadata?.customLogo || activeAddon?.manifest.logo) && (
+                                                            <img
+                                                                src={activeAddon.metadata?.customLogo || activeAddon.manifest.logo}
+                                                                alt=""
+                                                                className="w-5 h-5 rounded object-contain bg-muted/50 p-0.5"
+                                                                onError={(e) => {
+                                                                    e.currentTarget.style.display = 'none'
+                                                                }}
+                                                            />
+                                                        )}
+                                                        <div className="font-bold flex items-center gap-2">
+                                                            {activeAddon?.metadata?.customName || activeAddon?.manifest.name || 'Unknown'}
+                                                            {!isPrimary && <span className="text-[10px] bg-amber-500 text-white px-1.5 py-0.5 rounded uppercase font-bold">Failed Over</span>}
+                                                        </div>
                                                     </div>
                                                     <div className="text-[10px] text-muted-foreground font-mono">
                                                         ID: {rule.id.slice(0, 8)}
@@ -246,7 +290,17 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                     <div key={idx} className="flex items-center gap-1 group">
                                                         <div className={`px-2 py-1 rounded flex items-center gap-2 border ${isActiveInRule ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted border-transparent'}`}>
                                                             <span className="opacity-70 font-bold">{idx + 1}</span>
-                                                            <span className="font-medium truncate max-w-[100px]">{addon?.manifest.name || '???'}</span>
+                                                            {(addon?.metadata?.customLogo || addon?.manifest.logo) && (
+                                                                <img
+                                                                    src={addon.metadata?.customLogo || addon.manifest.logo}
+                                                                    alt=""
+                                                                    className="w-4 h-4 rounded object-contain"
+                                                                    onError={(e) => {
+                                                                        e.currentTarget.style.display = 'none'
+                                                                    }}
+                                                                />
+                                                            )}
+                                                            <span className="font-medium truncate max-w-[100px]">{addon?.metadata?.customName || addon?.manifest.name || '???'}</span>
                                                             {reliability > 0 && (
                                                                 <span className={`text-[8px] px-1 rounded ${isActiveInRule ? 'bg-white/20' : 'bg-primary/10 text-primary'}`} title="Consecutive successful health checks">
                                                                     {reliability} pts
