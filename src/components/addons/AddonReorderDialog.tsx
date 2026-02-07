@@ -2,9 +2,8 @@ import { useState, useEffect } from 'react'
 import {
   DndContext,
   closestCenter,
+  PointerSensor,
   KeyboardSensor,
-  MouseSensor,
-  TouchSensor,
   useSensor,
   useSensors,
   DragEndEvent,
@@ -56,12 +55,7 @@ export function AddonReorderDialog({
   }, [open, addons])
 
   const sensors = useSensors(
-    useSensor(MouseSensor, {
-      activationConstraint: {
-        distance: 5, // Prevent accidental clicks from triggering drag
-      },
-    }),
-    useSensor(TouchSensor, {
+    useSensor(PointerSensor, {
       activationConstraint: {
         delay: 250,
         tolerance: 5,

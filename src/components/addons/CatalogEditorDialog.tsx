@@ -58,11 +58,18 @@ function SortableCatalogItem({ catalog, onRename, onDelete }: SortableCatalogIte
             style={style}
             className={`flex items-center gap-3 p-3 rounded-lg border bg-card ${isDragging ? 'shadow-lg' : ''}`}
         >
-            {/* Drag handle */}
+            {/* Drag handle - Increased Touch Target */}
             <button
                 {...attributes}
                 {...listeners}
-                className="cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground"
+                className="
+                    -ml-2 p-3 cursor-grab active:cursor-grabbing 
+                    text-muted-foreground hover:text-foreground 
+                    hover:bg-accent rounded-md transition-colors 
+                    shrink-0
+                "
+                style={{ touchAction: 'none' }}
+                title="Drag to reorder"
             >
                 <GripVertical className="h-5 w-5" />
             </button>
@@ -111,7 +118,12 @@ export function CatalogEditorDialog({
     const [hasChanges, setHasChanges] = useState(false)
 
     const sensors = useSensors(
-        useSensor(PointerSensor),
+        useSensor(PointerSensor, {
+            activationConstraint: {
+                delay: 250,
+                tolerance: 5,
+            },
+        }),
         useSensor(KeyboardSensor, {
             coordinateGetter: sortableKeyboardCoordinates,
         })

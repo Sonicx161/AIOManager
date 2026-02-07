@@ -27,19 +27,26 @@ export function SortableProfileItem({ id, profile }: SortableProfileItemProps) {
     return (
         <div
             ref={setNodeRef}
-            style={style}
             className={cn(
-                'flex items-center gap-3 p-3 bg-card border rounded-lg',
-                isDragging && 'opacity-50',
-                'touch-none' // Important for touch devices
+                'flex items-center gap-3 p-3 bg-card border rounded-lg transition-all duration-200',
+                isDragging && 'shadow-xl z-50 border-primary scale-[1.02] ring-2 ring-primary/20',
+                !isDragging && 'shadow-sm'
             )}
+            style={{ ...style, touchAction: 'none' }}
         >
             <div
                 {...attributes}
                 {...listeners}
-                className="cursor-grab hover:text-foreground text-muted-foreground p-1 rounded hover:bg-muted transition-colors shrink-0"
+                className="
+                    -ml-2 p-3 cursor-grab active:cursor-grabbing 
+                    text-muted-foreground hover:text-foreground 
+                    hover:bg-accent rounded-md transition-colors 
+                    shrink-0
+                "
+                style={{ touchAction: 'none' }}
+                title="Drag to reorder"
             >
-                <GripVertical className="h-4 w-4" />
+                <GripVertical className="h-5 w-5" />
             </div>
 
             <div className="flex items-center gap-3 min-w-0 flex-1">

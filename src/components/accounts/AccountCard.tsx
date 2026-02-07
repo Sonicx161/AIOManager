@@ -71,11 +71,20 @@ export function AccountCard({
       }}
     >
       <CardHeader className="relative">
-        {/* Drag Handle Overlay */}
+        {/* Drag Handle Overlay - Increased Touch Target */}
         {restProps.dragHandleProps && (
           <div
             {...restProps.dragHandleProps}
-            className="absolute left-2 top-1/2 -translate-y-1/2 p-2 cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground z-10"
+            className="
+              absolute left-0 top-0 bottom-0 px-4 
+              flex items-center justify-center 
+              cursor-grab active:cursor-grabbing 
+              text-muted-foreground hover:text-foreground 
+              hover:bg-accent/50 transition-colors 
+              z-10
+            "
+            style={{ touchAction: 'none' }}
+            title="Drag to reorder"
           >
             <GripVertical className="h-5 w-5" />
           </div>
