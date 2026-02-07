@@ -153,7 +153,9 @@ With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `serve
 
 ---
 
-## [1.5.6] - The Library Installation Hotfix 💎
+## [1.5.7] - Mobile UX Polish 📱
+
+AIOManager v1.5.7 focuses on making the mobile experience smoother, specifically improving the reliability of addon reordering on touch devices.
 
 AIOManager v1.5.6 addresses critical issues with the "Install from Library" functionality, ensuring reliability and flexibility for users with multiple addon configurations.
 

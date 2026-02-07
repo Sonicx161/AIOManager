@@ -270,7 +270,7 @@ fastify.get('/api/health', {
     if (!dbHealthy) {
         return reply.code(503).send({
             status: 'degraded',
-            version: '1.5.6',
+            version: '1.5.7',
             mode: 'multi-tenant',
             optimized: true,
             database: { type: db.type, healthy: false }
@@ -979,7 +979,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.6
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.7
  ==============================================================================
 `;
         console.log(banner);

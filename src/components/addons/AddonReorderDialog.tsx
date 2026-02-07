@@ -63,7 +63,8 @@ export function AddonReorderDialog({
     }),
     useSensor(TouchSensor, {
       activationConstraint: {
-        distance: 5, // Prevent accidental touches from triggering drag
+        delay: 250,
+        tolerance: 5,
       },
     }),
     useSensor(KeyboardSensor, {
