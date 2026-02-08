@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.5.9'
+const VERSION = '1.6.0'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '20') // Increased from 5 to 20 for faster parallel updates
@@ -364,7 +364,25 @@ fastify.get('/api/sync/:id', {
 })
 
 
-// PROXY: Simple Metadata/Manifest Proxy (Bypass CORS via internal server)
+// SECURITY: SSRF Protection
+const isSafeUrl = (url) => {
+    try {
+        const u = new URL(url)
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+
+        // Block private/internal ranges
+        const hostname = u.hostname
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return false
+        if (hostname.startsWith('192.168.') || hostname.startsWith('10.') || hostname.startsWith('172.')) return false
+
+        // Fast-Fail Video Extensions (Anti-Abuse)
+        if (u.pathname.match(/\.(mp4|mkv|avi|mov|wmv|flv|webm)$/i)) return false
+
+        return true
+    } catch (e) { return false }
+}
+
+// PROXY: Simple Metadata/Manifest Proxy (Secured)
 fastify.get('/api/meta-proxy', {
     schema: {
         querystring: {
@@ -380,15 +398,21 @@ fastify.get('/api/meta-proxy', {
     const accountContext = request.headers['x-account-context'] || 'Unknown'
     fastify.log.info({ category: 'MetaProxy' }, `[${accountContext}] Proxying request to: ${url}`)
 
+    if (!isSafeUrl(url)) {
+        fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request: ${url}`)
+        return reply.code(403).send({ error: 'Access Denied: Unsafe URL' })
+    }
+
     return enqueueProxyRequest(url, async () => {
         try {
             const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), 5000) // Reduced from 8s to 5s to unblock queue faster
+            const timeout = setTimeout(() => controller.abort(), 6000) // 6s timeout
 
             const response = await fetch(url, {
                 signal: controller.signal,
                 headers: {
-                    'User-Agent': 'AIOManager/1.2 (Internal Proxy; Hardened)'
+                    'User-Agent': 'AIOManager/1.5.10 (Internal Proxy; Hardened)',
+                    'Accept': 'application/json, text/plain, */*'
                 }
             })
 
@@ -398,17 +422,33 @@ fastify.get('/api/meta-proxy', {
                 return reply.code(response.status).send({ error: `Upstream returned ${response.status}` })
             }
 
-            const contentType = response.headers.get('content-type')
+            // 1. Content-Type Check (Allow JSON/Text/Web, block Media)
+            const contentType = response.headers.get('content-type') || ''
+            if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
+                return reply.code(415).send({ error: 'Unsupported Media Type' })
+            }
             if (contentType) reply.type(contentType)
+
+            // 2. Size Limit Check (5MB)
+            const contentLength = parseInt(response.headers.get('content-length') || '0')
+            if (contentLength > 5 * 1024 * 1024) {
+                return reply.code(413).send({ error: 'Payload Too Large (>5MB)' })
+            }
 
             // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
             const arrayBuffer = await response.arrayBuffer()
             const buffer = Buffer.from(arrayBuffer)
+
+            // Double-check buffer size just in case content-length was missing/fake
+            if (buffer.length > 5 * 1024 * 1024) {
+                return reply.code(413).send({ error: 'Payload Too Large (>5MB)' })
+            }
+
             return reply.send(buffer)
         } catch (err) {
             if (err.name === 'AbortError') {
-                fastify.log.error({ category: 'MetaProxy' }, `Timeout after 5s: ${url}`)
-                return reply.code(504).send({ error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>5s)' })
+                fastify.log.error({ category: 'MetaProxy' }, `Timeout after 6s: ${url}`)
+                return reply.code(504).send({ error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>6s)' })
             }
             fastify.log.error({ category: 'MetaProxy' }, `Failed to fetch ${url}: ${err.message}`)
             return reply.code(500).send({ error: 'Internal Proxy Error', details: err.message })
@@ -434,7 +474,9 @@ fastify.post('/api/stremio-proxy', {
     } else if (type === 'AddonCollectionSet') {
         fastify.log.info({ category: 'Sync' }, `[${accountContext}] Pushing updated collection to Stremio (${payload.addons?.length || 0} addons)`)
     } else {
-        fastify.log.info({ category: 'Server' }, `[Proxy] Relaying Stremio API call: ${type}`)
+        // Strict Whitelist: Block unknown methods to prevent abuse
+        fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked unauthorized Stremio API call: ${type}`)
+        return reply.code(403).send({ error: 'Method Not Allowed' })
     }
 
     try {
@@ -546,10 +588,21 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
     // We use a dummy URL for the enqueue key since token might be large, 
     // but better to decoode it to get the domain
     let targetDomain = 'unknown'
+    let originalUrl = ''
     try {
         const config = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'))
         targetDomain = new URL(config.url).origin
-    } catch (e) { }
+        originalUrl = config.url
+    } catch (e) {
+        fastify.log.warn({ category: 'Proxy' }, `Failed to decode token: ${e.message}`)
+        return reply.code(400).send({ error: 'Invalid Token' })
+    }
+
+    // SSRF Protection for Manifest Rewriter
+    if (!isSafeUrl(originalUrl)) {
+        fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request (Manifest Rewriter): ${originalUrl}`)
+        return reply.code(403).send({ error: 'Access Denied: Unsafe URL' })
+    }
 
     return enqueueProxyRequest(targetDomain, async () => {
         try {
