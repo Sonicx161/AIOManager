@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import {
     DndContext,
     closestCenter,
-    PointerSensor,
+    MouseSensor,
+    TouchSensor,
     KeyboardSensor,
     useSensor,
     useSensors,
@@ -14,6 +15,9 @@ import {
     sortableKeyboardCoordinates,
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
+import {
+    restrictToVerticalAxis,
+} from '@dnd-kit/modifiers'
 import {
     Dialog,
     DialogContent,
@@ -50,9 +54,14 @@ export function ProfileReorderDialog({
     }, [open, profiles])
 
     const sensors = useSensors(
-        useSensor(PointerSensor, {
+        useSensor(MouseSensor, {
             activationConstraint: {
-                delay: 250,
+                distance: 3,
+            },
+        }),
+        useSensor(TouchSensor, {
+            activationConstraint: {
+                delay: 200,
                 tolerance: 5,
             },
         }),
@@ -106,6 +115,7 @@ export function ProfileReorderDialog({
                         sensors={sensors}
                         collisionDetection={closestCenter}
                         onDragEnd={handleDragEnd}
+                        modifiers={[restrictToVerticalAxis]}
                     >
                         <SortableContext
                             items={items.map((item) => item.id)}

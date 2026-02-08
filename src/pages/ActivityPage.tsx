@@ -5,9 +5,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useActivityStore, ActivityItem } from '@/store/activityStore'
 import { useAccountStore } from '@/store/accountStore'
 
-import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare } from 'lucide-react'
+import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity } from 'lucide-react'
 import { useEffect, useState, useMemo } from 'react'
 import { toast } from '@/hooks/use-toast'
+import { cn } from '@/lib/utils'
 import {
     AlertDialog,
     AlertDialogAction,
@@ -20,10 +21,11 @@ import {
 } from '@/components/ui/alert-dialog'
 
 export function ActivityPage() {
-    const { fetchActivity, clearHistory, deleteItems, loading, initialize, history } = useActivityStore()
+    const { fetchActivity, deleteItems, loading, initialize, history, lastUpdated } = useActivityStore()
 
     const [searchTerm, setSearchTerm] = useState('')
     const [userFilter, setUserFilter] = useState('all')
+    const [timeFilter, setTimeFilter] = useState('all') // '24h', '7d', '30d', 'all'
     const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
         if (typeof window !== 'undefined') {
             const saved = localStorage.getItem('activity-view-mode')
@@ -39,6 +41,13 @@ export function ActivityPage() {
         initialize().then(() => {
             fetchActivity()
         })
+
+        // Background polling for "Now Watching" status
+        const interval = setInterval(() => {
+            fetchActivity(true) // Silent refresh
+        }, 60000)
+
+        return () => clearInterval(interval)
     }, [initialize, fetchActivity])
 
     const orderedAccounts = useAccountStore((state) => state.accounts)
@@ -65,13 +74,24 @@ export function ActivityPage() {
         })
     }, [history, orderedAccounts])
 
-    // Filter history based on search and user filter
+    // Filter history based on search, user filter and time filter
     const filteredHistory = useMemo(() => {
+        const now = new Date().getTime()
+        const oneDay = 24 * 60 * 60 * 1000
+        const sevenDays = 7 * oneDay
+        const thirtyDays = 30 * oneDay
+
         return history.filter(item => {
             // User filter
             if (userFilter !== 'all' && item.accountId !== userFilter) {
                 return false
             }
+            // Time filter
+            const itemTime = new Date(item.timestamp).getTime()
+            if (timeFilter === '24h' && now - itemTime > oneDay) return false
+            if (timeFilter === '7d' && now - itemTime > sevenDays) return false
+            if (timeFilter === '30d' && now - itemTime > thirtyDays) return false
+
             // Search filter
             if (searchTerm.trim()) {
                 const searchLower = searchTerm.toLowerCase()
@@ -79,7 +99,33 @@ export function ActivityPage() {
             }
             return true
         })
-    }, [history, userFilter, searchTerm])
+    }, [history, userFilter, searchTerm, timeFilter])
+
+    // Session stats comparison
+    const sessionComparison = useMemo(() => {
+        const now = new Date().getTime()
+        const oneDay = 24 * 60 * 60 * 1000
+
+        const watchedToday = history
+            .filter(item => now - new Date(item.timestamp).getTime() < oneDay)
+            .reduce((acc, item) => acc + (item.watched || 0), 0)
+
+        const watchedYesterday = history
+            .filter(item => {
+                const diff = now - new Date(item.timestamp).getTime()
+                return diff > oneDay && diff < 2 * oneDay
+            })
+            .reduce((acc, item) => acc + (item.watched || 0), 0)
+
+        const diff = watchedToday - watchedYesterday
+        const percent = watchedYesterday > 0 ? (diff / watchedYesterday) * 100 : 0
+
+        return {
+            todayHrs: Math.round(watchedToday / 3600000 * 10) / 10,
+            percent: Math.round(percent),
+            isUp: diff > 0
+        }
+    }, [history])
 
     const handleViewModeChange = (mode: 'grid' | 'list') => {
         setViewMode(mode)
@@ -88,17 +134,16 @@ export function ActivityPage() {
         }
     }
 
-    const handleClearHistory = async () => {
-        await clearHistory()
-    }
 
-    const handleToggleSelect = (itemId: string) => {
+    const handleToggleSelect = (itemId: string | string[]) => {
+        const ids = Array.isArray(itemId) ? itemId : [itemId]
         setSelectedItems(prev => {
             const newSet = new Set(prev)
-            if (newSet.has(itemId)) {
-                newSet.delete(itemId)
+            const allSelected = ids.every(id => newSet.has(id))
+            if (allSelected) {
+                ids.forEach(id => newSet.delete(id))
             } else {
-                newSet.add(itemId)
+                ids.forEach(id => newSet.add(id))
             }
             return newSet
         })
@@ -138,10 +183,33 @@ export function ActivityPage() {
             <div className="flex flex-col md:flex-row justify-between items-start gap-4">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Activity</h1>
-                    <p className="text-muted-foreground mt-1">
-                        Watch history from all your accounts.
-                    </p>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-1">
+                        <p className="text-muted-foreground">
+                            Unified watch history from all your accounts.
+                        </p>
+                    </div>
                 </div>
+                {history.length > 0 && (
+                    <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-2 text-xs font-bold text-primary bg-primary/10 px-3 py-1.5 rounded-full whitespace-nowrap border border-primary/20">
+                            <Activity className="h-3 w-3" />
+                            {history.length} items • {Math.round(history.reduce((acc, item) => acc + (item.watched || 0), 0) / 3600000)}h total
+                            {sessionComparison.todayHrs > 0 && (
+                                <span className={cn(
+                                    "ml-2 pl-2 border-l border-primary/30",
+                                    sessionComparison.isUp ? "text-green-500" : "text-amber-500"
+                                )}>
+                                    {sessionComparison.isUp ? '↑' : '↓'}{sessionComparison.todayHrs}h today
+                                </span>
+                            )}
+                        </div>
+                        {lastUpdated && (
+                            <span className="text-[10px] text-muted-foreground mr-2 font-mono opacity-60">
+                                Last synced: {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                            </span>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* Controls Row */}
@@ -160,7 +228,7 @@ export function ActivityPage() {
 
                     {/* User Filter */}
                     <Select value={userFilter} onValueChange={setUserFilter}>
-                        <SelectTrigger className="w-full sm:w-[180px]">
+                        <SelectTrigger className="w-full sm:w-[150px]">
                             <SelectValue placeholder="All Users" />
                         </SelectTrigger>
                         <SelectContent>
@@ -172,35 +240,41 @@ export function ActivityPage() {
                             ))}
                         </SelectContent>
                     </Select>
+
+                    {/* Time Filter */}
+                    <Select value={timeFilter} onValueChange={setTimeFilter}>
+                        <SelectTrigger className="w-full sm:w-[150px]">
+                            <SelectValue placeholder="All Time" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="all">All Time</SelectItem>
+                            <SelectItem value="24h">Last 24 Hours</SelectItem>
+                            <SelectItem value="7d">Last 7 Days</SelectItem>
+                            <SelectItem value="30d">Last 30 Days</SelectItem>
+                        </SelectContent>
+                    </Select>
                 </div>
 
                 {/* Actions */}
-                <div className="flex gap-2 w-full xl:w-auto overflow-x-auto pb-1 xl:pb-0">
-                    {isSelecting ? (
+                <div className="flex gap-2 w-full xl:w-auto overflow-x-auto pb-1 xl:pb-0 shrink-0">
+                    {isSelecting && (
                         <>
+                            <Button variant="outline" size="sm" onClick={handleSelectAll} disabled={filteredHistory.length === 0} className="whitespace-nowrap">
+                                <CheckSquare className="mr-2 h-4 w-4" />
+                                Select All ({filteredHistory.length})
+                            </Button>
                             <Button variant="outline" size="sm" onClick={handleDeselectAll} className="whitespace-nowrap">
                                 <XSquare className="mr-2 h-4 w-4" />
-                                Deselect
+                                Deselect ({selectedItems.size})
                             </Button>
                             <Button variant="destructive" size="sm" onClick={() => setShowDeleteDialog(true)} className="whitespace-nowrap">
                                 <Trash2 className="mr-2 h-4 w-4" />
                                 Delete ({selectedItems.size})
                             </Button>
                         </>
-                    ) : (
-                        <>
-                            <Button variant="outline" size="sm" onClick={handleSelectAll} disabled={filteredHistory.length === 0} className="whitespace-nowrap">
-                                <CheckSquare className="mr-2 h-4 w-4" />
-                                Select All
-                            </Button>
-                        </>
                     )}
 
-                    <Button variant="outline" size="sm" onClick={handleClearHistory} disabled={loading} className="whitespace-nowrap">
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Clear Local
-                    </Button>
-                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="whitespace-nowrap">
+                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="whitespace-nowrap ml-auto xl:ml-0">
                         <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                         Refresh
                     </Button>
@@ -232,6 +306,14 @@ export function ActivityPage() {
                 viewMode={viewMode}
                 selectedItems={selectedItems}
                 onToggleSelect={handleToggleSelect}
+                onDelete={(id, removeRemote) => {
+                    const ids = Array.isArray(id) ? id : [id]
+                    deleteItems(ids, removeRemote)
+                    toast({
+                        title: ids.length > 1 ? 'Episodes Deleted' : 'Item Deleted',
+                        description: `Removed from activity history.`
+                    })
+                }}
             />
 
             {/* Delete Confirmation Dialog */}

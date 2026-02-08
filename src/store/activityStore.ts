@@ -56,6 +56,7 @@ interface ActivityState {
     loading: boolean
     error: string | null
     initialized: boolean
+    lastUpdated: Date | null
 
     initialize: () => Promise<void>
     fetchActivity: (silent?: boolean) => Promise<void>
@@ -199,6 +200,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
     loading: false,
     error: null,
     initialized: false,
+    lastUpdated: null,
 
     initialize: async () => {
         if (get().initialized) return
@@ -291,12 +293,27 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
             const results = await Promise.all(accountPromises)
             const freshItems = results.flat()
 
+            // MERGE LOGIC: Combine fresh snapshots with existing history
+            // We use item.id as the key, which for series includes the specific episode ID.
+            const { history: existingHistory } = get()
+            const historyMap = new Map<string, ActivityItem>()
+
+            // 1. Populate map with existing history
+            existingHistory.forEach(item => historyMap.set(item.id, item))
+
+            // 2. Overwrite/Add fresh items from Stremio (always contains the LATEST state)
+            freshItems.forEach(item => {
+                historyMap.set(item.id, item)
+            })
+
+            const mergedHistory = Array.from(historyMap.values())
+
             // Sort history by timestamp (newest first)
-            freshItems.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+            mergedHistory.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
             // Save and update state
-            set({ history: freshItems })
-            await localforage.setItem(STORAGE_KEY, freshItems)
+            set({ history: mergedHistory, lastUpdated: new Date() })
+            await localforage.setItem(STORAGE_KEY, mergedHistory)
 
             console.log(`[Activity] Loaded ${freshItems.length} activity items`)
 

@@ -12,8 +12,9 @@ import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import {
   DndContext,
   closestCenter,
+  MouseSensor,
+  TouchSensor,
   KeyboardSensor,
-  PointerSensor,
   useSensor,
   useSensors,
   DragEndEvent
@@ -88,9 +89,14 @@ export function AccountList() {
   }
 
   const sensors = useSensors(
-    useSensor(PointerSensor, {
+    useSensor(MouseSensor, {
       activationConstraint: {
-        delay: 250,
+        distance: 3,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 200,
         tolerance: 5,
       },
     }),

@@ -663,22 +663,51 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const encryptionKey = getEncryptionKey()
                   const currentAccounts = [...get().accounts]
-                  const emailMap = new Map(
-                        currentAccounts.filter((a) => a.email).map((a) => [a.email!.toLowerCase(), a])
+
+                  // Pre-decrypt local accounts for AuthKey-based reconciliation
+                  const localDecrypted = await Promise.all(
+                        currentAccounts.map(async (acc) => {
+                              try {
+                                    return { id: acc.id, key: await decrypt(acc.authKey, encryptionKey) }
+                              } catch (e) {
+                                    return { id: acc.id, key: null }
+                              }
+                        })
                   )
 
                   const reconciledAccounts: StremioAccount[] = []
                   const processedLocalIds = new Set<string>()
 
                   for (const ra of normalizedAccounts) {
-                        let matchedAccount = emailMap.get(ra.email?.toLowerCase() || '')
+                        // RECONCILIATION LAYERS:
+                        // 1. Exact ID Match (Same instance)
+                        // 2. AuthKey Match (Same Stremio account, different AIOM instance/ID)
+                        // 3. Email Match (Credential logins)
+                        let matchedAccount = currentAccounts.find((a) => a.id === ra.id)
+
+                        if (!matchedAccount && ra.rawKey) {
+                              const found = localDecrypted.find((ld) => ld.key === ra.rawKey)
+                              if (found) matchedAccount = currentAccounts.find((a) => a.id === found.id)
+                        }
+
+                        if (!matchedAccount && ra.email) {
+                              matchedAccount = currentAccounts.find(
+                                    (a) => a.email?.toLowerCase() === ra.email?.toLowerCase()
+                              )
+                        }
+
                         if (matchedAccount) {
                               const updated: StremioAccount = {
                                     ...matchedAccount,
-                                    name: ra.name,
-                                    authKey: ra.rawKey.length > 50 ? ra.rawKey : await encrypt(ra.rawKey, encryptionKey),
+                                    name: ra.name || matchedAccount.name,
+                                    authKey: ra.rawKey
+                                          ? ra.rawKey.length > 50
+                                                ? ra.rawKey
+                                                : await encrypt(ra.rawKey, encryptionKey)
+                                          : matchedAccount.authKey,
                                     addons: ra.addons,
-                                    lastSync: ra.lastSync,
+                                    lastSync: new Date(),
+                                    status: 'active' as const,
                               }
                               reconciledAccounts.push(updated)
                               processedLocalIds.add(matchedAccount.id)

@@ -21,6 +21,7 @@ interface AccountCardProps {
   onDelete?: () => void
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement>
   isSelectionMode?: boolean
+  disableTransition?: boolean
 }
 
 export function AccountCard({
@@ -29,6 +30,7 @@ export function AccountCard({
   onToggleSelect,
   onDelete,
   isSelectionMode = false,
+  disableTransition = false,
   ...restProps
 }: AccountCardProps) {
   const navigate = useNavigate()
@@ -62,7 +64,7 @@ export function AccountCard({
 
   return (
     <Card
-      className={`flex flex-col transition-all duration-200 ${isSelectionMode ? 'cursor-pointer hover:border-primary/50' : ''} ${isSelected ? 'ring-2 ring-primary border-primary bg-primary/5' : ''
+      className={`flex flex-col ${!disableTransition ? 'transition-all duration-200' : ''} ${isSelectionMode ? 'cursor-pointer hover:border-primary/50' : ''} ${isSelected ? 'ring-2 ring-primary border-primary bg-primary/5' : ''
         }`}
       onClick={() => {
         if (isSelectionMode && onToggleSelect) {

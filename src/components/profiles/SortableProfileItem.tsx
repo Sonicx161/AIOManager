@@ -28,7 +28,8 @@ export function SortableProfileItem({ id, profile }: SortableProfileItemProps) {
         <div
             ref={setNodeRef}
             className={cn(
-                'flex items-center gap-3 p-3 bg-card border rounded-lg transition-all duration-200',
+                'flex items-center gap-3 p-3 bg-card border rounded-lg',
+                !isDragging && 'transition-all duration-200',
                 isDragging && 'shadow-xl z-50 border-primary scale-[1.02] ring-2 ring-primary/20',
                 !isDragging && 'shadow-sm'
             )}

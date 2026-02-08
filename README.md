@@ -153,9 +153,25 @@ With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `serve
 
 ---
 
-## [1.5.7] - Mobile UX Polish 📱
+## [1.5.9] - Pulse Dashboard & Sync Hardening ⚡
+AIOManager v1.5.9 is a major release combining specific highly-requested stability fixes with a complete dashboard transformation.
 
-AIOManager v1.5.7 focuses on making the mobile experience smoother, specifically improving the reliability of addon reordering on touch devices.
+### 🚨 Critical Fixes
+- **Sync Hardening**: Resolved "Rule Battles" and account duplication with a new Live Base sync model.
+- **Failover Fixes**: Fixed the "???" missing metadata bug by preserving disabled addons in memory.
+- **Hybrid Reordering**: Lag-free dragging with vertical locking and hybrid touch/mouse sensors.
+
+### 📊 Dashboard Refinements
+- **Pulse-First**: Reprioritized the default view to focus on high-level stats and 24h activity heatmaps.
+- **Personality DNA**: Enhanced with "Watch Personas" (Night Owl, Binge Master) and habit tracking.
+- **Deep Dive**: Expanded with "The Loop" (rewatch tracking) and "Endurance Test" (completion funnels).
+
+## [1.5.8] - Hybrid Reordering & Critical Sync Fix 💨
+AIOManager v1.5.8 introduced a hybrid reordering system for better device support and resolved critical account duplication issues.
+
+### 🛡️ Critical Fixes
+- **Account Reconciliation**: Implemented a multi-layered matching strategy (ID, AuthKey, and Email) to correctly identify existing accounts during cloud sync.
+- **Hybrid Input Handling**: Differentiates between PC (Mouse) and Mobile (Touch) inputs for an instant feel on desktop.
 
 AIOManager v1.5.6 addresses critical issues with the "Install from Library" functionality, ensuring reliability and flexibility for users with multiple addon configurations.
 

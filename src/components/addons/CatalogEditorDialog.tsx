@@ -13,8 +13,9 @@ import { AddonDescriptor, Catalog } from '@/types/addon'
 import {
     DndContext,
     closestCenter,
+    MouseSensor,
+    TouchSensor,
     KeyboardSensor,
-    PointerSensor,
     useSensor,
     useSensors,
     DragEndEvent,
@@ -118,9 +119,14 @@ export function CatalogEditorDialog({
     const [hasChanges, setHasChanges] = useState(false)
 
     const sensors = useSensors(
-        useSensor(PointerSensor, {
+        useSensor(MouseSensor, {
             activationConstraint: {
-                delay: 250,
+                distance: 5,
+            },
+        }),
+        useSensor(TouchSensor, {
+            activationConstraint: {
+                delay: 200,
                 tolerance: 5,
             },
         }),

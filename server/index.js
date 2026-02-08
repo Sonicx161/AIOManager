@@ -18,6 +18,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
+const VERSION = '1.5.9'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '20') // Increased from 5 to 20 for faster parallel updates
@@ -270,7 +271,7 @@ fastify.get('/api/health', {
     if (!dbHealthy) {
         return reply.code(503).send({
             status: 'degraded',
-            version: '1.5.7',
+            version: '1.5.9',
             mode: 'multi-tenant',
             optimized: true,
             database: { type: db.type, healthy: false }
@@ -767,12 +768,10 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
         const normalizedChain = chain.map(u => normalizeAddonUrl(u).toLowerCase());
         const normalizedActive = normalizeAddonUrl(activeUrl).toLowerCase();
 
-        // Fallback: If local stored list is empty, start with the live remote list for order preservation
-        let baseAddonList = [...(storedAddonList || [])];
-        if (baseAddonList.length === 0) {
-            fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Local list empty, falling back to Stremio live order.`)
-            baseAddonList = [...remoteAddons];
-        }
+        // ALWAYS start with the fresh remote list as the baseline.
+        // This prevents multiple rules for the same account from fighting each other.
+        // We only scavenge metadata (custom names/logos) from the stored list.
+        const baseAddonList = [...remoteAddons];
 
         // Ensure all chain addons are in baseAddonList
         normalizedChain.forEach((normUrl, idx) => {
@@ -818,9 +817,12 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
             authKey,
             addons: finalAddons
         })
-
         fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Stremio updated (Mirror): ${finalAddons.length} addons actively installed.`)
     } catch (err) {
+        if (err.response?.status === 401) {
+            fastify.log.error({ category: 'Autopilot' }, `[${accountId}] Auth Key Expired (401). Disabling rule.`)
+            await db.run('UPDATE autopilot_rules SET is_active = 0 WHERE account_id = $1', [accountId])
+        }
         fastify.log.error({ category: 'Autopilot' }, `[${accountId}] Mirror sync failed: ${err.message}`)
         throw err
     }
@@ -979,7 +981,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.7
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.9
  ==============================================================================
 `;
         console.log(banner);

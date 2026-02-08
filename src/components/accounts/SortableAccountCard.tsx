@@ -46,6 +46,7 @@ export function SortableAccountCard({
                 // Pass drag handle props to AccountCard to render the grip
                 dragHandleProps={dragHandleProps}
                 isSelectionMode={isSelectionMode}
+                disableTransition={isDragging}
             />
         </div>
     )

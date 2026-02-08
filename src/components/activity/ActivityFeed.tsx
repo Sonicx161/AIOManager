@@ -3,16 +3,17 @@ import { format, isToday, isYesterday, formatDistanceToNow } from 'date-fns'
 import { PlayCircle, Trash2, Tv, Film, Activity } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { toast } from '@/hooks/use-toast'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '../../components/ui/avatar'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { cn } from '@/lib/utils'
 
 interface ActivityFeedProps {
     history: ActivityItem[]
     viewMode?: 'grid' | 'list'
-    onToggleSelect?: (id: string) => void
+    onToggleSelect?: (id: string | string[]) => void
+    onDelete?: (id: string | string[], removeFromLibrary: boolean) => void
     selectedItems?: Set<string>
 }
 
@@ -20,10 +21,43 @@ export function ActivityFeed({
     history,
     viewMode = 'grid',
     onToggleSelect,
+    onDelete,
     selectedItems = new Set(),
 }: ActivityFeedProps) {
     const [activeTab, setActiveTab] = useState("all")
-    const isSelectionMode = onToggleSelect !== undefined
+
+    // Account color index to tailwind classes mapping
+    const getColorClasses = (index: number) => {
+        const colors = [
+            'border-blue-500/50 hover:border-blue-500 bg-blue-500/5',
+            'border-purple-500/50 hover:border-purple-500 bg-purple-500/5',
+            'border-green-500/50 hover:border-green-500 bg-green-500/5',
+            'border-amber-500/50 hover:border-amber-500 bg-amber-500/5',
+            'border-rose-500/50 hover:border-rose-500 bg-rose-500/5',
+            'border-cyan-500/50 hover:border-cyan-500 bg-cyan-500/5',
+            'border-orange-500/50 hover:border-orange-500 bg-orange-500/5',
+            'border-pink-500/50 hover:border-pink-500 bg-pink-500/5',
+            'border-indigo-500/50 hover:border-indigo-500 bg-indigo-500/5',
+            'border-emerald-500/50 hover:border-emerald-500 bg-emerald-500/5',
+        ]
+        return colors[index % colors.length]
+    }
+
+    const getAvatarColor = (index: number) => {
+        const colors = [
+            'bg-blue-500/20 text-blue-400',
+            'bg-purple-500/20 text-purple-400',
+            'bg-green-500/20 text-green-400',
+            'bg-amber-500/20 text-amber-400',
+            'bg-rose-500/20 text-rose-400',
+            'bg-cyan-500/20 text-cyan-400',
+            'bg-orange-500/20 text-orange-400',
+            'bg-pink-500/20 text-pink-400',
+            'bg-indigo-500/20 text-indigo-400',
+            'bg-emerald-500/20 text-emerald-400',
+        ]
+        return colors[index % colors.length]
+    }
 
     // Filter history based on active tab AND search query
     const filteredHistory = useMemo(() => {
@@ -40,24 +74,60 @@ export function ActivityFeed({
         return filtered
     }, [history, activeTab])
 
-    const groupedHistory = useMemo(() => {
-        // Sort by timestamp descending
-        const sorted = [...filteredHistory].sort((a, b) => {
-            const dateA = new Date(a.timestamp).getTime()
-            const dateB = new Date(b.timestamp).getTime()
-            return dateB - dateA
-        })
+    // Cluster consecutive episodes of the same show within a date group
+    type HistoryCluster = {
+        isCluster: true,
+        name: string,
+        items: ActivityItem[],
+        timestamp: Date
+    }
 
-        return sorted.reduce((groups, item) => {
+    const isCluster = (entry: ActivityItem | HistoryCluster): entry is HistoryCluster => {
+        return (entry as any).isCluster === true
+    }
+
+    const groupedHistory = useMemo(() => {
+        const sorted = [...filteredHistory].sort((a, b) =>
+            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        )
+
+        const dateGroups: Record<string, (ActivityItem | HistoryCluster)[]> = {}
+
+        sorted.forEach(item => {
             const date = new Date(item.timestamp)
             const dateStr = isNaN(date.getTime()) ? 'Unknown Date' : date.toDateString()
 
-            if (!groups[dateStr]) {
-                groups[dateStr] = []
+            if (!dateGroups[dateStr]) {
+                dateGroups[dateStr] = []
             }
-            groups[dateStr].push(item)
-            return groups
-        }, {} as Record<string, ActivityItem[]>)
+
+            const currentGroup: (ActivityItem | HistoryCluster)[] = dateGroups[dateStr]
+            const lastEntry = currentGroup[currentGroup.length - 1]
+
+            // If movie, always separate item
+            if (item.type === 'movie' || !item.name) {
+                currentGroup.push(item)
+                return
+            }
+
+            // Cluster logic: If same show name as last entry, add to cluster
+            if (lastEntry && isCluster(lastEntry) && lastEntry.name === item.name) {
+                lastEntry.items.push(item)
+            } else if (lastEntry && !isCluster(lastEntry) && lastEntry.name === item.name && (item.type === 'series' || item.type === 'episode')) {
+                // Convert last item to a cluster and add current item
+                const cluster: HistoryCluster = {
+                    isCluster: true,
+                    name: item.name,
+                    items: [lastEntry, item],
+                    timestamp: new Date(lastEntry.timestamp)
+                }
+                currentGroup[currentGroup.length - 1] = cluster
+            } else {
+                currentGroup.push(item)
+            }
+        })
+
+        return dateGroups
     }, [filteredHistory])
 
     const formatDateHeader = (dateStr: string) => {
@@ -100,10 +170,18 @@ export function ActivityFeed({
                         </div>
 
                         <div className={viewMode === 'grid' ? "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4" : "space-y-3"}>
-                            {items.map((item) => {
-                                const isSelected = selectedItems.has(item.id)
+                            {items.map((entry) => {
+                                // Extract the main item to show (always the latest one in a cluster)
+                                const item = isCluster(entry) ? entry.items[0] : entry
+                                const cluster = isCluster(entry) ? entry : null
+
+                                const isSelected = cluster
+                                    ? cluster.items.every(i => selectedItems.has(i.id))
+                                    : selectedItems.has(item.id)
+
                                 const itemDate = getSafeDate(item.timestamp)
                                 const userName = item.accountName || 'Unknown User'
+
                                 // Live logic: < 20 mins ago (User requested "Currently watching")
                                 const diffNow = new Date().getTime() - itemDate.getTime()
                                 const isLive = diffNow < 1200000 // 20 mins
@@ -118,7 +196,13 @@ export function ActivityFeed({
                                             key={item.id}
                                             className={`group relative aspect-[2/3] rounded-xl overflow-hidden cursor-pointer border-2 transition-all duration-200 ${isSelected ? 'border-primary ring-2 ring-primary/20 scale-[0.98]' : 'border-transparent hover:border-primary/50'
                                                 }`}
-                                            onClick={() => onToggleSelect?.(item.id)}
+                                            onClick={() => {
+                                                if (cluster) {
+                                                    onToggleSelect?.(cluster.items.map(i => i.id))
+                                                } else {
+                                                    onToggleSelect?.(item.id)
+                                                }
+                                            }}
                                         >
                                             <img
                                                 src={item.poster}
@@ -138,8 +222,19 @@ export function ActivityFeed({
                                                         <h3 className="font-black text-[11px] text-white leading-tight line-clamp-2">
                                                             {item.name}
                                                         </h3>
-                                                        {(item.type === 'series' || item.type === 'anime') && item.episode !== undefined && (
-                                                            <span className="text-[10px] text-primary font-bold block mt-0.5">
+                                                        {cluster ? (
+                                                            <div className="flex flex-wrap gap-1 mt-0.5">
+                                                                {cluster.items.map(i => ({ s: i.season || 1, e: i.episode })).filter(i => i.e !== undefined).sort((a, b) => b.e! - a.e!).map((item, idx) => (
+                                                                    <span key={idx} className="text-[10px] font-black text-primary bg-primary/10 px-1 rounded">
+                                                                        S{item.s} E{item.e}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        ) : (item.type === 'series' || item.type === 'anime') && item.episode !== undefined && (
+                                                            <span className={cn(
+                                                                "text-[10px] font-bold block mt-0.5",
+                                                                getAvatarColor(item.accountColorIndex).split(' ')[1]
+                                                            )}>
                                                                 S{item.season ?? 1} E{item.episode}
                                                             </span>
                                                         )}
@@ -155,7 +250,7 @@ export function ActivityFeed({
                                                 <div className="flex flex-col gap-1 items-end shrink-0">
                                                     <Badge variant="secondary" className="bg-black/60 hover:bg-black/70 text-white backdrop-blur-sm border-0 shadow-lg flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold">
                                                         <Avatar className="h-3 w-3 border border-white/20">
-                                                            <AvatarFallback className="bg-primary/40 text-[6px] text-white">
+                                                            <AvatarFallback className={cn("text-[6px] font-bold", getAvatarColor(item.accountColorIndex))}>
                                                                 {userName[0]?.toUpperCase()}
                                                             </AvatarFallback>
                                                         </Avatar>
@@ -185,9 +280,17 @@ export function ActivityFeed({
                                 return (
                                     <div
                                         key={item.id}
-                                        className={`group flex items-center gap-6 p-4 rounded-2xl border transition-all duration-200 ${isSelected ? 'bg-primary/5 border-primary shadow-sm' : 'hover:bg-muted/30 border-border/40'
-                                            }`}
-                                        onClick={() => isSelectionMode && onToggleSelect?.(item.id)}
+                                        className={cn(
+                                            'group flex items-center gap-6 p-4 rounded-2xl border transition-all duration-200 cursor-pointer',
+                                            isSelected ? 'bg-primary/5 border-primary shadow-md ring-2 ring-primary/20' : cn('shadow-sm', getColorClasses(item.accountColorIndex))
+                                        )}
+                                        onClick={() => {
+                                            if (cluster) {
+                                                onToggleSelect?.(cluster.items.map(i => i.id))
+                                            } else {
+                                                onToggleSelect?.(item.id)
+                                            }
+                                        }}
                                     >
                                         <div className="relative w-24 h-36 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-muted shadow-sm group-hover:shadow-md transition-all">
                                             <img src={item.poster} className="w-full h-full object-cover" loading="lazy" />
@@ -223,15 +326,31 @@ export function ActivityFeed({
                                             <h4 className="font-black text-xl truncate tracking-tight">{item.name}</h4>
 
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                                                {item.type === 'series' && (
-                                                    <span className="flex items-center gap-1 font-mono text-primary font-bold">
+                                                {cluster ? (
+                                                    <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide py-1">
+                                                        <span className="text-[10px] font-black tracking-tighter text-primary bg-primary/20 px-2 py-0.5 rounded border border-primary/30">
+                                                            {cluster.items.length} EPISODES
+                                                        </span>
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {cluster.items.map(i => ({ s: i.season || 1, e: i.episode })).filter(i => i.e !== undefined).sort((a, b) => b.e! - a.e!).map((item, idx) => (
+                                                                <span key={idx} className="text-[9px] font-bold opacity-70 bg-muted px-1.5 rounded border border-border/50">
+                                                                    S{item.s} E{item.e}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                ) : (item.type === 'series' || item.type === 'anime') && item.episode !== undefined && (
+                                                    <span className={cn(
+                                                        "flex items-center gap-1 font-mono font-bold",
+                                                        getAvatarColor(item.accountColorIndex).split(' ')[1]
+                                                    )}>
                                                         S{item.season} E{item.episode}
                                                     </span>
                                                 )}
 
                                                 <div className="flex items-center gap-2">
                                                     <Avatar className="h-5 w-5 border border-border">
-                                                        <AvatarFallback className="text-[9px] bg-secondary font-bold">
+                                                        <AvatarFallback className={cn("text-[9px] font-bold", getAvatarColor(item.accountColorIndex))}>
                                                             {userName[0]?.toUpperCase()}
                                                         </AvatarFallback>
                                                     </Avatar>
@@ -257,10 +376,11 @@ export function ActivityFeed({
                                             className="h-10 w-10 text-muted-foreground hover:text-destructive shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                                             onClick={(e) => {
                                                 e.stopPropagation()
-                                                toast({
-                                                    title: 'Coming Soon',
-                                                    description: 'Direct deletion from feed will be available next sync.',
-                                                })
+                                                if (cluster) {
+                                                    onDelete?.(cluster.items.map(i => i.id), false)
+                                                } else {
+                                                    onDelete?.(item.id, false)
+                                                }
                                             }}
                                         >
                                             <Trash2 className="h-5 w-5" />
@@ -288,9 +408,6 @@ export function ActivityFeed({
                                 <Activity className="h-3 w-3 mr-1.5" /> Now
                             </TabsTrigger>
                         </TabsList>
-                    </div>
-                    <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground hidden sm:block whitespace-nowrap">
-                        {history.length} movies and shows
                     </div>
                 </div>
 

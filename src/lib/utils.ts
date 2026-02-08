@@ -110,23 +110,13 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
       })
       processedRemoteNormUrls.add(normLocal)
     } else {
-      // Catch-all preservation: Keep ONLY if it is explicitly disabled locally, protected,
-      // or has custom metadata (managed/customized addon)
-      const hasMetadata =
-        localAddon.metadata &&
-        (localAddon.metadata.customName ||
-          localAddon.metadata.customLogo ||
-          localAddon.metadata.customDescription)
-
-      const isRecent = localAddon.metadata?.lastUpdated &&
-        (Date.now() - localAddon.metadata.lastUpdated < 60000)
-
-      if (localAddon.flags?.enabled === false || localAddon.flags?.protected || hasMetadata || isRecent) {
-        finalAddons.push({
-          ...localAddon,
-          flags: { ...(localAddon.flags || {}), enabled: isRecent || localAddon.flags?.enabled }, // Keep enabled if recent
-        })
-      }
+      // Catch-all preservation: Keep ALL local addons even if missing from remote.
+      // If missing from remote, mark as disabled locally so we don't wipe their metadata/names.
+      // This prevents the '???' issue in Failover/Addon list.
+      finalAddons.push({
+        ...localAddon,
+        flags: { ...(localAddon.flags || {}), enabled: false },
+      })
     }
   })
 
