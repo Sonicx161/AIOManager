@@ -97,10 +97,23 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
     const remoteAddon = remoteAddonMap.get(normLocal)
 
     if (remoteAddon) {
-      // Exists in both: Use Remote data + Local flags
-      // CRITICAL: If it exists in remote, it IS currently active/enabled in Stremio.
+      // ANTI-WIPE GUARD: Favor local manifest if remote is 'broken' or 'ghost'.
+      // A substantial manifest has resources, types, and a real version (> 0.0.0).
+      const isSubstantial = (m: any) => {
+        if (!m || !m.name || m.name === 'Unknown Addon') return false;
+        const v = (m.version || '').replace(/^v/, '');
+        const hasResources = Array.isArray(m.resources) && m.resources.length > 0;
+        return v !== '0.0.0' && v !== '' && hasResources;
+      };
+
+      const remoteManifest = remoteAddon.manifest;
+      const localManifest = localAddon.manifest;
+
+      const useLocalManifest = isSubstantial(localManifest) && !isSubstantial(remoteManifest);
+
       finalAddons.push({
         ...remoteAddon,
+        manifest: useLocalManifest ? localManifest : remoteManifest,
         flags: {
           ...remoteAddon.flags,
           protected: localAddon.flags?.protected,

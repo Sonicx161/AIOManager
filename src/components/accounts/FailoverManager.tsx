@@ -28,6 +28,7 @@ import { useFailoverStore } from "@/store/failoverStore"
 import { useHistoryStore } from "@/store/historyStore"
 import { ArrowRight, AlertTriangle, Activity, Trash2, Plus, History, Pencil, Webhook } from "lucide-react"
 import { useState, useEffect } from "react"
+import { identifyAddon } from "@/lib/addon-identifier"
 import { toast } from "@/hooks/use-toast"
 import { formatDistanceToNow } from "date-fns"
 import { Input } from "@/components/ui/input"
@@ -38,7 +39,7 @@ interface FailoverManagerProps {
 
 export function FailoverManager({ accountId }: FailoverManagerProps) {
     const account = useAccountStore((state) => state.accounts.find((a) => a.id === accountId))
-    const { rules, addRule, updateRule, removeRule, toggleRuleActive, webhook, setWebhook } = useFailoverStore()
+    const { rules, addRule, updateRule, removeRule, webhook, setWebhook } = useFailoverStore()
 
     const [chain, setChain] = useState<string[]>(["", ""])
     const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
@@ -260,7 +261,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                             />
                                                         )}
                                                         <div className="font-bold flex items-center gap-2">
-                                                            {activeAddon?.metadata?.customName || activeAddon?.manifest.name || 'Unknown'}
+                                                            {activeAddon?.metadata?.customName || identifyAddon(rule.activeUrl || '', activeAddon?.manifest).name}
                                                             {!isPrimary && <span className="text-[10px] bg-amber-500 text-white px-1.5 py-0.5 rounded uppercase font-bold">Failed Over</span>}
                                                         </div>
                                                     </div>
@@ -269,12 +270,18 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-2">
-                                                <Switch
-                                                    checked={rule.isActive}
-                                                    onCheckedChange={(c) => toggleRuleActive(rule.id, c)}
-                                                />
-                                                <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeRule(rule.id)}>
+                                            <div className="flex flex-col items-end gap-2">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[10px] text-muted-foreground uppercase font-bold">Enabled</span>
+                                                    <Switch
+                                                        checked={rule.isActive}
+                                                        onCheckedChange={(c) => updateRule(rule.id, {
+                                                            isActive: c,
+                                                            isAutomatic: c
+                                                        })}
+                                                    />
+                                                </div>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 mt-1" onClick={() => removeRule(rule.id)}>
                                                     <Trash2 className="w-4 h-4 text-destructive" />
                                                 </Button>
                                             </div>
@@ -300,7 +307,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                                     }}
                                                                 />
                                                             )}
-                                                            <span className="font-medium truncate max-w-[100px]">{addon?.metadata?.customName || addon?.manifest.name || '???'}</span>
+                                                            <span className="font-medium truncate max-w-[100px]">{addon?.metadata?.customName || identifyAddon(url, addon?.manifest).name}</span>
                                                             {reliability > 0 && (
                                                                 <span className={`text-[8px] px-1 rounded ${isActiveInRule ? 'bg-white/20' : 'bg-primary/10 text-primary'}`} title="Consecutive successful health checks">
                                                                     {reliability} pts

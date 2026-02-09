@@ -59,8 +59,8 @@ export function ProfileDialog({ profile, trigger }: ProfileDialogProps) {
     }
 
     return (
-        <Dialog open={open} onOpenChange={setOpen}>
-            <div onClick={() => setOpen(true)} className="inline-block cursor-pointer w-full">
+        <>
+            <div onClick={() => setOpen(true)} className="inline-block cursor-pointer">
                 {trigger || (
                     <Button>
                         <Plus className="mr-2 h-4 w-4" />
@@ -68,38 +68,40 @@ export function ProfileDialog({ profile, trigger }: ProfileDialogProps) {
                     </Button>
                 )}
             </div>
-            <DialogContent className="sm:max-w-[425px]">
-                <DialogHeader>
-                    <DialogTitle>{profile ? 'Edit Profile' : 'Create Profile'}</DialogTitle>
-                    <DialogDescription>
-                        {profile ? 'Update profile details.' : 'Create a new profile to organize your addons.'}
-                    </DialogDescription>
-                </DialogHeader>
-                <form onSubmit={handleSubmit} className="space-y-4 py-4">
-                    <div className="grid gap-2">
-                        <Label htmlFor="name">Name</Label>
-                        <Input
-                            id="name"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            placeholder="e.g. Kids, Guests"
-                            required
-                        />
-                    </div>
-                    <div className="grid gap-2">
-                        <Label htmlFor="description">Description (Optional)</Label>
-                        <Input
-                            id="description"
-                            value={description}
-                            onChange={(e) => setDescription(e.target.value)}
-                            placeholder="Brief description of this profile"
-                        />
-                    </div>
-                    <DialogFooter>
-                        <Button type="submit">{profile ? 'Save Changes' : 'Create Profile'}</Button>
-                    </DialogFooter>
-                </form>
-            </DialogContent>
-        </Dialog>
+            <Dialog open={open} onOpenChange={setOpen}>
+                <DialogContent className="sm:max-w-[425px]">
+                    <DialogHeader>
+                        <DialogTitle>{profile ? 'Edit Profile' : 'Create Profile'}</DialogTitle>
+                        <DialogDescription>
+                            {profile ? 'Update profile details.' : 'Create a new profile to organize your addons.'}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <form onSubmit={handleSubmit} className="space-y-4 py-4">
+                        <div className="grid gap-2">
+                            <Label htmlFor="name">Name</Label>
+                            <Input
+                                id="name"
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                placeholder="e.g. Kids, Guests"
+                                required
+                            />
+                        </div>
+                        <div className="grid gap-2">
+                            <Label htmlFor="description">Description (Optional)</Label>
+                            <Input
+                                id="description"
+                                value={description}
+                                onChange={(e) => setDescription(e.target.value)}
+                                placeholder="Brief description of this profile"
+                            />
+                        </div>
+                        <DialogFooter>
+                            <Button type="submit">{profile ? 'Save Changes' : 'Create Profile'}</Button>
+                        </DialogFooter>
+                    </form>
+                </DialogContent>
+            </Dialog>
+        </>
     )
 }

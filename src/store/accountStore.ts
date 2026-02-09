@@ -10,13 +10,17 @@ import { decrypt, encrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import { updateLatestVersions as updateLatestVersionsCoordinator } from '@/lib/store-coordinator'
 import { toast } from '@/hooks/use-toast'
-import { mergeAddons } from '@/lib/utils'
+import { mergeAddons, normalizeAddonUrl } from '@/lib/utils'
 import { StremioAccount } from '@/types/account'
 import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
 import { CinemetaManifest } from '@/types/cinemeta'
 import { isCinemetaAddon, detectAllPatches, applyCinemetaConfiguration } from '@/lib/cinemeta-utils'
+import { identifyAddon } from '@/lib/addon-identifier'
 import localforage from 'localforage'
+import { syncManager } from '@/lib/sync/syncManager'
+import { autopilotManager } from '@/lib/autopilot/autopilotManager'
+
 import { create } from 'zustand'
 
 const STORAGE_KEY = 'stremio-manager:accounts'
@@ -27,18 +31,9 @@ const MANIFEST_CACHE: Record<string, { manifest: AddonDescriptor['manifest']; ti
 const CACHE_TTL = 30 * 60 * 1000 // 30 minutes
 
 // Helper function to sanitize addon manifests by converting null to undefined
-const sanitizeAddonManifest = (manifest: AddonDescriptor['manifest']) => {
-      if (!manifest) {
-            return {
-                  id: '',
-                  name: 'Unknown Addon',
-                  version: '0.0.0',
-                  description: '',
-                  types: [],
-                  logo: undefined,
-                  background: undefined,
-                  idPrefixes: undefined,
-            } as AddonDescriptor['manifest']
+const sanitizeAddonManifest = (manifest: AddonDescriptor['manifest'], transportUrl?: string) => {
+      if (!manifest || !manifest.name || manifest.name === 'Unknown Addon') {
+            return identifyAddon(transportUrl || '', manifest || undefined)
       }
       return {
             ...manifest,
@@ -94,7 +89,8 @@ interface AccountStore {
             transportUrl: string,
             isEnabled: boolean,
             silent?: boolean,
-            targetIndex?: number
+            targetIndex?: number,
+            isAutopilot?: boolean
       ) => Promise<void>
       updateAddonMetadata: (
             accountId: string,
@@ -105,6 +101,7 @@ interface AccountStore {
       moveAccount: (id: string, direction: 'up' | 'down') => Promise<void>
       reorderAccounts: (newOrder: string[]) => Promise<void>
       bulkProtectAddons: (accountId: string, isProtected: boolean) => Promise<void>
+      bulkProtectSelectedAddons: (accountId: string, transportUrls: string[], isProtected: boolean) => Promise<void>
       removeLocalAddons: (accountId: string, transportUrls: string[]) => Promise<void>
       syncAutopilotRules: (accountId: string) => Promise<void>
       clearError: () => void
@@ -151,7 +148,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const addons = await getAddons(authKey, 'New-Login-Check')
                   const normalizedAddons = addons.map((addon) => ({
                         ...addon,
-                        manifest: sanitizeAddonManifest(addon.manifest),
+                        manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                   }))
 
                   const account: StremioAccount = {
@@ -207,7 +204,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const addons = await getAddons(response.authKey, 'New-Login-Check')
                   const normalizedAddons = addons.map((addon) => ({
                         ...addon,
-                        manifest: sanitizeAddonManifest(addon.manifest),
+                        manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                   }))
 
                   const account: StremioAccount = {
@@ -260,10 +257,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const authKey = await decrypt(account.authKey, getEncryptionKey())
                   const addons = await getAddons(authKey, account.id)
 
-                  const normalizedAddons = addons.map((addon) => ({
-                        ...addon,
-                        manifest: sanitizeAddonManifest(addon.manifest),
-                  }))
+                  const normalizedAddons = addons
+                        .filter(a => !syncManager.isPendingRemoval(account.id, a.transportUrl))
+                        .map((addon) => ({
+                              ...addon,
+                              manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
+                        }))
 
                   const mergedAddons = mergeAddons(account.addons, normalizedAddons)
 
@@ -275,7 +274,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               try {
                                     const now = Date.now()
 
-                                    if (!forceRefresh && addon.manifest && addon.manifest.id) {
+                                    const v = (addon.manifest?.version || '').replace(/^v/, '')
+                                    const isBroken = !addon.manifest?.name ||
+                                          addon.manifest.name === 'Unknown Addon' ||
+                                          v === '0.0.0' ||
+                                          v === '' ||
+                                          !addon.manifest.resources ||
+                                          addon.manifest.resources.length === 0
+
+                                    if (!forceRefresh && addon.manifest && addon.manifest.id && !isBroken) {
                                           return addon
                                     }
 
@@ -297,7 +304,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           MANIFEST_CACHE[addon.transportUrl] = { manifest: manifestRaw, timestamp: now }
                                     }
 
-                                    let repairedManifest = sanitizeAddonManifest(manifestRaw)
+                                    let repairedManifest = sanitizeAddonManifest(manifestRaw, addon.transportUrl)
 
                                     if (cinemetaPatches) {
                                           repairedManifest = applyCinemetaConfiguration(repairedManifest as CinemetaManifest, {
@@ -309,8 +316,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                                     return { ...addon, manifest: repairedManifest }
                               } catch (e) {
-                                    console.warn(`[Sync] Failed to baseline \${addon.manifest?.name || 'addon'}:`, e)
-                                    return { ...addon, manifest: sanitizeAddonManifest(addon.manifest) }
+                                    console.warn(`[Sync] Failed to baseline ${addon.manifest?.name || 'addon'}:`, e)
+                                    return { ...addon, manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl) }
                               }
                         })
                   )
@@ -362,7 +369,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                               const normalizedAddons = addons.map((addon) => ({
                                     ...addon,
-                                    manifest: sanitizeAddonManifest(addon.manifest),
+                                    manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                               }))
 
                               const mergedAddons = mergeAddons(account.addons, normalizedAddons)
@@ -408,7 +415,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const normalizedAddons = updatedAddons.map((addon) => ({
                         ...addon,
-                        manifest: sanitizeAddonManifest(addon.manifest),
+                        manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                         metadata: {
                               ...addon.metadata,
                               lastUpdated: Date.now(),
@@ -441,11 +448,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   if (!account) throw new Error('Account not found')
 
                   const authKey = await decrypt(account.authKey, getEncryptionKey())
+
+                  // Optimistically mark as pending to prevent background sync from restoring it
+                  syncManager.addPendingRemoval(accountId, transportUrl)
+
                   const updatedAddons = await apiRemoveAddon(authKey, transportUrl, account.id)
 
                   const normalizedAddons = updatedAddons.map((addon) => ({
                         ...addon,
-                        manifest: sanitizeAddonManifest(addon.manifest),
+                        manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                   }))
 
                   const localAddonsFiltered = account.addons.filter((a) => a.transportUrl !== transportUrl)
@@ -465,17 +476,23 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   throw error
             } finally {
                   set({ loading: false })
+                  // Clear pending status after a short grace period
+                  setTimeout(() => syncManager.removePendingRemoval(accountId, transportUrl), 5000)
             }
       },
 
       removeAddonByIndexFromAccount: async (accountId: string, index: number) => {
             set({ loading: true, error: null })
+            let transportUrl = ''
             try {
                   const account = get().accounts.find((acc) => acc.id === accountId)
                   if (!account) throw new Error('Account not found')
 
                   const addonToRemove = account.addons[index]
                   if (!addonToRemove) throw new Error('Addon not found at index')
+
+                  transportUrl = addonToRemove.transportUrl
+                  syncManager.addPendingRemoval(accountId, transportUrl)
 
                   if (addonToRemove.flags?.protected) {
                         throw new Error(
@@ -503,6 +520,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   throw error
             } finally {
                   set({ loading: false })
+                  // Clear pending status after a short grace period
+                  setTimeout(() => syncManager.removePendingRemoval(accountId, transportUrl), 5000)
             }
       },
 
@@ -548,7 +567,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const processAddons = (addons: AddonDescriptor[]) => {
                         return addons.map((addon: AddonDescriptor) => {
-                              const sanitized = sanitizeAddonManifest(addon.manifest)
+                              const sanitized = sanitizeAddonManifest(addon.manifest, addon.transportUrl)
                               const key = getManifestKey(sanitized)
                               if (!manifestMap[key]) manifestMap[key] = sanitized
                               return {
@@ -653,7 +672,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               addons: Array.isArray(acc.addons)
                                     ? acc.addons.map((ad: any) => ({
                                           ...ad,
-                                          manifest: sanitizeAddonManifest(ad.manifest || manifestMap[ad.manifestId]),
+                                          manifest: sanitizeAddonManifest(ad.manifest || manifestMap[ad.manifestId], ad.transportUrl),
                                     }))
                                     : [],
                               lastSync: new Date(),
@@ -705,8 +724,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                                 ? ra.rawKey
                                                 : await encrypt(ra.rawKey, encryptionKey)
                                           : matchedAccount.authKey,
-                                    addons: ra.addons,
-                                    lastSync: new Date(),
+                                    addons: mergeAddons(matchedAccount.addons, ra.addons),
+                                    lastSync: ra.lastSync || new Date(),
                                     status: 'active' as const,
                               }
                               reconciledAccounts.push(updated)
@@ -793,7 +812,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             await updateAddons(authKey, updatedAddons, accountId)
       },
 
-      toggleAddonEnabled: async (accountId: string, transportUrl: string, isEnabled: boolean, silent: boolean = false, targetIndex?: number) => {
+      toggleAddonEnabled: async (accountId: string, transportUrl: string, isEnabled: boolean, silent: boolean = false, targetIndex?: number, isAutopilot: boolean = false) => {
             const account = get().accounts.find((acc) => acc.id === accountId)
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) =>
@@ -811,6 +830,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             if (!silent) {
                   const authKey = await decrypt(account.authKey, getEncryptionKey())
                   await updateAddons(authKey, updatedAddons, accountId)
+            }
+
+            // Task 5: Inform Autopilot of manual toggle
+            // ONLY if this wasn't an automatic action by Autopilot itself
+            if (!isAutopilot) {
+                  autopilotManager.handleManualToggle(accountId, transportUrl)
             }
       },
 
@@ -855,10 +880,37 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             useSyncStore.getState().syncToRemote(true).catch(console.error)
       },
 
-      removeLocalAddons: async (accountId: string, transportUrls: string[]) => {
+      bulkProtectSelectedAddons: async (accountId: string, transportUrls: string[], isProtected: boolean) => {
             const account = get().accounts.find((a) => a.id === accountId)
             if (!account) return
-            const updatedAddons = account.addons.filter((a) => !transportUrls.includes(a.transportUrl))
+            const updatedAddons = account.addons.map((a) => (
+                  transportUrls.includes(a.transportUrl)
+                        ? { ...a, flags: { ...a.flags, protected: isProtected } }
+                        : a
+            ))
+            const accounts = get().accounts.map((acc) =>
+                  acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
+            )
+            set({ accounts })
+            await localforage.setItem(STORAGE_KEY, accounts)
+            const { useSyncStore } = await import('./syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+      },
+
+      removeLocalAddons: async (accountId: string, idsOrUrls: string[]) => {
+            const account = get().accounts.find((a) => a.id === accountId)
+            if (!account) return
+
+            // Robust matching (ID or Normalized URL)
+            const updatedAddons = account.addons.filter((addon) => {
+                  const normA = normalizeAddonUrl(addon.transportUrl).toLowerCase()
+                  const shouldRemove = idsOrUrls.some((target) => {
+                        const normTarget = normalizeAddonUrl(target).toLowerCase()
+                        return addon.manifest.id === target || normA === normTarget
+                  })
+                  return !shouldRemove
+            })
+
             const accounts = get().accounts.map((acc) =>
                   acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
             )

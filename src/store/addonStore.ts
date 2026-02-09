@@ -5,6 +5,7 @@ import {
   fetchAddonManifest,
 
 } from '@/api/addons'
+import { identifyAddon } from '@/lib/addon-identifier'
 import { checkAllAddonsHealth } from '@/lib/addon-health'
 import { mergeAddons, removeAddons } from '@/lib/addon-merger'
 import {
@@ -27,6 +28,8 @@ import {
 } from '@/types/saved-addon'
 import { create } from 'zustand'
 import localforage from 'localforage'
+import { restorationManager } from '@/lib/autopilot/restorationManager'
+
 
 // Helper function to get encryption key from auth store
 const getEncryptionKey = () => {
@@ -109,7 +112,8 @@ interface AddonStore {
   // === Bulk Operations (Account-First Workflow) ===
   bulkApplySavedAddons: (
     savedAddonIds: string[],
-    accountIds: Array<{ id: string; authKey: string }>
+    accountIds: Array<{ id: string; authKey: string }>,
+    allowProtected?: boolean
   ) => Promise<BulkResult>
   bulkApplyTag: (
     tag: string,
@@ -117,11 +121,13 @@ interface AddonStore {
   ) => Promise<BulkResult>
   bulkRemoveAddons: (
     addonIds: string[],
-    accountIds: Array<{ id: string; authKey: string }>
+    accountIds: Array<{ id: string; authKey: string }>,
+    allowProtected?: boolean
   ) => Promise<BulkResult>
   bulkRemoveByTag: (
     tag: string,
-    accountIds: Array<{ id: string; authKey: string }>
+    accountIds: Array<{ id: string; authKey: string }>,
+    allowProtected?: boolean
   ) => Promise<BulkResult>
   bulkReinstallAddons: (
     addonIds: string[],
@@ -129,7 +135,8 @@ interface AddonStore {
   ) => Promise<BulkResult>
   bulkInstallFromUrls: (
     urls: string[],
-    accountIds: Array<{ id: string; authKey: string }>
+    accountIds: Array<{ id: string; authKey: string }>,
+    allowProtected?: boolean
   ) => Promise<BulkResult>
   bulkCloneAccount: (
     sourceAccount: { id: string; authKey: string },
@@ -141,6 +148,7 @@ interface AddonStore {
   syncAccountState: (accountId: string, accountAuthKey: string) => Promise<void>
 
   syncAllAccountStates: (accounts: Array<{ id: string; authKey: string }>) => Promise<void>
+  toggleAutoRestore: (id: string, enabled: boolean) => Promise<void>
   lastHealthCheck?: number
 
   // === Import/Export ===
@@ -250,8 +258,13 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       // Normalize tags
       const normalizedTags = tags.map(normalizeTagName).filter(Boolean)
 
-      // Use provided name or fall back to manifest name
-      const addonName = name.trim() || manifest?.name || 'Unknown Addon'
+      // Use provided name or fall back to robust identification
+      let addonName = name.trim()
+      if (!addonName || addonName === 'Unknown Addon') {
+        const identified = identifyAddon(installUrl, manifest || undefined)
+        addonName = identified.name
+        if (!manifest) manifest = identified
+      }
 
       const savedAddon: SavedAddon = {
         id: crypto.randomUUID(),
@@ -261,6 +274,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         tags: normalizedTags,
         profileId,
         metadata,
+        autoRestore: false,
         createdAt: new Date(),
         updatedAt: new Date(),
         sourceType: 'manual',
@@ -370,9 +384,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     // Capture previous version for logging
     const previousVersion = savedAddon.manifest.version
 
-    // Fetch fresh manifest from the install URL
+    // Fetch fresh manifest from the install URL and sanitize it
     const addonDescriptor = await fetchAddonManifest(savedAddon.installUrl, 'System-Check')
-    const freshManifest = addonDescriptor.manifest
+    const freshManifest = identifyAddon(savedAddon.installUrl, addonDescriptor.manifest)
 
     // Verify manifest ID matches (prevent replacing with wrong addon)
     if (freshManifest.id !== savedAddon.manifest.id) {
@@ -423,6 +437,30 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       // Sync to cloud
       const { useSyncStore } = await import('./syncStore')
       useSyncStore.getState().syncToRemote(true).catch(console.error)
+    }
+  },
+
+  toggleAutoRestore: async (id, enabled) => {
+    try {
+      const savedAddon = get().library[id]
+      if (!savedAddon) throw new Error('Saved addon not found')
+
+      const updatedSavedAddon = {
+        ...savedAddon,
+        autoRestore: enabled,
+        updatedAt: new Date()
+      }
+
+      const library = { ...get().library, [id]: updatedSavedAddon }
+      set({ library })
+      await saveAddonLibrary(library)
+
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to toggle auto-restore'
+      set({ error: message })
+      throw error
     }
   },
 
@@ -611,7 +649,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   applyTagToAccount: async (tag, accountId, accountAuthKey) => {
     const savedAddons = get().getSavedAddonsByTag(tag)
     if (savedAddons.length === 0) {
-      throw new Error(`No saved addons found with tag: ${tag}`)
+      throw new Error(`No saved addons found with tag: ${tag} `)
     }
 
     set({ loading: true, error: null })
@@ -656,7 +694,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
   // === Bulk Operations ===
 
-  bulkApplySavedAddons: async (savedAddonIds, accountIds) => {
+  bulkApplySavedAddons: async (savedAddonIds, accountIds, allowProtected = false) => {
     set({ loading: true, error: null })
     try {
       const savedAddons = savedAddonIds
@@ -682,7 +720,8 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
           const { addons: mergedAddons, result: mergeResult } = await mergeAddons(
             currentAddons,
             savedAddons,
-            accountId
+            accountId,
+            allowProtected
           )
 
           // CRITICAL: Set lastUpdated timestamp for the grace period fix
@@ -731,7 +770,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   bulkApplyTag: async (tag, accountIds) => {
     const savedAddons = get().getSavedAddonsByTag(tag)
     if (savedAddons.length === 0) {
-      throw new Error(`No saved addons found with tag: ${tag}`)
+      throw new Error(`No saved addons found with tag: ${tag} `)
     }
 
     return get().bulkApplySavedAddons(
@@ -740,7 +779,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     )
   },
 
-  bulkRemoveAddons: async (addonIds, accountIds) => {
+  bulkRemoveAddons: async (addonIds, accountIds, allowProtected = false) => {
     set({ loading: true, error: null })
     try {
       const result: BulkResult = {
@@ -755,7 +794,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
           const currentAddons = await getAddons(authKey, accountId)
 
-          const { addons: updatedAddons, protectedAddons } = removeAddons(currentAddons, addonIds)
+          const { addons: updatedAddons, protectedAddons } = removeAddons(currentAddons, addonIds, allowProtected)
 
           await updateAddons(authKey, updatedAddons, accountId)
 
@@ -799,14 +838,14 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
-  bulkRemoveByTag: async (tag, accountIds) => {
+  bulkRemoveByTag: async (tag, accountIds, allowProtected = false) => {
     const savedAddons = get().getSavedAddonsByTag(tag)
     if (savedAddons.length === 0) {
-      throw new Error(`No saved addons found with tag: ${tag}`)
+      throw new Error(`No saved addons found with tag: ${tag} `)
     }
 
     const addonIds = savedAddons.map((s) => s.manifest.id)
-    return get().bulkRemoveAddons(addonIds, accountIds)
+    return get().bulkRemoveAddons(addonIds, accountIds, allowProtected)
   },
 
   bulkReinstallAddons: async (addonIds, accountIds) => {
@@ -846,7 +885,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
               }
             } catch (error) {
               // Log but continue with other addons
-              console.warn(`Failed to reinstall addon ${addonId} on account ${accountId}:`, error)
+              console.warn(`Failed to reinstall addon ${addonId} on account ${accountId}: `, error)
               skippedResults.push({
                 addonId,
                 reason: 'fetch-failed'
@@ -892,7 +931,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
-  bulkInstallFromUrls: async (urls, accountIds) => {
+  bulkInstallFromUrls: async (urls, accountIds, allowProtected = false) => {
     set({ loading: true, error: null })
     try {
       // 1. Fetch manifests for all URLs first
@@ -908,14 +947,14 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
           validDescriptors.push(res.value)
         } else {
           invalidUrls.push(urls[index])
-          // console.warn(`[Bulk Install] Failed to fetch manifest for ${urls[index]}:`, res.reason)
+          // console.warn(`[Bulk Install] Failed to fetch manifest for ${ urls[index]}: `, res.reason)
         }
       })
 
       if (validDescriptors.length === 0) {
         // If ALL failed, we throw (or maybe we just return 0 success?)
         // User wants "more information". Let's throw a descriptive error with the list.
-        throw new Error(`Failed to fetch manifests from: ${invalidUrls.join(', ')}`)
+        throw new Error(`Failed to fetch manifests from: ${invalidUrls.join(', ')} `)
       }
 
       // 2. Apply to accounts
@@ -952,7 +991,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             if (existingIndex >= 0) {
               // Update behavior
               const existing = updatedAddons[existingIndex]
-              if (existing.flags?.protected) {
+              if (existing.flags?.protected && !allowProtected) {
                 mergeResultDetails.protected.push({
                   addonId: existing.manifest.id,
                   name: existing.manifest.name,
@@ -1044,7 +1083,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             // Overwrite Mode: Start fresh to mirror the source.
             // We ignore target's existing addons (including protected ones) to ensure mirror fidelity.
             newAddons = []
-            console.log(`[Clone] Overwrite mode: Strictly mirroring source onto ${accountId}`)
+            console.log(`[Clone] Overwrite mode: Strictly mirroring source onto ${accountId} `)
           } else {
             // Append Mode: Keep everything from target
             newAddons = [...targetAddons]
@@ -1189,7 +1228,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       try {
         await get().syncAccountState(account.id, account.authKey)
       } catch (error) {
-        console.error(`Failed to sync account ${account.id}:`, error)
+        console.error(`Failed to sync account ${account.id}: `, error)
       }
     }
   },
@@ -1283,7 +1322,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
         // Final Manifest Resilience: If still missing, try to construct a minimal one or fetch it later
         if (!newItem.manifest) {
-          console.warn(`[AddonStore] Item ${newItem.name || newItem.id} is missing a manifest. Attempting recovery...`)
+          console.warn(`[AddonStore] Item ${newItem.name || newItem.id} is missing a manifest.Attempting recovery...`)
 
           // If we have an install URL, we can at least try to pull the manifest later via initialize()
           // For now, we construct a "placeholder" manifest to allow the import to succeed
@@ -1344,7 +1383,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     // Throttling: 3-minute cooldown for full health checks to prevent UI lag
     const COOLDOWN = 3 * 60 * 1000
     if (lastHealthCheck && (Date.now() - lastHealthCheck < COOLDOWN)) {
-      console.log(`[Health] Skipping checkAllHealth (Cooldown: ${Math.round((COOLDOWN - (Date.now() - lastHealthCheck)) / 1000)}s remaining)`)
+      console.log(`[Health] Skipping checkAllHealth(Cooldown: ${Math.round((COOLDOWN - (Date.now() - lastHealthCheck)) / 1000)}s remaining)`)
       return
     }
 
@@ -1356,17 +1395,41 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const updatedLibrary = { ...library }
       let hasChanges = false
 
-      results.forEach((result) => {
-        if (updatedLibrary[result.id]) {
-          updatedLibrary[result.id] = {
-            ...updatedLibrary[result.id],
-            health: {
-              isOnline: result.health?.isOnline ?? false,
-              lastChecked: Date.now(),
-            },
-            updatedAt: new Date(),
+      results.forEach(async (result) => {
+        const addon = updatedLibrary[result.id]
+        if (!addon) return
+
+        const isOnline = result.health?.isOnline ?? false
+
+        updatedLibrary[result.id] = {
+          ...addon,
+          health: {
+            isOnline,
+            lastChecked: Date.now(),
+          },
+          updatedAt: new Date(),
+        }
+        hasChanges = true
+
+        // Restoration Logic
+        if (!isOnline && addon.autoRestore) {
+          if (restorationManager.canAttemptRestore(addon.installUrl, true)) {
+            console.log(`[Restoration] Attempting recovery for: ${addon.name} `)
+            restorationManager.recordAttempt(addon.installUrl)
+
+            try {
+              // Generic Restoration: Attempt to re-fetch manifest or re-apply
+              // For now, we'll try to update the manifest which re-validates the URL
+              await get().updateSavedAddonManifest(addon.id)
+              restorationManager.recordSuccess(addon.installUrl)
+              console.log(`[Restoration] Successfully recovered: ${addon.name} `)
+            } catch (err) {
+              restorationManager.recordFailure(addon.installUrl)
+              console.warn(`[Restoration] Recovery failed for ${addon.name}: `, err)
+            }
           }
-          hasChanges = true
+        } else if (isOnline && addon.autoRestore) {
+          restorationManager.recordSuccess(addon.installUrl)
         }
       })
 

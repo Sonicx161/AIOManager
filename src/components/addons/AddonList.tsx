@@ -10,7 +10,7 @@ import { useAddonStore } from '@/store/addonStore'
 import { useAuthStore } from '@/store/authStore'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { ArrowLeft, GripVertical, Library, RefreshCw, Save, Plus, ShieldCheck } from 'lucide-react'
+import { ArrowLeft, GripVertical, Library, RefreshCw, Save, Plus, ShieldCheck, ShieldAlert } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AddonCard } from './AddonCard'
@@ -212,6 +212,70 @@ export function AddonList({ accountId }: AddonListProps) {
     }
   }, [account, encryptionKey, accountId, toast])
 
+  const handleUnprotectAll = useCallback(async () => {
+    if (!account || !encryptionKey) return
+
+    try {
+      await useAccountStore.getState().bulkProtectAddons(accountId, false)
+
+      toast({
+        title: 'Addons Unprotected',
+        description: 'All addons have been unprotected.'
+      })
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Failed to Unprotect Addons',
+        description: error instanceof Error ? error.message : 'Unknown error'
+      })
+    }
+  }, [account, encryptionKey, accountId, toast])
+
+  const handleProtectSelected = useCallback(async () => {
+    if (!account || selectedAddonUrls.size === 0) return
+
+    try {
+      // Extract transport URLs from composite IDs (url::index)
+      const urls = Array.from(selectedAddonUrls).map(id => id.split('::')[0])
+      await useAccountStore.getState().bulkProtectSelectedAddons(accountId, urls, true)
+
+      toast({
+        title: 'Selection Protected',
+        description: `Marked ${selectedAddonUrls.size} selected addons as protected.`
+      })
+      setIsSelectionMode(false)
+      setSelectedAddonUrls(new Set())
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Protection Failed',
+        description: 'Could not protect selected addons.'
+      })
+    }
+  }, [account, accountId, selectedAddonUrls, toast])
+
+  const handleUnprotectSelected = useCallback(async () => {
+    if (!account || selectedAddonUrls.size === 0) return
+
+    try {
+      const urls = Array.from(selectedAddonUrls).map(id => id.split('::')[0])
+      await useAccountStore.getState().bulkProtectSelectedAddons(accountId, urls, false)
+
+      toast({
+        title: 'Selection Unprotected',
+        description: `Unprotected ${selectedAddonUrls.size} selected addons.`
+      })
+      setIsSelectionMode(false)
+      setSelectedAddonUrls(new Set())
+    } catch (error) {
+      toast({
+        variant: 'destructive',
+        title: 'Unprotection Failed',
+        description: 'Could not unprotect selected addons.'
+      })
+    }
+  }, [account, accountId, selectedAddonUrls, toast])
+
   const handleUpdateAll = useCallback(async () => {
     if (!account || !encryptionKey) return
 
@@ -331,15 +395,35 @@ export function AddonList({ accountId }: AddonListProps) {
               </Button>
 
               {isSelectionMode && selectedAddonUrls.size > 0 && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleBulkDeleteClick}
-                  disabled={updatingAll}
-                  className="flex-1 sm:flex-none"
-                >
-                  Delete ({selectedAddonUrls.size})
-                </Button>
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleProtectSelected}
+                    className="flex-1 sm:flex-none border-blue-200 hover:bg-blue-50 dark:border-blue-900/30 dark:hover:bg-blue-900/20"
+                  >
+                    <ShieldCheck className="h-4 w-4 mr-1.5" />
+                    Protect ({selectedAddonUrls.size})
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleUnprotectSelected}
+                    className="flex-1 sm:flex-none"
+                  >
+                    <ShieldAlert className="h-4 w-4 mr-1.5" />
+                    Unprotect
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={handleBulkDeleteClick}
+                    disabled={updatingAll}
+                    className="flex-1 sm:flex-none"
+                  >
+                    Delete ({selectedAddonUrls.size})
+                  </Button>
+                </>
               )}
 
               {/* 3. Updates Available (Conditional) */}
@@ -374,19 +458,28 @@ export function AddonList({ accountId }: AddonListProps) {
                 <span className="inline xs:hidden">Reorder</span>
               </Button>
 
-              {/* 5. Protect */}
-              <Button
-                onClick={handleProtectAll}
-                disabled={addons.length === 0}
-                variant="outline"
-                size="sm"
-                className="flex-1 sm:flex-none"
-                title="Protect all addons from updates/changes"
-              >
-                <ShieldCheck className="h-4 w-4" />
-                <span className="hidden xs:inline">Protect Addons</span>
-                <span className="inline xs:hidden">Protect</span>
-              </Button>
+              {/* 5. Protect Toggle */}
+              {(() => {
+                const anyUnprotected = addons.some(a => !a.flags?.protected)
+                return (
+                  <Button
+                    onClick={anyUnprotected ? handleProtectAll : handleUnprotectAll}
+                    disabled={addons.length === 0}
+                    variant="outline"
+                    size="sm"
+                    className="flex-1 sm:flex-none"
+                    title={anyUnprotected ? "Protect all addons" : "Unprotect all addons"}
+                  >
+                    {anyUnprotected ? (
+                      <ShieldCheck className="h-4 w-4 text-blue-500 mr-1.5" />
+                    ) : (
+                      <ShieldAlert className="h-4 w-4 text-muted-foreground mr-1.5" />
+                    )}
+                    <span className="hidden xs:inline">{anyUnprotected ? 'Protect All' : 'Unprotect All'}</span>
+                    <span className="inline xs:hidden text-[10px]">{anyUnprotected ? 'Protect' : 'Unprotect'}</span>
+                  </Button>
+                )
+              })()}
 
               {/* 6. Save All */}
               <Button

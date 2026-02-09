@@ -365,7 +365,7 @@ export function SavedAddonLibrary() {
     <div className="flex flex-col md:flex-row gap-6">
       {/* Sidebar - Profiles */}
       <div className="w-full md:w-64 flex-shrink-0 space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between pr-2">
           <h2 className="text-lg font-semibold tracking-tight">Profiles</h2>
           <div className="flex items-center gap-1">
             <Button
@@ -378,7 +378,16 @@ export function SavedAddonLibrary() {
             >
               <GripVertical className="h-4 w-4" />
             </Button>
-            <ProfileDialog trigger={<Button variant="ghost" size="icon" className="h-8 w-8"><Plus className="h-4 w-4" /></Button>} />
+            <ProfileDialog trigger={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                title="Create Profile"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            } />
           </div>
         </div>
 
@@ -444,34 +453,26 @@ export function SavedAddonLibrary() {
               </div>
             </div>
           ))}
-          {profiles.length === 0 && (
-            <p className="text-xs text-muted-foreground px-2 italic">No profiles created</p>
-          )}
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 space-y-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-4 border-b">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">Saved Addons</h1>
-            <p className="text-muted-foreground text-sm mt-1">Manage your personal collection.</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-            {/* Actions moved to stats row */}
-          </div>
-        </div>
-
+      <div className="flex-1 min-w-0 space-y-6">
         {/* Header */}
-        <div className="flex flex-col gap-4 w-full">
+        <div className="flex flex-col gap-4 w-full pt-2">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
-            <div className="w-full">
-              <h1 className="text-2xl md:text-3xl font-bold">
+            <div className="w-full min-w-0">
+              <h1 className="text-2xl md:text-3xl font-bold tracking-tight truncate">
                 {selectedProfileId === 'unassigned' ? 'Unassigned Addons' :
                   selectedProfileId ? profiles.find(p => p.id === selectedProfileId)?.name || 'Profile' :
                     'All Addons'}
               </h1>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 md:gap-4 mt-1 w-full">
+              {selectedProfileId && selectedProfileId !== 'unassigned' && (
+                <p className="text-muted-foreground mt-1 text-base break-all whitespace-pre-wrap max-w-full">
+                  {profiles.find(p => p.id === selectedProfileId)?.description}
+                </p>
+              )}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 md:gap-4 mt-4 w-full">
                 <div className="flex flex-row items-center gap-4">
                   <p className="text-sm md:text-base text-muted-foreground whitespace-nowrap">
                     {filteredAddons.length} saved addon{filteredAddons.length !== 1 ? 's' : ''}
@@ -841,6 +842,6 @@ export function SavedAddonLibrary() {
         )).sort()}
         onSave={handleBulkEdit}
       />
-    </div>
+    </div >
   )
 }

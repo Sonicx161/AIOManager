@@ -18,7 +18,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.6.0'
+const VERSION = '1.6.1'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '20') // Increased from 5 to 20 for faster parallel updates
@@ -183,6 +183,7 @@ const schema = `
     active_url TEXT,
     stabilization TEXT,
     is_active INTEGER DEFAULT 1,
+    is_automatic INTEGER DEFAULT 1,
     last_check BIGINT,
     updated_at BIGINT
   );
@@ -208,6 +209,19 @@ try {
         if (!hasAddonList) {
             await db.run(`ALTER TABLE autopilot_rules ADD COLUMN addon_list TEXT`)
             fastify.log.info({ category: 'Database' }, 'Migrated: Added addon_list column to autopilot_rules')
+        }
+        const hasIsAutomatic = tableInfo.some(col => col.name === 'is_automatic')
+        if (!hasIsAutomatic) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN is_automatic INTEGER DEFAULT 1`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added is_automatic column to autopilot_rules')
+        }
+    }
+    if (db.type === 'postgres') {
+        // Postgres Specific Migration for is_automatic column
+        try {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`)
+        } catch (e) {
+            // IF NOT EXISTS might not be supported on very old postgres, but generally it is.
         }
     }
 } catch (migrationErr) {
@@ -654,8 +668,24 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             return reply.send(buffer)
 
         } catch (err) {
+            // PROXY RESILIENCE: If upstream is dead (offline), we MUST return a valid manifest
+            // so Stremio doesn't delete the addon or show garbage.
+            if ((pathSuffix === 'manifest.json' || pathSuffix === '') && customName) {
+                fastify.log.warn({ category: 'Proxy' }, `Upstream offline: ${targetDomain}. Serving fallback manifest for ${customName}.`)
+                return reply.send({
+                    id: 'proxy-offline-' + Date.now(),
+                    name: customName,
+                    version: '0.0.1',
+                    description: 'This addon is currently offline or unreachable. The Manager is attempting to restore connection.',
+                    logo: customLogo,
+                    resources: [],
+                    types: [],
+                    catalogs: []
+                })
+            }
+
             fastify.log.error({ category: 'Proxy' }, `Fatal Error: ${err.message}`)
-            return reply.code(500).send({ error: 'Proxy Error', details: err.message })
+            return reply.code(502).send({ error: 'Proxy Error', details: 'Upstream Unreachable' })
         }
     })
 })
@@ -728,13 +758,32 @@ const checkAddonHealthInternal = async (url) => {
     return false
 }
 
+const deriveAddonName = (url) => {
+    try {
+        const hostname = new URL(url).hostname
+        return hostname
+            .replace(/^www\./, '')
+            .replace(/\.[^.]+$/, '')
+            .split(/[.-]/)
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ')
+    } catch {
+        return 'Unknown Addon'
+    }
+}
+
 // Helper to ensure manifests are Stremio-compliant before pushing
-const sanitizeManifest = (manifest) => {
-    if (!manifest) return { id: '', name: 'Unknown', version: '0.0.0', types: [], resources: [] }
+const sanitizeManifest = (manifest, transportUrl = '') => {
+    const isUnknown = !manifest?.name || manifest?.name === 'Unknown Addon' || manifest?.name === 'Restoring Addon...'
+    const name = isUnknown && transportUrl ? deriveAddonName(transportUrl) : (manifest?.name || 'Unknown Addon')
+
     return {
         ...manifest,
-        types: manifest.types || [],
-        resources: manifest.resources || []
+        name,
+        id: manifest?.id || `synth-${Date.now()}`,
+        version: manifest?.version || '0.0.0',
+        types: manifest?.types || [],
+        resources: manifest?.resources || []
     }
 }
 
@@ -744,14 +793,27 @@ const mergeAddons = (localAddons, remoteAddons) => {
     const processedRemoteNormUrls = new Set();
     const finalAddons = [];
 
+    // ANTI-WIPE GUARD: Favor local manifest if remote is 'broken' or 'ghost'.
+    const isSubstantial = (m) => {
+        if (!m || !m.name || m.name === 'Unknown Addon') return false;
+        const v = (m.version || '').replace(/^v/, '');
+        const hasResources = Array.isArray(m.resources) && m.resources.length > 0;
+        return v !== '0.0.0' && v !== '' && hasResources;
+    };
+
     // 1. Mirror Local List (Source of Truth for Order & Failover Flags)
     (localAddons || []).forEach(localAddon => {
         const normLocal = normalizeAddonUrl(localAddon.transportUrl).toLowerCase()
         const remoteAddon = remoteAddonMap.get(normLocal);
 
         if (remoteAddon) {
+            const remoteManifest = remoteAddon.manifest;
+            const localManifest = localAddon.manifest;
+            const useLocalManifest = isSubstantial(localManifest) && !isSubstantial(remoteManifest);
+
             finalAddons.push({
                 ...remoteAddon,
+                manifest: useLocalManifest ? localManifest : remoteManifest,
                 flags: {
                     ...(remoteAddon.flags || {}),
                     protected: localAddon.flags?.protected,
@@ -783,7 +845,7 @@ const prepareAddonsForStremio = (addons) => {
     return (addons || [])
         .filter(addon => addon.flags?.enabled !== false)
         .map(addon => {
-            const baseManifest = sanitizeManifest(addon.manifest)
+            const baseManifest = sanitizeManifest(addon.manifest, addon.transportUrl)
             const meta = addon.metadata || {}
 
             if (meta.customName || meta.customDescription || meta.customLogo) {
@@ -821,20 +883,35 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
         const normalizedChain = chain.map(u => normalizeAddonUrl(u).toLowerCase());
         const normalizedActive = normalizeAddonUrl(activeUrl).toLowerCase();
 
-        // ALWAYS start with the fresh remote list as the baseline.
-        // This prevents multiple rules for the same account from fighting each other.
-        // We only scavenge metadata (custom names/logos) from the stored list.
-        const baseAddonList = [...remoteAddons];
+        // 2. Prepare the target state
+        // CRITICAL FIX: Use the storedMasterList as the primary baseline for order.
+        // This ensures that enabled backups don't jump to the end of the Stremio list.
+        const baseAddonList = (storedAddonList && storedAddonList.length > 0)
+            ? [...storedAddonList]
+            : [...remoteAddons];
 
         // Ensure all chain addons are in baseAddonList
         normalizedChain.forEach((normUrl, idx) => {
             const exists = baseAddonList.some(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normUrl);
             if (!exists) {
+                // Try to find it in remote first
                 const remote = remoteAddons.find(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normUrl);
+
+                // CRITICAL FIX: Scavenge from the stored account addons if missing from remote
+                // Only scavenge if the stored manifest is substantial
+                const isSubstantial = (m) => m && m.name && m.name !== 'Unknown Addon' && m.name !== 'Restoring Addon...' && Array.isArray(m.resources) && m.resources.length > 0;
+                const stored = (storedAddonList || []).find(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normUrl);
+
                 if (remote) {
                     baseAddonList.push(remote);
+                } else if (stored && isSubstantial(stored.manifest)) {
+                    // Use the rich stored manifest
+                    baseAddonList.push({
+                        ...stored,
+                        flags: { ...(stored.flags || {}), enabled: false }
+                    });
                 } else {
-                    // Disaster Recovery: Add a placeholder to force-enable it
+                    // Disaster Recovery: Add a placeholder
                     baseAddonList.push({
                         transportUrl: chain[idx],
                         manifest: { id: `synth-${idx}`, name: 'Restoring Addon...', version: '0.0.0', types: [], resources: [] },
@@ -887,6 +964,10 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
 
 
 const processAutopilotRule = async (rule) => {
+    if (rule.is_automatic === 0) {
+        // Skip automatic switching for manual-only rules
+        return
+    }
     // 1. Decrypt and Parse Data
     const decryptedAuthKey = decrypt(rule.auth_key, FALLBACK_KEYS)
     const decryptedChainStr = decrypt(rule.priority_chain, FALLBACK_KEYS)
@@ -938,65 +1019,85 @@ const processAutopilotRule = async (rule) => {
         stabilization = {}
     }
 
-    // 2. Health Sweep
-    let bestHealthyUrl = null
+    // 2. Health Sweep & Target Selection
+    let targetActiveUrl = chain[0] // Default to primary
+    let foundOnline = false
     for (const url of chain) {
         const isHealthy = await checkAddonHealthInternal(url)
         if (isHealthy) {
-            bestHealthyUrl = url
+            targetActiveUrl = url
+            foundOnline = true
             break
         }
     }
 
-    // 3. Determine Target & Detect Changes
+    // 3. Detect Changes
     const decryptedNormalizedActive = normalizeAddonUrl(decryptedActiveUrl || chain[0]).toLowerCase()
-    let currentActiveUrl = decryptedActiveUrl || chain[0]
-
-    if (bestHealthyUrl) {
-        const normalizedBest = normalizeAddonUrl(bestHealthyUrl).toLowerCase()
-        if (normalizedBest !== decryptedNormalizedActive) {
-            fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] [Switch] ${decryptedNormalizedActive.substring(0, 30)}... -> ${normalizedBest.substring(0, 30)}...`)
-            currentActiveUrl = bestHealthyUrl
-            stabilization._forceSync = true
-        }
-    } else {
-        fastify.log.error({ category: 'Autopilot' }, `[${rule.account_id}] CRITICAL: All addons in chain are down.`)
-        stabilization._forceSync = true
-    }
-
     // 4. Synchronization Logic
-    const normalizedActiveUrl = normalizeAddonUrl(currentActiveUrl).toLowerCase()
-    const hasChanged = normalizedActiveUrl !== decryptedNormalizedActive
+    const normalizedTarget = normalizeAddonUrl(targetActiveUrl).toLowerCase()
+    const normalizedChain = chain.map(u => normalizeAddonUrl(u).toLowerCase())
 
-    // ALWAYS sync to Stremio to ensure alignment (prevents state desync issues)
+    // Update local addonList enabled states (One-Hot enforcement)
+    // This ensures local state matches what we're about to push to Stremio
+    const updatedAddonList = addonList.map(addon => {
+        const normUrl = normalizeAddonUrl(addon.transportUrl).toLowerCase()
+        if (normalizedChain.includes(normUrl)) {
+            return {
+                ...addon,
+                flags: { ...(addon.flags || {}), enabled: normUrl === normalizedTarget }
+            }
+        }
+        return addon
+    })
+
+    // Detect if we shifted priority
+    const hasChanged = normalizedTarget !== decryptedNormalizedActive
+
     if (hasChanged) {
-        fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] [Switch] Outage or preference change. Swapping to: ${normalizedActiveUrl.substring(0, 40)}`)
+        const statusMsg = foundOnline ? `Swapping to: ${normalizedTarget.substring(0, 40)}` : `Outage! Primary offline, keeping/forcing ${normalizedTarget.substring(0, 40)}`
+        fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] [Switch] ${statusMsg}`)
     }
 
     // Live Sync (Fetch -> Filter -> Inject -> Push)
+    // We pass our updatedAddonList to syncStremioLive
     try {
-        await syncStremioLive(decryptedAuthKey, chain, currentActiveUrl, rule.account_id, addonList)
-        fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] Stremio synced: ${normalizedActiveUrl.substring(0, 40)} active.`)
+        await syncStremioLive(decryptedAuthKey, chain, targetActiveUrl, rule.account_id, updatedAddonList)
+        fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] Stremio synced: ${normalizedTarget.substring(0, 40)} active.`)
     } catch (syncErr) {
         fastify.log.error({ category: 'Autopilot' }, `[${rule.account_id}] Stremio sync error: ${syncErr.message}`)
     }
 
     // Save State (Encrypt all fields for uniformity)
-    const activeUrlToSave = encrypt(currentActiveUrl, PRIMARY_KEY)
+    const activeUrlToSave = encrypt(targetActiveUrl, PRIMARY_KEY)
     const authKeyToSave = encrypt(decryptedAuthKey, PRIMARY_KEY)
     const chainToSave = encrypt(JSON.stringify(chain), PRIMARY_KEY)
     const stabilizationToSave = encrypt(JSON.stringify(stabilization), PRIMARY_KEY)
-    const addonListToSave = encrypt(JSON.stringify(addonList), PRIMARY_KEY)
+    const addonListToSave = encrypt(JSON.stringify(updatedAddonList), PRIMARY_KEY)
+
+    // 5. Optimization: Only update DB if something meaningful changed (Zero Idle Write)
+    if (!hasChanged) {
+        // Skip DB write entirely if state is stable.
+        return
+    }
 
     await db.run(`
         UPDATE autopilot_rules 
         SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, updated_at = $7 
-        WHERE id = $8
-    `, [activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, Date.now(), Date.now(), rule.id])
+        WHERE id = $8 
+        AND (
+            active_url IS DISTINCT FROM $9 OR 
+            priority_chain IS DISTINCT FROM $10 OR 
+            stabilization IS DISTINCT FROM $11 OR
+            addon_list IS DISTINCT FROM $12
+        )
+    `, [
+        activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, Date.now(), Date.now(), rule.id,
+        activeUrlToSave, chainToSave, stabilizationToSave, addonListToSave
+    ])
 }
 
 const runAutopilot = async () => {
-    const rules = await db.query('SELECT id, account_id, auth_key, priority_chain, addon_list, active_url, stabilization FROM autopilot_rules WHERE is_active = 1')
+    const rules = await db.query('SELECT id, account_id, auth_key, priority_chain, addon_list, active_url, stabilization, is_automatic FROM autopilot_rules WHERE is_active = 1')
 
     if (rules.length > 0) {
         fastify.log.info({ category: 'Autopilot' }, `Check Summary: Periodic health check for ${rules.length} active rules.`)
@@ -1034,14 +1135,14 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.5.9
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.1
  ==============================================================================
 `;
         console.log(banner);
 
         // --- Autopilot Sync Endpoint ---
         fastify.post('/api/autopilot/sync', async (request, reply) => {
-            const { id, accountId, authKey, priorityChain, activeUrl, isActive, addonList } = request.body
+            const { id, accountId, authKey, priorityChain, activeUrl, is_active, is_automatic, addonList } = request.body
 
             if (!id || !accountId || !authKey || !priorityChain) {
                 return reply.status(400).send({ error: 'Missing required Autopilot data' })
@@ -1056,28 +1157,30 @@ const start = async () => {
             const now = Date.now()
             if (db.type === 'postgres') {
                 await db.run(`
-                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, is_active, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, is_active, is_automatic, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (id) DO UPDATE SET
                         auth_key = EXCLUDED.auth_key,
                         priority_chain = EXCLUDED.priority_chain,
                         addon_list = EXCLUDED.addon_list,
                         active_url = EXCLUDED.active_url,
                         is_active = EXCLUDED.is_active,
+                        is_automatic = EXCLUDED.is_automatic,
                         updated_at = EXCLUDED.updated_at
-                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, isActive ? 1 : 0, now])
+                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now])
             } else {
                 await db.run(`
-                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, is_active, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, is_active, is_automatic, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT(id) DO UPDATE SET
                         auth_key = excluded.auth_key,
                         priority_chain = excluded.priority_chain,
                         addon_list = excluded.addon_list,
                         active_url = excluded.active_url,
                         is_active = excluded.is_active,
+                        is_automatic = excluded.is_automatic,
                         updated_at = excluded.updated_at
-                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, isActive ? 1 : 0, now])
+                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now])
             }
 
             fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Rule synced to server (Swap & Hide Mode).`)
@@ -1089,13 +1192,14 @@ const start = async () => {
         fastify.get('/api/autopilot/state/:accountId', async (request, reply) => {
             const { accountId } = request.params
 
-            const rules = await db.query('SELECT id, active_url, is_active, last_check FROM autopilot_rules WHERE account_id = $1', [accountId])
+            const rules = await db.query('SELECT id, active_url, is_active, is_automatic, last_check FROM autopilot_rules WHERE account_id = $1', [accountId])
 
             // Decrypt active_url for each rule
             const states = (rules || []).map(rule => ({
                 id: rule.id,
                 activeUrl: rule.active_url ? decrypt(rule.active_url, FALLBACK_KEYS) : null,
                 isActive: rule.is_active === 1,
+                isAutomatic: rule.is_automatic === 1,
                 lastCheck: rule.last_check
             }))
 

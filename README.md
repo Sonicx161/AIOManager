@@ -153,65 +153,7 @@ With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `serve
 
 ---
 
-## [1.5.9] - Pulse Dashboard & Sync Hardening ⚡
-AIOManager v1.5.9 is a major release combining specific highly-requested stability fixes with a complete dashboard transformation.
 
-### 🚨 Critical Fixes
-- **Sync Hardening**: Resolved "Rule Battles" and account duplication with a new Live Base sync model.
-- **Failover Fixes**: Fixed the "???" missing metadata bug by preserving disabled addons in memory.
-- **Hybrid Reordering**: Lag-free dragging with vertical locking and hybrid touch/mouse sensors.
-
-### 📊 Dashboard Refinements
-- **Pulse-First**: Reprioritized the default view to focus on high-level stats and 24h activity heatmaps.
-- **Personality DNA**: Enhanced with "Watch Personas" (Night Owl, Binge Master) and habit tracking.
-- **Deep Dive**: Expanded with "The Loop" (rewatch tracking) and "Endurance Test" (completion funnels).
-
-## [1.5.8] - Hybrid Reordering & Critical Sync Fix 💨
-AIOManager v1.5.8 introduced a hybrid reordering system for better device support and resolved critical account duplication issues.
-
-### 🛡️ Critical Fixes
-- **Account Reconciliation**: Implemented a multi-layered matching strategy (ID, AuthKey, and Email) to correctly identify existing accounts during cloud sync.
-- **Hybrid Input Handling**: Differentiates between PC (Mouse) and Mobile (Touch) inputs for an instant feel on desktop.
-
-AIOManager v1.5.6 addresses critical issues with the "Install from Library" functionality, ensuring reliability and flexibility for users with multiple addon configurations.
-
-### 🛡️ Critical Fixes
-- **Sync Wipe Prevention**: Fixed a critical bug where corrupted remote data (or `[object Object]` strings) could wipe local accounts on login.
-- **Timestamp Conflict Resolution**: Implemented smart merging logic to prevent stale cloud data (from other devices) from overwriting newer local changes.
-    - *Logic:* `if (remote.syncedAt < local.lastSyncedAt) -> Merge (Preserve Local)`. `if (remote > local) -> Mirror (Trust Cloud)`.
-    - *Fix:* Explicitly triggers a cloud push after a Safe Merge to ensure mobile/remote devices get the recovered state.
-- **Cross-Device Mirroring**: Switched to a "Mirror Mode" sync strategy, ensuring that deleted addons/accounts are properly removed across all devices.
-- **Auth Race Condition**: Fixed "Database is locked" errors on refresh by implementing a smart lock-check during startup.
-- **Mobile FAQ**: Fixed code block overflow on small screens by enabling text wrapping and break-all.
-
-## [1.5.3] - The Resilience Release 🛡️
-
-AIOManager v1.5.3 is an **important bug fix** release resolving critical sync issues.
-
-> [!IMPORTANT]
-> **Retroactive Fix**: If you were facing a `[object Object]` or `Invalid library format` error after signing out, you do **not** need to recreate your account. Simply update to v1.5.3 and log in again—the fix automatically repairs the corrupted state.
-
-- **🛡️ Sync Resilience**: Fixed a race condition where the library importer would crash when receiving unexpected objects from the cloud.
-- **🔄 Registration Parity**: Ensured fresh accounts are initialized with a standard empty library structure.
-- **✨ Robust Parsing**: Hardened all store importers to handle both JSON strings and plain objects gracefully.
-
-## [1.5.2] - The Stabilization Sweep 🛡️
-
-AIOManager v1.5.2 is a maintenance release focused on **reliability, hardening, and UI synchronization**.
-
-### 🛠️ Key Improvements
-- **Version Detection Fix**: Resolved a bug where multiple addons on the same domain (like AIOMetadata) would misreport version updates due to cache collisions.
-- **Autonomous Stabilization**: Hardened the Autopilot engine to trust the remote Stremio state as the definitive source of truth for addon enablement.
-- **Failover Hardening**: Squashed "priorityChain is not iterable" crashes during account cloning and implemented defensive array defaults.
-- **Silent Health Checks**: Standardized the "Silent Domain-Only" health check across both Autopilot and Saved Addons to prevent provider flood logs.
-- **URL Normalization**: Unified robust URL normalization logic to handle `stremio://` protocols and trailing slashes consistently across the stack.
-- **Postgres Support**: Fixed `JSONB` column strictness by converting to `TEXT` for encrypted string support.
-
-## [1.5.0] - The Sovereign Update 🚀
-
-AIOManager v1.5.x is a milestone series focused on **infrastructure independence** and **autonomous reliability**.
-
----
 
 ## ⚖️ Disclaimer
 

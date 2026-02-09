@@ -1,10 +1,7 @@
 import { create } from 'zustand'
 import localforage from 'localforage'
-import { checkAddonHealth } from '@/lib/addon-health'
 import { useAccountStore } from '@/store/accountStore'
 import { useAuthStore } from '@/store/authStore'
-import { toast } from '@/hooks/use-toast'
-import { useHistoryStore } from '@/store/historyStore'
 import axios from 'axios'
 import { decrypt, loadSessionKey } from '@/lib/crypto'
 import { normalizeAddonUrl } from '@/lib/utils'
@@ -20,12 +17,8 @@ export interface FailoverRule {
     lastFailover?: Date
     status: 'idle' | 'monitoring' | 'failed-over'
     activeUrl?: string // Track which one is currently pushed to Stremio
-    stabilization?: Record<string, number> // URL -> consecutive success count
-    // Migration helpers
-    primaryUrl?: string
-    backupUrl?: string
-    primaryAddonId?: string
-    backupAddonId?: string
+    isAutomatic?: boolean // Toggle for automatic health-based switching
+    stabilization?: Record<string, number> // Addon health score
 }
 
 export interface WebhookConfig {
@@ -82,7 +75,8 @@ const syncRuleToServer = async (rule: FailoverRule) => {
             authKey,
             priorityChain: rule.priorityChain,
             activeUrl: rule.activeUrl,
-            isActive: rule.isActive,
+            is_active: rule.isActive ? 1 : 0,
+            is_automatic: rule.isAutomatic !== false ? 1 : 0,
             addonList
         })
         console.log(`[Autopilot] Rule ${rule.id} synced to server (Live Mode).`)
@@ -118,23 +112,22 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const rule = get().rules.find(r => r.id === ruleId)
         if (!rule) throw new Error("Rule not found")
 
-        const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
-        if (!account) throw new Error("Account not found")
+        const chain = rule.priorityChain || []
+        if (chain.length === 0) throw new Error("Chain is empty")
 
-        const primary = account.addons.find(a => a.transportUrl === rule.primaryUrl)
-        const backup = account.addons.find(a => a.transportUrl === rule.backupUrl)
+        // Test the first two in the chain as "Primary" and "Backup" for the UI
+        const primaryUrl = chain[0]
+        const backupUrl = chain[1]
 
-        if (!primary || !backup) throw new Error("Addons missing")
-
-        // Import dynamically to avoid circular dependency issues if any
+        // Import dynamically
         const { checkAddonFunctionality } = await import('@/lib/addon-health')
 
-        const primaryHealth = await checkAddonFunctionality(primary.transportUrl)
-        const backupHealth = await checkAddonFunctionality(backup.transportUrl)
+        const primaryHealth = await checkAddonFunctionality(primaryUrl)
+        const backupHealth = backupUrl ? await checkAddonFunctionality(backupUrl) : { status: 'offline', message: 'No backup configured' }
 
         return {
-            primary: { name: primary.manifest.name, ...primaryHealth },
-            backup: { name: backup.manifest.name, ...backupHealth }
+            primary: { name: 'Primary Addon', ...primaryHealth },
+            backup: { name: backupUrl ? 'Backup Addon' : 'None', ...backupHealth }
         }
     },
 
@@ -146,29 +139,11 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             let rules: FailoverRule[] = []
 
             if (storedRules) {
-                const accounts = useAccountStore.getState().accounts
-                rules = storedRules.map(r => {
-                    const ruleData = r as unknown as Record<string, string | undefined>
-                    let primaryUrl = ruleData.primaryUrl || ''
-                    let backupUrl = ruleData.backupUrl || ''
-                    const { primaryAddonId, backupAddonId, accountId } = ruleData
-
-                    if (!primaryUrl && primaryAddonId) {
-                        const acc = accounts.find(a => a.id === accountId)
-                        primaryUrl = acc?.addons.find(a => a.manifest.id === primaryAddonId)?.transportUrl || ''
-                    }
-                    if (!backupUrl && backupAddonId) {
-                        const acc = accounts.find(a => a.id === accountId)
-                        backupUrl = acc?.addons.find(a => a.manifest.id === backupAddonId)?.transportUrl || ''
-                    }
-                    return {
-                        ...r,
-                        primaryUrl,
-                        backupUrl,
-                        lastCheck: r.lastCheck ? new Date(r.lastCheck) : undefined,
-                        lastFailover: r.lastFailover ? new Date(r.lastFailover) : undefined
-                    }
-                })
+                rules = storedRules.map(r => ({
+                    ...r,
+                    lastCheck: r.lastCheck ? new Date(r.lastCheck) : undefined,
+                    lastFailover: r.lastFailover ? new Date(r.lastFailover) : undefined
+                }))
             }
 
             // Fetch server's current activeUrl for each rule and merge
@@ -193,6 +168,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                 if (localRule && serverRule.activeUrl) {
                                     console.log(`[Failover] Syncing activeUrl from server: ${localRule.id} -> ${serverRule.activeUrl.substring(0, 40)}...`)
                                     localRule.activeUrl = serverRule.activeUrl
+                                    localRule.isActive = serverRule.isActive !== undefined ? serverRule.isActive : localRule.isActive
+                                    localRule.isAutomatic = serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : localRule.isAutomatic
+
                                     const normServerActive = normalizeAddonUrl(serverRule.activeUrl).toLowerCase()
                                     const normPrimary = normalizeAddonUrl(localRule.priorityChain?.[0] || '').toLowerCase()
                                     localRule.status = normServerActive === normPrimary ? 'monitoring' : 'failed-over'
@@ -208,7 +186,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                             localRule.accountId,
                                             url,
                                             shouldBeEnabled,
-                                            true // silent
+                                            true, // silent
+                                            undefined, // targetIndex
+                                            true // isAutopilot
                                         )
                                     }
                                 }
@@ -302,6 +282,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                     updatedRules[ruleIndex] = {
                                         ...localRule,
                                         activeUrl: serverRule.activeUrl,
+                                        isActive: serverRule.isActive !== undefined ? serverRule.isActive : localRule.isActive,
+                                        isAutomatic: serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : localRule.isAutomatic,
                                         status: normServerActive === normPrimary ? 'monitoring' : 'failed-over'
                                     }
                                     hasUpdates = true
@@ -315,7 +297,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                             localRule.accountId,
                                             url,
                                             shouldBeEnabled,
-                                            true // silent
+                                            true, // silent
+                                            undefined, // targetIndex
+                                            true // isAutopilot
                                         )
                                     }
                                 }
@@ -354,6 +338,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             accountId,
             priorityChain: safeChain,
             isActive: true,
+            isAutomatic: true,
             status: 'idle',
             activeUrl: safeChain[0]
         }
@@ -416,8 +401,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
     checkRules: async () => {
         if (get().isChecking) return
         set({ isChecking: true })
+
         try {
-            const { rules, webhook } = get()
+            const { rules } = get()
             const activeRules = rules.filter(r => r.isActive)
             const accounts = useAccountStore.getState().accounts
 
@@ -428,114 +414,15 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 const chain = rule.priorityChain || []
                 if (chain.length === 0) continue
 
-                let bestCandidate: string | null = null
-                const stabilization = { ...(rule.stabilization || {}) }
-                const updatedRule = { ...rule, lastCheck: new Date(), stabilization }
+                // Phase 1 Clean Slate: Just check health and find which one *should* be active
+                // (Logic will be implemented in Phase 2)
+                console.log(`[Autopilot] Rule ${rule.id} checking health for chain of ${chain.length}...`)
 
-                // Check each addon in the chain in priority order
-                for (let i = 0; i < chain.length; i++) {
-                    const url = chain[i]
-                    const isOnline = await checkAddonHealth(url)
-
-                    if (isOnline) {
-                        stabilization[url] = (stabilization[url] || 0) + 1
-
-                        // ANTI-FLAPPING: To move "up" (index < current) or stay at top, we need stability
-                        const currentActiveIndex = chain.indexOf(rule.activeUrl || '')
-                        const isImproving = currentActiveIndex === -1 || i < currentActiveIndex
-
-                        // If it's a better one (higher priority) or if we are not set yet, it needs stability (2 checks).
-                        // If it's the current one OR lower priority, we accept it if it's online.
-                        const isStable = !isImproving || stabilization[url] >= 2
-
-                        if (isStable) {
-                            bestCandidate = url
-                            break // Found the best stable worker
-                        }
-                    } else {
-                        stabilization[url] = 0 // Reset on failure
-                    }
-                }
-
-                // If no healthy addons found, we stay on the current one or first one (last resort)
-                if (!bestCandidate) {
-                    console.warn(`[Failover] Rule ${rule.id}: All addons in chain are DOWN.`)
-                    bestCandidate = rule.activeUrl || chain[0]
-                }
-
-                // ACTION: If bestCandidate differs from activeUrl, perform the swap
-                if (bestCandidate !== rule.activeUrl) {
-                    console.log(`[Failover] Rule ${rule.id} swapping: ${rule.activeUrl} -> ${bestCandidate}`)
-
-                    try {
-                        // 1. Find all addons in chain for this account and enable/disable as needed
-                        for (const url of chain) {
-                            const isCandidate = url === bestCandidate
-                            const addon = account.addons.find(a => a.transportUrl === url)
-                            if (!addon) continue
-
-                            // Only update if state change is needed
-                            if ((addon.flags?.enabled !== false) !== isCandidate) {
-                                await useAccountStore.getState().toggleAddonEnabled(account.id, url, isCandidate, true)
-                            }
-                        }
-
-                        // 2. Update Rule State
-                        const isPrimary = bestCandidate === chain[0]
-                        updatedRule.activeUrl = bestCandidate
-                        updatedRule.status = isPrimary ? 'monitoring' : 'failed-over'
-                        updatedRule.lastFailover = isPrimary ? rule.lastFailover : new Date()
-
-                        // 3. Log Event
-                        const candidateAddon = account.addons.find(a => a.transportUrl === bestCandidate)
-                        const candidateName = candidateAddon?.metadata?.customName || candidateAddon?.manifest.name || 'Unknown'
-
-                        await useHistoryStore.getState().addLog({
-                            type: isPrimary ? 'recovery' : 'failover',
-                            ruleId: rule.id,
-                            primaryName: candidateName,
-                            message: isPrimary
-                                ? `System recovered. Switched back to primary addon: ${candidateName}`
-                                : `Priority shift! primary failed or inferior. Switched to backup: ${candidateName}`,
-                            metadata: { chain, activeUrl: bestCandidate }
-                        })
-
-                        // 4. Webhook Notification
-                        if (webhook.enabled && webhook.url) {
-                            fetch(webhook.url, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    username: "AIOManager Autopilot",
-                                    embeds: [{
-                                        title: isPrimary ? "🟢 Autopilot Recovery" : "🚨 Autopilot Handover",
-                                        color: isPrimary ? 3066993 : 15158332,
-                                        description: `**Account:** ${account.name || account.id}\n**Active Addon:** ${candidateName}\n**Action:** Switched from ${rule.activeUrl || 'None'} to ${bestCandidate}`,
-                                        timestamp: new Date().toISOString()
-                                    }]
-                                })
-                            }).catch(err => console.error("Webhook failed", err))
-                        }
-
-                        // 5. Toast notification
-                        toast({
-                            title: isPrimary ? "Autopilot Recovered" : "Autopilot Handover",
-                            description: `Now using: ${candidateName}`,
-                            variant: isPrimary ? "default" : "destructive"
-                        })
-
-                    } catch (err) {
-                        console.error(`[Failover] Rule ${rule.id} swap failed:`, err)
-                    }
-                }
-
-                // Update store with new rule state
                 set(state => ({
-                    rules: state.rules.map(r => r.id === rule.id ? updatedRule : r)
+                    rules: state.rules.map(r => r.id === rule.id ? { ...r, lastCheck: new Date() } : r)
                 }))
             }
 
-            // Persist rules
             await localforage.setItem(STORAGE_KEY, get().rules)
         } finally {
             set({ isChecking: false })
@@ -637,34 +524,15 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const currentRules = [...get().rules]
         let updatedCount = 0
         let addedCount = 0
-
-        const accounts = useAccountStore.getState().accounts
         if (strategy === 'mirror') {
             // 1. Identification
             const finalRules: FailoverRule[] = []
 
             // 2. Process Imports (Add/Update)
             rulesToImport.forEach(newRule => {
-                // ... normalization logic (same as merge) ...
-                const ruleData = newRule as unknown as Record<string, string | undefined>
-                let primaryUrl = ruleData.primaryUrl || ''
-                let backupUrl = ruleData.backupUrl || ''
-                const { primaryAddonId, backupAddonId, accountId } = ruleData
-
-                if (!primaryUrl && primaryAddonId) {
-                    const acc = accounts.find(a => a.id === accountId)
-                    primaryUrl = acc?.addons.find(a => a.manifest.id === primaryAddonId)?.transportUrl || ''
-                }
-                if (!backupUrl && backupAddonId) {
-                    const acc = accounts.find(a => a.id === accountId)
-                    backupUrl = acc?.addons.find(a => a.manifest.id === backupAddonId)?.transportUrl || ''
-                }
-
                 const migratedRule: FailoverRule = {
                     ...newRule,
                     priorityChain: Array.isArray(newRule.priorityChain) ? newRule.priorityChain : [],
-                    primaryUrl,
-                    backupUrl,
                     status: newRule.status || 'idle'
                 }
 
@@ -696,25 +564,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
         // --- MERGE STRATEGY (Legacy) ---
         rulesToImport.forEach(newRule => {
-            const ruleData = newRule as unknown as Record<string, string | undefined>
-            let primaryUrl = ruleData.primaryUrl || ''
-            let backupUrl = ruleData.backupUrl || ''
-            const { primaryAddonId, backupAddonId, accountId } = ruleData
-
-            if (!primaryUrl && primaryAddonId) {
-                const acc = accounts.find(a => a.id === accountId)
-                primaryUrl = acc?.addons.find(a => a.manifest.id === primaryAddonId)?.transportUrl || ''
-            }
-            if (!backupUrl && backupAddonId) {
-                const acc = accounts.find(a => a.id === accountId)
-                backupUrl = acc?.addons.find(a => a.manifest.id === backupAddonId)?.transportUrl || ''
-            }
-
             const migratedRule: FailoverRule = {
                 ...newRule,
                 priorityChain: Array.isArray(newRule.priorityChain) ? newRule.priorityChain : [],
-                primaryUrl,
-                backupUrl,
                 status: newRule.status || 'idle'
             }
 

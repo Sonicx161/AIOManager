@@ -15,6 +15,7 @@ import { useAddonStore } from '@/store/addonStore'
 import { useUIStore } from '@/store/uiStore'
 import { SavedAddon } from '@/types/saved-addon'
 import { Copy, MoreVertical, Pencil, RefreshCw, Settings, Trash2 } from 'lucide-react'
+import { restorationManager } from '@/lib/autopilot/restorationManager'
 import { useState } from 'react'
 import { SavedAddonDetails } from './SavedAddonDetails'
 import { AddonTag } from '../addons/AddonTag'
@@ -142,6 +143,26 @@ export function SavedAddonCard({
                 title={getHealthTooltip()}
               />
               <CardTitle className="text-lg line-clamp-2">{savedAddon.name}</CardTitle>
+              <div className="flex items-center gap-2 ml-auto pr-2">
+              </div>
+              {(() => {
+                const status = restorationManager.getStatus(savedAddon.installUrl)
+                if (status.status === 'restoring') {
+                  return (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">
+                      Restoring...
+                    </span>
+                  )
+                }
+                if (status.circuitState === 'open') {
+                  return (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400" title="Auto-restore disabled after repeated failures. 30m cooldown.">
+                      Restoration Failed
+                    </span>
+                  )
+                }
+                return null
+              })()}
               {hasUpdate && (
                 <span className="text-xs px-2 py-1 rounded-md bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 shrink-0">
                   Update

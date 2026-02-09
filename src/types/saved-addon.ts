@@ -27,7 +27,8 @@ export interface SavedAddon {
     customDescription?: string
   }
 
-  // Health monitoring
+  // Health & Restoration
+  autoRestore?: boolean
   health?: {
     isOnline: boolean
     lastChecked: number // timestamp

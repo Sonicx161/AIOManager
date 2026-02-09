@@ -19,7 +19,8 @@ import { normalizeAddonUrl } from './utils'
 export async function mergeAddons(
   currentAddons: AddonDescriptor[],
   savedAddons: SavedAddon[],
-  accountId: string = 'Unknown'
+  accountId: string = 'Unknown',
+  allowProtected: boolean = false
 ): Promise<{ addons: AddonDescriptor[]; result: MergeResult }> {
   const result: MergeResult = {
     added: [],
@@ -46,8 +47,8 @@ export async function mergeAddons(
     if (existingIndex >= 0) {
       const existing = updatedAddons[existingIndex]
 
-      // Skip protected addons
-      if (existing.flags?.protected) {
+      // Skip protected addons unless explicitly allowed
+      if (existing.flags?.protected && !allowProtected) {
         result.protected.push({
           addonId,
           name: existing.manifest.name,
@@ -57,9 +58,7 @@ export async function mergeAddons(
 
       // Update existing instance
       try {
-        // CRITICAL: We trust the saved manifest from the library if it exists.
-        // This ensures that custom-patched manifests (like Cinemeta) are preserved
-        // when installing the "saved" version.
+        // ... rest of update logic ...
         const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
 
         const updatedDescriptor: AddonDescriptor = {
@@ -75,7 +74,7 @@ export async function mergeAddons(
           newUrl: installUrl, // We already have the installUrl
         })
       } catch (error) {
-        // Use cached manifest as fallback if fetch fails during update
+        // ... fallback logic ...
         console.warn(`[Merger] Update fetch failed for ${savedAddon.name}, keeping current/cached`, error)
 
         // Even if fetch fails, we still apply the metadata from the library
@@ -91,6 +90,7 @@ export async function mergeAddons(
       }
     } else {
       // 2. New instance (Additive)
+      // ... new instance logic ...
       try {
         // Trust the saved manifest first to preserve patches
         const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
@@ -134,12 +134,14 @@ export async function mergeAddons(
  * Remove addons from an account's collection
  *
  * @param currentAddons - The account's current addon collection
- * @param addonIds - Addon IDs to remove
+ * @param idsOrUrls - Addon IDs or transport URLs to remove
+ * @param allowProtected - If true, protected addons will also be removed
  * @returns Updated addon collection and list of removed addons
  */
 export function removeAddons(
   currentAddons: AddonDescriptor[],
-  idsOrUrls: string[]
+  idsOrUrls: string[],
+  allowProtected: boolean = false
 ): {
   addons: AddonDescriptor[]
   removed: string[]
@@ -157,8 +159,8 @@ export function removeAddons(
     })
 
     if (shouldRemove) {
-      // Don't remove protected addons
-      if (addon.flags?.protected) {
+      // Don't remove protected addons unless explicitly allowed
+      if (addon.flags?.protected && !allowProtected) {
         protectedAddons.push(addon.manifest.id)
         return true // Keep it
       }

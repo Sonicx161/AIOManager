@@ -67,6 +67,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
   const [urlList, setUrlList] = useState<string>('')
   const [sourceAccountId, setSourceAccountId] = useState<string>('')
   const [overwriteClone, setOverwriteClone] = useState(false)
+  const [showProtected, setShowProtected] = useState(true)
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
@@ -82,16 +83,19 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
   const isTagAction = action === 'add-by-tag' || action === 'remove-by-tag'
   const isInvalidTag = isTagAction && selectedTag !== '' && currentTagAddonsCount === 0
 
-  // Collect all unique addons across selected accounts, excluding protected ones, and sort alphabetically
-  const allAddons = Array.from(
+  // Collect all unique addons across selected accounts, and sort alphabetically
+  const allAddonsRaw = Array.from(
     new Map(
       selectedAccounts.flatMap((acc) =>
         acc.addons
-          .filter((addon) => !addon.flags?.protected)
           .map((addon) => [addon.manifest.id, addon])
       )
     ).values()
   ).sort((a, b) => a.manifest.name.localeCompare(b.manifest.name))
+
+  const allAddons = showProtected
+    ? allAddonsRaw
+    : allAddonsRaw.filter(a => !a.flags?.protected)
 
   const toggleSavedAddon = (savedAddonId: string) => {
     setSelectedSavedAddonIds((prev) => {
@@ -137,7 +141,8 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           }
           bulkResult = await bulkApplySavedAddons(
             Array.from(selectedSavedAddonIds),
-            accountsData
+            accountsData,
+            true // allowProtected override
           )
           break
 
@@ -154,7 +159,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             setError('Please select at least one addon to remove')
             return
           }
-          bulkResult = await bulkRemoveAddons(Array.from(selectedAddonIds), accountsData)
+          bulkResult = await bulkRemoveAddons(Array.from(selectedAddonIds), accountsData, true)
           break
 
         case 'remove-by-tag':
@@ -162,7 +167,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             setError('Please select a tag')
             return
           }
-          bulkResult = await bulkRemoveByTag(selectedTag, accountsData)
+          bulkResult = await bulkRemoveByTag(selectedTag, accountsData, true)
           break
 
         case 'update-addons':
@@ -179,7 +184,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             setError('Please enter at least one URL')
             return
           }
-          bulkResult = await bulkInstallFromUrls(urls, accountsData)
+          bulkResult = await bulkInstallFromUrls(urls, accountsData, true)
           break
         }
 
@@ -523,7 +528,17 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             {action === 'remove-addons' && (
               <div className="space-y-3">
                 <div className="flex justify-between items-center">
-                  <Label>Select Addons to Remove</Label>
+                  <div className="space-y-0.5">
+                    <Label>Select Addons to Remove</Label>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="show-prot-remove"
+                        checked={showProtected}
+                        onCheckedChange={setShowProtected}
+                      />
+                      <span className="text-[10px] text-muted-foreground">Show Protected</span>
+                    </div>
+                  </div>
                   <span className="text-xs text-muted-foreground">{selectedAddonIds.size} selected</span>
                 </div>
                 <div className="border rounded-md max-h-60 overflow-y-auto bg-background">
@@ -541,18 +556,32 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                             className="rounded border-gray-300 text-destructive focus:ring-destructive"
                             checked={selectedAddonIds.has(addon.manifest.id)}
                             onChange={() => toggleAddon(addon.manifest.id)}
-                            disabled={addon.flags?.protected}
                           />
-                          <div className="flex-1">
-                            <p className="text-sm font-medium">
-                              {addon.manifest.name}
+                          {(addon.manifest.logo) ? (
+                            <img
+                              src={addon.manifest.logo}
+                              alt={addon.manifest.name}
+                              className="w-8 h-8 rounded object-contain flex-shrink-0 bg-transparent"
+                              onError={(e) => { e.currentTarget.style.display = 'none' }}
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                              <span className="text-xs text-muted-foreground">📦</span>
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-medium truncate">{addon.manifest.name}</p>
                               {(addon.flags?.protected || addon.flags?.official) && (
-                                <span className="ml-2 text-xs font-normal text-amber-600 bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 rounded">
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${addon.flags?.protected
+                                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                                  }`}>
                                   {addon.flags?.protected ? 'Protected' : 'Official'}
                                 </span>
                               )}
-                            </p>
-                            <p className="text-xs text-muted-foreground">{addon.manifest.id}</p>
+                            </div>
+                            <p className="text-xs text-muted-foreground truncate">{addon.manifest.id}</p>
                           </div>
                         </label>
                       ))}
@@ -590,7 +619,17 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             {action === 'update-addons' && (
               <div className="space-y-3">
                 <div className="flex justify-between items-center">
-                  <Label>Select Addons to Update</Label>
+                  <div className="space-y-0.5">
+                    <Label>Select Addons to Update</Label>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id="show-prot-update"
+                        checked={showProtected}
+                        onCheckedChange={setShowProtected}
+                      />
+                      <span className="text-[10px] text-muted-foreground">Show Protected</span>
+                    </div>
+                  </div>
                   <span className="text-xs text-muted-foreground">{selectedUpdateAddonIds.size} selected</span>
                 </div>
                 <p className="text-xs text-muted-foreground mb-2">
@@ -621,16 +660,29 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                                 return newSet
                               })
                             }}
-                            disabled={addon.flags?.protected}
                           />
-                          <div className="flex-1">
-                            <p className="text-sm font-medium">
-                              {addon.manifest.name}
+                          {(addon.manifest.logo) ? (
+                            <img
+                              src={addon.manifest.logo}
+                              alt={addon.manifest.name}
+                              className="w-8 h-8 rounded object-contain flex-shrink-0 bg-transparent"
+                              onError={(e) => { e.currentTarget.style.display = 'none' }}
+                            />
+                          ) : (
+                            <div className="w-8 h-8 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                              <span className="text-xs text-muted-foreground">📦</span>
+                            </div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-medium truncate">{addon.manifest.name}</p>
                               {addon.flags?.protected && (
-                                <span className="ml-2 text-xs text-amber-600 bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 rounded">Protected</span>
+                                <span className="text-[10px] px-1.5 py-0.5 bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 rounded-full">
+                                  Protected
+                                </span>
                               )}
-                            </p>
-                            <p className="text-xs text-muted-foreground">v{addon.manifest.version}</p>
+                            </div>
+                            <p className="text-xs text-muted-foreground truncate">v{addon.manifest.version}</p>
                           </div>
                         </label>
                       ))}
