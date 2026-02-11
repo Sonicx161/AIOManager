@@ -13,7 +13,7 @@ interface SavedAddonDetailsProps {
 }
 
 export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProps) {
-  const { updateSavedAddon, updateSavedAddonMetadata, loading, error } = useAddonStore()
+  const { updateSavedAddon, updateSavedAddonMetadata, replaceTransportUrlUniversally, loading, error } = useAddonStore()
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
 
   const [formData, setFormData] = useState({
@@ -24,6 +24,9 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
   })
 
   const [formError, setFormError] = useState<string | null>(null)
+  const [newUrl, setNewUrl] = useState(savedAddon.installUrl)
+  const [replacingUrl, setReplacingUrl] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const hasChanges =
     formData.name !== savedAddon.name ||
@@ -56,6 +59,21 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
       onClose()
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to update saved addon')
+    }
+  }
+
+  const handleReplaceUrl = async () => {
+    if (!newUrl.trim() || newUrl === savedAddon.installUrl) return
+
+    setReplacingUrl(true)
+    setFormError(null)
+    try {
+      await replaceTransportUrlUniversally(savedAddon.id, savedAddon.installUrl, newUrl.trim())
+      // Keep advanced open but updated
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Failed to replace URL')
+    } finally {
+      setReplacingUrl(false)
     }
   }
 
@@ -94,20 +112,6 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
           />
         </div>
 
-        {/* Install URL */}
-        <div className="space-y-2">
-          <Label htmlFor="edit-url">Install URL</Label>
-          <Input
-            id="edit-url"
-            type={isPrivacyModeEnabled ? 'password' : 'url'}
-            value={formData.installUrl}
-            readOnly
-            className="bg-muted cursor-not-allowed"
-          />
-          <p className="text-xs text-muted-foreground">
-            The URL cannot be changed manually due to CORS restrictions.
-          </p>
-        </div>
 
         {/* Custom Logo */}
         <div className="space-y-2">
@@ -165,6 +169,54 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
             )}
             <p>Source: {savedAddon.sourceType === 'manual' ? 'Manual' : 'Cloned from account'}</p>
           </div>
+        </div>
+
+        {/* Advanced Section */}
+        <div className="mt-4 border-t pt-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-[10px] uppercase font-bold tracking-widest opacity-50 hover:opacity-100 p-0 h-auto"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+          >
+            {showAdvanced ? 'Hide Advanced Settings' : 'Show Advanced Settings'}
+          </Button>
+
+          {showAdvanced && (
+            <div className="mt-4 p-4 border rounded-md bg-destructive/5 border-destructive/20 space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+              <div className="space-y-1">
+                <h4 className="text-sm font-semibold text-destructive uppercase tracking-tight">Replace Transport URL</h4>
+                <p className="text-xs text-muted-foreground">
+                  Swap the underlying manifest URL. This will also update any Autopilot rules using this addon.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Input
+                  id="edit-url"
+                  type="text"
+                  value={newUrl}
+                  onChange={(e) => setNewUrl(e.target.value)}
+                  placeholder="Enter new manifest URL"
+                  className="flex-1 text-xs bg-background"
+                />
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleReplaceUrl}
+                  disabled={replacingUrl || !newUrl.trim() || newUrl === savedAddon.installUrl}
+                >
+                  {replacingUrl ? 'Updating...' : 'Replace'}
+                </Button>
+              </div>
+              {!isPrivacyModeEnabled && (
+                <p className="text-[10px] text-muted-foreground truncate uppercase opacity-50">
+                  Current: {savedAddon.installUrl}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Actions */}

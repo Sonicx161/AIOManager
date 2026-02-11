@@ -1,5 +1,5 @@
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
@@ -90,9 +90,10 @@ export function SavedAddonCard({
       return 'Health not checked'
     }
     const status = savedAddon.health.isOnline ? 'Online' : 'Offline'
+    const error = savedAddon.health.error ? ` (${savedAddon.health.error})` : ''
     const lastChecked = new Date(savedAddon.health.lastChecked)
     const timeAgo = getTimeAgo(lastChecked)
-    return `${status}\nLast checked: ${timeAgo}`
+    return `${status}${error}\nLast checked: ${timeAgo}`
   }
 
   const getTimeAgo = (date: Date) => {
@@ -120,7 +121,7 @@ export function SavedAddonCard({
   return (
     <>
       <Card
-        className={`flex flex-col transition-all duration-200 ${isSelectionMode
+        className={`flex flex-col h-full transition-all duration-300 ${isSelectionMode
           ? 'cursor-pointer hover:border-primary/50'
           : ''
           } ${isSelected
@@ -133,149 +134,146 @@ export function SavedAddonCard({
           }
         }}
       >
-        <CardHeader className="pb-2">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-
-
-              <div
-                className={`w-2 h-2 rounded-full shrink-0 ${getHealthStatusColor()}`}
-                title={getHealthTooltip()}
-              />
-              <CardTitle className="text-lg line-clamp-2">{savedAddon.name}</CardTitle>
-              <div className="flex items-center gap-2 ml-auto pr-2">
-              </div>
-              {(() => {
-                const status = restorationManager.getStatus(savedAddon.installUrl)
-                if (status.status === 'restoring') {
-                  return (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">
-                      Restoring...
-                    </span>
-                  )
-                }
-                if (status.circuitState === 'open') {
-                  return (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400" title="Auto-restore disabled after repeated failures. 30m cooldown.">
-                      Restoration Failed
-                    </span>
-                  )
-                }
-                return null
-              })()}
-              {hasUpdate && (
-                <span className="text-xs px-2 py-1 rounded-md bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 shrink-0">
-                  Update
-                </span>
-              )}
-              {savedAddon.sourceType === 'cloned-from-account' && (
-                <span className="text-xs px-2 py-1 rounded-md bg-primary/10 text-primary shrink-0">
-                  Cloned
-                </span>
-              )}
-            </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger className="p-1 hover:bg-accent rounded transition-colors duration-150 shrink-0">
-                <MoreVertical className="h-5 w-5 text-muted-foreground" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setShowDetails(true)}>
-                  <Pencil className="h-4 w-4 mr-2" />
-                  Edit
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem destructive onClick={handleDelete}>
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </CardHeader>
-
-        <CardContent className="flex-1">
-          <div className="space-y-3">
-            {/* Addon Info */}
-            <div className="flex items-center gap-3">
-              {savedAddon.metadata?.customLogo || savedAddon.manifest.logo ? (
+        <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+          <div className="flex items-center gap-3 min-w-0">
+            {(savedAddon.metadata?.customLogo || savedAddon.manifest.logo) ? (
+              <div className="bg-muted p-1 rounded-md shrink-0">
                 <img
                   src={savedAddon.metadata?.customLogo || savedAddon.manifest.logo}
-                  alt={savedAddon.name} // savedAddon.name is the display name
-                  className="w-10 h-10 rounded object-contain flex-shrink-0 bg-transparent"
+                  alt={savedAddon.name}
+                  className="w-10 h-10 rounded object-contain"
                   onError={(e) => {
                     e.currentTarget.style.display = 'none'
                   }}
                 />
-              ) : (
-                <div className="w-10 h-10 rounded bg-muted flex items-center justify-center flex-shrink-0">
-                  <span className="text-xs text-muted-foreground">📦</span>
-                </div>
-              )}
-              <div className="text-sm min-w-0">
-                <p className="font-medium truncate">{savedAddon.manifest.name}</p>
-                <p className="text-xs text-muted-foreground flex items-center gap-2">
-                  v{savedAddon.manifest.version}
-                  {hasUpdate && latestVersion && (
-                    <span className="text-blue-600 dark:text-blue-400">→ v{latestVersion}</span>
-                  )}
-                </p>
               </div>
-            </div>
-
-            {/* Tags */}
-            {savedAddon.tags.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {savedAddon.tags.map((tag) => (
-                  <AddonTag key={tag} tag={tag} />
-                ))}
+            ) : (
+              <div className="bg-muted p-1 rounded-md shrink-0 w-12 h-12 flex items-center justify-center">
+                <span className="text-lg">📦</span>
               </div>
             )}
-
-            {/* Dates */}
-            <div className="text-xs text-muted-foreground space-y-1">
-              <p>Created: {formatDate(savedAddon.createdAt)}</p>
-              {savedAddon.lastUsed && <p>Last used: {formatDate(savedAddon.lastUsed)}</p>}
+            <div className="flex flex-col min-w-0">
+              <CardTitle className="text-base font-semibold truncate leading-tight">
+                {savedAddon.name}
+              </CardTitle>
+              <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
+                <span className="text-xs truncate">v{savedAddon.manifest.version}</span>
+                <div
+                  className={`w-2 h-2 rounded-full shrink-0 ${getHealthStatusColor()}`}
+                  title={getHealthTooltip()}
+                />
+                {hasUpdate && latestVersion && (
+                  <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
+                    → v{latestVersion}
+                  </span>
+                )}
+                {savedAddon.sourceType === 'cloned-from-account' && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary border border-primary/20">
+                    Cloned
+                  </span>
+                )}
+                {(() => {
+                  const status = restorationManager.getStatus(savedAddon.installUrl)
+                  if (status.status === 'restoring') {
+                    return (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20 animate-pulse">
+                        Restoring...
+                      </span>
+                    )
+                  }
+                  if (status.circuitState === 'open') {
+                    return (
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20" title="Auto-restore disabled after repeated failures. 30m cooldown.">
+                        Failed
+                      </span>
+                    )
+                  }
+                  return null
+                })()}
+              </CardDescription>
             </div>
+          </div>
 
-            {/* URL Display and Actions */}
-            <div className="mt-4 flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger className="p-1 hover:bg-accent rounded transition-colors duration-150 shrink-0">
+              <MoreVertical className="h-5 w-5 text-muted-foreground" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleCopyUrl}>
+                <Copy className="h-4 w-4 mr-2" />
+                Copy URL
+              </DropdownMenuItem>
+              {savedAddon.manifest.behaviorHints?.configurable && (
+                <DropdownMenuItem onClick={handleOpenConfiguration}>
+                  <Settings className="h-4 w-4 mr-2" />
+                  Configure
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onClick={() => setShowDetails(true)}>
+                <Pencil className="h-4 w-4 mr-2" />
+                Edit
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem destructive onClick={handleDelete}>
+                <Trash2 className="h-4 w-4 mr-2" />
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </CardHeader>
+
+        <CardContent className="flex-grow py-2 min-w-0">
+          {/* Description */}
+          {savedAddon.manifest.description && (
+            <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
+              {savedAddon.manifest.description}
+            </p>
+          )}
+
+          {/* URL Bar */}
+          <div className="flex items-center gap-2 w-full min-w-0 mb-3">
+            <div className="flex-1 bg-muted/40 rounded px-2 py-1 flex items-center justify-between border min-w-0 w-full overflow-hidden">
+              <span className="text-xs text-muted-foreground font-mono truncate mr-2 flex-grow min-w-0">
+                {isPrivacyModeEnabled ? maskUrl(savedAddon.installUrl) : savedAddon.installUrl}
+              </span>
               <button
                 onClick={handleCopyUrl}
-                className="text-[10px] text-muted-foreground truncate font-mono bg-muted/50 px-2 py-1.5 rounded flex-1 flex items-center justify-between gap-2 hover:bg-muted transition-colors group"
+                className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
                 title="Copy URL"
               >
-                <span className="truncate">
-                  {isPrivacyModeEnabled ? maskUrl(savedAddon.installUrl) : savedAddon.installUrl}
-                </span>
-                <Copy className="h-3 w-3 shrink-0 opacity-50 group-hover:opacity-100 transition-opacity" />
+                <Copy className="h-3 w-3" />
               </button>
-              {savedAddon.manifest.behaviorHints?.configurable && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0"
-                  onClick={handleOpenConfiguration}
-                  title="Configure Addon"
-                >
-                  <Settings className="h-4 w-4" />
-                </Button>
-              )}
             </div>
-
-            {/* Update Button */}
-            {hasUpdate && onUpdate && (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={handleUpdate}
-                disabled={updating}
-                className="w-full mt-2"
-              >
-                <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
-                {updating ? 'Updating...' : 'Update Addon'}
-              </Button>
-            )}
           </div>
+
+          {/* Tags */}
+          {savedAddon.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-3">
+              {savedAddon.tags.map((tag) => (
+                <AddonTag key={tag} tag={tag} />
+              ))}
+            </div>
+          )}
+
+          {/* Dates */}
+          <div className="text-xs text-muted-foreground space-y-1">
+            <p>Created: {formatDate(savedAddon.createdAt)}</p>
+            {savedAddon.lastUsed && <p>Last used: {formatDate(savedAddon.lastUsed)}</p>}
+          </div>
+
+          {/* Update Button */}
+          {hasUpdate && onUpdate && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleUpdate}
+              disabled={updating}
+              className="w-full mt-3"
+            >
+              <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
+              {updating ? 'Updating...' : 'Update Addon'}
+            </Button>
+          )}
         </CardContent>
       </Card>
 

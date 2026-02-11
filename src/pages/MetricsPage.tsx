@@ -25,7 +25,7 @@ import {
 import { useMemo, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '../components/ui/avatar'
-import { subHours, isWeekend, subDays } from 'date-fns'
+import { subHours, subDays } from 'date-fns'
 import { cn } from '@/lib/utils'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
@@ -47,8 +47,6 @@ export function MetricsPage() {
         const sortedHistory = [...history].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
         let totalDurationMinutes = 0
         const itemsByHour = Array(24).fill(0)
-        let weekendCount = 0
-        let weekdayCount = 0
         const typeCounts = { movie: 0, series: 0, animation: 0, other: 0 }
 
         // Maps
@@ -95,9 +93,9 @@ export function MetricsPage() {
             const hour = new Date(h.timestamp).getHours()
             itemsByHour[hour]++
 
-            // 3. Weekend Warriors
-            if (isWeekend(h.timestamp)) weekendCount++
-            else weekdayCount++
+            // 3. Weekend Warriors (Legacy count removed)
+            // if (isWeekend(h.timestamp)) weekendCount++
+            // else weekdayCount++
 
             // 4. Type Distribution
             if (h.type === 'movie') typeCounts.movie++
@@ -486,9 +484,9 @@ export function MetricsPage() {
                     <div className="overflow-x-auto scrollbar-hide">
                         <TabsList className="flex whitespace-nowrap">
                             <TabsTrigger value="pulse" className="shrink-0">Pulse</TabsTrigger>
-                            <TabsTrigger value="community" className="shrink-0">Community</TabsTrigger>
+                            <TabsTrigger value="community" className="shrink-0">Community ({stats.leaderboard.length})</TabsTrigger>
                             <TabsTrigger value="personality" className="shrink-0">Personality</TabsTrigger>
-                            <TabsTrigger value="vault" className="shrink-0">Vault</TabsTrigger>
+                            <TabsTrigger value="vault" className="shrink-0">Vault ({stats.topAllTime.length})</TabsTrigger>
                             <TabsTrigger value="deep-dive" className="shrink-0">Deep Dive</TabsTrigger>
                         </TabsList>
                     </div>
@@ -580,17 +578,27 @@ export function MetricsPage() {
 
                         {/* Improved Scroll Area */}
                         <div id="trending-scroll" className="w-full overflow-x-auto pb-4 px-4 scrollbar-hide scroll-smooth">
-                            <div className="flex gap-4">
-                                {stats.topTrending.map((item, i) => (
-                                    <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative w-32 h-48 md:w-40 md:h-60 shrink-0 rounded-xl overflow-hidden shadow-xl group cursor-pointer transition-transform hover:-translate-y-2">
-                                        <div className="absolute top-2 left-2 z-10 bg-orange-500/90 text-white font-black text-xs px-2 py-1 rounded shadow-lg">#{i + 1}</div>
-                                        <img src={item.poster} className="w-full h-full object-cover" />
-                                        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
-                                            <div className="text-white text-sm font-bold truncate">{item.name}</div>
-                                        </div>
-                                    </a>
-                                ))}
-                            </div>
+                            {stats.topTrending.length > 0 ? (
+                                <div className="flex gap-4">
+                                    {stats.topTrending.map((item, i) => (
+                                        <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative w-32 h-48 md:w-40 md:h-60 shrink-0 rounded-xl overflow-hidden shadow-xl group cursor-pointer transition-transform hover:-translate-y-2">
+                                            <div className="absolute top-2 left-2 z-10 bg-orange-500/90 text-white font-black text-xs px-2 py-1 rounded shadow-lg">#{i + 1}</div>
+                                            <img src={item.poster} className="w-full h-full object-cover" />
+                                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
+                                                <div className="text-white text-sm font-bold truncate">{item.name}</div>
+                                            </div>
+                                        </a>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-center py-12 text-center">
+                                    <div className="opacity-50">
+                                        <Flame className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                                        <p className="text-sm font-medium text-muted-foreground">No trending activity in the last 48 hours</p>
+                                        <p className="text-xs text-muted-foreground/60 mt-1">Start watching to populate this section</p>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
 

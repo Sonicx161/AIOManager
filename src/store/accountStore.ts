@@ -4,13 +4,13 @@ import {
       getAddons,
       updateAddons,
 } from '@/api/addons'
+import { normalizeAddonUrl, mergeAddons } from '@/lib/utils'
 import { loginWithCredentials } from '@/api/auth'
 import { LoginResponse } from '@/api/stremio-client'
 import { decrypt, encrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import { updateLatestVersions as updateLatestVersionsCoordinator } from '@/lib/store-coordinator'
 import { toast } from '@/hooks/use-toast'
-import { mergeAddons, normalizeAddonUrl } from '@/lib/utils'
 import { StremioAccount } from '@/types/account'
 import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
@@ -66,7 +66,7 @@ interface AccountStore {
       addAccountByCredentials: (email: string, password: string, name: string) => Promise<void>
       removeAccount: (id: string) => Promise<void>
       syncAccount: (id: string, forceRefresh?: boolean) => Promise<void>
-      syncAllAccounts: () => Promise<void>
+      syncAllAccounts: (silent?: boolean) => Promise<void>
       repairAccount: (id: string) => Promise<void>
       installAddonToAccount: (accountId: string, addonUrl: string) => Promise<void>
       removeAddonFromAccount: (accountId: string, transportUrl: string) => Promise<void>
@@ -103,6 +103,8 @@ interface AccountStore {
       bulkProtectAddons: (accountId: string, isProtected: boolean) => Promise<void>
       bulkProtectSelectedAddons: (accountId: string, transportUrls: string[], isProtected: boolean) => Promise<void>
       removeLocalAddons: (accountId: string, transportUrls: string[]) => Promise<void>
+      replaceTransportUrl: (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any) => Promise<void>
+      reinstallAddon: (accountId: string, transportUrl: string) => Promise<void>
       syncAutopilotRules: (accountId: string) => Promise<void>
       clearError: () => void
       reset: () => Promise<void>
@@ -234,16 +236,58 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       },
 
       removeAccount: async (id: string) => {
+            // 1. Clean up server-side autopilot rules for this account (prevents ghost rules)
+            try {
+                  const { useFailoverStore } = await import('@/store/failoverStore')
+                  const failoverState = useFailoverStore.getState()
+                  const rulesForAccount = failoverState.rules.filter(r => r.accountId === id)
+
+                  if (rulesForAccount.length > 0) {
+                        console.log(`[Account] Cleaning up ${rulesForAccount.length} autopilot rules for account ${id}`)
+
+                        // Try bulk-delete via server endpoint first
+                        try {
+                              const { useSyncStore } = await import('./syncStore')
+                              const { auth, serverUrl } = useSyncStore.getState()
+                              if (auth.isAuthenticated) {
+                                    const baseUrl = serverUrl || ''
+                                    const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+                                    const { default: axios } = await import('axios')
+                                    await axios.delete(`${apiPath}/autopilot/account/${id}`)
+                                    console.log(`[Account] Bulk-deleted server rules for account ${id}`)
+                              }
+                        } catch (serverErr) {
+                              console.warn('[Account] Bulk server delete failed, falling back to per-rule delete:', serverErr)
+                              // Fallback: delete each rule individually from server (fire-and-forget)
+                              for (const rule of rulesForAccount) {
+                                    failoverState.removeRule(rule.id).catch(() => { })
+                              }
+                        }
+
+                        // Remove rules locally
+                        const remainingRules = failoverState.rules.filter(r => r.accountId !== id)
+                        useFailoverStore.setState({ rules: remainingRules })
+                        const localforageFO = await import('localforage')
+                        await localforageFO.default.setItem('stremio-manager:failover-rules', remainingRules)
+                  }
+            } catch (e) {
+                  console.warn('[Account] Autopilot rule cleanup failed (non-blocking):', e)
+            }
+
+            // 2. Clean up activity
             const { useActivityStore } = await import('@/store/activityStore')
             await useActivityStore.getState().deleteActivityForAccount(id)
 
+            // 3. Clean up addon state
             const { useAddonStore } = await import('@/store/addonStore')
             await useAddonStore.getState().deleteAccountState(id)
 
+            // 4. Remove account from local state
             const accounts = get().accounts.filter((acc) => acc.id !== id)
             set({ accounts })
             await localforage.setItem(STORAGE_KEY, accounts)
 
+            // 5. Sync to cloud
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
       },
@@ -355,7 +399,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      syncAllAccounts: async () => {
+      syncAllAccounts: async (silent: boolean = false) => {
+            console.log(`[Account] syncAllAccounts called (silent: ${silent})`)
             if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
 
             set({ loading: true, error: null })
@@ -395,8 +440,10 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             )
 
             await localforage.setItem(STORAGE_KEY, get().accounts)
-            const { useSyncStore } = await import('./syncStore')
-            useSyncStore.getState().syncToRemote(true).catch(console.error)
+            if (!silent) {
+                  const { useSyncStore } = await import('./syncStore')
+                  useSyncStore.getState().syncToRemote(true).catch(console.error)
+            }
             set({ loading: false })
       },
 
@@ -459,7 +506,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                   }))
 
-                  const localAddonsFiltered = account.addons.filter((a) => a.transportUrl !== transportUrl)
+                  const localAddonsFiltered = account.addons.filter(
+                        (a) => normalizeAddonUrl(a.transportUrl).toLowerCase() !== normalizeAddonUrl(transportUrl).toLowerCase()
+                  )
                   const mergedOrder = mergeAddons(localAddonsFiltered, normalizedAddons)
 
                   const updatedAccount = { ...account, addons: mergedOrder, lastSync: new Date() }
@@ -739,7 +788,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         }
                   }
 
-                  let finalAccounts =
+                  const finalAccounts =
                         mode === 'mirror'
                               ? reconciledAccounts
                               : [...currentAccounts.filter((a) => !processedLocalIds.has(a.id)), ...reconciledAccounts]
@@ -747,10 +796,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   set({ accounts: finalAccounts })
                   await localforage.setItem(STORAGE_KEY, finalAccounts)
 
-                  const { useSyncStore } = await import('./syncStore')
-                  useSyncStore.getState().syncToRemote(true).catch(console.error)
-
-                  if (!isSilent) toast({ title: 'Import Successful' })
+                  if (!isSilent) {
+                        const { useSyncStore } = await import('./syncStore')
+                        useSyncStore.getState().syncToRemote(true).catch(console.error)
+                        toast({ title: 'Import Successful' })
+                  }
                   get().syncAllAccounts().catch(console.error)
             } catch (error) {
                   set({ error: (error as Error).message })
@@ -768,7 +818,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const updatedAccount = { ...account, name: data.name }
                   if (data.authKey || (data.email && data.password)) {
-                        let authKey =
+                        const authKey =
                               data.authKey || (await loginWithCredentials(data.email!, data.password!)).authKey
                         updatedAccount.authKey = await encrypt(authKey, getEncryptionKey())
                         const addons = await getAddons(authKey, updatedAccount.id)
@@ -797,7 +847,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             const account = get().accounts.find((acc) => acc.id === accountId)
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) =>
-                  (targetIndex !== undefined ? index === targetIndex : addon.transportUrl === transportUrl)
+                  (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
                         ? { ...addon, flags: { ...addon.flags, protected: isProtected } }
                         : addon
             )
@@ -816,8 +866,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             const account = get().accounts.find((acc) => acc.id === accountId)
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) =>
-                  (targetIndex !== undefined ? index === targetIndex : addon.transportUrl === transportUrl)
-                        ? { ...addon, flags: { ...addon.flags, enabled: isEnabled } }
+                  (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
+                        ? {
+                              ...addon,
+                              flags: { ...addon.flags, enabled: isEnabled },
+                              metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                        }
                         : addon
             )
             const accounts = get().accounts.map((acc) =>
@@ -832,10 +886,50 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   await updateAddons(authKey, updatedAddons, accountId)
             }
 
-            // Task 5: Inform Autopilot of manual toggle
-            // ONLY if this wasn't an automatic action by Autopilot itself
             if (!isAutopilot) {
                   autopilotManager.handleManualToggle(accountId, transportUrl)
+            }
+      },
+
+      reinstallAddon: async (accountId: string, transportUrl: string) => {
+            set({ loading: true, error: null })
+            try {
+                  const account = get().accounts.find((acc) => acc.id === accountId)
+                  if (!account) throw new Error('Account not found')
+
+                  const { reinstallAddon: apiReinstallAddon } = await import('@/api/addons')
+                  const authKey = await decrypt(account.authKey, getEncryptionKey())
+
+                  const { updatedAddon } = await apiReinstallAddon(authKey, transportUrl, accountId)
+
+                  // CRITICAL: We update the LOCAL collection immediately based on API return
+                  // This ensures that even if the addon is disabled (and thus omitted from Stremio push),
+                  // the local store reflects the new version.
+                  const updatedAddons = account.addons.map((addon) => {
+                        if (normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
+                              return {
+                                    ...addon,
+                                    manifest: updatedAddon?.manifest || addon.manifest,
+                                    metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                              }
+                        }
+                        return addon
+                  })
+
+                  const accounts = get().accounts.map((acc) =>
+                        acc.id === accountId ? { ...acc, addons: updatedAddons, lastSync: new Date() } : acc
+                  )
+                  set({ accounts })
+                  await localforage.setItem(STORAGE_KEY, accounts)
+
+                  const { useSyncStore } = await import('./syncStore')
+                  useSyncStore.getState().syncToRemote(true).catch(console.error)
+            } catch (error) {
+                  const message = error instanceof Error ? error.message : 'Failed to reinstall addon'
+                  set({ error: message })
+                  throw error
+            } finally {
+                  set({ loading: false })
             }
       },
 
@@ -843,7 +937,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             const account = get().accounts.find((a) => a.id === accountId)
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) => {
-                  if (targetIndex !== undefined ? index === targetIndex : addon.transportUrl === transportUrl) {
+                  if (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
                         const cleanMetadata = { ...(addon.metadata || {}) } as any
                         Object.keys(metadata).forEach((k) => {
                               if ((metadata as any)[k] === undefined) delete cleanMetadata[k]
@@ -883,11 +977,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       bulkProtectSelectedAddons: async (accountId: string, transportUrls: string[], isProtected: boolean) => {
             const account = get().accounts.find((a) => a.id === accountId)
             if (!account) return
-            const updatedAddons = account.addons.map((a) => (
-                  transportUrls.includes(a.transportUrl)
+            const normalizedTargets = new Set(transportUrls.map((u) => normalizeAddonUrl(u).toLowerCase()))
+            const updatedAddons = account.addons.map((a) =>
+                  normalizedTargets.has(normalizeAddonUrl(a.transportUrl).toLowerCase())
                         ? { ...a, flags: { ...a.flags, protected: isProtected } }
                         : a
-            ))
+            )
             const accounts = get().accounts.map((acc) =>
                   acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
             )
@@ -916,6 +1011,58 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             )
             set({ accounts })
             await localforage.setItem(STORAGE_KEY, accounts)
+            const { useSyncStore } = await import('./syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+      },
+
+      replaceTransportUrl: async (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any) => {
+            const normOld = normalizeAddonUrl(oldUrl).toLowerCase()
+            const modifiedAccountIds = new Set<string>()
+
+            const updatedAccounts = get().accounts.map((account) => {
+                  // If accountId is provided, only process that specific account
+                  if (accountId && account.id !== accountId) return account
+
+                  const hasOld = account.addons.some(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normOld)
+                  if (!hasOld) return account
+
+                  modifiedAccountIds.add(account.id)
+
+                  const updatedAddons = account.addons.map(addon => {
+                        if (normalizeAddonUrl(addon.transportUrl).toLowerCase() === normOld) {
+                              return {
+                                    ...addon,
+                                    transportUrl: newUrl,
+                                    // SILENT REINSTALL: Update the technical manifest if provided,
+                                    // but keep the metadata overrides (customName, customLogo, etc)
+                                    manifest: freshManifest || addon.manifest,
+                                    metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                              }
+                        }
+                        return addon
+                  })
+
+                  return { ...account, addons: updatedAddons, lastSync: new Date() }
+            })
+
+            set({ accounts: updatedAccounts })
+            await localforage.setItem(STORAGE_KEY, updatedAccounts)
+
+            // Task: Immediate Stremio Push for URL Swap
+            for (const account of updatedAccounts) {
+                  // Only push for accounts that were actually updated
+                  if (!modifiedAccountIds.has(account.id)) continue
+
+                  try {
+                        const { updateAddons } = await import('@/api/addons')
+                        const authKey = await decrypt(account.authKey, getEncryptionKey())
+                        await updateAddons(authKey, account.addons, account.id)
+                        console.log(`[Account] Stremio updated for URL swap: ${account.name}`)
+                  } catch (err) {
+                        console.error(`[Account] Stremio swap sync failed for ${account.name}:`, err)
+                  }
+            }
+
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
       },

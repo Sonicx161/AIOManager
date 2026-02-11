@@ -16,8 +16,8 @@ import { getHealthSummary } from '@/lib/addon-health'
 import { useAddonStore } from '@/store/addonStore'
 import { SavedAddon } from '@/types/saved-addon'
 import { ProfileReorderDialog } from '../profiles/ProfileReorderDialog'
-import { Plus, RefreshCw, Folder, Settings, User, Trash2, GripVertical } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Plus, RefreshCw, Folder, Settings, User, Trash2, GripVertical, Pencil, Search, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { SavedAddonCard } from './SavedAddonCard'
 import { useProfileStore } from '@/store/profileStore'
 import { ProfileDialog } from '../profiles/ProfileDialog'
@@ -42,6 +42,7 @@ export function SavedAddonLibrary() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [showAddDialog, setShowAddDialog] = useState(false)
   const [showProfileReorderDialog, setShowProfileReorderDialog] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const [addUrl, setAddUrl] = useState('')
   const [addName, setAddName] = useState('')
@@ -88,7 +89,8 @@ export function SavedAddonLibrary() {
       // Update health from update check results (bonus)
       const healthUpdates = updateInfoList.map(info => ({
         id: info.addonId,
-        isOnline: info.isOnline
+        isOnline: info.health.isOnline,
+        error: info.health.error
       }))
       useAddonStore.getState().updateHealthStatus(healthUpdates)
 
@@ -503,13 +505,6 @@ export function SavedAddonLibrary() {
                 {/* Main Actions - Inline with Stats */}
                 <div className="flex items-center gap-2 mt-2 sm:mt-0">
                   <Button
-                    variant={isSelectionMode ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={toggleSelectionMode}
-                  >
-                    {isSelectionMode ? 'Cancel Selection' : 'Select Addons'}
-                  </Button>
-                  <Button
                     variant="outline"
                     size="sm"
                     onClick={handleRefresh}
@@ -530,6 +525,13 @@ export function SavedAddonLibrary() {
                       {updatingAll ? `Updating (${updateProgress.current}/${updateProgress.total})` : 'Update All Available'}
                     </Button>
                   )}
+                  <Button
+                    variant={isSelectionMode ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={toggleSelectionMode}
+                  >
+                    {isSelectionMode ? 'Cancel' : 'Select'}
+                  </Button>
                   <Button size="sm" onClick={handleOpenAddDialog}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add Addon
@@ -565,6 +567,7 @@ export function SavedAddonLibrary() {
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowBulkEditDialog(true)}
                 >
+                  <Pencil className="h-4 w-4 mr-2" />
                   Bulk Edit...
                 </Button>
               </div>
@@ -583,14 +586,26 @@ export function SavedAddonLibrary() {
 
         {/* Search and Filters */}
         <div className="flex flex-col sm:flex-row gap-4">
-          <div className="flex-1">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
+              ref={searchInputRef}
               type="text"
               placeholder="Search saved addons by name or tag..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full"
+              className="pl-9 h-9 text-xs"
+              data-search-focus
             />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                title="Clear Search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -793,55 +808,53 @@ export function SavedAddonLibrary() {
                 id="addon-tags"
                 value={addTags}
                 onChange={(e) => setAddTags(e.target.value)}
-                placeholder="e.g., movies, debrid, streaming"
+                placeholder="e.g. Movies, Series, Debrid"
               />
             </div>
 
-            {addError && <p className="text-sm text-destructive">{addError}</p>}
+            {addError && (
+              <p className="text-sm text-red-600 dark:text-red-400">{addError}</p>
+            )}
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAddDialog(false)} disabled={adding}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setShowAddDialog(false)}>Cancel</Button>
             <Button onClick={handleAddAddon} disabled={adding}>
-              {adding ? 'Adding...' : 'Add Addon'}
+              {adding ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+              Add Addon
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
+      {/* Profile Management Dialogs */}
       <ConfirmationDialog
         open={!!deleteProfileId}
         onOpenChange={(open) => !open && setDeleteProfileId(null)}
         title="Delete Profile?"
-        description="This will PERMANENTLY delete the profile AND ALL saved addons inside it. This action cannot be undone."
+        description="This will permanently delete this profile AND all addons associated with it. This action cannot be undone."
         confirmText="Delete Everything"
-        isDestructive
+        isDestructive={true}
         onConfirm={handleDeleteProfile}
-      />
-
-      <ConfirmationDialog
-        open={showBulkDeleteConfirmation}
-        onOpenChange={setShowBulkDeleteConfirmation}
-        title={`Delete ${selectedIds.size} Saved Addons?`}
-        description="This will permanently delete the selected addons from your saved library. This action cannot be undone. Note: This will NOT remove the addons from your active Stremio account(s)."
-        confirmText="Delete Addons"
-        isDestructive
-        onConfirm={handleBulkDelete}
       />
 
       <BulkEditDialog
         open={showBulkEditDialog}
         onOpenChange={setShowBulkEditDialog}
         selectedCount={selectedIds.size}
-        availableTags={Array.from(new Set(
-          filteredAddons
-            .filter(a => selectedIds.has(a.id))
-            .flatMap(a => a.tags)
-        )).sort()}
+        availableTags={allTags}
         onSave={handleBulkEdit}
       />
-    </div >
+
+      <ConfirmationDialog
+        open={showBulkDeleteConfirmation}
+        onOpenChange={setShowBulkDeleteConfirmation}
+        title={`Delete ${selectedIds.size} Saved Addons?`}
+        description="This will permanently delete these addons from your library. This action cannot be undone."
+        confirmText="Delete"
+        isDestructive={true}
+        onConfirm={handleBulkDelete}
+      />
+    </div>
   )
 }

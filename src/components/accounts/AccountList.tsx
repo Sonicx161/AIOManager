@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { RefreshCw, Users, GripHorizontal, Search, X } from 'lucide-react'
+import { RefreshCw, Users, GripHorizontal, Search, X, Layers, Trash2 } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { useState } from 'react'
 import { AccountCard } from './AccountCard'
@@ -180,6 +180,7 @@ export function AccountList() {
               className="pl-9 h-9 text-xs"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
+              data-search-focus
             />
             {searchQuery && (
               <Button
@@ -196,7 +197,7 @@ export function AccountList() {
         <div className="flex flex-wrap gap-2 w-full sm:w-auto">
           {isSelectionMode && (
             <Button variant="outline" size="sm" onClick={selectAll} className="flex-1 sm:flex-none">
-              {selectedAccountIds.size === accounts.length && accounts.length > 0 ? 'Deselect All' : 'Select All'}
+              {selectedAccountIds.size === accounts.length && accounts.length > 0 ? 'Deselect All' : `Select All (${accounts.length})`}
             </Button>
           )}
           {selectedAccountIds.size > 0 && (
@@ -207,14 +208,43 @@ export function AccountList() {
                 onClick={handleDeleteSelected}
                 className="flex-1 sm:flex-none"
               >
-                Delete Selected
+                <Trash2 className="h-4 w-4 mr-1.5" />
+                Delete ({selectedAccountIds.size})
               </Button>
               <Button
                 size="sm"
                 onClick={() => setShowBulkActions(true)}
                 className="flex-1 sm:flex-none"
               >
+                <Layers className="h-4 w-4 mr-1.5" />
                 Bulk Actions
+              </Button>
+            </>
+          )}
+          {!isSelectionMode && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRefreshAll}
+                disabled={loading || accounts.length === 0}
+                className="flex-1 sm:flex-none"
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+              <Button
+                size="sm"
+                variant={isReorderMode ? "secondary" : "outline"}
+                onClick={() => {
+                  setIsReorderMode(!isReorderMode)
+                  if (isSelectionMode) toggleSelectionMode()
+                }}
+                disabled={accounts.length < 2}
+                className="flex-1 sm:flex-none"
+              >
+                <GripHorizontal className="h-4 w-4 mr-2" />
+                {isReorderMode ? 'Done' : 'Reorder'}
               </Button>
             </>
           )}
@@ -224,34 +254,13 @@ export function AccountList() {
             onClick={toggleSelectionMode}
             className="flex-1 sm:flex-none"
           >
-            {isSelectionMode ? 'Cancel Selection' : 'Select Accounts'}
+            {isSelectionMode ? 'Cancel' : 'Select'}
           </Button>
-          <Button
-            size="sm"
-            variant={isReorderMode ? "secondary" : "outline"}
-            onClick={() => {
-              setIsReorderMode(!isReorderMode)
-              if (isSelectionMode) toggleSelectionMode() // Disable select mode if reorder starts
-            }}
-            disabled={accounts.length < 2}
-            className="flex-1 sm:flex-none"
-          >
-            <GripHorizontal className="h-4 w-4 mr-2" />
-            {isReorderMode ? 'Done Reordering' : 'Reorder'}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleRefreshAll}
-            disabled={loading || accounts.length === 0}
-            className="flex-1 sm:flex-none"
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            Refresh All
-          </Button>
-          <Button size="sm" onClick={() => openAddAccountDialog()} className="flex-1 sm:flex-none">
-            Add Account
-          </Button>
+          {!isSelectionMode && (
+            <Button size="sm" onClick={() => openAddAccountDialog()} className="flex-1 sm:flex-none">
+              Add Account
+            </Button>
+          )}
         </div>
       </div>
 

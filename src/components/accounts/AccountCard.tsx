@@ -9,10 +9,12 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
+import { useFailoverStore } from '@/store/failoverStore'
 import { StremioAccount } from '@/types/account'
-import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical } from 'lucide-react'
+import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ShieldCheck, AlertTriangle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { maskEmail } from '@/lib/utils'
+import { useMemo } from 'react'
 
 interface AccountCardProps {
   account: StremioAccount
@@ -36,6 +38,10 @@ export function AccountCard({
   const navigate = useNavigate()
   const { syncAccount, repairAccount, loading } = useAccounts()
   const openAddAccountDialog = useUIStore((state) => state.openAddAccountDialog)
+  const allRules = useFailoverStore((state) => state.rules)
+  const failoverRules = useMemo(() => allRules.filter(r => r.accountId === account.id), [allRules, account.id])
+  const activeRules = useMemo(() => failoverRules.filter(r => r.isActive), [failoverRules])
+  const failedOverRules = useMemo(() => activeRules.filter(r => r.activeUrl !== r.priorityChain?.[0]), [activeRules])
 
   const handleSync = async () => {
     try {
@@ -148,6 +154,25 @@ export function AccountCard({
             <span className="text-muted-foreground">Addons:</span>
             <span className="font-medium">{account.addons.length}</span>
           </div>
+          {activeRules.length > 0 && (
+            <div className="flex items-center gap-1.5 text-sm">
+              {failedOverRules.length > 0 ? (
+                <>
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                  <span className="text-amber-600 dark:text-amber-400 font-medium">
+                    {failedOverRules.length} rule{failedOverRules.length !== 1 ? 's' : ''} failed over
+                  </span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
+                  <span className="text-green-600 dark:text-green-400 font-medium">
+                    {activeRules.length} rule{activeRules.length !== 1 ? 's' : ''} healthy
+                  </span>
+                </>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-1.5 text-sm">
             <span className="text-muted-foreground">Last Refresh:</span>
             <span className="text-sm">{lastSyncText}</span>

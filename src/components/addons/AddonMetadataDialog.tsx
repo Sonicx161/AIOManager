@@ -18,6 +18,7 @@ interface AddonMetadataDialogProps {
     onOpenChange: (open: boolean) => void
     addon: AddonDescriptor
     onSave: (metadata: { customName?: string; customLogo?: string; customDescription?: string }) => Promise<void>
+    onReplaceUrl?: (newUrl: string) => Promise<void>
 }
 
 export function AddonMetadataDialog({
@@ -25,12 +26,16 @@ export function AddonMetadataDialog({
     onOpenChange,
     addon,
     onSave,
+    onReplaceUrl,
 }: AddonMetadataDialogProps) {
     const [customName, setCustomName] = useState('')
     const [customLogo, setCustomLogo] = useState('')
     const [customDescription, setCustomDescription] = useState('')
     const [saving, setSaving] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [showAdvanced, setShowAdvanced] = useState(false)
+    const [newUrl, setNewUrl] = useState('')
+    const [replacingUrl, setReplacingUrl] = useState(false)
 
     // Initialize form with existing metadata
     useEffect(() => {
@@ -38,6 +43,8 @@ export function AddonMetadataDialog({
             setCustomName(addon.metadata?.customName || '')
             setCustomLogo(addon.metadata?.customLogo || '')
             setCustomDescription(addon.metadata?.customDescription || '')
+            setNewUrl(addon.transportUrl)
+            setShowAdvanced(false)
             setError(null)
         }
     }, [open, addon])
@@ -79,6 +86,21 @@ export function AddonMetadataDialog({
             setError('Failed to reset defaults.')
         } finally {
             setSaving(false)
+        }
+    }
+
+    const handleReplaceUrl = async () => {
+        if (!onReplaceUrl || !newUrl.trim() || newUrl === addon.transportUrl) return
+        setReplacingUrl(true)
+        setError(null)
+        try {
+            await onReplaceUrl(newUrl.trim())
+            // Success toast is handled by parent, we just clear error
+            setError(null)
+        } catch (err: any) {
+            setError(err.message || 'Failed to replace URL.')
+        } finally {
+            setReplacingUrl(false)
         }
     }
 
@@ -178,7 +200,7 @@ export function AddonMetadataDialog({
                                         src={customLogo || addon.manifest.logo || "https://placehold.co/80x80?text=?"}
                                         className="w-20 h-20 object-contain rounded-lg"
                                         alt="Logo Preview"
-                                        onError={(e) => e.currentTarget.style.display = 'none'}
+                                        onError={(e) => { e.currentTarget.style.display = 'none' }}
                                     />
                                 </div>
                                 <span className="font-bold text-lg text-center truncate w-full px-2">
@@ -198,7 +220,7 @@ export function AddonMetadataDialog({
                 </div>
 
                 {/* Info Footer */}
-                <div className="bg-muted/50 -mx-6 -mb-6 px-6 py-4 mt-2 border-t text-xs text-muted-foreground grid grid-cols-2 gap-4">
+                <div className="bg-muted/50 -mx-6 px-6 py-4 mt-2 border-t text-xs text-muted-foreground grid grid-cols-2 gap-4">
                     <div>
                         <span className="font-semibold block mb-1">Developer Info</span>
                         <p className="truncate">ID: {addon.manifest.id}</p>
@@ -211,7 +233,48 @@ export function AddonMetadataDialog({
                     </div>
                 </div>
 
-                <DialogFooter className="gap-2 sm:gap-0 mt-6 pt-2">
+                {onReplaceUrl && (
+                    <div className="bg-muted/30 -mx-6 px-6 py-4 bg-destructive/5 border-t border-b">
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-[10px] uppercase font-bold tracking-widest opacity-50 hover:opacity-100 p-0 h-auto"
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                        >
+                            {showAdvanced ? 'Hide Advanced Settings' : 'Show Advanced Settings'}
+                        </Button>
+
+                        {showAdvanced && (
+                            <div className="mt-4 p-4 border rounded-md bg-destructive/5 border-destructive/20 space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+                                <div className="space-y-1">
+                                    <h4 className="text-sm font-semibold text-destructive uppercase tracking-tight">Replace Transport URL</h4>
+                                    <p className="text-xs text-muted-foreground">
+                                        Swap the underlying manifest URL. This will also update any Autopilot rules using this addon.
+                                    </p>
+                                </div>
+                                <div className="flex flex-col sm:flex-row gap-2">
+                                    <Input
+                                        value={newUrl}
+                                        onChange={(e) => setNewUrl(e.target.value)}
+                                        placeholder="https://..."
+                                        className="text-xs bg-background flex-1 min-w-0"
+                                    />
+                                    <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        onClick={handleReplaceUrl}
+                                        disabled={replacingUrl || !newUrl.trim() || newUrl === addon.transportUrl}
+                                        className="shrink-0"
+                                    >
+                                        {replacingUrl ? 'Updating...' : 'Replace'}
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <DialogFooter className="gap-2 sm:gap-0 mt-6 pb-2">
                     <Button type="button" variant="secondary" onClick={handleReset} className="mr-auto" disabled={saving}>
                         Reset to Default
                     </Button>

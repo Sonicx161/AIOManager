@@ -4,6 +4,7 @@ import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useActivityStore } from '@/store/activityStore'
 import { useUIStore } from '@/store/uiStore'
+import { useFailoverStore } from '@/store/failoverStore'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
@@ -19,7 +20,7 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Trash2, Download, Upload, EyeOff, Check, ShieldAlert, Copy, RefreshCw, Cloud, User } from 'lucide-react'
+import { Trash2, Download, Upload, EyeOff, Check, ShieldAlert, Copy, RefreshCw, Cloud, User, Bell } from 'lucide-react'
 import localforage from 'localforage'
 import { useSyncStore } from '@/store/syncStore'
 
@@ -189,6 +190,44 @@ function ThemeCard({ option, selected, onSelect }: { option: ThemeOption; select
     )
 }
 
+function NotificationsSection() {
+    const { webhook, setWebhook } = useFailoverStore()
+    const [webhookUrl, setWebhookUrl] = useState(webhook.url)
+
+    const handleSave = () => {
+        setWebhook(webhookUrl, !!webhookUrl)
+        toast({ title: webhookUrl ? 'Notifications Enabled' : 'Notifications Disabled' })
+    }
+
+    return (
+        <section className="space-y-4">
+            <div>
+                <h2 className="text-xl font-semibold flex items-center gap-2">
+                    <Bell className="h-5 w-5 text-primary" />
+                    Global Notifications
+                </h2>
+                <p className="text-sm text-muted-foreground">Configure global Discord health alerts.</p>
+            </div>
+            <div className="p-4 rounded-lg border bg-card space-y-4">
+                <div className="space-y-2">
+                    <Label>Discord Webhook URL</Label>
+                    <div className="flex gap-2">
+                        <Input
+                            placeholder="https://discord.com/api/webhooks/..."
+                            value={webhookUrl}
+                            onChange={(e) => setWebhookUrl(e.target.value)}
+                        />
+                        <Button onClick={handleSave}>Save</Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                        Used for system-wide health alerts and failover notifications.
+                    </p>
+                </div>
+            </div>
+        </section>
+    )
+}
+
 export function SettingsPage() {
     const { theme, setTheme } = useTheme()
     const { accounts, reset: resetAccounts, exportAccounts, importAccounts } = useAccountStore()
@@ -211,6 +250,7 @@ export function SettingsPage() {
     const fileInputRef = useRef<HTMLInputElement>(null)
 
     const savedAddonsCount = Object.keys(library).length
+    const failoverRulesCount = useFailoverStore((s) => s.rules.length)
 
     // Export all data (uses same logic as ExportDialog)
     const handleExport = async () => {
@@ -325,6 +365,54 @@ export function SettingsPage() {
         })
     }
 
+    const handlePurgeAutopilot = () => {
+        if (!unsafeMode) {
+            toast({ variant: 'destructive', title: 'Enable Unsafe Mode', description: 'You must enable Unsafe Mode to purge autopilot rules.' })
+            return
+        }
+        setConfirmDialog({
+            open: true,
+            title: 'Purge All Autopilot Rules',
+            description: `This will delete all ${failoverRulesCount} autopilot rule(s) from both local storage and the server. The Autopilot worker will stop processing these rules immediately. This cannot be undone.`,
+            destructive: true,
+            action: async () => {
+                try {
+                    const failoverState = useFailoverStore.getState()
+
+                    // Delete from server (bulk endpoint per account)
+                    const accountIds = [...new Set(failoverState.rules.map(r => r.accountId))]
+                    for (const accountId of accountIds) {
+                        try {
+                            const { useSyncStore } = await import('@/store/syncStore')
+                            const { auth: syncAuth, serverUrl } = useSyncStore.getState()
+                            if (syncAuth.isAuthenticated) {
+                                const baseUrl = serverUrl || ''
+                                const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+                                const axios = (await import('axios')).default
+                                await axios.delete(`${apiPath}/autopilot/account/${accountId}`)
+                            }
+                        } catch (e) {
+                            console.warn(`[Settings] Failed to purge server rules for ${accountId}:`, e)
+                        }
+                    }
+
+                    // Clear local state
+                    useFailoverStore.setState({ rules: [] })
+                    const localforageModule = await import('localforage')
+                    await localforageModule.default.setItem('stremio-manager:failover-rules', [])
+
+                    const { useSyncStore } = await import('@/store/syncStore')
+                    useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+                    toast({ title: 'Autopilot Purged', description: 'All rules have been deleted from local and server.' })
+                } catch (e) {
+                    console.error('Purge failed:', e)
+                    toast({ variant: 'destructive', title: 'Purge Failed', description: 'Could not purge all autopilot rules.' })
+                }
+            },
+        })
+    }
+
     const handleResetAll = () => {
         if (!unsafeMode) {
             toast({ variant: 'destructive', title: 'Enable Unsafe Mode', description: 'You must enable Unsafe Mode to reset everything.' })
@@ -382,6 +470,9 @@ export function SettingsPage() {
 
             {/* Account Management (Top Priority) */}
             <AccountSection />
+
+            {/* Notifications */}
+            <NotificationsSection />
 
             {/* Privacy */}
             <section className="space-y-4">
@@ -515,6 +606,7 @@ export function SettingsPage() {
                     <div className="flex flex-wrap gap-3">
                         <Button
                             variant="outline"
+                            size="sm"
                             className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
                             onClick={handleDeleteAllAccounts}
                             disabled={accounts.length === 0 || !unsafeMode}
@@ -524,6 +616,7 @@ export function SettingsPage() {
                         </Button>
                         <Button
                             variant="outline"
+                            size="sm"
                             className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
                             onClick={handleDeleteAllAddons}
                             disabled={savedAddonsCount === 0 || !unsafeMode}
@@ -532,7 +625,18 @@ export function SettingsPage() {
                             Delete All Saved Addons ({savedAddonsCount})
                         </Button>
                         <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
+                            onClick={handlePurgeAutopilot}
+                            disabled={failoverRulesCount === 0 || !unsafeMode}
+                        >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Purge All Autopilot Rules ({failoverRulesCount})
+                        </Button>
+                        <Button
                             variant="destructive"
+                            size="sm"
                             onClick={handleResetAll}
                             disabled={!unsafeMode}
                         >

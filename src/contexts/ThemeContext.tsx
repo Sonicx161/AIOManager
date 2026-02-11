@@ -751,7 +751,7 @@ export const THEME_OPTIONS: ThemeOption[] = [
         id: 'trakt',
         label: 'Trakt',
         description: 'Scrobbler Red',
-        emoji: '✅',
+        emoji: '✔',
         category: 'community',
         palette: {
             background: '0 0% 8%', // Pure Dark/Black

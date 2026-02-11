@@ -1,5 +1,6 @@
 import { AddonDescriptor } from '@/types/addon'
 import axios, { AxiosInstance } from 'axios'
+import { resilientFetch } from '@/lib/api-resilience'
 
 // API endpoint - we'll test CORS first, may need to use a proxy
 const API_BASE = 'https://api.strem.io'
@@ -52,20 +53,18 @@ export class StremioClient {
     })
   }
 
-  /**
-   * Login with email and password
-   */
   async login(email: string, password: string): Promise<LoginResponse> {
     try {
-      const response = await this.client.post('/api/login', {
-        type: 'Auth',
-        email,
-        password,
+      const response = await resilientFetch(`${API_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'Auth', email, password })
       })
 
-      if (response.data?.error) {
-        // Carry forward the specific error message from Stremio (e.g., USER_NOT_FOUND)
-        const errData = response.data.error
+      const data = await response.json()
+
+      if (data?.error) {
+        const errData = data.error
         const message = typeof errData === 'string' ? errData : (errData.message || 'Login failed')
         const err = new Error(typeof message === 'string' ? message : JSON.stringify(message))
         const code = errData.code || errData.message
@@ -73,55 +72,38 @@ export class StremioClient {
         throw err
       }
 
-      if (!response.data?.result?.authKey) {
+      if (!data?.result?.authKey) {
         throw new Error('Invalid login response - no auth key')
       }
 
-      return response.data.result
+      return data.result
     } catch (error) {
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 401) {
-          throw new Error('Invalid email or password')
-        }
-        if (error.code === 'ERR_NETWORK') {
-          throw new Error('Network error - check your internet connection or CORS configuration')
-        }
-        const apiError = error.response?.data?.error
-        const finalMessage = typeof apiError === 'string' ? apiError : (typeof apiError === 'object' ? JSON.stringify(apiError) : (error.message || 'Login failed'))
-        throw new Error(finalMessage)
+      if (error instanceof Error) {
+        if (error.message.includes('401')) throw new Error('Invalid email or password')
+        if (error.message.includes('Failed to fetch')) throw new Error('Network error - check your internet connection')
       }
       throw error
     }
   }
 
-  /**
-   * Register a new Stremio account
-   */
   async register(email: string, password: string): Promise<LoginResponse> {
-    try {
-      const response = await this.client.post('/api/register', {
-        type: 'Auth',
-        email,
-        password,
-      })
+    const response = await resilientFetch(`${API_BASE}/api/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'Auth', email, password })
+    })
 
-      if (response.data?.error) {
-        throw new Error(response.data.error.message || 'Registration failed')
-      }
+    const data = await response.json()
 
-      if (!response.data?.result?.authKey) {
-        throw new Error('Invalid registration response - no auth key')
-      }
-
-      return response.data.result
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const apiError = error.response?.data?.error
-        const finalMessage = typeof apiError === 'string' ? apiError : (typeof apiError === 'object' ? JSON.stringify(apiError) : (error.message || 'Registration failed'))
-        throw new Error(finalMessage)
-      }
-      throw error
+    if (data?.error) {
+      throw new Error(data.error.message || 'Registration failed')
     }
+
+    if (!data?.result?.authKey) {
+      throw new Error('Invalid registration response - no auth key')
+    }
+
+    return data.result
   }
 
   /**
@@ -248,73 +230,48 @@ export class StremioClient {
       ? finalManifestUrl
       : `/api/meta-proxy?url=${encodeURIComponent(finalManifestUrl)}`
 
-    let lastError: unknown
-    for (let i = 0; i <= retries; i++) {
-      try {
-        if (i > 0) {
-          console.log(`[Manifest Fetch] Retrying (${i}/${retries}) for: ${manifestUrl}`)
-          // Small delay before retry
-          await new Promise((resolve) => setTimeout(resolve, 1000 * i))
-        } else {
-          console.log(
-            `[Manifest Fetch] Fetching ${shouldFetchDirectly ? 'directly' : 'via proxy'}: ${manifestUrl}`
-          )
-        }
+    try {
+      console.log(
+        `[Manifest Fetch] Fetching ${shouldFetchDirectly ? 'directly' : 'via proxy'}: ${manifestUrl}`
+      )
 
-        const response = await axios.get(fetchUrl, {
-          timeout: 15000,
-          headers: shouldFetchDirectly ? {} : { 'x-account-context': accountContext }
-        })
+      const response = await resilientFetch(fetchUrl, {
+        timeout: 15000,
+        headers: shouldFetchDirectly ? {} : { 'x-account-context': accountContext },
+        retries: retries
+      })
 
-        // allorigins might return the data as a string, so parse it if needed
-        let manifestData = response.data
-        if (typeof manifestData === 'string') {
-          try {
-            manifestData = JSON.parse(manifestData)
-          } catch {
-            console.error(
-              `[Manifest Fetch] Failed to parse JSON for ${manifestUrl}:`,
-              response.data
-            )
-            throw new Error('Invalid addon manifest - could not parse JSON')
-          }
-        }
-
-        if (!manifestData?.id || !manifestData?.name || !manifestData?.version) {
-          console.error(`[Manifest Fetch] Missing fields for ${manifestUrl}:`, manifestData)
-          throw new Error('Invalid addon manifest - missing required fields')
-        }
-
-        // Sanitize manifest to ensure Stremio compliance (Fixes "missing field types")
-        const sanitizedManifest = {
-          ...manifestData,
-          types: manifestData.types || [],
-          resources: manifestData.resources || []
-        }
-
-        return {
-          transportUrl,
-          manifest: sanitizedManifest,
-        }
-      } catch (error) {
-        lastError = error
-        console.warn(
-          `[Manifest Fetch] Attempt ${i + 1} failed for ${manifestUrl}:`,
-          error instanceof Error ? error.message : error
-        )
-
-        // If it's a 404, don't retry
-        if (axios.isAxiosError(error) && error.response?.status === 404) {
-          throw new Error('Addon manifest not found at this URL')
-        }
+      if (!response.ok) {
+        if (response.status === 404) throw new Error('Addon manifest not found at this URL')
+        throw new Error(`Addon server responded with ${response.status}`)
       }
-    }
 
-    // If we're here, all retries failed
-    if (axios.isAxiosError(lastError)) {
-      throw new Error(lastError.message || 'Failed to fetch addon manifest after retries')
+      // allorigins might return the data as a string, so parse it if needed
+      const manifestData = await response.json()
+
+      if (!manifestData?.id || !manifestData?.name || !manifestData?.version) {
+        console.error(`[Manifest Fetch] Missing fields for ${manifestUrl}:`, manifestData)
+        throw new Error('Invalid addon manifest - missing required fields')
+      }
+
+      // Sanitize manifest to ensure Stremio compliance (Fixes "missing field types")
+      const sanitizedManifest = {
+        ...manifestData,
+        types: manifestData.types || [],
+        resources: manifestData.resources || []
+      }
+
+      return {
+        transportUrl,
+        manifest: sanitizedManifest,
+      }
+    } catch (error) {
+      console.warn(
+        `[Manifest Fetch] Failed for ${manifestUrl}:`,
+        error instanceof Error ? error.message : error
+      )
+      throw error
     }
-    throw lastError
   }
 
 

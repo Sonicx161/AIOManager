@@ -45,6 +45,7 @@ import { CatalogEditorDialog } from './CatalogEditorDialog'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import { Switch } from '@/components/ui/switch'
+import { usePendingRemoval } from '@/hooks/useSyncManager'
 
 // --- URL Helpers ---
 const MANIFEST_SUFFIX_REGEX = /\/manifest(\.[^/?#]+)?$/i
@@ -126,6 +127,7 @@ interface AddonCardProps {
   onUpdate?: (accountId: string, transportUrl: string) => Promise<void>
   latestVersion?: string
   isOnline?: boolean
+  healthError?: string
   loading?: boolean
   loader?: boolean
   isSelectionMode?: boolean
@@ -143,6 +145,7 @@ export function AddonCard({
   onUpdate,
   latestVersion,
   isOnline,
+  healthError,
   loading,
   isSelectionMode,
   isSelected,
@@ -174,6 +177,7 @@ export function AddonCard({
   const [showCatalogEditor, setShowCatalogEditor] = useState(false)
   const [showUnprotectConfirmation, setShowUnprotectConfirmation] = useState(false)
   const [showMetadataDialog, setShowMetadataDialog] = useState(false)
+  const isPendingRemoval = usePendingRemoval(accountId, addon.transportUrl)
 
   useEffect(() => {
     initProfiles()
@@ -368,6 +372,40 @@ export function AddonCard({
     }
   }
 
+  const handleReplaceUrl = async (targetNewUrl: string) => {
+    try {
+      // 1. Find the saved addon if it exists in the library
+      const savedAddon = Object.values(library).find(
+        (s) => s.manifest.id === addon.manifest.id && s.installUrl === addon.transportUrl
+      )
+
+      // 2. Call the universal replacement action
+      await useAddonStore.getState().replaceTransportUrlUniversally(
+        savedAddon ? savedAddon.id : null,
+        addon.transportUrl,
+        targetNewUrl,
+        accountId
+      )
+
+      // 3. Refresh local account state to reflect changes
+      await useAccountStore.getState().syncAccount(accountId)
+
+      toast({
+        title: 'URL Replaced',
+        description: 'Addon transport URL updated successfully.'
+      })
+    } catch (err) {
+      console.error('Failed to replace URL', err)
+      const message = err instanceof Error ? err.message : 'Failed to replace URL'
+      toast({
+        variant: 'destructive',
+        title: 'Replacement Failed',
+        description: message
+      })
+      throw new Error(message)
+    }
+  }
+
   const candidateUrls = useMemo(() => buildCandidateUrls(addon), [addon])
 
   const handleConfigure = async () => {
@@ -450,7 +488,7 @@ export function AddonCard({
   return (
     <>
       <Card
-        className={`flex flex-col h-full transition-all duration-300 relative ${addon.flags?.enabled === false ? 'opacity-60 grayscale-[0.8] border-dashed' : ''
+        className={`flex flex-col h-full transition-all duration-300 relative ${addon.flags?.enabled === false || isPendingRemoval ? 'opacity-60 grayscale-[0.8] border-dashed' : ''
           } ${isSelectionMode && isSelected
             ? 'ring-2 ring-primary border-primary bg-primary/5'
             : isSelectionMode
@@ -487,7 +525,7 @@ export function AddonCard({
                 {isOnline !== undefined && (
                   <span
                     className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}
-                    title={isOnline ? 'Online' : 'Offline'}
+                    title={isOnline ? 'Online' : (healthError ? `Offline (${healthError})` : 'Offline')}
                   />
                 )}
                 {isCinemeta && (
@@ -510,6 +548,11 @@ export function AddonCard({
                     Protected
                   </span>
                 )}
+                {isPendingRemoval && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20 animate-pulse">
+                    Deleting...
+                  </span>
+                )}
               </CardDescription>
             </div>
           </div>
@@ -518,7 +561,23 @@ export function AddonCard({
             <div className="flex items-center gap-2 mr-2">
               <Switch
                 checked={addon.flags?.enabled !== false}
-                onCheckedChange={(checked) => useAccountStore.getState().toggleAddonEnabled(accountId, addon.transportUrl, checked, false, index)}
+                onCheckedChange={async (checked) => {
+                  useAccountStore.getState().toggleAddonEnabled(accountId, addon.transportUrl, checked, false, index)
+
+                  // Autopilot awareness: Check if this addon is part of an active rule
+                  const { useFailoverStore } = await import('@/store/failoverStore')
+                  const failoverStore = useFailoverStore.getState()
+                  const rule = failoverStore.rules.find((r: any) => r.accountId === accountId && r.isActive && r.priorityChain.some((url: string) => url === addon.transportUrl))
+
+                  if (rule) {
+                    await failoverStore.updateRule(rule.id, { isActive: false, isAutomatic: false })
+                    toast({
+                      title: "Autopilot Disabled",
+                      description: "Manual override detected. Autopilot has been set to standby for this chain.",
+                      variant: "default"
+                    })
+                  }
+                }}
                 className="data-[state=checked]:bg-green-500"
                 aria-label="Toggle Addon"
               />
@@ -605,6 +664,7 @@ export function AddonCard({
             <Pencil className="h-4 w-4 mr-2" />
             Customize
           </Button>
+
 
           {canUpdate && hasUpdate && (
             <Button
@@ -784,6 +844,7 @@ export function AddonCard({
         onOpenChange={setShowMetadataDialog}
         addon={addon}
         onSave={handleSaveMetadata}
+        onReplaceUrl={handleReplaceUrl}
       />
     </>
   )

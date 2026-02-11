@@ -42,7 +42,6 @@ class AutopilotManager {
         const rule = useFailoverStore.getState().rules.find(r => r.id === ruleId)
         if (!rule) return false
 
-        // @ts-ignore
         return rule.isActive && (rule.isAutomatic !== false)
     }
 }

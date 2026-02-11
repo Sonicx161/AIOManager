@@ -1,9 +1,8 @@
 import { create } from 'zustand'
 import localforage from 'localforage'
 import { useAccountStore } from '@/store/accountStore'
-import { useAuthStore } from '@/store/authStore'
 import axios from 'axios'
-import { decrypt, loadSessionKey } from '@/lib/crypto'
+import { decrypt, encrypt, loadSessionKey } from '@/lib/crypto'
 import { normalizeAddonUrl } from '@/lib/utils'
 
 const STORAGE_KEY = 'stremio-manager:failover-rules'
@@ -24,6 +23,8 @@ export interface FailoverRule {
 export interface WebhookConfig {
     url: string
     enabled: boolean
+    updatedAt?: number
+    isEncrypted?: boolean // Flag to indicate if URL is stored encrypted
 }
 
 interface FailoverStore {
@@ -32,6 +33,7 @@ interface FailoverStore {
     loading: boolean
     isMonitoring: boolean // Global automation switch
     isChecking: boolean // Re-entrancy guard
+    lastWorkerRun?: Date // In-memory heartbeat from server
 
     initialize: () => Promise<void>
     setWebhook: (url: string, enabled: boolean) => Promise<void>
@@ -44,8 +46,13 @@ interface FailoverStore {
     testRule: (ruleId: string) => Promise<{ primary: any, backup: any }>
     startAutomation: () => void
     stopAutomation: () => void
-    importRules: (rules: FailoverRule[], strategy?: 'merge' | 'mirror') => Promise<void>
+    importRules: (data: any, strategy?: 'merge' | 'mirror', isSilent?: boolean) => Promise<void>
+    importWebhook: (config: WebhookConfig, isSilent?: boolean) => Promise<void>
     syncRulesForAccount: (accountId: string) => Promise<void>
+    removeUrlFromRules: (accountId: string, url: string) => Promise<void>
+    replaceUrlInRules: (oldUrl: string, newUrl: string, accountId?: string) => Promise<void>
+    toggleAllRulesForAccount: (accountId: string, isActive: boolean) => Promise<void>
+    toggleAllRulesForAccounts: (isActive: boolean) => Promise<void>
     reset: () => Promise<void>
 }
 
@@ -65,7 +72,7 @@ const syncRuleToServer = async (rule: FailoverRule) => {
 
         const authKey = await decrypt(account.authKey, sessionKey)
         const baseUrl = serverUrl || ''
-        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')} /api` : '/api'
 
         const addonList = account.addons || []
 
@@ -77,7 +84,8 @@ const syncRuleToServer = async (rule: FailoverRule) => {
             activeUrl: rule.activeUrl,
             is_active: rule.isActive ? 1 : 0,
             is_automatic: rule.isAutomatic !== false ? 1 : 0,
-            addonList
+            addonList,
+            webhookUrl: useFailoverStore.getState().webhook.url
         })
         console.log(`[Autopilot] Rule ${rule.id} synced to server (Live Mode).`)
     } catch (err) {
@@ -103,10 +111,11 @@ const deleteRuleFromServer = async (ruleId: string) => {
 
 export const useFailoverStore = create<FailoverStore>((set, get) => ({
     rules: [],
-    webhook: { url: '', enabled: false },
+    webhook: { url: '', enabled: false, updatedAt: 0 },
     loading: false,
     isMonitoring: false,
     isChecking: false,
+    lastWorkerRun: undefined,
 
     testRule: async (ruleId) => {
         const rule = get().rules.find(r => r.id === ruleId)
@@ -115,11 +124,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const chain = rule.priorityChain || []
         if (chain.length === 0) throw new Error("Chain is empty")
 
-        // Test the first two in the chain as "Primary" and "Backup" for the UI
         const primaryUrl = chain[0]
         const backupUrl = chain[1]
 
-        // Import dynamically
         const { checkAddonFunctionality } = await import('@/lib/addon-health')
 
         const primaryHealth = await checkAddonFunctionality(primaryUrl)
@@ -146,14 +153,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 }))
             }
 
-            // Fetch server's current activeUrl for each rule and merge
-            // This ensures frontend reflects what the server-side Autopilot has set
             try {
                 const { useSyncStore } = await import('@/store/syncStore')
                 const { auth, serverUrl } = useSyncStore.getState()
 
-                if (auth.isAuthenticated && rules.length > 0) {
-                    const accountIds = [...new Set(rules.map(r => r.accountId))]
+                if (auth.isAuthenticated) {
+                    // Fetch rules for all accounts to ensure local state is complete
+                    const accountIds = useAccountStore.getState().accounts.map(a => a.id)
                     const baseUrl = serverUrl || ''
                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
@@ -161,34 +167,54 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         try {
                             const resp = await axios.get(`${apiPath}/autopilot/state/${accountId}`)
                             const serverStates = resp.data?.states || []
+                            const serverHeartbeat = resp.data?.lastWorkerRun
 
-                            // Merge server's activeUrl into local rules
+                            if (serverHeartbeat) {
+                                set({ lastWorkerRun: new Date(serverHeartbeat) })
+                            }
+
                             for (const serverRule of serverStates) {
-                                const localRule = rules.find(r => r.id === serverRule.id)
-                                if (localRule && serverRule.activeUrl) {
-                                    console.log(`[Failover] Syncing activeUrl from server: ${localRule.id} -> ${serverRule.activeUrl.substring(0, 40)}...`)
-                                    localRule.activeUrl = serverRule.activeUrl
-                                    localRule.isActive = serverRule.isActive !== undefined ? serverRule.isActive : localRule.isActive
-                                    localRule.isAutomatic = serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : localRule.isAutomatic
+                                // Check if we already have this rule in local 'rules'
+                                const existsIndex = rules.findIndex(r => r.id === serverRule.id)
 
+                                const processedRule: FailoverRule = {
+                                    id: serverRule.id,
+                                    accountId: accountId,
+                                    priorityChain: serverRule.priorityChain || [],
+                                    isActive: serverRule.isActive !== undefined ? serverRule.isActive : true,
+                                    isAutomatic: serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : true,
+                                    activeUrl: serverRule.activeUrl,
+                                    lastCheck: serverRule.lastCheck ? new Date(serverRule.lastCheck) : undefined,
+                                    stabilization: serverRule.stabilization || {},
+                                    status: 'idle'
+                                }
+
+                                if (processedRule.activeUrl) {
+                                    const normServerActive = normalizeAddonUrl(processedRule.activeUrl).toLowerCase()
+                                    const normPrimary = normalizeAddonUrl(processedRule.priorityChain?.[0] || '').toLowerCase()
+                                    processedRule.status = normServerActive === normPrimary ? 'monitoring' : 'failed-over'
+                                }
+
+                                if (existsIndex !== -1) {
+                                    rules[existsIndex] = { ...rules[existsIndex], ...processedRule }
+                                } else {
+                                    rules.push(processedRule)
+                                }
+
+                                // Also sync addon enabled/disabled states based on activeUrl
+                                // CRITICAL BUGFIX: Only enforce if rule is ACTIVE
+                                if (processedRule.isActive && serverRule.activeUrl && processedRule.priorityChain.length > 0) {
                                     const normServerActive = normalizeAddonUrl(serverRule.activeUrl).toLowerCase()
-                                    const normPrimary = normalizeAddonUrl(localRule.priorityChain?.[0] || '').toLowerCase()
-                                    localRule.status = normServerActive === normPrimary ? 'monitoring' : 'failed-over'
-
-                                    // CRITICAL: Also update account addon enabled states to match
-                                    // This ensures frontend addons reflect server Autopilot state
-                                    const chain = localRule.priorityChain || []
-                                    for (const url of chain) {
+                                    for (const url of processedRule.priorityChain) {
                                         const normUrl = normalizeAddonUrl(url).toLowerCase()
                                         const shouldBeEnabled = normUrl === normServerActive
-                                        // Use silent toggle to avoid triggering redundant syncs
                                         await useAccountStore.getState().toggleAddonEnabled(
-                                            localRule.accountId,
+                                            accountId,
                                             url,
                                             shouldBeEnabled,
-                                            true, // silent
-                                            undefined, // targetIndex
-                                            true // isAutopilot
+                                            true,
+                                            undefined,
+                                            true
                                         )
                                     }
                                 }
@@ -204,8 +230,6 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
             set({ rules })
 
-            // CLEANUP: Prune rules for accounts that no longer exist
-            // This prevents "Account not found" errors if a backup was restored or accounts deleted
             const currentAccountIds = new Set(useAccountStore.getState().accounts.map(a => a.id))
             const validRules = rules.filter(r => currentAccountIds.has(r.accountId))
 
@@ -215,29 +239,27 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 await localforage.setItem(STORAGE_KEY, validRules)
             }
 
-            // Pull latest state from Stremio so the UI reflects the server's autopilot decisions
-            // We use false for forceRefresh to avoid a redundant deep sync/push back to Stremio
-            const isLocked = useAuthStore.getState().isLocked
-            if (validRules.length > 0 && !isLocked) {
-                const affectedAccountIds = [...new Set(validRules.map(r => r.accountId))]
-                for (const accountId of affectedAccountIds) {
+            if (storedWebhook) {
+                let webhook = storedWebhook
+                // Decrypt if necessary
+                if (webhook.isEncrypted && webhook.url) {
                     try {
-                        // Double check existence to be safe
-                        if (useAccountStore.getState().accounts.some(a => a.id === accountId)) {
-                            await useAccountStore.getState().syncAccount(accountId, false)
+                        const sessionKey = await loadSessionKey()
+                        if (sessionKey) {
+                            webhook = {
+                                ...webhook,
+                                url: await decrypt(webhook.url, sessionKey),
+                                isEncrypted: false
+                            }
+                            console.log('[Failover] Webhook URL decrypted during initialization.')
+                        } else {
+                            console.warn('[Failover] Webhook is encrypted but no session key found. Link may appear broken until unlock.')
                         }
                     } catch (e) {
-                        console.warn(`[Failover] Local UI sync failed for ${accountId}:`, e)
+                        console.error('[Failover] Failed to decrypt webhook during initialize:', e)
                     }
                 }
-            } else if (isLocked) {
-                console.log('[Failover] Skipping startup UI sync (Vault is locked). Refresh will trigger after unlock.')
-            }
-
-
-
-            if (storedWebhook) {
-                set({ webhook: storedWebhook })
+                set({ webhook })
             }
         } catch (error) {
             console.error('Failed to load failover rules:', error)
@@ -265,6 +287,11 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 try {
                     const resp = await axios.get(`${apiPath}/autopilot/state/${accountId}`)
                     const serverStates = resp.data?.states || []
+                    const serverHeartbeat = resp.data?.lastWorkerRun
+
+                    if (serverHeartbeat) {
+                        set({ lastWorkerRun: new Date(serverHeartbeat) })
+                    }
 
                     for (const serverRule of serverStates) {
                         const ruleIndex = updatedRules.findIndex(r => r.id === serverRule.id)
@@ -284,30 +311,34 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                         activeUrl: serverRule.activeUrl,
                                         isActive: serverRule.isActive !== undefined ? serverRule.isActive : localRule.isActive,
                                         isAutomatic: serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : localRule.isAutomatic,
+                                        stabilization: serverRule.stabilization || {},
+                                        lastCheck: serverRule.lastCheck ? new Date(serverRule.lastCheck) : localRule.lastCheck,
                                         status: normServerActive === normPrimary ? 'monitoring' : 'failed-over'
                                     }
                                     hasUpdates = true
 
-                                    // Update local account addons to reflect the enabled state
-                                    const chain = localRule.priorityChain || []
-                                    for (const url of chain) {
-                                        const normUrl = normalizeAddonUrl(url).toLowerCase()
-                                        const shouldBeEnabled = normUrl === normServerActive
-                                        await useAccountStore.getState().toggleAddonEnabled(
-                                            localRule.accountId,
-                                            url,
-                                            shouldBeEnabled,
-                                            true, // silent
-                                            undefined, // targetIndex
-                                            true // isAutopilot
-                                        )
+                                    // Sync addon states ONLY if rule is active
+                                    if (updatedRules[ruleIndex].isActive) {
+                                        const chain = localRule.priorityChain || []
+                                        for (const url of chain) {
+                                            const normUrl = normalizeAddonUrl(url).toLowerCase()
+                                            const shouldBeEnabled = normUrl === normServerActive
+                                            await useAccountStore.getState().toggleAddonEnabled(
+                                                localRule.accountId,
+                                                url,
+                                                shouldBeEnabled,
+                                                true,
+                                                undefined,
+                                                true
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 } catch (e) {
-                    // Fail silently for background sync
+                    console.warn('[Failover] pullServerState item processing failed:', e)
                 }
             }
 
@@ -320,13 +351,29 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         }
     },
 
-
     setWebhook: async (url, enabled) => {
-        const config = { url, enabled }
-        set({ webhook: config })
-        await localforage.setItem(STORAGE_KEY + ':webhook', config)
+        console.log(`[Failover] setWebhook called - Link length: ${url?.length || 0}, Enabled: ${enabled}`)
 
-        // Immediate sync
+        const timestamp = Date.now()
+        let configToStore: WebhookConfig = { url, enabled, updatedAt: timestamp }
+
+        // Always keep plain URL in memory for the UI
+        set({ webhook: { url, enabled, updatedAt: timestamp } })
+
+        try {
+            const sessionKey = await loadSessionKey()
+            if (sessionKey && url) {
+                const encryptedUrl = await encrypt(url, sessionKey)
+                configToStore = { ...configToStore, url: encryptedUrl, isEncrypted: true }
+                console.log('[Failover] Webhook URL encrypted for storage.')
+            }
+        } catch (e) {
+            console.error('[Failover] Encryption failed during setWebhook:', e)
+        }
+
+        await localforage.setItem(STORAGE_KEY + ':webhook', configToStore)
+        console.log(`[Failover] Webhook persisted to localforage at ${new Date(timestamp).toISOString()}`)
+
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
@@ -346,11 +393,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const rules = [...get().rules, newRule]
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
-
-        // Sync to server for Autopilot
         await syncRuleToServer(newRule)
-
-        // Immediate sync
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
@@ -359,11 +402,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const rules = get().rules.filter(r => r.id !== ruleId)
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
-
-        // Remote deletion from Autopilot
         await deleteRuleFromServer(ruleId)
-
-        // Immediate sync
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
@@ -372,12 +411,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const rules = get().rules.map(r => r.id === ruleId ? { ...r, ...updates } : r)
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
-
-        // Update server Autopilot
         const rule = rules.find(r => r.id === ruleId)
         if (rule) await syncRuleToServer(rule)
-
-        // Immediate sync
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
@@ -388,12 +423,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         )
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
-
-        // Update server Autopilot
         const rule = rules.find(r => r.id === ruleId)
         if (rule) await syncRuleToServer(rule)
-
-        // Immediate sync
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
@@ -401,29 +432,10 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
     checkRules: async () => {
         if (get().isChecking) return
         set({ isChecking: true })
-
         try {
-            const { rules } = get()
-            const activeRules = rules.filter(r => r.isActive)
-            const accounts = useAccountStore.getState().accounts
-
-            for (const rule of activeRules) {
-                const account = accounts.find(a => a.id === rule.accountId)
-                if (!account) continue
-
-                const chain = rule.priorityChain || []
-                if (chain.length === 0) continue
-
-                // Phase 1 Clean Slate: Just check health and find which one *should* be active
-                // (Logic will be implemented in Phase 2)
-                console.log(`[Autopilot] Rule ${rule.id} checking health for chain of ${chain.length}...`)
-
-                set(state => ({
-                    rules: state.rules.map(r => r.id === rule.id ? { ...r, lastCheck: new Date() } : r)
-                }))
-            }
-
-            await localforage.setItem(STORAGE_KEY, get().rules)
+            // ZERO-WRITE: We keep lastCheck in memory for the UI, but we don't 
+            // force a localforage write unless a real change happens elsewhere.
+            // This prevents "600,000 updates" issues on idle machines.
         } finally {
             set({ isChecking: false })
         }
@@ -431,23 +443,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
     startAutomation: () => {
         if (automationInterval) return
-
-        // 1. Initial Immediate Pull & Check (No delay)
         get().pullServerState()
         get().checkRules()
-
         console.log('[Failover] Starting automation engine...')
         set({ isMonitoring: true })
-
-        // 2. Scheduled Background Updates
         automationInterval = setInterval(() => {
-            // Idle Optimization: Skip autopilot checks if tab is hidden
             if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
-
-            // 1. Pull latest state from server (Single Source of Truth)
             get().pullServerState()
-
-            // 2. Perform local health checks (as fallback/double-check)
             get().checkRules()
         }, 1 * 60 * 1000)
     },
@@ -461,33 +463,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         console.log('[Failover] Automation stopped.')
     },
 
-    reset: async () => {
-        get().stopAutomation()
-        set({ rules: [], webhook: { url: '', enabled: false }, isMonitoring: false })
-        if (automationInterval) {
-            clearInterval(automationInterval)
-            automationInterval = null
-        }
-        await Promise.all([
-            localforage.removeItem(STORAGE_KEY),
-            localforage.removeItem(STORAGE_KEY + ':webhook')
-        ])
-        // Immediate sync after reset
-        const { useSyncStore } = await import('@/store/syncStore')
-        useSyncStore.getState().syncToRemote(true).catch(console.error)
-    },
-
-    importRules: async (data: any, strategy: 'merge' | 'mirror' = 'merge') => {
+    importRules: async (data: any, strategy: 'merge' | 'mirror' = 'merge', isSilent: boolean = false) => {
         if (!data) return
-
-        // Scavenge rules and webhook
         let scavengedRules: FailoverRule[] = []
         let scavengedWebhook: WebhookConfig | null = null
-
         if (Array.isArray(data)) {
             scavengedRules = data
         } else if (typeof data === 'object') {
-            // 1. Check for standard keys
             const failoverData = data.failover || {}
             if (Array.isArray(failoverData)) {
                 scavengedRules = failoverData
@@ -495,8 +477,6 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 scavengedRules = failoverData.rules
                 if (failoverData.webhook) scavengedWebhook = failoverData.webhook
             }
-
-            // 2. Check for ADB Dump keys
             if (data['stremio-manager:failover-rules']) {
                 scavengedRules = data['stremio-manager:failover-rules']
             }
@@ -504,38 +484,38 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 scavengedWebhook = data['stremio-manager:failover-rules:webhook']
             }
         }
-
-        // Convert object-map rules to array if found (ADB dump style)
         if (scavengedRules && !Array.isArray(scavengedRules) && typeof scavengedRules === 'object') {
             scavengedRules = Object.values(scavengedRules)
         }
-
         if (!scavengedRules || !Array.isArray(scavengedRules)) {
-            console.warn('[FailoverStore] No valid failover rules found in import object.')
             scavengedRules = []
         }
-
-        // Apply webhook if discovered
         if (scavengedWebhook) {
-            get().setWebhook(scavengedWebhook.url, scavengedWebhook.enabled)
+            const currentWebhook = get().webhook
+            const incomingTs = scavengedWebhook.updatedAt || 0
+            const currentTs = currentWebhook.updatedAt || 0
+            if (incomingTs >= currentTs) {
+                set({ webhook: scavengedWebhook })
+                await localforage.setItem(STORAGE_KEY + ':webhook', scavengedWebhook)
+            }
         }
-
         const rulesToImport = scavengedRules
         const currentRules = [...get().rules]
-        let updatedCount = 0
-        let addedCount = 0
-        if (strategy === 'mirror') {
-            // 1. Identification
-            const finalRules: FailoverRule[] = []
 
-            // 2. Process Imports (Add/Update)
+        if (strategy === 'mirror') {
+            // Anti-Wipe Guard: If remote has 0 rules but we have local rules, preserve local state.
+            // This prevents cloud pull from wiping rules when the server has stale/empty data.
+            if (rulesToImport.length === 0 && currentRules.length > 0) {
+                console.warn('[Failover] Anti-Wipe Triggered: Remote has 0 rules but local has ' + currentRules.length + '. Preserving local rules.')
+                return
+            }
+            const finalRules: FailoverRule[] = []
             rulesToImport.forEach(newRule => {
                 const migratedRule: FailoverRule = {
                     ...newRule,
                     priorityChain: Array.isArray(newRule.priorityChain) ? newRule.priorityChain : [],
                     status: newRule.status || 'idle'
                 }
-
                 const existing = currentRules.find(r => r.id === migratedRule.id)
                 if (existing) {
                     finalRules.push({
@@ -552,37 +532,33 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                     })
                 }
             })
-
             set({ rules: finalRules })
             await localforage.setItem(STORAGE_KEY, finalRules)
-            console.log(`[Failover] Mirror sync complete. ${finalRules.length} rules active.`)
-            // Immediate sync after mirror import
-            const { useSyncStore } = await import('@/store/syncStore')
-            useSyncStore.getState().syncToRemote(true).catch(console.error)
+            if (!isSilent) {
+                const { useSyncStore } = await import('@/store/syncStore')
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            }
             return
         }
 
-        // --- MERGE STRATEGY (Legacy) ---
+        let updatedCount = 0
+        let addedCount = 0
         rulesToImport.forEach(newRule => {
             const migratedRule: FailoverRule = {
                 ...newRule,
                 priorityChain: Array.isArray(newRule.priorityChain) ? newRule.priorityChain : [],
                 status: newRule.status || 'idle'
             }
-
             const index = currentRules.findIndex(r => r.id === migratedRule.id)
             if (index !== -1) {
-                // Update existing
                 currentRules[index] = {
                     ...currentRules[index],
                     ...migratedRule,
-                    // Ensure dates are parsed
                     lastCheck: migratedRule.lastCheck ? new Date(migratedRule.lastCheck) : currentRules[index].lastCheck,
                     lastFailover: migratedRule.lastFailover ? new Date(migratedRule.lastFailover) : currentRules[index].lastFailover
                 }
                 updatedCount++
             } else {
-                // Add new
                 currentRules.push({
                     ...migratedRule,
                     lastCheck: migratedRule.lastCheck ? new Date(migratedRule.lastCheck) : undefined,
@@ -591,26 +567,204 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 addedCount++
             }
         })
+        if ((updatedCount > 0 || addedCount > 0) && !isSilent) {
+            set({ rules: currentRules })
+            await localforage.setItem(STORAGE_KEY, currentRules)
+            const { useSyncStore } = await import('@/store/syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        }
+    },
 
-        if (updatedCount === 0 && addedCount === 0) return
+    importWebhook: async (incoming, isSilent = false) => {
+        if (!incoming) return
+        const current = get().webhook
+        const incomingTs = incoming.updatedAt || 0
+        const currentTs = current.updatedAt || 0
 
-        set({ rules: currentRules })
-        await localforage.setItem(STORAGE_KEY, currentRules)
+        console.log(`[Failover] importWebhook - Incoming TS: ${incomingTs}, Local TS: ${currentTs}, Incoming URL Length: ${incoming.url?.length || 0}`)
 
-        // Immediate sync after merge import
-        const { useSyncStore } = await import('@/store/syncStore')
-        useSyncStore.getState().syncToRemote(true).catch(console.error)
+        if (incomingTs >= currentTs) {
+            let processedWebhook = incoming
 
-        console.log(`[Failover] Import sync: ${addedCount} added, ${updatedCount} updated.`)
+            // Decrypt if incoming is encrypted
+            if (incoming.isEncrypted && incoming.url) {
+                try {
+                    const sessionKey = await loadSessionKey()
+                    if (sessionKey) {
+                        processedWebhook = {
+                            ...incoming,
+                            url: await decrypt(incoming.url, sessionKey),
+                            isEncrypted: false
+                        }
+                        console.log('[Failover] Incoming webhook decrypted during import.')
+                    } else {
+                        console.warn('[Failover] Incoming webhook is encrypted but no session key found.')
+                    }
+                } catch (e) {
+                    console.error('[Failover] Failed to decrypt incoming webhook:', e)
+                }
+            }
+
+            console.log(`[Failover] Updating webhook (Incoming: ${incomingTs}, Local: ${currentTs})`)
+            set({ webhook: processedWebhook })
+
+            // Store encrypted version
+            let configToStore = processedWebhook
+            try {
+                const sessionKey = await loadSessionKey()
+                if (sessionKey && processedWebhook.url && !processedWebhook.isEncrypted) {
+                    const encryptedUrl = await encrypt(processedWebhook.url, sessionKey)
+                    configToStore = { ...processedWebhook, url: encryptedUrl, isEncrypted: true }
+                }
+            } catch (e) {
+                console.error('[Failover] Re-encryption failed during importWebhook:', e)
+            }
+
+            await localforage.setItem(STORAGE_KEY + ':webhook', configToStore)
+
+            if (!isSilent) {
+                const { useSyncStore } = await import('@/store/syncStore')
+                useSyncStore.getState().syncToRemote(true).catch(console.error)
+            }
+        } else {
+            console.log(`[Failover] Skipping stale webhook update (Incoming: ${incomingTs}, Local: ${currentTs})`)
+        }
     },
 
     syncRulesForAccount: async (accountId: string) => {
         const rules = get().rules.filter(r => r.accountId === accountId)
         if (rules.length === 0) return
-
-        console.log(`[Failover] Syncing ${rules.length} rules for account ${accountId} to update addon list on server.`)
         for (const rule of rules) {
             await syncRuleToServer(rule)
         }
-    }
+    },
+
+    removeUrlFromRules: async (accountId: string, url: string) => {
+        const normUrl = normalizeAddonUrl(url).toLowerCase()
+        let hasChanges = false
+        const updatedRules = get().rules.map(rule => {
+            if (rule.accountId !== accountId) return rule
+            const isMatching = rule.priorityChain.some(u => normalizeAddonUrl(u).toLowerCase() === normUrl)
+            if (!isMatching) return rule
+            hasChanges = true
+            const newChain = rule.priorityChain.filter(u => normalizeAddonUrl(u).toLowerCase() !== normUrl)
+            let newActiveUrl = rule.activeUrl
+            if (normalizeAddonUrl(rule.activeUrl || '').toLowerCase() === normUrl) {
+                newActiveUrl = newChain[0] || ''
+            }
+            return {
+                ...rule,
+                priorityChain: newChain,
+                activeUrl: newActiveUrl,
+                status: (newActiveUrl && newActiveUrl === newChain[0]) ? 'monitoring' : 'failed-over'
+            } as FailoverRule
+        })
+        if (hasChanges) {
+            set({ rules: updatedRules })
+            await localforage.setItem(STORAGE_KEY, updatedRules)
+            const finalRules = updatedRules.filter(r => r.priorityChain.length >= 1)
+            if (finalRules.length !== updatedRules.length) {
+                const deletedRules = updatedRules.filter(r => r.priorityChain.length < 1)
+                for (const dr of deletedRules) {
+                    await deleteRuleFromServer(dr.id)
+                }
+                set({ rules: finalRules })
+                await localforage.setItem(STORAGE_KEY, finalRules)
+            }
+            for (const rule of get().rules) {
+                if (rule.accountId === accountId) {
+                    await syncRuleToServer(rule)
+                }
+            }
+            const { useSyncStore } = await import('@/store/syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        }
+    },
+
+    replaceUrlInRules: async (oldUrl: string, newUrl: string, accountId?: string) => {
+        const normOld = normalizeAddonUrl(oldUrl).toLowerCase()
+        let hasChanges = false
+        const updatedRules = get().rules.map(rule => {
+            // If accountId is provided, only process rules for that account
+            if (accountId && rule.accountId !== accountId) return rule
+
+            const isMatching = rule.priorityChain.some(u => normalizeAddonUrl(u).toLowerCase() === normOld)
+            if (!isMatching) return rule
+            hasChanges = true
+            const newChain = rule.priorityChain.map(u =>
+                normalizeAddonUrl(u).toLowerCase() === normOld ? newUrl : u
+            )
+            let newActiveUrl = rule.activeUrl
+            if (normalizeAddonUrl(rule.activeUrl || '').toLowerCase() === normOld) {
+                newActiveUrl = newUrl
+            }
+            return {
+                ...rule,
+                priorityChain: newChain,
+                activeUrl: newActiveUrl,
+                status: (newActiveUrl && newActiveUrl === newChain[0]) ? 'monitoring' : 'failed-over'
+            } as FailoverRule
+        })
+        if (hasChanges) {
+            set({ rules: updatedRules })
+            await localforage.setItem(STORAGE_KEY, updatedRules)
+            for (const rule of updatedRules) {
+                // Only sync the rules we actually touched (or match our target)
+                if (accountId && rule.accountId !== accountId) continue
+
+                if (rule.priorityChain.includes(newUrl)) {
+                    await syncRuleToServer(rule)
+                }
+            }
+            const { useSyncStore } = await import('@/store/syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        }
+    },
+
+    toggleAllRulesForAccount: async (accountId, isActive) => {
+        const rules = get().rules.map(r =>
+            r.accountId === accountId ? { ...r, isActive } : r
+        )
+        set({ rules })
+        await localforage.setItem(STORAGE_KEY, rules)
+
+        // Sync each modified rule
+        for (const rule of rules) {
+            if (rule.accountId === accountId) {
+                await syncRuleToServer(rule)
+            }
+        }
+
+        const { useSyncStore } = await import('@/store/syncStore')
+        useSyncStore.getState().syncToRemote(true).catch(console.error)
+    },
+
+    toggleAllRulesForAccounts: async (isActive) => {
+        const rules = get().rules.map(r => ({ ...r, isActive }))
+        set({ rules })
+        await localforage.setItem(STORAGE_KEY, rules)
+
+        // Sync all rules
+        for (const rule of rules) {
+            await syncRuleToServer(rule)
+        }
+
+        const { useSyncStore } = await import('@/store/syncStore')
+        useSyncStore.getState().syncToRemote(true).catch(console.error)
+    },
+
+    reset: async () => {
+        get().stopAutomation()
+        set({ rules: [], webhook: { url: '', enabled: false, updatedAt: 0 }, isMonitoring: false })
+        if (automationInterval) {
+            clearInterval(automationInterval)
+            automationInterval = null
+        }
+        await Promise.all([
+            localforage.removeItem(STORAGE_KEY),
+            localforage.removeItem(STORAGE_KEY + ':webhook')
+        ])
+        const { useSyncStore } = await import('@/store/syncStore')
+        useSyncStore.getState().syncToRemote(true).catch(console.error)
+    },
 }))

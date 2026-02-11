@@ -1,7 +1,7 @@
 import { ActivityItem } from '@/store/activityStore'
 import { format, isToday, isYesterday, formatDistanceToNow } from 'date-fns'
-import { PlayCircle, Trash2, Tv, Film, Activity } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { PlayCircle, Trash2, Tv, Film, Activity, CheckSquare } from 'lucide-react'
+import { useMemo, useState, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,7 @@ interface ActivityFeedProps {
     onToggleSelect?: (id: string | string[]) => void
     onDelete?: (id: string | string[], removeFromLibrary: boolean) => void
     selectedItems?: Set<string>
+    isBulkMode?: boolean
 }
 
 export function ActivityFeed({
@@ -23,6 +24,7 @@ export function ActivityFeed({
     onToggleSelect,
     onDelete,
     selectedItems = new Set(),
+    isBulkMode = false,
 }: ActivityFeedProps) {
     const [activeTab, setActiveTab] = useState("all")
 
@@ -82,9 +84,9 @@ export function ActivityFeed({
         timestamp: Date
     }
 
-    const isCluster = (entry: ActivityItem | HistoryCluster): entry is HistoryCluster => {
+    const isCluster = useCallback((entry: ActivityItem | HistoryCluster): entry is HistoryCluster => {
         return (entry as any).isCluster === true
-    }
+    }, [])
 
     const groupedHistory = useMemo(() => {
         const sorted = [...filteredHistory].sort((a, b) =>
@@ -128,7 +130,7 @@ export function ActivityFeed({
         })
 
         return dateGroups
-    }, [filteredHistory])
+    }, [filteredHistory, isCluster])
 
     const formatDateHeader = (dateStr: string) => {
         if (dateStr === 'Unknown Date') return dateStr
@@ -197,13 +199,25 @@ export function ActivityFeed({
                                             className={`group relative aspect-[2/3] rounded-xl overflow-hidden cursor-pointer border-2 transition-all duration-200 ${isSelected ? 'border-primary ring-2 ring-primary/20 scale-[0.98]' : 'border-transparent hover:border-primary/50'
                                                 }`}
                                             onClick={() => {
-                                                if (cluster) {
-                                                    onToggleSelect?.(cluster.items.map(i => i.id))
+                                                if (isBulkMode || selectedItems.size > 0) {
+                                                    if (cluster) {
+                                                        onToggleSelect?.(cluster.items.map(i => i.id))
+                                                    } else {
+                                                        onToggleSelect?.(item.id)
+                                                    }
                                                 } else {
-                                                    onToggleSelect?.(item.id)
+                                                    // Open in Stremio Desktop App
+                                                    const type = item.type === 'anime' ? 'series' : item.type
+                                                    window.location.href = `stremio:///detail/${type}/${item.itemId}`
                                                 }
                                             }}
                                         >
+                                            {/* Selection Overlay */}
+                                            {(isBulkMode || selectedItems.size > 0) && (
+                                                <div className={`absolute top-2 left-2 z-30 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-primary border-primary' : 'bg-black/40 border-white/40'}`}>
+                                                    {isSelected && <CheckSquare className="w-3.5 h-3.5 text-white" />}
+                                                </div>
+                                            )}
                                             <img
                                                 src={item.poster}
                                                 alt={item.name}
@@ -213,6 +227,13 @@ export function ActivityFeed({
 
                                             {/* Gradient overlay for readability */}
                                             <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
+                                            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20 pointer-events-none">
+                                                {(!isBulkMode && selectedItems.size === 0) && (
+                                                    <div className="bg-primary/20 backdrop-blur-md rounded-full p-3 border border-primary/50">
+                                                        <PlayCircle className="w-8 h-8 text-white drop-shadow-lg" />
+                                                    </div>
+                                                )}
+                                            </div>
 
                                             {/* Bottom Layout: Left stack + Right user/time */}
                                             <div className="absolute bottom-0 left-0 right-0 p-2.5 flex items-end justify-between gap-2 z-10">
@@ -285,13 +306,25 @@ export function ActivityFeed({
                                             isSelected ? 'bg-primary/5 border-primary shadow-md ring-2 ring-primary/20' : cn('shadow-sm', getColorClasses(item.accountColorIndex))
                                         )}
                                         onClick={() => {
-                                            if (cluster) {
-                                                onToggleSelect?.(cluster.items.map(i => i.id))
+                                            if (isBulkMode || selectedItems.size > 0) {
+                                                if (cluster) {
+                                                    onToggleSelect?.(cluster.items.map(i => i.id))
+                                                } else {
+                                                    onToggleSelect?.(item.id)
+                                                }
                                             } else {
-                                                onToggleSelect?.(item.id)
+                                                // Open in Stremio Desktop App
+                                                const type = item.type === 'anime' ? 'series' : item.type
+                                                window.location.href = `stremio:///detail/${type}/${item.itemId}`
                                             }
                                         }}
                                     >
+                                        {/* Selection Checkbox (List) */}
+                                        {(isBulkMode || selectedItems.size > 0) && (
+                                            <div className={`shrink-0 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-primary border-primary' : 'bg-muted-foreground/20 border-border'}`}>
+                                                {isSelected && <CheckSquare className="w-3.5 h-3.5 text-white" />}
+                                            </div>
+                                        )}
                                         <div className="relative w-24 h-36 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-muted shadow-sm group-hover:shadow-md transition-all">
                                             <img src={item.poster} className="w-full h-full object-cover" loading="lazy" />
                                             {item.progress > 0 && (

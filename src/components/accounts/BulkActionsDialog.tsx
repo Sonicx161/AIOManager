@@ -41,6 +41,7 @@ type BulkAction =
   | 'clone-account'
   | 'protect-all'
   | 'unprotect-all'
+  | 'reinstall-all'
 
 export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose }: BulkActionsDialogProps) {
   const {
@@ -217,6 +218,9 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           }
           bulkResult = { success: selectedAccounts.length, failed: 0, errors: [], details: [] }
           break
+        case 'reinstall-all':
+          bulkResult = await bulkReinstallAddons(['*'], accountsData)
+          break
       }
 
       setResult(bulkResult!)
@@ -326,6 +330,12 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                     <div className="flex items-center gap-2">
                       <RefreshCw className="h-4 w-4 text-orange-500" />
                       <span>Update Existing Addons</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="reinstall-all">
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="h-4 w-4 text-emerald-500" />
+                      <span>Reinstall All Addons</span>
                     </div>
                   </SelectItem>
                   <SelectItem value="remove-addons">
@@ -692,15 +702,21 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
               </div>
             )}
 
-            {/* Protect / Unprotect All */}
-            {(action === 'protect-all' || action === 'unprotect-all') && (
+            {/* Reinstall All / Protect / Unprotect All */}
+            {(action === 'protect-all' || action === 'unprotect-all' || action === 'reinstall-all') && (
               <div className="space-y-4">
                 <div className="p-4 rounded-lg bg-muted/30 border border-dashed text-center">
                   <p className="text-sm font-medium">
-                    This will {action === 'protect-all' ? 'enable' : 'disable'} protection for ALL addons on the {selectedAccounts.length} selected accounts.
+                    {action === 'reinstall-all'
+                      ? `This will REINSTALL ALL addons on the ${selectedAccounts.length} selected accounts.`
+                      : `This will ${action === 'protect-all' ? 'enable' : 'disable'} protection for ALL addons on the ${selectedAccounts.length} selected accounts.`
+                    }
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Protected addons cannot be removed or modified unless protection is disabled.
+                    {action === 'reinstall-all'
+                      ? 'Re-installs every addon from its source URL. Useful for clearing glitches or forcing updates.'
+                      : 'Protected addons cannot be removed or modified unless protection is disabled.'
+                    }
                   </p>
                 </div>
               </div>

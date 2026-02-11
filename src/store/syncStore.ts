@@ -8,6 +8,7 @@ import { useAuthStore } from './authStore'
 import { v4 as uuidv4 } from 'uuid'
 import { toast } from '@/hooks/use-toast'
 import { deriveSyncToken } from '@/lib/crypto'
+import { resilientFetch } from '@/lib/api-resilience'
 
 interface SyncState {
     auth: {
@@ -19,6 +20,7 @@ interface SyncState {
     serverUrl: string
     lastSyncedAt: string | null
     isSyncing: boolean
+    lastActionTimestamp: number
     // Actions
     register: (password: string, name?: string) => Promise<void>
     login: (id: string, password: string, isSilent?: boolean) => Promise<void>
@@ -44,6 +46,7 @@ export const useSyncStore = create<SyncState>()(
             serverUrl: '',
             lastSyncedAt: null,
             isSyncing: false,
+            lastActionTimestamp: 0,
 
             setServerUrl: (url) => set({ serverUrl: url }),
 
@@ -92,7 +95,7 @@ export const useSyncStore = create<SyncState>()(
                         syncedAt: new Date().toISOString()
                     }
 
-                    const res = await fetch(`${apiPath}/sync/${newId}`, {
+                    const res = await resilientFetch(`${apiPath}/sync/${newId}`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -131,7 +134,7 @@ export const useSyncStore = create<SyncState>()(
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
 
                 try {
-                    const res = await fetch(`${apiPath}/sync/${id}`, {
+                    const res = await resilientFetch(`${apiPath}/sync/${id}`, {
                         headers: { 'x-sync-password': await deriveSyncToken(password) }
                     })
 
@@ -288,10 +291,10 @@ export const useSyncStore = create<SyncState>()(
                             setTimeout(() => get().syncToRemote(true), 2000)
                         } else if (isEqual) {
                             console.log("[Sync] Addons synchronized. Passive import.")
-                            await useAddonStore.getState().importLibrary(data, true)
+                            await useAddonStore.getState().importLibrary(data, true, true)
                         } else {
                             // Mirror
-                            await useAddonStore.getState().importLibrary(data, false)
+                            await useAddonStore.getState().importLibrary(data, false, true)
                         }
                         await useAddonStore.getState().initialize()
                     }
@@ -301,13 +304,13 @@ export const useSyncStore = create<SyncState>()(
                     if (data.failover) {
                         if (Array.isArray(data.failover)) {
                             // Legacy format: just rules
-                            await useFailoverStore.getState().importRules(data.failover, isRemoteNewer ? 'mirror' : 'merge')
+                            await useFailoverStore.getState().importRules(data.failover, isRemoteNewer ? 'mirror' : 'merge', true)
                         } else if (typeof data.failover === 'object') {
                             // New format: { rules, webhook }
                             const strategy = isRemoteNewer ? 'mirror' : 'merge'
-                            if (data.failover.rules) await useFailoverStore.getState().importRules(data.failover.rules, strategy)
+                            if (data.failover.rules) await useFailoverStore.getState().importRules(data.failover.rules, strategy, true)
                             if (data.failover.webhook) {
-                                useFailoverStore.getState().setWebhook(data.failover.webhook.url, data.failover.webhook.enabled)
+                                await useFailoverStore.getState().importWebhook(data.failover.webhook, true)
                             }
                         }
                     }
@@ -357,19 +360,19 @@ export const useSyncStore = create<SyncState>()(
                 const { isLocked } = useAuthStore.getState()
                 if (!auth.isAuthenticated || isSyncing || isLocked) return
 
+                set({ isSyncing: true })
+
                 // Server Protection: Debounce check
                 const now = Date.now()
-                const lastSync = (get() as any)._lastSyncTimestamp || 0
+                const lastSync = get().lastActionTimestamp
                 const COOLDOWN = 1000 // 1 second minimum between syncs
 
                 if (isAuto && now - lastSync < COOLDOWN) {
-                    // If it's an auto-sync and we just synced, skip
+                    set({ isSyncing: false })
                     return
                 }
 
-                (set as any)({ _lastSyncTimestamp: now })
-
-                set({ isSyncing: true })
+                set({ lastActionTimestamp: now })
                 const baseUrl = serverUrl || DEFAULT_SERVER
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
 
@@ -422,7 +425,7 @@ export const useSyncStore = create<SyncState>()(
 
                     const encryptedState = AES.encrypt(stringifiedState, auth.password).toString()
 
-                    const res = await fetch(`${apiPath}/sync/${auth.id}`, {
+                    const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -479,7 +482,7 @@ export const useSyncStore = create<SyncState>()(
                 const baseUrl = serverUrl || DEFAULT_SERVER
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
 
-                const res = await fetch(`${apiPath}/sync/${auth.id}`, {
+                const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
                     method: 'DELETE',
                     headers: { 'x-sync-password': await deriveSyncToken(auth.password) }
                 })

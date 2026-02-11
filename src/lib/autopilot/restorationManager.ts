@@ -1,3 +1,5 @@
+import { normalizeAddonUrl } from '@/lib/utils';
+
 interface RestorationState {
     status: 'idle' | 'restoring' | 'failed' | 'healthy';
     failureCount: number;
@@ -13,8 +15,9 @@ class RestorationManager {
     private readonly CIRCUIT_COOLDOWN = 30 * 60 * 1000; // 30 mins
 
     private getState(addonUrl: string): RestorationState {
-        if (!this.states.has(addonUrl)) {
-            this.states.set(addonUrl, {
+        const normalized = normalizeAddonUrl(addonUrl).toLowerCase();
+        if (!this.states.has(normalized)) {
+            this.states.set(normalized, {
                 status: 'idle',
                 failureCount: 0,
                 lastFailureTime: 0,
@@ -22,7 +25,7 @@ class RestorationManager {
                 restorationAttempts: 0
             });
         }
-        return this.states.get(addonUrl)!;
+        return this.states.get(normalized)!;
     }
 
     canAttemptRestore(addonUrl: string, autoRestoreEnabled: boolean): boolean {

@@ -39,6 +39,7 @@ const URL_PATTERNS = [
 
 /**
  * Robustly identifies an addon even if the manifest is missing or partial.
+ * Non-destructive: Preserves all existing fields (catalogs, behaviorHints, etc.) while filling gaps.
  */
 export function identifyAddon(transportUrl: string, manifest?: Partial<AddonDescriptor['manifest']>): AddonDescriptor['manifest'] {
     const url = transportUrl.toLowerCase()
@@ -46,55 +47,39 @@ export function identifyAddon(transportUrl: string, manifest?: Partial<AddonDesc
     const name = manifest?.name || ''
     const isUnknown = !name || name === 'Unknown Addon'
 
+    // Helper to ensure core fields exist while preserving everything else
+    const wrap = (meta: Partial<AddonDescriptor['manifest']>) => ({
+        ...manifest,
+        id: manifest?.id || meta.id || 'unknown',
+        name: isUnknown ? meta.name : (manifest?.name || meta.name),
+        logo: manifest?.logo || meta.logo,
+        description: manifest?.description || meta.description,
+        version: manifest?.version || '0.0.0',
+        types: manifest?.types || []
+    } as AddonDescriptor['manifest'])
+
     // 1. Check ID-based official matches
     for (const [key, meta] of Object.entries(OFFICIAL_ADDONS)) {
         if (id.includes(key) || (name && name.toLowerCase() === meta.name.toLowerCase())) {
-            return {
-                ...manifest,
-                id: manifest?.id || key,
-                name: isUnknown ? meta.name : (manifest?.name || meta.name),
-                logo: manifest?.logo || meta.logo,
-                description: manifest?.description || meta.description,
-                version: manifest?.version || '0.0.0',
-                types: manifest?.types || []
-            } as AddonDescriptor['manifest']
+            return wrap({ ...meta, id: key })
         }
     }
 
     // 2. Check URL-based official matches
     for (const { pattern, key } of URL_PATTERNS) {
         if (url.includes(pattern)) {
-            const meta = OFFICIAL_ADDONS[key]
-            return {
-                ...manifest,
-                id: manifest?.id || key,
-                name: isUnknown ? meta.name : (manifest?.name || meta.name),
-                logo: manifest?.logo || meta.logo,
-                description: manifest?.description || meta.description,
-                version: manifest?.version || '0.0.0',
-                types: manifest?.types || []
-            } as AddonDescriptor['manifest']
+            return wrap({ ...OFFICIAL_ADDONS[key], id: key })
         }
     }
 
     // 3. Fallback: hostname-based identification
-    if (!name || name === 'Unknown Addon') {
+    if (isUnknown) {
         if (!transportUrl || !transportUrl.startsWith('http')) {
-            return {
-                id: manifest?.id || 'unknown',
-                name: manifest?.name || 'Unknown Addon',
-                version: manifest?.version || '0.0.0',
-                description: manifest?.description || '',
-                types: manifest?.types || [],
-                logo: manifest?.logo,
-                background: manifest?.background,
-                idPrefixes: manifest?.idPrefixes
-            } as AddonDescriptor['manifest']
+            return wrap({})
         }
 
         try {
             const hostname = new URL(transportUrl).hostname
-            // Clean up common prefixes/suffixes
             const readableName = hostname
                 .replace(/^www\./, '')
                 .replace(/\.[^.]+$/, '')
@@ -102,37 +87,12 @@ export function identifyAddon(transportUrl: string, manifest?: Partial<AddonDesc
                 .map(word => word.charAt(0).toUpperCase() + word.slice(1))
                 .join(' ')
 
-            return {
-                ...manifest,
-                id: manifest?.id || 'unknown',
-                name: readableName || 'Unknown Addon',
-                version: manifest?.version || '0.0.0',
-                description: manifest?.description || `Addon from ${hostname}`,
-                types: manifest?.types || []
-            } as AddonDescriptor['manifest']
+            return wrap({ name: readableName, description: `Addon from ${hostname}` })
         } catch {
-            return {
-                id: manifest?.id || 'unknown',
-                name: manifest?.name || 'Unknown Addon',
-                version: manifest?.version || '0.0.0',
-                description: manifest?.description || '',
-                types: manifest?.types || [],
-                logo: manifest?.logo,
-                background: manifest?.background,
-                idPrefixes: manifest?.idPrefixes
-            } as AddonDescriptor['manifest']
+            return wrap({})
         }
     }
 
-    // 4. Return existing manifest if it seems valid enough
-    return {
-        id: manifest?.id || 'unknown',
-        name: manifest?.name || 'Unknown Addon',
-        version: manifest?.version || '0.0.0',
-        description: manifest?.description || '',
-        types: manifest?.types || [],
-        logo: manifest?.logo,
-        background: manifest?.background,
-        idPrefixes: manifest?.idPrefixes
-    } as AddonDescriptor['manifest']
+    // 4. Return existing manifest with core defaults ensured
+    return wrap({})
 }

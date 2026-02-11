@@ -1,7 +1,8 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useTheme } from '@/contexts/ThemeContext'
 import { useSyncStore } from '@/store/syncStore'
-import { LogOut, LayoutDashboard, Package, Activity, BarChart3, Settings, HelpCircle } from 'lucide-react'
+import { useFailoverStore } from '@/store/failoverStore'
+import { LogOut, LayoutDashboard, Package, Activity, BarChart3, Settings, HelpCircle, Zap, ZapOff } from 'lucide-react'
 import { SyncStatus } from '@/components/SyncStatus'
 
 export function Header() {
@@ -9,6 +10,21 @@ export function Header() {
   const { theme } = useTheme()
   const isInverted = theme === 'light' || theme === 'hoth'
   const { auth, logout } = useSyncStore()
+  const { rules, lastWorkerRun } = useFailoverStore()
+
+  const activeRulesCount = rules.filter(r => r.isActive).length
+  const hasRules = rules.length > 0
+  const isServerLive = lastWorkerRun && (Date.now() - new Date(lastWorkerRun).getTime()) < 120000
+
+  // Refined Status
+  const autopilotStatus = !isServerLive ? 'Offline' :
+    !hasRules ? 'Standby' :
+      activeRulesCount > 0 ? 'Live' : 'Paused'
+
+  const statusColor = autopilotStatus === 'Live' ? 'text-amber-500 border-amber-500/20 bg-amber-500/10' :
+    autopilotStatus === 'Paused' ? 'text-amber-500/60 border-amber-500/10 bg-amber-500/5' :
+      autopilotStatus === 'Standby' ? 'text-blue-500/60 border-blue-500/10 bg-blue-500/5' :
+        'text-muted-foreground opacity-60 border-muted-foreground/10 bg-muted/30'
 
   return (
     <header className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-40">
@@ -30,8 +46,37 @@ export function Header() {
             </div>
           </Link>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            {/* Autopilot Status Badge */}
+            <div
+              className={`flex items-center gap-2 px-3 py-1 rounded-full border backdrop-blur-md shadow-sm transition-all cursor-help ${statusColor}`}
+              title={
+                !isServerLive ? 'Autopilot Server is offline or heartbeat lost' :
+                  !hasRules ? 'Autopilot Live: No rules configured' :
+                    activeRulesCount > 0 ? `Autopilot Monitoring: ${activeRulesCount} active rules` :
+                      'Autopilot Paused: All rules are disabled'
+              }
+            >
+              <div className="relative">
+                {autopilotStatus === 'Live' ? (
+                  <Zap className="h-3.5 w-3.5 fill-amber-500 animate-pulse" />
+                ) : (
+                  <ZapOff className="h-3.5 w-3.5" />
+                )}
+                {autopilotStatus === 'Live' && (
+                  <span className="absolute -top-0.5 -right-0.5 flex h-1.5 w-1.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-amber-500"></span>
+                  </span>
+                )}
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-widest hidden md:inline whitespace-nowrap">
+                Autopilot: {autopilotStatus}
+              </span>
+            </div>
+
             <SyncStatus />
+
             {/* User Identity & Logout */}
             {auth.isAuthenticated && (
               <div className="flex items-center gap-3 border px-3 py-1.5 rounded-full bg-background/50 backdrop-blur">

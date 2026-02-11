@@ -57,10 +57,11 @@ function App() {
   useEffect(() => {
     if (!isLocked && auth.isAuthenticated && isInitialized) {
       console.log('[App] Vault unlocked. Triggering fresh sync.')
-      // 1. Sync Stremio -> App
-      useAccountStore.getState().syncAllAccounts()
-      // 2. Sync Cloud -> App (Pull latest changes)
-      useSyncStore.getState().syncFromRemote().catch(console.error)
+      // 1. Sync Cloud -> App (Pull latest changes)
+      useSyncStore.getState().syncFromRemote().then(() => {
+        // 2. Sync Stremio -> App (Once local state is updated from cloud)
+        useAccountStore.getState().syncAllAccounts()
+      }).catch(console.error)
     }
   }, [isLocked, auth.isAuthenticated, isInitialized])
 

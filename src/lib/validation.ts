@@ -30,8 +30,9 @@ export const addonManifestSchema = z.object({
       configurable: z.boolean().optional(),
       configurationRequired: z.boolean().optional(),
     })
+    .passthrough()
     .optional(),
-})
+}).passthrough()
 
 export const addonDescriptorSchema = z.object({
   transportUrl: z.string().url(),
@@ -43,8 +44,9 @@ export const addonDescriptorSchema = z.object({
       protected: z.boolean().optional(),
       enabled: z.boolean().optional(),
     })
+    .passthrough()
     .optional(),
-})
+}).passthrough()
 
 // V2 Optimized Addon Reference
 export const addonReferenceSchema = z.object({
@@ -55,8 +57,8 @@ export const addonReferenceSchema = z.object({
     official: z.boolean().optional(),
     protected: z.boolean().optional(),
     enabled: z.boolean().optional(),
-  }).optional()
-})
+  }).passthrough().optional()
+}).passthrough()
 
 export const savedAddonSchema = z.object({
   id: z.string(),
@@ -82,8 +84,9 @@ export const savedAddonSchema = z.object({
       isOnline: z.boolean(),
       lastChecked: z.number(),
     })
+    .passthrough()
     .optional(),
-})
+}).passthrough()
 
 export const profileSchema = z.object({
   id: z.string(),
@@ -142,7 +145,7 @@ export const accountExportSchema = z.object({
   debridConfig: z.any().optional(),
   debridConfigType: z.any().optional(),
   debridGroupId: z.any().optional(),
-})
+}).passthrough()
 
 export const loginCredentialsSchema = z.object({
   email: z.string().email('Invalid email address'),

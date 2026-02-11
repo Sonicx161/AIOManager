@@ -8,6 +8,7 @@ import {
 import { identifyAddon } from '@/lib/addon-identifier'
 import { checkAllAddonsHealth } from '@/lib/addon-health'
 import { mergeAddons, removeAddons } from '@/lib/addon-merger'
+import { normalizeAddonUrl } from '@/lib/utils'
 import {
   findSavedAddonByUrl,
   loadAccountAddonStates,
@@ -143,6 +144,7 @@ interface AddonStore {
     targetAccountIds: Array<{ id: string; authKey: string }>,
     overwrite?: boolean
   ) => Promise<BulkResult>
+  bulkReinstallAllOnAccount: (accountId: string, accountAuthKey: string) => Promise<BulkResult>
 
   // === Sync ===
   syncAccountState: (accountId: string, accountAuthKey: string) => Promise<void>
@@ -153,7 +155,7 @@ interface AddonStore {
 
   // === Import/Export ===
   exportLibrary: () => string
-  importLibrary: (json: string, merge: boolean) => Promise<void>
+  importLibrary: (json: string, merge: boolean, isSilent?: boolean) => Promise<void>
 
   // === Health Checking ===
   checkAllHealth: () => Promise<void>
@@ -164,6 +166,7 @@ interface AddonStore {
   reset: () => Promise<void>
   deleteAccountState: (accountId: string) => Promise<void>
   repairLibrary: () => Promise<void>
+  replaceTransportUrlUniversally: (savedAddonId: string | null, oldUrl: string, newUrl: string, accountId?: string) => Promise<void>
 }
 
 export const useAddonStore = create<AddonStore>((set, get) => ({
@@ -264,6 +267,22 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         const identified = identifyAddon(installUrl, manifest || undefined)
         addonName = identified.name
         if (!manifest) manifest = identified
+      }
+
+      // Prevent duplicates: Check if an addon with the same NORMALIZED URL already exists in the library
+      const normUrl = normalizeAddonUrl(installUrl).toLowerCase()
+      const existingAddon = Object.values(get().library).find(
+        (addon) => normalizeAddonUrl(addon.installUrl).toLowerCase() === normUrl
+      )
+
+      if (existingAddon) {
+        // If profileId matches, we update instead of creating a new one
+        if (existingAddon.profileId === profileId) {
+          return existingAddon.id
+        }
+        // If profileId is DIFFERENT, we allow it (User might want same addon in multiple profiles)
+        // but usually, we should still warn or handle it. 
+        // For now, we proceed to create a new one to allow profile-based segmentation.
       }
 
       const savedAddon: SavedAddon = {
@@ -796,6 +815,17 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
           const { addons: updatedAddons, protectedAddons } = removeAddons(currentAddons, addonIds, allowProtected)
 
+          // CRITICAL: Clean up Autopilot rules for removed addons
+          try {
+            const { useFailoverStore } = await import('@/store/failoverStore')
+            const failoverStore = useFailoverStore.getState()
+            for (const url of addonIds) {
+              await failoverStore.removeUrlFromRules(accountId, url)
+            }
+          } catch (e) {
+            console.warn('[AddonStore] Failover cleanup failed during removal:', e)
+          }
+
           await updateAddons(authKey, updatedAddons, accountId)
 
           result.success++
@@ -861,6 +891,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       for (const { id: accountId, authKey: accountAuthKey } of accountIds) {
         try {
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
+          const currentAddons = await getAddons(authKey, accountId)
 
           // Reinstall each addon in place to preserve ordering
           const updateResults: Array<{
@@ -873,7 +904,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             reason: 'already-exists' | 'protected' | 'fetch-failed'
           }> = []
 
-          for (const addonId of addonIds) {
+          const idsToReinstall = (addonIds.length === 1 && addonIds[0] === '*')
+            ? currentAddons.map(a => a.transportUrl) // Use URLs as IDs for reinstallation lookup
+            : addonIds
+
+          for (const addonId of idsToReinstall) {
             try {
               const reinstallResult = await reinstallAddonApi(authKey, addonId, accountId)
               if (reinstallResult.updatedAddon) {
@@ -1248,7 +1283,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     )
   },
 
-  importLibrary: async (json, merge) => {
+  importLibrary: async (json, merge, isSilent = false) => {
     set({ loading: true, error: null })
     console.log("%c[AddonStore] Importing library with SECURE HARDENING", "color: green; font-weight: bold;")
     try {
@@ -1362,6 +1397,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       set({ library: currentLibrary })
       await saveAddonLibrary(currentLibrary)
+
+      if (!isSilent) {
+        const { useSyncStore } = await import('./syncStore')
+        useSyncStore.getState().syncToRemote(true).catch(console.error)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to import library'
       set({ error: message })
@@ -1488,5 +1528,70 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       localforage.removeItem('stremio-manager:addon-library'),
       localforage.removeItem('stremio-manager:account-addons'),
     ])
+  },
+  replaceTransportUrlUniversally: async (savedAddonId, oldUrl, newUrl, accountId) => {
+    set({ loading: true, error: null })
+    try {
+      const normOld = normalizeAddonUrl(oldUrl).toLowerCase()
+      const normNew = normalizeAddonUrl(newUrl).toLowerCase()
+
+      if (normOld === normNew) return
+
+      // 1. Fetch fresh manifest for the NEW URL to enable "Silent Reinstall"
+      let freshManifest = null
+      try {
+        const { fetchAddonManifest } = await import('@/api/addons')
+        const { identifyAddon } = await import('@/lib/addon-identifier')
+        const descriptor = await fetchAddonManifest(newUrl, 'System-Check')
+        freshManifest = identifyAddon(newUrl, descriptor.manifest)
+      } catch (err) {
+        console.warn('[AddonStore] Could not fetch fresh manifest for silent reinstall, falling back to URL swap only.', err)
+      }
+
+      // 2. Update Library if applicable
+      // ONLY update library if we are NOT scoping to a specific account (or if we explicitly want to update the template)
+      if (savedAddonId) {
+        const savedAddon = get().library[savedAddonId]
+        if (savedAddon) {
+          const updatedSavedAddon = {
+            ...savedAddon,
+            installUrl: newUrl,
+            manifest: freshManifest || savedAddon.manifest,
+            updatedAt: new Date(),
+          }
+
+          const library = { ...get().library, [savedAddonId]: updatedSavedAddon }
+          set({ library })
+          await saveAddonLibrary(library)
+          console.log(`[AddonStore] Library URL updated for "${savedAddon.name}"`)
+        }
+      }
+
+      // 3. Update accounts via AccountStore (with optional scoping)
+      const { useAccountStore } = await import('@/store/accountStore')
+      await useAccountStore.getState().replaceTransportUrl(oldUrl, newUrl, accountId, freshManifest)
+
+      // 4. Update Autopilot rules via FailoverStore (with optional scoping)
+      const { useFailoverStore } = await import('@/store/failoverStore')
+      await useFailoverStore.getState().replaceUrlInRules(oldUrl, newUrl, accountId)
+
+      // 5. Sync to cloud
+      const { useSyncStore } = await import('./syncStore')
+      useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+      console.log(`[AddonStore] Scoped URL replacement complete: ${oldUrl.substring(0, 30)}... -> ${newUrl.substring(0, 30)}... (Account: ${accountId || 'Global'})`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to replace URL universally'
+      set({ error: message })
+      console.error('[AddonStore] Universal replacement failed:', error)
+      throw error
+    } finally {
+      set({ loading: false })
+    }
+  },
+
+  bulkReinstallAllOnAccount: async (accountId, accountAuthKey) => {
+    // Convenience wrapper for single account "Reinstall All"
+    return get().bulkReinstallAddons(['*'], [{ id: accountId, authKey: accountAuthKey }])
   },
 }))

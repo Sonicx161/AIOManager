@@ -31,6 +31,7 @@ export interface SavedAddon {
   autoRestore?: boolean
   health?: {
     isOnline: boolean
+    error?: string
     lastChecked: number // timestamp
   }
 }

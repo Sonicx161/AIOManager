@@ -1,16 +1,21 @@
 
 import { SavedAddon } from '@/types/saved-addon'
 
+export interface HealthStatus {
+  isOnline: boolean
+  error?: string
+}
+
 /**
  * Check if an addon URL is accessible
  * @param addonUrl The addon install URL
- * @returns true if online (200 response), false otherwise
+ * @returns HealthStatus object
  */
-export async function checkAddonHealth(addonUrl: string): Promise<boolean> {
+export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> {
   let domain = addonUrl;
-  try { domain = new URL(addonUrl).origin } catch (e) { }
+  try { domain = new URL(addonUrl).origin } catch (e) { console.warn('[AddonHealth] Invalid URL for origin extraction:', addonUrl) }
 
-  const performCheck = async (target: string, timeoutMs: number) => {
+  const performCheck = async (target: string, timeoutMs: number): Promise<{ ok: boolean, error?: string }> => {
     try {
       const controller = new AbortController()
       const id = setTimeout(() => controller.abort(), timeoutMs)
@@ -24,7 +29,7 @@ export async function checkAddonHealth(addonUrl: string): Promise<boolean> {
 
       if (response.ok || response.status === 405) {
         clearTimeout(id)
-        return true
+        return { ok: true }
       }
 
       // Priority 2: GET
@@ -35,25 +40,30 @@ export async function checkAddonHealth(addonUrl: string): Promise<boolean> {
       })
 
       clearTimeout(id)
-      return response2.ok
+      if (response2.ok) return { ok: true }
+      return { ok: false, error: `HTTP ${response2.status}: ${response2.statusText}` }
     } catch (error) {
-      return false
+      if (error instanceof Error && error.name === 'AbortError') {
+        return { ok: false, error: 'Request Timeout' }
+      }
+      return { ok: false, error: error instanceof Error ? error.message : 'Unknown Network Error' }
     }
   }
 
   // 1. Silent Domain-Only Check (Anti-Flood)
-  if (await performCheck(domain, 15000)) {
-    return true
+  const domainCheck = await performCheck(domain, 10000)
+  if (domainCheck.ok) {
+    return { isOnline: true }
   }
 
   // 2. Definitive Manifest Check (Fallback)
-  // Ensures we don't have false positives if the domain root is blocked.
   const manifestUrl = addonUrl.endsWith('/manifest.json') ? addonUrl : `${addonUrl}/manifest.json`
-  if (await performCheck(manifestUrl, 15000)) {
-    return true
+  const manifestCheck = await performCheck(manifestUrl, 10000)
+  if (manifestCheck.ok) {
+    return { isOnline: true }
   }
 
-  // 3. Final Proxy Fallback (AllOrigins) - Last resort
+  // 3. Final Proxy Fallback - Last resort
   try {
     const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(domain)}`
     const controller = new AbortController()
@@ -66,9 +76,10 @@ export async function checkAddonHealth(addonUrl: string): Promise<boolean> {
     })
 
     clearTimeout(id)
-    return response.ok
+    if (response.ok) return { isOnline: true }
+    return { isOnline: false, error: manifestCheck.error || 'Connection Failed' }
   } catch (err) {
-    return false
+    return { isOnline: false, error: manifestCheck.error || 'Connection Failed' }
   }
 }
 
@@ -76,12 +87,13 @@ export async function checkAddonHealth(addonUrl: string): Promise<boolean> {
  * Update a saved addon with health status
  */
 export async function updateAddonHealth(addon: SavedAddon): Promise<SavedAddon> {
-  const isOnline = await checkAddonHealth(addon.installUrl)
+  const status = await checkAddonHealth(addon.installUrl)
 
   return {
     ...addon,
     health: {
-      isOnline,
+      isOnline: status.isOnline,
+      error: status.error,
       lastChecked: Date.now(),
     },
   }
@@ -100,7 +112,7 @@ export async function checkAllAddonsHealth(
   const CONCURRENT_LIMIT = 5
   const results: SavedAddon[] = [...addons]
   const domainHealthCache: Record<string, boolean> = {}
-  const PENDING_CHECKS: Record<string, Promise<boolean>> = {}
+  const PENDING_CHECKS: Record<string, Promise<HealthStatus>> = {}
 
   for (let i = 0; i < addons.length; i += CONCURRENT_LIMIT) {
     const batch = addons.slice(i, i + CONCURRENT_LIMIT)
@@ -115,30 +127,30 @@ export async function checkAllAddonsHealth(
         origin = addon.installUrl
       }
 
-      let isOnline: boolean
+      let status: HealthStatus
       if (domainHealthCache[origin] === true) {
-        isOnline = true
+        status = { isOnline: true }
       } else {
         // Use shared promise for in-flight checks to the same origin
         if (!PENDING_CHECKS[origin]) {
-          PENDING_CHECKS[origin] = checkAddonHealth(addon.installUrl).then(status => {
-            if (status) {
+          PENDING_CHECKS[origin] = checkAddonHealth(addon.installUrl).then(s => {
+            if (s.isOnline) {
               domainHealthCache[origin] = true
             }
             // Temporarily keep it in the cache to collapse other simultaneous requests
             setTimeout(() => delete PENDING_CHECKS[origin], 2000)
-            return status
+            return s
           })
         }
 
         const sharedStatus = await PENDING_CHECKS[origin]
-        if (sharedStatus) {
-          isOnline = true
+        if (sharedStatus.isOnline) {
+          status = sharedStatus
         } else {
           // If the shared/first check failed, don't assume everyone on this domain is dead.
           // This specific addon gets to try its own URL as a fallback.
-          isOnline = await checkAddonHealth(addon.installUrl)
-          if (isOnline) {
+          status = await checkAddonHealth(addon.installUrl)
+          if (status.isOnline) {
             domainHealthCache[origin] = true
           }
         }
@@ -147,7 +159,8 @@ export async function checkAllAddonsHealth(
       results[globalIndex] = {
         ...addon,
         health: {
-          isOnline,
+          isOnline: status.isOnline,
+          error: status.error,
           lastChecked: Date.now(),
         },
       }

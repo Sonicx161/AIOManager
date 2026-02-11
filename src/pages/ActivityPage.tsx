@@ -6,7 +6,7 @@ import { useActivityStore, ActivityItem } from '@/store/activityStore'
 import { useAccountStore } from '@/store/accountStore'
 
 import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity } from 'lucide-react'
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 import {
@@ -24,8 +24,21 @@ export function ActivityPage() {
     const { fetchActivity, deleteItems, loading, initialize, history, lastUpdated } = useActivityStore()
 
     const [searchTerm, setSearchTerm] = useState('')
+    const searchInputRef = useRef<HTMLInputElement>(null)
+
     const [userFilter, setUserFilter] = useState('all')
-    const [timeFilter, setTimeFilter] = useState('all') // '24h', '7d', '30d', 'all'
+    const [timeFilter, setTimeFilter] = useState(() => {
+        if (typeof window !== 'undefined') {
+            return localStorage.getItem('activity-time-filter') || 'all'
+        }
+        return 'all'
+    })
+    const [customStartDate, setCustomStartDate] = useState<string>(() => {
+        if (typeof window !== 'undefined') {
+            return localStorage.getItem('activity-since-date') || ''
+        }
+        return ''
+    })
     const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
         if (typeof window !== 'undefined') {
             const saved = localStorage.getItem('activity-view-mode')
@@ -36,6 +49,7 @@ export function ActivityPage() {
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
     const [showDeleteDialog, setShowDeleteDialog] = useState(false)
     const [removeFromLibrary, setRemoveFromLibrary] = useState(false)
+    const [isBulkMode, setIsBulkMode] = useState(false)
 
     useEffect(() => {
         initialize().then(() => {
@@ -91,6 +105,10 @@ export function ActivityPage() {
             if (timeFilter === '24h' && now - itemTime > oneDay) return false
             if (timeFilter === '7d' && now - itemTime > sevenDays) return false
             if (timeFilter === '30d' && now - itemTime > thirtyDays) return false
+            if (timeFilter === 'since' && customStartDate) {
+                const sinceTime = new Date(customStartDate).getTime()
+                if (itemTime < sinceTime) return false
+            }
 
             // Search filter
             if (searchTerm.trim()) {
@@ -99,7 +117,7 @@ export function ActivityPage() {
             }
             return true
         })
-    }, [history, userFilter, searchTerm, timeFilter])
+    }, [history, userFilter, searchTerm, timeFilter, customStartDate])
 
     // Session stats comparison
     const sessionComparison = useMemo(() => {
@@ -156,6 +174,7 @@ export function ActivityPage() {
 
     const handleDeselectAll = () => {
         setSelectedItems(new Set())
+        setIsBulkMode(false)
     }
 
     const handleDeleteSelected = async () => {
@@ -176,7 +195,7 @@ export function ActivityPage() {
         })
     }
 
-    const isSelecting = selectedItems.size > 0
+    const isSelecting = selectedItems.size > 0 || isBulkMode
 
     return (
         <div className="space-y-6">
@@ -210,6 +229,25 @@ export function ActivityPage() {
                         )}
                     </div>
                 )}
+                {/* Actions Toolbar (Mobile) */}
+                <div className="flex md:hidden gap-2 w-full mt-2">
+                    <Button
+                        variant={isSelecting ? "secondary" : "outline"}
+                        size="sm"
+                        className="flex-1"
+                        onClick={() => {
+                            if (isBulkMode || selectedItems.size > 0) handleDeselectAll()
+                            else setIsBulkMode(true)
+                        }}
+                    >
+                        <CheckSquare className="mr-2 h-4 w-4" />
+                        {isSelecting ? 'Cancel' : 'Select'}
+                    </Button>
+                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="flex-1">
+                        <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                        Refresh
+                    </Button>
+                </div>
             </div>
 
             {/* Controls Row */}
@@ -219,10 +257,12 @@ export function ActivityPage() {
                     <div className="relative flex-1">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                         <Input
+                            ref={searchInputRef}
                             placeholder="Search by title..."
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             className="pl-9"
+                            data-search-focus
                         />
                     </div>
 
@@ -242,7 +282,10 @@ export function ActivityPage() {
                     </Select>
 
                     {/* Time Filter */}
-                    <Select value={timeFilter} onValueChange={setTimeFilter}>
+                    <Select value={timeFilter} onValueChange={(val) => {
+                        setTimeFilter(val)
+                        localStorage.setItem('activity-time-filter', val)
+                    }}>
                         <SelectTrigger className="w-full sm:w-[150px]">
                             <SelectValue placeholder="All Time" />
                         </SelectTrigger>
@@ -251,8 +294,22 @@ export function ActivityPage() {
                             <SelectItem value="24h">Last 24 Hours</SelectItem>
                             <SelectItem value="7d">Last 7 Days</SelectItem>
                             <SelectItem value="30d">Last 30 Days</SelectItem>
+                            <SelectItem value="since">Since…</SelectItem>
                         </SelectContent>
                     </Select>
+
+                    {/* Since Date Picker (inline, only visible when "Since" is selected) */}
+                    {timeFilter === 'since' && (
+                        <Input
+                            type="date"
+                            value={customStartDate}
+                            onChange={(e) => {
+                                setCustomStartDate(e.target.value)
+                                localStorage.setItem('activity-since-date', e.target.value)
+                            }}
+                            className="w-full sm:w-[170px]"
+                        />
+                    )}
                 </div>
 
                 {/* Actions */}
@@ -274,7 +331,20 @@ export function ActivityPage() {
                         </>
                     )}
 
-                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="whitespace-nowrap ml-auto xl:ml-0">
+                    <Button
+                        variant={isSelecting ? "secondary" : "outline"}
+                        size="sm"
+                        onClick={() => {
+                            if (isBulkMode || selectedItems.size > 0) handleDeselectAll()
+                            else setIsBulkMode(true)
+                        }}
+                        className="hidden md:flex whitespace-nowrap"
+                    >
+                        <CheckSquare className="mr-2 h-4 w-4" />
+                        {isSelecting ? 'Cancel' : 'Select'}
+                    </Button>
+
+                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="whitespace-nowrap hidden md:flex">
                         <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                         Refresh
                     </Button>
@@ -305,7 +375,12 @@ export function ActivityPage() {
                 history={filteredHistory}
                 viewMode={viewMode}
                 selectedItems={selectedItems}
-                onToggleSelect={handleToggleSelect}
+                isBulkMode={isBulkMode}
+                onToggleSelect={(id) => {
+                    handleToggleSelect(id)
+                    // If we manually select something, ensure we're in bulk mode for the UI
+                    setIsBulkMode(true)
+                }}
                 onDelete={(id, removeRemote) => {
                     const ids = Array.isArray(id) ? id : [id]
                     deleteItems(ids, removeRemote)
