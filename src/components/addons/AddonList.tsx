@@ -705,13 +705,15 @@ export function AddonList({ accountId }: AddonListProps) {
 
       {
         account && (
-          <InstallSavedAddonDialog
-            accountId={accountId}
-            accountAuthKey={account.authKey}
-            open={installFromLibraryOpen}
-            onOpenChange={setInstallFromLibraryOpen}
-            installedAddons={addons}
-          />
+          <>
+            <InstallSavedAddonDialog
+              accountId={accountId}
+              accountAuthKey={account.authKey}
+              open={installFromLibraryOpen}
+              onOpenChange={setInstallFromLibraryOpen}
+              installedAddons={addons}
+            />
+          </>
         )
       }
 

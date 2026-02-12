@@ -1,6 +1,6 @@
-# Deploying AIOManager v1.6.1
+# Deploying AIOManager v1.6.3
 
-AIOManager v1.6.1 requires a Node.js server to handle **Autopilot**, **Health Checks**, and **Sync**. 
+AIOManager v1.6.3 requires a Node.js server to handle **Autopilot**, **Health Checks**, and **Sync**. 
 
 ## 1. Docker (Recommended)
 
@@ -28,7 +28,7 @@ services:
 3. Use the default template or customize the `App Data` path.
 4. Click **Apply**.
 
-## 3. Manual Deployment Guide - v1.6.1 (Node.js)
+## 3. Manual Deployment Guide - v1.6.3 (Node.js)
 
 If running directly on a VPS without Docker:
 

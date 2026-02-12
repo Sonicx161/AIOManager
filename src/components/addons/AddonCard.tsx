@@ -692,7 +692,7 @@ export function AddonCard({
             </Button>
           )}
 
-          {!addon.flags?.protected && !addon.flags?.official && (
+          {!addon.flags?.protected && (
             <Button
               variant="destructive"
               size="sm"

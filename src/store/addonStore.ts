@@ -250,7 +250,8 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   createSavedAddon: async (name, installUrl, tags = [], profileId, existingManifest, metadata) => {
     set({ loading: true, error: null })
     try {
-      let manifest = existingManifest
+      // Safety: If we're passed a descriptor instead of a manifest, unwrap it
+      let manifest = (existingManifest as any)?.manifest || existingManifest
 
       // If no manifest provided, fetch it from the URL
       if (!manifest) {
@@ -624,10 +625,12 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
       const currentAddons = await getAddons(authKey, accountId)
 
-      // Merge the saved addon (Purely Additive)
+      // Merge the saved addon (Unrestricted)
       const { addons: updatedAddons, result } = await mergeAddons(
         currentAddons,
-        [savedAddon]
+        [savedAddon],
+        accountId,
+        true
       )
 
       // Update account addons
@@ -677,10 +680,12 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
       const currentAddons = await getAddons(authKey, accountId)
 
-      // Merge all saved addons with this tag
+      // Merge all saved addons with this tag (Unrestricted)
       const { addons: updatedAddons, result } = await mergeAddons(
         currentAddons,
-        savedAddons
+        savedAddons,
+        accountId,
+        true
       )
 
       // Update account addons
@@ -713,7 +718,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
   // === Bulk Operations ===
 
-  bulkApplySavedAddons: async (savedAddonIds, accountIds, allowProtected = false) => {
+  bulkApplySavedAddons: async (savedAddonIds, accountIds, allowProtected = true) => {
     set({ loading: true, error: null })
     try {
       const savedAddons = savedAddonIds
@@ -966,7 +971,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
-  bulkInstallFromUrls: async (urls, accountIds, allowProtected = false) => {
+  bulkInstallFromUrls: async (urls, accountIds, allowProtected = true) => {
     set({ loading: true, error: null })
     try {
       // 1. Fetch manifests for all URLs first
@@ -1353,6 +1358,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         // Inflate manifest from map if missing
         if (!newItem.manifest && newItem.manifestId && manifestMap[newItem.manifestId]) {
           newItem.manifest = manifestMap[newItem.manifestId]
+        }
+
+        // Safety: Unwrap manifest if nested (Rescue legacy data)
+        if (newItem.manifest && (newItem.manifest as any).manifest) {
+          newItem.manifest = (newItem.manifest as any).manifest
         }
 
         // Final Manifest Resilience: If still missing, try to construct a minimal one or fetch it later

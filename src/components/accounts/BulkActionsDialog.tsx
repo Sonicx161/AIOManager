@@ -11,9 +11,10 @@ import {
 // import { Textarea } from '@/components/ui/textarea' 
 import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore } from '@/store/accountStore'
+import { useProfileStore } from '@/store/profileStore'
 import { StremioAccount } from '@/types/account'
 import { BulkResult } from '@/types/saved-addon'
-import { Copy, Globe, LayoutGrid, Loader2, PlusCircle, RefreshCw, Tags, Trash2, AlertTriangle, Shield, ShieldOff } from 'lucide-react'
+import { Copy, Globe, LayoutGrid, Library, Loader2, PlusCircle, RefreshCw, Tags, Trash2, AlertTriangle, Shield, ShieldOff } from 'lucide-react'
 import { useState } from 'react'
 import { Switch } from '@/components/ui/switch'
 
@@ -30,37 +31,33 @@ interface BulkActionsDialogProps {
   allAccounts?: StremioAccount[]
   onClose: () => void
 }
-
 type BulkAction =
+  | 'install-from-library'
   | 'add-saved-addons'
-  | 'add-by-tag'
-  | 'remove-addons'
-  | 'remove-by-tag'
-  | 'update-addons'
   | 'install-from-url'
   | 'clone-account'
+  | 'update-addons'
+  | 'reinstall-all'
   | 'protect-all'
   | 'unprotect-all'
-  | 'reinstall-all'
+  | 'remove-addons'
 
 export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose }: BulkActionsDialogProps) {
   const {
     library,
     getAllTags,
     bulkApplySavedAddons,
-    bulkApplyTag,
     bulkRemoveAddons,
-    bulkRemoveByTag,
     bulkReinstallAddons,
     bulkInstallFromUrls,
     bulkCloneAccount,
     loading,
   } = useAddonStore()
   const { bulkProtectAddons } = useAccountStore()
+  const { profiles } = useProfileStore()
 
-  const [action, setAction] = useState<BulkAction>('add-saved-addons')
+  const [action, setAction] = useState<BulkAction>('install-from-library')
   const [selectedSavedAddonIds, setSelectedSavedAddonIds] = useState<Set<string>>(new Set())
-  const [selectedTag, setSelectedTag] = useState<string>('')
   const [selectedAddonIds, setSelectedAddonIds] = useState<Set<string>>(new Set())
   const [selectedUpdateAddonIds, setSelectedUpdateAddonIds] = useState<Set<string>>(new Set())
 
@@ -70,6 +67,11 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
   const [overwriteClone, setOverwriteClone] = useState(false)
   const [showProtected, setShowProtected] = useState(true)
 
+  // Install from Library Profile State
+  const [installMode, setInstallMode] = useState<'profile' | 'tag'>('profile')
+  const [selectedInstallProfileId, setSelectedInstallProfileId] = useState<string>('')
+  const [selectedInstallTagName, setSelectedInstallTagName] = useState<string>('')
+
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
   const [result, setResult] = useState<BulkResult | null>(null)
@@ -77,12 +79,12 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
   const savedAddons = Object.values(library).sort((a, b) => a.name.localeCompare(b.name))
   const allTags = getAllTags()
 
-  const currentTagAddonsCount = selectedTag
-    ? savedAddons.filter((addon) => addon.tags.includes(selectedTag)).length
+  const currentTagAddonsCount = selectedInstallTagName
+    ? savedAddons.filter((addon) => addon.tags.includes(selectedInstallTagName)).length
     : 0
 
-  const isTagAction = action === 'add-by-tag' || action === 'remove-by-tag'
-  const isInvalidTag = isTagAction && selectedTag !== '' && currentTagAddonsCount === 0
+  const isTagAction = action === 'install-from-library' && installMode === 'tag'
+  const isInvalidTag = isTagAction && selectedInstallTagName !== '' && currentTagAddonsCount === 0
 
   // Collect all unique addons across selected accounts, and sort alphabetically
   const allAddonsRaw = Array.from(
@@ -147,12 +149,11 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           )
           break
 
-        case 'add-by-tag':
-          if (!selectedTag) {
-            setError('Please select a tag')
-            return
-          }
-          bulkResult = await bulkApplyTag(selectedTag, accountsData)
+          bulkResult = await bulkApplySavedAddons(
+            Array.from(selectedSavedAddonIds),
+            accountsData,
+            true // allowProtected override
+          )
           break
 
         case 'remove-addons':
@@ -163,12 +164,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           bulkResult = await bulkRemoveAddons(Array.from(selectedAddonIds), accountsData, true)
           break
 
-        case 'remove-by-tag':
-          if (!selectedTag) {
-            setError('Please select a tag')
-            return
-          }
-          bulkResult = await bulkRemoveByTag(selectedTag, accountsData, true)
+          bulkResult = await bulkRemoveAddons(Array.from(selectedAddonIds), accountsData, true)
           break
 
         case 'update-addons':
@@ -221,6 +217,29 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
         case 'reinstall-all':
           bulkResult = await bulkReinstallAddons(['*'], accountsData)
           break
+        case 'install-from-library': {
+          const libraryArray = Object.values(library)
+          let addonsToInstall: any[] = []
+          if (installMode === 'profile' && selectedInstallProfileId) {
+            addonsToInstall = selectedInstallProfileId === 'unassigned'
+              ? libraryArray.filter(a => !a.profileId)
+              : libraryArray.filter(a => a.profileId === selectedInstallProfileId)
+          } else if (installMode === 'tag' && selectedInstallTagName) {
+            addonsToInstall = libraryArray.filter(a => a.tags.includes(selectedInstallTagName))
+          }
+
+          if (addonsToInstall.length === 0) {
+            setError('No addons found in the selected group')
+            return
+          }
+
+          bulkResult = await bulkApplySavedAddons(
+            addonsToInstall.map(a => a.id),
+            accountsData,
+            true // unrestricted
+          )
+          break
+        }
       }
 
       setResult(bulkResult!)
@@ -299,67 +318,87 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
               <Label htmlFor="action-select">I want to...</Label>
               <Select value={action} onValueChange={(v) => setAction(v as BulkAction)}>
                 <SelectTrigger id="action-select" className="bg-background">
-                  <SelectValue />
+                  <SelectValue placeholder="What should we do?" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="add-saved-addons">
+                  <SelectItem value="install-from-library" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <PlusCircle className="h-4 w-4 text-primary" />
-                      <span>Install Saved Addons</span>
+                      <Library className="h-4 w-4 text-primary" />
+                      <div className="text-left">
+                        <p className="font-medium">Install from Library</p>
+                        <p className="text-[10px] text-muted-foreground">Apply profiles or tags across accounts</p>
+                      </div>
                     </div>
                   </SelectItem>
-                  <SelectItem value="add-by-tag">
+
+                  <SelectItem value="add-saved-addons" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <Tags className="h-4 w-4 text-blue-500" />
-                      <span>Install Addons by Tag</span>
+                      <PlusCircle className="h-4 w-4 text-emerald-500" />
+                      <div className="text-left">
+                        <p className="font-medium">Pick Saved Addons</p>
+                        <p className="text-[10px] text-muted-foreground">Select individual addons from library</p>
+                      </div>
                     </div>
                   </SelectItem>
-                  <SelectItem value="install-from-url">
+
+                  <SelectItem value="install-from-url" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <Globe className="h-4 w-4 text-indigo-500" />
-                      <span>Install from URLs</span>
+                      <Globe className="h-4 w-4 text-blue-500" />
+                      <div className="text-left">
+                        <p className="font-medium">Install from URLs</p>
+                        <p className="text-[10px] text-muted-foreground">Batch install manifest links</p>
+                      </div>
                     </div>
                   </SelectItem>
-                  <SelectItem value="clone-account">
+
+                  <SelectItem value="clone-account" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <Copy className="h-4 w-4 text-purple-500" />
-                      <span>Clone from Account</span>
+                      <Copy className="h-4 w-4 text-amber-500" />
+                      <div className="text-left">
+                        <p className="font-medium">Clone Account Addons</p>
+                        <p className="text-[10px] text-muted-foreground">Copy all addons from one to many</p>
+                      </div>
                     </div>
                   </SelectItem>
-                  <SelectItem value="update-addons">
+
+                  <div className="h-px bg-muted my-1" />
+
+                  <SelectItem value="update-addons" className="focus:bg-primary/10 text-primary font-semibold">
                     <div className="flex items-center gap-2">
-                      <RefreshCw className="h-4 w-4 text-orange-500" />
-                      <span>Update Existing Addons</span>
+                      <RefreshCw className="h-4 w-4" />
+                      <p>Force Update All</p>
                     </div>
                   </SelectItem>
-                  <SelectItem value="reinstall-all">
+
+                  <SelectItem value="reinstall-all" className="focus:bg-primary/10 text-primary font-semibold">
                     <div className="flex items-center gap-2">
-                      <RefreshCw className="h-4 w-4 text-emerald-500" />
-                      <span>Reinstall All Addons</span>
+                      <RefreshCw className="h-4 w-4" />
+                      <p>Clean Reinstall All</p>
                     </div>
                   </SelectItem>
-                  <SelectItem value="remove-addons">
+
+                  <div className="h-px bg-muted my-1" />
+
+                  <SelectItem value="protect-all" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                      <span>Remove Specific Addons</span>
+                      <Shield className="h-4 w-4 text-emerald-500" />
+                      <p>Enable Protection All</p>
                     </div>
                   </SelectItem>
-                  <SelectItem value="remove-by-tag">
+
+                  <SelectItem value="unprotect-all" className="focus:bg-primary/10">
                     <div className="flex items-center gap-2">
-                      <Tags className="h-4 w-4 text-destructive" />
-                      <span>Remove Addons by Tag</span>
+                      <ShieldOff className="h-4 w-4 text-amber-500" />
+                      <p>Disable Protection All</p>
                     </div>
                   </SelectItem>
-                  <SelectItem value="protect-all">
+
+                  <div className="h-px bg-muted my-1" />
+
+                  <SelectItem value="remove-addons" className="focus:bg-destructive/10 text-destructive font-semibold">
                     <div className="flex items-center gap-2">
-                      <Shield className="h-4 w-4 text-green-500" />
-                      <span>Protect All Addons</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="unprotect-all">
-                    <div className="flex items-center gap-2">
-                      <ShieldOff className="h-4 w-4 text-red-500" />
-                      <span>Unprotect All Addons</span>
+                      <Trash2 className="h-4 w-4" />
+                      <p>Remove Selected Addons</p>
                     </div>
                   </SelectItem>
                 </SelectContent>
@@ -379,7 +418,8 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                       action === 'clone-account' ? <Copy className="h-4 w-4" /> :
                         action === 'protect-all' ? <Shield className="h-4 w-4" /> :
                           action === 'unprotect-all' ? <ShieldOff className="h-4 w-4" /> :
-                            <PlusCircle className="h-4 w-4" />}
+                            action === 'install-from-library' ? <Library className="h-4 w-4 text-primary" /> :
+                              <PlusCircle className="h-4 w-4" />}
               Configuration
             </CardTitle>
           </CardHeader>
@@ -438,37 +478,101 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
               </div>
             )}
 
-            {/* Add by Tag */}
-            {action === 'add-by-tag' && (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Select Tag to Install</Label>
-                  <Select value={selectedTag} onValueChange={setSelectedTag}>
-                    <SelectTrigger className="bg-background">
-                      <SelectValue placeholder="Choose a tag..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {allTags.map((tag) => {
-                        const count = savedAddons.filter((addon) => addon.tags.includes(tag)).length
-                        return (
-                          <SelectItem key={tag} value={tag}>
-                            {tag} <span className="text-muted-foreground ml-1">({count} addons)</span>
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectContent>
-                  </Select>
-                  {isInvalidTag && (
-                    <p className="text-xs text-destructive mt-1 font-medium flex items-center gap-1">
-                      <Loader2 className="h-3 w-3 animate-spin" /> {/* Placeholder icon */}
-                      No saved addons found with this tag.
-                    </p>
-                  )}
+            {/* UI for Library Install (Polished) */}
+            {action === 'install-from-library' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="space-y-1.5 px-1">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">Installation Source</p>
+                  <div className="flex bg-muted/50 p-1 rounded-xl gap-1 border border-border/50">
+                    <Button
+                      variant={installMode === 'profile' ? 'secondary' : 'ghost'}
+                      className={`flex-1 h-9 text-xs transition-all duration-200 rounded-lg ${installMode === 'profile' ? 'shadow-sm bg-background hover:bg-background' : 'text-muted-foreground hover:text-foreground'}`}
+                      onClick={() => setInstallMode('profile')}
+                      type="button"
+                    >
+                      <Library className={`h-3.5 w-3.5 mr-2 ${installMode === 'profile' ? 'text-primary' : ''}`} />
+                      Profiles
+                    </Button>
+                    <Button
+                      variant={installMode === 'tag' ? 'secondary' : 'ghost'}
+                      className={`flex-1 h-9 text-xs transition-all duration-200 rounded-lg ${installMode === 'tag' ? 'shadow-sm bg-background hover:bg-background' : 'text-muted-foreground hover:text-foreground'}`}
+                      onClick={() => setInstallMode('tag')}
+                      type="button"
+                    >
+                      <Tags className={`h-3.5 w-3.5 mr-2 ${installMode === 'tag' ? 'text-primary' : ''}`} />
+                      Tags
+                    </Button>
+                  </div>
                 </div>
+
+                {installMode === 'profile' ? (
+                  <div className="space-y-3 animate-in fade-in duration-300">
+                    <div className="space-y-1.5 px-1">
+                      <Label className="text-[10px] font-bold uppercase text-muted-foreground/70 tracking-wider">Select Library Profile</Label>
+                      <Select value={selectedInstallProfileId} onValueChange={setSelectedInstallProfileId}>
+                        <SelectTrigger className="bg-background/50 border-border/50 h-10">
+                          <SelectValue placeholder="Choose a profile..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="unassigned">
+                            <div className="flex items-center gap-2">
+                              <LayoutGrid className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span>Unassigned Addons</span>
+                            </div>
+                          </SelectItem>
+                          {profiles.map(p => (
+                            <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3 animate-in fade-in duration-300">
+                    <div className="space-y-1.5 px-1">
+                      <Label className="text-[10px] font-bold uppercase text-muted-foreground/70 tracking-wider">Select Library Tag</Label>
+                      <Select value={selectedInstallTagName} onValueChange={setSelectedInstallTagName}>
+                        <SelectTrigger className="bg-background/50 border-border/50 h-10">
+                          <SelectValue placeholder="Choose a tag..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {allTags.map(tag => (
+                            <SelectItem key={tag} value={tag}>
+                              <div className="flex items-center gap-2">
+                                <Tags className="h-3.5 w-3.5 text-primary/60" />
+                                <span>{tag}</span>
+                              </div>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                )}
+
+                {/* Preview Addons */}
+                {((installMode === 'profile' && selectedInstallProfileId) || (installMode === 'tag' && selectedInstallTagName)) && (
+                  <div className="p-3 rounded-lg bg-primary/5 border border-primary/10 space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-primary/70">
+                      Addons to Install
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                      {(installMode === 'profile'
+                        ? (selectedInstallProfileId === 'unassigned' ? Object.values(library).filter(a => !a.profileId) : Object.values(library).filter(a => a.profileId === selectedInstallProfileId))
+                        : Object.values(library).filter(a => a.tags.includes(selectedInstallTagName))
+                      ).map(addon => (
+                        <div key={addon.id} className="text-[10px] px-2 py-0.5 bg-background border rounded flex items-center gap-1.5">
+                          {addon.manifest.logo && <img src={addon.manifest.logo} className="w-3 h-3 object-contain" alt="" />}
+                          <span className="truncate max-w-[120px]">{addon.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* NEW: Install from URL */}
+            {/* Install from URL */}
             {action === 'install-from-url' && (
               <div className="space-y-4">
                 <div className="space-y-2">
@@ -486,7 +590,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
               </div>
             )}
 
-            {/* NEW: Clone Account */}
+            {/* Clone Account */}
             {action === 'clone-account' && (
               <div className="space-y-4">
                 <div className="space-y-2">
@@ -601,29 +705,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
               </div>
             )}
 
-            {/* Remove by Tag */}
-            {action === 'remove-by-tag' && (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Select Tag to Remove</Label>
-                  <Select value={selectedTag} onValueChange={setSelectedTag}>
-                    <SelectTrigger className="bg-background">
-                      <SelectValue placeholder="Choose a tag..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {allTags.map((tag) => {
-                        const count = savedAddons.filter((addon) => addon.tags.includes(tag)).length
-                        return (
-                          <SelectItem key={tag} value={tag}>
-                            {tag} <span className="text-muted-foreground ml-1">({count} known addons)</span>
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            )}
+            {/* Remove by Tag handled via unified Library UI or pick manually */}
 
             {/* Update Addons */}
             {action === 'update-addons' && (
@@ -739,6 +821,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           onClick={handleExecute}
           disabled={loading || success || isInvalidTag}
           className="flex-1"
+          type="button"
         >
           {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           {success ? 'Done' : 'Execute'}
