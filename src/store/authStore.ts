@@ -107,7 +107,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const storedHash = loadPasswordHash()
 
     if (!salt || !storedHash) {
-      throw new Error('Master password not set up')
+      throw new Error('App is not initialized. Please set up a master password or login via Cloud Sync.')
     }
 
 

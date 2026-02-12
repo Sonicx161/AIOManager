@@ -82,19 +82,15 @@ import { AddonDescriptor } from '@/types/addon'
 
 export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonDescriptor[]) {
   // 1. Map remote addons for lookup (by normalized URL)
+  // STRICT: Case-sensitive URL matching only. No ID-based deduplication.
   const remoteAddonMap = new Map<string, AddonDescriptor>()
-  const remoteIdMap = new Map<string, AddonDescriptor>()
 
   remoteAddons.forEach((a) => {
-    const norm = normalizeAddonUrl(a.transportUrl).toLowerCase()
+    const norm = normalizeAddonUrl(a.transportUrl)
     if (!remoteAddonMap.has(norm)) remoteAddonMap.set(norm, a)
-
-    const id = a.manifest?.id
-    if (id && !remoteIdMap.has(id)) remoteIdMap.set(id, a)
   })
 
   const processedRemoteNormUrls = new Set<string>()
-  const processedRemoteIds = new Set<string>()
   const finalAddons: AddonDescriptor[] = []
 
   const now = Date.now()
@@ -102,24 +98,10 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
 
   // 2. Iterate through LOCAL addons to preserve their order
   localAddons.forEach((localAddon) => {
-    const normLocal = normalizeAddonUrl(localAddon.transportUrl).toLowerCase()
-    const idLocal = localAddon.manifest?.id
+    const normLocal = normalizeAddonUrl(localAddon.transportUrl)
 
-    // Priority 1: Match by URL
+    // STRICT: Only match by transportUrl to support multiple instances of same manifest ID (e.g. AIOStreams variants)
     let remoteAddon = remoteAddonMap.get(normLocal)
-
-    // Priority 2: Match by ID (Detects URL Swap)
-    if (!remoteAddon && idLocal) {
-      const potentialSwap = remoteIdMap.get(idLocal)
-      // Only treat as a swap if the remote URL isn't already accounted for by another local addon
-      if (potentialSwap) {
-        const normPotential = normalizeAddonUrl(potentialSwap.transportUrl).toLowerCase()
-        const isBoundToOther = localAddons.some(l => l !== localAddon && normalizeAddonUrl(l.transportUrl).toLowerCase() === normPotential)
-        if (!isBoundToOther) {
-          remoteAddon = potentialSwap
-        }
-      }
-    }
 
     const isRecentLocalChange = localAddon.metadata?.lastUpdated && (now - localAddon.metadata.lastUpdated < MANIFEST_GRACE_PERIOD)
 
@@ -146,10 +128,10 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
           enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : true, // Trust remote presence UNLESS we just changed it locally
         },
         metadata: localAddon.metadata,
+        catalogOverrides: localAddon.catalogOverrides,
       })
 
-      processedRemoteNormUrls.add(normalizeAddonUrl(remoteAddon.transportUrl).toLowerCase())
-      if (remoteAddon.manifest?.id) processedRemoteIds.add(remoteAddon.manifest.id)
+      processedRemoteNormUrls.add(normalizeAddonUrl(remoteAddon.transportUrl))
       processedRemoteNormUrls.add(normLocal)
     } else {
       // Missing from remote: mark as disabled locally UNLESS it was recently changed (e.g. just enabled)
@@ -165,10 +147,10 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
 
   // 3. Append any NEW remote addons that weren't accounted for
   remoteAddons.forEach((remoteAddon) => {
-    const normRemote = normalizeAddonUrl(remoteAddon.transportUrl).toLowerCase()
-    const idRemote = remoteAddon.manifest?.id
+    const normRemote = normalizeAddonUrl(remoteAddon.transportUrl)
 
-    const alreadyProcessed = processedRemoteNormUrls.has(normRemote) || (idRemote && processedRemoteIds.has(idRemote))
+    // STRICT: Only skip if this exact URL has been processed
+    const alreadyProcessed = processedRemoteNormUrls.has(normRemote)
 
     if (!alreadyProcessed) {
       finalAddons.push({

@@ -155,8 +155,13 @@ export function removeAddons(
     // Check if the addon's ID OR its transport URL is in the removal list
     const normA = normalizeAddonUrl(addon.transportUrl).toLowerCase()
     const shouldRemove = idsOrUrls.some(target => {
-      const normTarget = normalizeAddonUrl(target).toLowerCase()
-      return addon.manifest.id === target || normA === normTarget
+      // If target looks like a URL, match ONLY by URL to support multiple instances of same manifest ID
+      if (target.includes('://') || target.startsWith('stremio://')) {
+        const normTarget = normalizeAddonUrl(target).toLowerCase()
+        return normA === normTarget
+      }
+      // Otherwise match by ID (legacy/bulk ID removal)
+      return addon.manifest.id === target || normA === normalizeAddonUrl(target).toLowerCase()
     })
 
     if (shouldRemove) {

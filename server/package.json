@@ -1,6 +1,6 @@
 {
   "name": "aiomanager-server",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "description": "Hybrid Sync Server for AIOManager",
   "main": "index.js",
   "type": "module",

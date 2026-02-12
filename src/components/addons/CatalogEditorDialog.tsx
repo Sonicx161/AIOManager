@@ -28,7 +28,7 @@ import {
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, Trash2 } from 'lucide-react'
+import { GripVertical, Trash2, RotateCcw } from 'lucide-react'
 import { useState, useEffect } from 'react'
 
 interface SortableCatalogItemProps {
@@ -138,14 +138,21 @@ export function CatalogEditorDialog({
     // Initialize catalogs when dialog opens
     useEffect(() => {
         if (open && addon.manifest.catalogs) {
-            const catalogsWithIds = addon.manifest.catalogs.map((cat, idx) => ({
-                ...cat,
-                _tempId: `${cat.id}-${cat.type}-${idx}`,
-            }))
-            setCatalogs(catalogsWithIds)
+            // Respect existing overrides on open
+            const removedIds = new Set(addon.catalogOverrides?.removed || [])
+
+            const effectiveCatalogs = addon.manifest.catalogs
+                .filter(cat => !removedIds.has(cat.id))
+                .map((cat, idx) => ({
+                    ...cat,
+                    _tempId: `${cat.id}-${cat.type}-${idx}`,
+                }))
+
+            setCatalogs(effectiveCatalogs)
             setHasChanges(false)
         }
-    }, [open, addon])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open])
 
     const handleDragEnd = (event: DragEndEvent) => {
         const { active, over } = event
@@ -179,6 +186,24 @@ export function CatalogEditorDialog({
         try {
             // Remove the temporary IDs before saving
             const cleanedCatalogs: Catalog[] = catalogs.map(({ _tempId, ...rest }) => rest)
+            const currentCatalogIds = new Set(cleanedCatalogs.map(c => c.id))
+
+            // Logic:
+            // 1. Start with existing removed IDs
+            const finalRemovedIds = new Set(addon.catalogOverrides?.removed || [])
+
+            // 2. Un-delete: If an ID is currently visible, it must NOT be in the removed list
+            for (const id of currentCatalogIds) {
+                finalRemovedIds.delete(id)
+            }
+
+            // 3. New Deletions: If an ID was in the visible list we started with, but is gone now, ADD it to removed
+            const originalVisibleIds = (addon.manifest.catalogs || []).map(c => c.id)
+            for (const id of originalVisibleIds) {
+                if (!currentCatalogIds.has(id)) {
+                    finalRemovedIds.add(id)
+                }
+            }
 
             const updatedAddon: AddonDescriptor = {
                 ...addon,
@@ -186,6 +211,10 @@ export function CatalogEditorDialog({
                     ...addon.manifest,
                     catalogs: cleanedCatalogs,
                 },
+                catalogOverrides: {
+                    ...addon.catalogOverrides,
+                    removed: Array.from(finalRemovedIds)
+                }
             }
 
             await onSave(updatedAddon)
@@ -201,6 +230,35 @@ export function CatalogEditorDialog({
                 variant: 'destructive',
                 title: 'Failed to Save',
                 description: error instanceof Error ? error.message : 'Unknown error',
+            })
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const handleReset = async () => {
+        setSaving(true)
+        try {
+            const { fetchAddonManifest } = await import('@/api/addons')
+            const fresh = await fetchAddonManifest(addon.transportUrl)
+
+            if (fresh.manifest.catalogs) {
+                const freshCatalogs = fresh.manifest.catalogs.map((cat, idx) => ({
+                    ...cat,
+                    _tempId: `${cat.id}-${cat.type}-${idx}`,
+                }))
+                setCatalogs(freshCatalogs)
+                setHasChanges(true)
+                toast({
+                    title: 'Catalogs Reset',
+                    description: 'Loaded original catalogs from addon. Click Save to apply.',
+                })
+            }
+        } catch (error) {
+            toast({
+                variant: 'destructive',
+                title: 'Reset Failed',
+                description: 'Could not fetch original manifest.',
             })
         } finally {
             setSaving(false)
@@ -248,6 +306,18 @@ export function CatalogEditorDialog({
                 </div>
 
                 <DialogFooter className="gap-2">
+                    <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleReset}
+                        disabled={saving}
+                        className="mr-auto text-muted-foreground hover:text-foreground"
+                        title="Restore original catalogs"
+                    >
+                        <RotateCcw className="h-4 w-4 mr-2" />
+                        Default
+                    </Button>
                     <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
                         Cancel
                     </Button>

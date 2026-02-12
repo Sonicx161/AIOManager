@@ -89,6 +89,8 @@ export function LoginPage() {
         }
 
         setIsUnlocking(true)
+        setLoginError(null)
+
         try {
             const success = await unlock(loginPass)
             if (!success) {
@@ -97,8 +99,21 @@ export function LoginPage() {
                 toast({ title: "Welcome Back", description: "Vault unlocked successfully." })
             }
         } catch (e) {
-            setLoginError((e as Error).message)
-            console.error("Unlock error:", e)
+            const msg = (e as Error).message
+
+            if (msg.includes('not initialized')) {
+                console.log('[Auth] Local DB empty. Attempting Cloud Restore...')
+                try {
+                    await login(auth.id, loginPass, true) // Silent login to restore
+                    toast({ title: "Restored", description: "Session restored from cloud." })
+                } catch (restoreErr) {
+                    console.error('[Auth] Cloud restore failed:', restoreErr)
+                    setLoginError("No local data found and cloud restore failed. Please log in from your original browser to sync first.")
+                }
+            } else {
+                setLoginError(msg)
+                console.error("Unlock error:", e)
+            }
         } finally {
             setIsUnlocking(false)
         }

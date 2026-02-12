@@ -34,16 +34,12 @@ import { useAddonStore } from '@/store/addonStore'
 import { useProfileStore } from '@/store/profileStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor } from '@/types/addon'
-import { updateAddons } from '@/api/addons'
-import { stremioClient } from '@/api/stremio-client'
 
 import { Copy, ExternalLink, Lock, Unlock, RefreshCw, Settings, Trash2, List, Pencil } from 'lucide-react'
 import { useMemo, useState, useEffect } from 'react'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
 import { CatalogEditorDialog } from './CatalogEditorDialog'
-import { decrypt } from '@/lib/crypto'
-import { useAuthStore } from '@/store/authStore'
 import { Switch } from '@/components/ui/switch'
 import { usePendingRemoval } from '@/hooks/useSyncManager'
 
@@ -185,7 +181,7 @@ export function AddonCard({
 
   const handleSaveMetadata = async (metadata: { customName?: string; customLogo?: string; customDescription?: string }) => {
     try {
-      await useAccountStore.getState().updateAddonMetadata(accountId, addon.transportUrl, metadata, index)
+      await useAccountStore.getState().updateAddonSettings(accountId, addon.transportUrl, { metadata }, index)
       toast({
         title: 'Appearance Updated',
         description: 'Addon metadata has been customized and synced to Stremio.'
@@ -460,29 +456,12 @@ export function AddonCard({
   const hasCatalogs = addon.manifest.catalogs && addon.manifest.catalogs.length > 0
 
   const handleSaveCatalogs = async (updatedAddon: AddonDescriptor) => {
-    // Decrypt the authKey before using with the API
-    const encryptionKey = useAuthStore.getState().encryptionKey
-    if (!encryptionKey) throw new Error('App is locked')
-    const decryptedAuthKey = await decrypt(accountAuthKey, encryptionKey)
-
-    // Get the current addon collection
-    const currentAddons = await stremioClient.getAddonCollection(decryptedAuthKey, accountId)
-
-    // Find and replace the addon we're editing
-    const updatedAddons = currentAddons.map((a, i) => {
-      // If index is available, use it for strict matching. Fallback to URL.
-      const isTarget = typeof index === 'number'
-        ? i === index
-        : a.transportUrl === addon.transportUrl
-
-      return isTarget ? updatedAddon : a
-    })
-
-    // Sync back to Stremio (using wrapper to preserve metadata)
-    await updateAddons(decryptedAuthKey, updatedAddons, accountId)
-
-    // Trigger a refresh in the account store
-    await useAccountStore.getState().syncAccount(accountId)
+    await useAccountStore.getState().updateAddonSettings(
+      accountId,
+      addon.transportUrl,
+      { catalogOverrides: updatedAddon.catalogOverrides },
+      index
+    )
   }
 
   return (
@@ -651,7 +630,9 @@ export function AddonCard({
               className="w-full"
             >
               <List className="h-4 w-4 mr-2" />
-              Edit Catalogs ({addon.manifest.catalogs?.length || 0})
+              Edit Catalogs ({
+                (addon.manifest.catalogs || []).filter(c => !(addon.catalogOverrides?.removed || []).includes(c.id)).length
+              })
             </Button>
           )}
 

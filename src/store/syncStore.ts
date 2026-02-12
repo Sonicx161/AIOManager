@@ -138,9 +138,9 @@ export const useSyncStore = create<SyncState>()(
                         headers: { 'x-sync-password': await deriveSyncToken(password) }
                     })
 
-                    if (res.status === 401) throw new Error("Invalid Password")
-                    if (res.status === 404) throw new Error("Account ID not found")
-                    if (!res.ok) throw new Error("Server error, please try again later.")
+                    if (res.status === 401) throw new Error("Incorrect Password. If you've forgotten it, you may need to reset your account.")
+                    if (res.status === 404) throw new Error("Cloud Account not found. Please check the ID or Register a new one.")
+                    if (!res.ok) throw new Error(`Cloud Sync Server error (${res.status}). Please try again later.`)
 
                     const text = await res.text()
                     if (!text || text.trim() === "") {
@@ -161,7 +161,7 @@ export const useSyncStore = create<SyncState>()(
                             const bytes = AES.decrypt(raw.data, password)
                             const decryptedStr = bytes.toString(enc.Utf8)
 
-                            if (!decryptedStr) throw new Error("Decryption failed. Wrong password?")
+                            if (!decryptedStr) throw new Error("Decryption failed. Wrong password or corrupted cloud data.")
 
                             // Ultra-Resilience: Attempt parsing first, don't just nuke everything on a partial match
                             try {
@@ -201,7 +201,7 @@ export const useSyncStore = create<SyncState>()(
                         if (e instanceof SyntaxError) {
                             throw new Error("Invalid server response. Please make sure the backend is running correctly.")
                         }
-                        throw new Error("Failed to decrypt data. Wrong password?")
+                        throw new Error("Failed to decrypt cloud data. Please verify your password.")
                     }
 
                     // 1. Extract salt and unlock app first

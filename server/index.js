@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.6.3'
+const VERSION = '1.6.4'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '50')
@@ -548,10 +548,27 @@ fastify.post('/api/stremio-proxy', {
         fastify.log.info({ category: 'Sync' }, `[${accountContext}] Refreshing addon collection from Stremio...`)
     } else if (type === 'AddonCollectionSet') {
         fastify.log.info({ category: 'Sync' }, `[${accountContext}] Pushing updated collection to Stremio (${payload.addons?.length || 0} addons)`)
+    } else if (type === 'DatastoreGet' || type === 'DatastorePut') {
+        fastify.log.info({ category: 'Sync' }, `[${accountContext}] Proxying library operation (${type}) for ${accountContext}`)
     } else {
         // Strict Whitelist: Block unknown methods to prevent abuse
         fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked unauthorized Stremio API call: ${type}`)
         return reply.code(403).send({ error: 'Method Not Allowed' })
+    }
+
+    // Stremio library items must have valid ISO dates, and StremThru's Go-based worker 
+    // crashes if deleted items (tombstones) have missing or empty timestamp strings.
+    if (type === 'DatastorePut' && payload.collection === 'libraryItem' && Array.isArray(payload.changes)) {
+        payload.changes = payload.changes.map(item => {
+            if (item.removed) {
+                return {
+                    ...item,
+                    _ctime: item._ctime || '0001-01-01T00:00:00Z',
+                    _mtime: item._mtime || '0001-01-01T00:00:00Z'
+                }
+            }
+            return item
+        })
     }
 
     const MAX_RETRIES = 2
@@ -581,6 +598,21 @@ fastify.post('/api/stremio-proxy', {
             }
 
             const data = await response.json()
+
+            // Also sanitize the result of DatastoreGet for safety
+            if (type === 'DatastoreGet' && data?.result?.library && Array.isArray(data.result.library)) {
+                data.result.library = data.result.library.map(item => {
+                    if (item.removed) {
+                        return {
+                            ...item,
+                            _ctime: item._ctime || '0001-01-01T00:00:00Z',
+                            _mtime: item._mtime || '0001-01-01T00:00:00Z'
+                        }
+                    }
+                    return item
+                })
+            }
+
             return reply.send(data)
         } catch (err) {
             clearTimeout(timeoutId)
@@ -1475,7 +1507,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.3
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.4
  ==============================================================================
 `;
         console.log(banner);

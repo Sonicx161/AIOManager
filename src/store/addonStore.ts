@@ -20,6 +20,7 @@ import { normalizeTagName } from '@/lib/addon-validator'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import { AddonManifest, AddonDescriptor } from '@/types/addon'
+import { getEffectiveManifest } from '@/lib/addon-utils'
 import {
   AccountAddonState,
   BulkResult,
@@ -62,7 +63,8 @@ interface AddonStore {
     tags?: string[],
     profileId?: string,
     existingManifest?: AddonManifest,
-    metadata?: SavedAddon['metadata']
+    metadata?: SavedAddon['metadata'],
+    catalogOverrides?: SavedAddon['catalogOverrides']
   ) => Promise<string>
   updateSavedAddon: (
     id: string,
@@ -247,7 +249,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
   // === Saved Addon Management ===
 
-  createSavedAddon: async (name, installUrl, tags = [], profileId, existingManifest, metadata) => {
+  createSavedAddon: async (name, installUrl, tags = [], profileId, existingManifest, metadata, catalogOverrides) => {
     set({ loading: true, error: null })
     try {
       // Safety: If we're passed a descriptor instead of a manifest, unwrap it
@@ -256,7 +258,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       // If no manifest provided, fetch it from the URL
       if (!manifest) {
         const addonDescriptor = await fetchAddonManifest(installUrl, 'System-Check')
-        manifest = addonDescriptor.manifest
+        manifest = getEffectiveManifest({ ...addonDescriptor, catalogOverrides })
       }
 
       // Normalize tags
@@ -294,6 +296,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         tags: normalizedTags,
         profileId,
         metadata,
+        catalogOverrides,
         autoRestore: false,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -416,7 +419,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     // Update the saved addon with fresh manifest
     const updatedSavedAddon = {
       ...savedAddon,
-      manifest: freshManifest,
+      manifest: getEffectiveManifest({ ...savedAddon, manifest: freshManifest }),
       updatedAt: new Date(),
     }
 
@@ -879,8 +882,8 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       throw new Error(`No saved addons found with tag: ${tag} `)
     }
 
-    const addonIds = savedAddons.map((s) => s.manifest.id)
-    return get().bulkRemoveAddons(addonIds, accountIds, allowProtected)
+    const transportUrls = savedAddons.map((s) => s.installUrl)
+    return get().bulkRemoveAddons(transportUrls, accountIds, allowProtected)
   },
 
   bulkReinstallAddons: async (addonIds, accountIds) => {
@@ -1024,8 +1027,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
           })
 
           for (const newAddon of validDescriptors) {
+            const normNew = normalizeAddonUrl(newAddon.transportUrl)
             const existingIndex = updatedAddons.findIndex(
-              (a) => a.transportUrl === newAddon.transportUrl
+              (a) => normalizeAddonUrl(a.transportUrl) === normNew
             )
 
             if (existingIndex >= 0) {
@@ -1038,9 +1042,17 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
                 })
                 continue
               }
-              updatedAddons[existingIndex] = newAddon
+
+              // Apply Manifest Guard: favor existing metadata/overrides
+              const finalDescriptor = {
+                ...newAddon,
+                metadata: { ...existing.metadata, ...newAddon.metadata },
+                catalogOverrides: existing.catalogOverrides,
+              }
+
+              updatedAddons[existingIndex] = finalDescriptor
               mergeResultDetails.updated.push({
-                addonId: newAddon.manifest.id,
+                addonId: finalDescriptor.manifest.id,
                 oldUrl: existing.transportUrl,
                 newUrl: newAddon.transportUrl,
               })

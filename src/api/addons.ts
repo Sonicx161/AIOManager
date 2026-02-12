@@ -2,38 +2,24 @@ import { AddonDescriptor } from '@/types/addon'
 import { stremioClient } from './stremio-client'
 import { checkAddonHealth, HealthStatus } from '@/lib/addon-health'
 import { isNewerVersion, normalizeAddonUrl } from '@/lib/utils'
+import { getEffectiveManifest } from '@/lib/addon-utils'
 
 export async function getAddons(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   return stremioClient.getAddonCollection(authKey, accountContext)
 }
 
 export async function updateAddons(authKey: string, addons: AddonDescriptor[], accountContext: string = 'Unknown'): Promise<void> {
+  await getAddons(authKey, accountContext)
+
   // CRITICAL: Apply manifest customizations (Raven fix)
   // This ensures that custom names, logos, and descriptions are pushed to Stremio.
   // We FILTER OUT disabled addons here so they are "hidden" in Stremio.
   const preparedAddons = (addons || [])
     .filter(addon => addon.flags?.enabled !== false)
-    .map((addon) => {
-      // CRITICAL: Always ensure types and resources are present
-      const baseManifest = {
-        ...addon.manifest,
-        types: addon.manifest?.types || [],
-        resources: addon.manifest?.resources || []
-      }
-
-      if (addon.metadata?.customName || addon.metadata?.customDescription || addon.metadata?.customLogo) {
-        return {
-          ...addon,
-          manifest: {
-            ...baseManifest,
-            name: addon.metadata.customName || baseManifest.name || '',
-            logo: addon.metadata.customLogo || baseManifest.logo || undefined,
-            description: addon.metadata.customDescription || baseManifest.description || '',
-          },
-        }
-      }
-      return { ...addon, manifest: baseManifest }
-    })
+    .map((addon) => ({
+      ...addon,
+      manifest: getEffectiveManifest(addon)
+    }))
 
   return stremioClient.setAddonCollection(authKey, preparedAddons, accountContext)
 }
@@ -48,7 +34,7 @@ export async function installAddon(authKey: string, addonUrl: string, accountCon
 
   // Check if addon already installed (by transportUrl to support duplicates with same ID)
   const existingIndex = currentAddons.findIndex(
-    (addon) => addon.transportUrl === newAddon.transportUrl
+    (addon) => normalizeAddonUrl(addon.transportUrl) === normalizeAddonUrl(newAddon.transportUrl)
   )
 
   let updatedAddons: AddonDescriptor[]
@@ -60,8 +46,10 @@ export async function installAddon(authKey: string, addonUrl: string, accountCon
     updatedAddons[existingIndex] = {
       ...newAddon,
       // Preserve local flags and metadata
+      // Preserve local flags and metadata and catalogOverrides
       flags: { ...existing.flags, ...newAddon.flags },
-      metadata: { ...existing.metadata, ...newAddon.metadata }
+      metadata: { ...existing.metadata, ...newAddon.metadata },
+      catalogOverrides: existing.catalogOverrides,
     }
   } else {
     // Add new addon (Additive)
@@ -138,6 +126,7 @@ export async function reinstallAddon(
       ...newAddonDescriptor,
       flags: { ...existingAddon.flags, ...newAddonDescriptor.flags },
       metadata: { ...existingAddon.metadata },
+      catalogOverrides: existingAddon.catalogOverrides,
     }
 
     // 4. Save the updated collection (Atomic operation)

@@ -20,6 +20,7 @@ import { identifyAddon } from '@/lib/addon-identifier'
 import localforage from 'localforage'
 import { syncManager } from '@/lib/sync/syncManager'
 import { autopilotManager } from '@/lib/autopilot/autopilotManager'
+import { getEffectiveManifest } from '@/lib/addon-utils'
 
 import { create } from 'zustand'
 
@@ -92,10 +93,13 @@ interface AccountStore {
             targetIndex?: number,
             isAutopilot?: boolean
       ) => Promise<void>
-      updateAddonMetadata: (
+      updateAddonSettings: (
             accountId: string,
             transportUrl: string,
-            metadata: { customName?: string; customLogo?: string; customDescription?: string },
+            settings: {
+                  metadata?: { customName?: string; customLogo?: string; customDescription?: string },
+                  catalogOverrides?: { removed: string[] }
+            },
             targetIndex?: number
       ) => Promise<void>
       moveAccount: (id: string, direction: 'up' | 'down') => Promise<void>
@@ -164,7 +168,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const accounts = [...get().accounts, account]
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -222,7 +226,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const accounts = [...get().accounts, account]
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -358,7 +362,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           }) as AddonDescriptor['manifest']
                                     }
 
-                                    return { ...addon, manifest: repairedManifest }
+                                    const finalManifest = getEffectiveManifest({ ...addon, manifest: repairedManifest })
+                                    return { ...addon, manifest: finalManifest }
                               } catch (e) {
                                     console.warn(`[Sync] Failed to baseline ${addon.manifest?.name || 'addon'}:`, e)
                                     return { ...addon, manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl) }
@@ -379,7 +384,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const accounts = get().accounts.map((acc) => (acc.id === id ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -389,7 +394,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         acc.id === id ? { ...acc, status: 'error' as const } : acc
                   )
                   set({ accounts, error: message })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -418,10 +423,14 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               }))
 
                               const mergedAddons = mergeAddons(account.addons, normalizedAddons)
+                              const finalAddons = mergedAddons.map(addon => ({
+                                    ...addon,
+                                    manifest: getEffectiveManifest(addon)
+                              }))
 
                               const updatedAccount = {
                                     ...account,
-                                    addons: mergedAddons,
+                                    addons: finalAddons,
                                     lastSync: new Date(),
                                     status: 'active' as const,
                               }
@@ -439,7 +448,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   })
             )
 
-            await localforage.setItem(STORAGE_KEY, get().accounts)
+            await localforage.setItem(STORAGE_KEY, structuredClone(get().accounts))
             if (!silent) {
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -470,11 +479,16 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   }))
 
                   const mergedAddons = mergeAddons(account.addons, normalizedAddons)
-                  const updatedAccount = { ...account, addons: mergedAddons, lastSync: new Date() }
+                  const finalAddons = mergedAddons.map(addon => ({
+                        ...addon,
+                        manifest: getEffectiveManifest(addon)
+                  }))
+
+                  const updatedAccount = { ...account, addons: finalAddons, lastSync: new Date() }
 
                   const accounts = get().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -514,7 +528,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const updatedAccount = { ...account, addons: mergedOrder, lastSync: new Date() }
                   const accounts = get().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -555,7 +569,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const updatedAccount = { ...account, addons: updatedAddons, lastSync: new Date() }
                   const accounts = get().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -595,7 +609,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const updatedAccount = { ...account, addons: timestampedOrder, lastSync: new Date() }
                   const accounts = get().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -831,7 +845,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const accounts = get().accounts.map((acc) => (acc.id === id ? updatedAccount : acc))
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -909,7 +923,10 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         if (normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
                               return {
                                     ...addon,
-                                    manifest: updatedAddon?.manifest || addon.manifest,
+                                    manifest: getEffectiveManifest({
+                                          ...addon,
+                                          manifest: updatedAddon?.manifest || addon.manifest
+                                    }),
                                     metadata: { ...addon.metadata, lastUpdated: Date.now() }
                               }
                         }
@@ -920,7 +937,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         acc.id === accountId ? { ...acc, addons: updatedAddons, lastSync: new Date() } : acc
                   )
                   set({ accounts })
-                  await localforage.setItem(STORAGE_KEY, accounts)
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -933,17 +950,37 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      updateAddonMetadata: async (accountId: string, transportUrl: string, metadata: { customName?: string; customLogo?: string; customDescription?: string }, targetIndex?: number) => {
+      updateAddonSettings: async (
+            accountId: string,
+            transportUrl: string,
+            settings: {
+                  metadata?: { customName?: string; customLogo?: string; customDescription?: string },
+                  catalogOverrides?: { removed: string[] }
+            },
+            targetIndex?: number
+      ) => {
             const account = get().accounts.find((a) => a.id === accountId)
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) => {
                   if (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
-                        const cleanMetadata = { ...(addon.metadata || {}) } as any
-                        Object.keys(metadata).forEach((k) => {
-                              if ((metadata as any)[k] === undefined) delete cleanMetadata[k]
-                              else cleanMetadata[k] = (metadata as any)[k]
-                        })
-                        return { ...addon, metadata: cleanMetadata }
+                        let newAddon = { ...addon }
+
+                        // Update Metadata
+                        if (settings.metadata) {
+                              const cleanMetadata = { ...(addon.metadata || {}) } as any
+                              Object.keys(settings.metadata).forEach((k) => {
+                                    if ((settings.metadata as any)[k] === undefined) delete cleanMetadata[k]
+                                    else cleanMetadata[k] = (settings.metadata as any)[k]
+                              })
+                              newAddon.metadata = cleanMetadata
+                        }
+
+                        // Update Catalog Overrides
+                        if (settings.catalogOverrides) {
+                              newAddon.catalogOverrides = settings.catalogOverrides
+                        }
+
+                        return newAddon
                   }
                   return addon
             })

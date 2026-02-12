@@ -174,6 +174,17 @@ export class StremioClient {
       if (response.data?.error) {
         throw new Error(response.data.error.message || 'Failed to update addon collection')
       }
+      // We wait a short moment for Stremio's consistency and then verify.
+      setTimeout(async () => {
+        try {
+          const verified = await this.getAddonCollection(authKey, accountContext)
+          if (verified.length < addons.length) {
+            console.warn(`[Sync] Stremio collection mismatch after update: ${addons.length} sent, ${verified.length} reported.`)
+          }
+        } catch (e) {
+          console.warn('[Sync] Post-sync verification failed:', e)
+        }
+      }, 2000)
     } catch (error) {
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 401) {
@@ -282,12 +293,11 @@ export class StremioClient {
    */
   async getLibraryItems(authKey: string): Promise<LibraryItem[]> {
     try {
-      const response = await this.client.post('/api/datastoreGet', {
+      const response = await this.serverClient.post('/stremio-proxy', {
         type: 'DatastoreGet',
         authKey,
         collection: 'libraryItem',
-        ids: [],
-        all: true,
+        all: true
       })
 
       if (response.data?.error) {

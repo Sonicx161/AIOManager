@@ -26,6 +26,9 @@ export interface SavedAddon {
     customLogo?: string
     customDescription?: string
   }
+  catalogOverrides?: {
+    removed: string[]
+  }
 
   // Health & Restoration
   autoRestore?: boolean

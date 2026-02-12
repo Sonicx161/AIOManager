@@ -43,4 +43,7 @@ export interface AddonDescriptor {
     customDescription?: string
     lastUpdated?: number
   }
+  catalogOverrides?: {
+    removed: string[]
+  }
 }
