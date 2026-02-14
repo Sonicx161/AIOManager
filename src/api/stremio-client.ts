@@ -291,13 +291,17 @@ export class StremioClient {
    * Get user's library items (Watch History)
    * Uses datastoreGet with collection: 'libraryItem' to match Syncio's implementation
    */
-  async getLibraryItems(authKey: string): Promise<LibraryItem[]> {
+  async getLibraryItems(authKey: string, accountContext: string = 'Unknown'): Promise<LibraryItem[]> {
     try {
       const response = await this.serverClient.post('/stremio-proxy', {
         type: 'DatastoreGet',
         authKey,
         collection: 'libraryItem',
         all: true
+      }, {
+        headers: {
+          'x-account-context': accountContext
+        }
       })
 
       if (response.data?.error) {
@@ -363,7 +367,7 @@ export class StremioClient {
     name: string
     type: string
     poster?: string
-  }): Promise<void> {
+  }, accountContext: string = 'Unknown'): Promise<void> {
     try {
       const libraryItem = {
         _id: item.id,
@@ -377,11 +381,15 @@ export class StremioClient {
         state: {}
       }
 
-      await this.client.post('/api/datastorePut', {
-        type: 'Put',
+      await this.serverClient.post('/stremio-proxy', {
+        type: 'DatastorePut',
         authKey,
         collection: 'libraryItem',
         changes: [libraryItem]
+      }, {
+        headers: {
+          'x-account-context': accountContext
+        }
       })
     } catch (error) {
       if (axios.isAxiosError(error)) {
@@ -397,7 +405,7 @@ export class StremioClient {
   /**
    * Remove an item from a user's library (marks as removed)
    */
-  async removeLibraryItem(authKey: string, itemId: string): Promise<void> {
+  async removeLibraryItem(authKey: string, itemId: string, accountContext: string = 'Unknown'): Promise<void> {
     try {
       const libraryItem = {
         _id: itemId,
@@ -405,11 +413,15 @@ export class StremioClient {
         _mtime: new Date().toISOString(),
       }
 
-      await this.client.post('/api/datastorePut', {
-        type: 'Put',
+      await this.serverClient.post('/stremio-proxy', {
+        type: 'DatastorePut',
         authKey,
         collection: 'libraryItem',
         changes: [libraryItem]
+      }, {
+        headers: {
+          'x-account-context': accountContext
+        }
       })
     } catch (error) {
       if (axios.isAxiosError(error)) {

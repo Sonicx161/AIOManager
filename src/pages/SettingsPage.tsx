@@ -3,6 +3,7 @@ import { useTheme, THEME_OPTIONS, ThemeOption, Theme } from '@/contexts/ThemeCon
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useActivityStore } from '@/store/activityStore'
+import { useLibraryCache } from '@/store/libraryCache'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
 import { Button } from '@/components/ui/button'
@@ -317,6 +318,8 @@ export function SettingsPage() {
         }
     }
 
+    const { clear: clearLibraryCache } = useLibraryCache()
+
     // Danger zone actions
     const handleClearActivity = () => {
         setConfirmDialog({
@@ -326,6 +329,7 @@ export function SettingsPage() {
             destructive: false,
             action: async () => {
                 await clearHistory()
+                await clearLibraryCache()
                 toast({ title: 'Activity Cleared', description: 'Watch history cache has been cleared.' })
             },
         })

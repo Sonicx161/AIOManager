@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useActivityStore, ActivityItem } from '@/store/activityStore'
 import { useAccountStore } from '@/store/accountStore'
+import { useLibraryCache } from '@/store/libraryCache'
 
 import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity } from 'lucide-react'
 import { useEffect, useState, useMemo, useRef } from 'react'
@@ -19,9 +20,27 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { Progress } from '@/components/ui/progress'
 
 export function ActivityPage() {
-    const { fetchActivity, deleteItems, loading, initialize, history, lastUpdated } = useActivityStore()
+    const { deleteItems } = useActivityStore()
+    const { accounts } = useAccountStore()
+    const {
+        items: history,
+        ensureLoaded,
+        loading,
+        loadingProgress,
+        invalidate: fetchActivityFull,
+        lastFetched: lastUpdated
+    } = useLibraryCache()
+
+    // Map useLibraryCache functions to original b06e names for UI compatibility
+    const fetchActivity = async (silent = false) => {
+        if (!silent) {
+            fetchActivityFull() // Invalidate
+            await ensureLoaded(accounts) // Re-fetch immediately
+        }
+    }
 
     const [searchTerm, setSearchTerm] = useState('')
     const searchInputRef = useRef<HTMLInputElement>(null)
@@ -52,19 +71,12 @@ export function ActivityPage() {
     const [isBulkMode, setIsBulkMode] = useState(false)
 
     useEffect(() => {
-        initialize().then(() => {
-            fetchActivity()
-        })
+        if (accounts.length > 0) {
+            ensureLoaded(accounts)
+        }
+    }, [accounts, ensureLoaded])
 
-        // Background polling for "Now Watching" status
-        const interval = setInterval(() => {
-            fetchActivity(true) // Silent refresh
-        }, 60000)
-
-        return () => clearInterval(interval)
-    }, [initialize, fetchActivity])
-
-    const orderedAccounts = useAccountStore((state) => state.accounts)
+    const orderedAccounts = accounts
 
     // Get unique accounts from history and sort by account store order
     const accountOptions = useMemo(() => {
@@ -185,6 +197,7 @@ export function ActivityPage() {
         setSelectedItems(new Set())
 
         await deleteItems(itemIds, removeFromLibrary)
+        fetchActivityFull() // Invalidate cache
 
         // Reset checkbox for next time
         setRemoveFromLibrary(false)
@@ -196,6 +209,19 @@ export function ActivityPage() {
     }
 
     const isSelecting = selectedItems.size > 0 || isBulkMode
+
+    // LOADING STATE
+    if (loading) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center p-8 opacity-50 animate-pulse">
+                <Activity className="h-16 w-16 mb-4 text-indigo-500" />
+                <h2 className="text-2xl font-bold">Gathering watch history...</h2>
+                <div className="mt-2 text-sm text-indigo-400 font-mono">
+                    {loadingProgress.current > 0 ? `Synced ${loadingProgress.current} accounts` : 'Connecting to Stremio...'}
+                </div>
+            </div>
+        )
+    }
 
     return (
         <div className="space-y-6">
@@ -224,7 +250,7 @@ export function ActivityPage() {
                         </div>
                         {lastUpdated && (
                             <span className="text-[10px] text-muted-foreground mr-2 font-mono opacity-60">
-                                Last synced: {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                Last synced: {new Date(lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                             </span>
                         )}
                     </div>
@@ -249,6 +275,13 @@ export function ActivityPage() {
                     </Button>
                 </div>
             </div>
+
+            {/* PROGRESS BAR */}
+            {loading && (
+                <div className="relative h-1 w-full bg-muted overflow-hidden rounded-full">
+                    <Progress value={(loadingProgress.current / loadingProgress.total) * 100} className="h-full bg-primary transition-all duration-300" />
+                </div>
+            )}
 
             {/* Controls Row */}
             <div className="flex flex-col xl:flex-row gap-3 items-end xl:items-center">
@@ -384,6 +417,7 @@ export function ActivityPage() {
                 onDelete={(id, removeRemote) => {
                     const ids = Array.isArray(id) ? id : [id]
                     deleteItems(ids, removeRemote)
+                    fetchActivityFull() // Invalidate cache
                     toast({
                         title: ids.length > 1 ? 'Episodes Deleted' : 'Item Deleted',
                         description: `Removed from activity history.`

@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.6.4'
+const VERSION = '1.6.5'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '50')
@@ -98,9 +98,27 @@ const truncateUrl = (url, maxLen = 80) => {
         }
 
         const safePath = pathParts.length > 0 ? `/${maskSegment(pathParts[0])}` : ''
-        const suffix = pathParts.length > 1 ? '/***' : ''
-        return `${u.protocol}//${u.hostname}${safePath}${suffix}`
-    } catch { return url.substring(0, 30) + '...<redacted>' }
+        return `${u.protocol}//${u.host}${safePath}${u.pathname.length > safePath.length ? '/...' : ''}`
+    } catch (e) {
+        return url.substring(0, maxLen) + '...'
+    }
+}
+
+// Log Helper: Mask account context for privacy (Zero-Knowledge compliance)
+const maskContext = (context) => {
+    if (!context || context === 'Unknown') return context
+
+    const normalized = context.trim()
+    const lower = normalized.toLowerCase()
+
+    // Whitelist for system labels to keep logs clear for the owner
+    // Use includes() to catch "Library Check" even if surrounded by other characters or formatting
+    const systemLabels = ['system check', 'library check', 'auto check', 'background sync', 'sync manager', 'system', 'library-update-check', 'update-check']
+    if (systemLabels.some(label => lower.includes(label))) return normalized
+
+    // Standard pattern: keep first 2 and last 2 (e.g., dd***25)
+    if (normalized.length <= 4) return `${normalized[0]}***${normalized[normalized.length - 1]}`
+    return `${normalized.substring(0, 2)}***${normalized.substring(normalized.length - 2)}`
 }
 
 // --- Server Setup ---
@@ -471,7 +489,7 @@ fastify.get('/api/meta-proxy', {
 }, async (request, reply) => {
     const { url } = request.query
     const accountContext = request.headers['x-account-context'] || 'Unknown'
-    fastify.log.info({ category: 'MetaProxy' }, `[${accountContext}] Proxying request to: ${truncateUrl(url)}`)
+    fastify.log.info({ category: 'MetaProxy' }, `[${maskContext(accountContext)}] Proxying request to: ${truncateUrl(url)}`)
 
     if (!isSafeUrl(url)) {
         fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request: ${truncateUrl(url)}`)
@@ -543,13 +561,20 @@ fastify.post('/api/stremio-proxy', {
 }, async (request, reply) => {
     const { type, ...payload } = request.body
     const accountContext = request.headers['x-account-context'] || 'Unknown'
+    const masked = maskContext(accountContext)
 
-    if (type === 'AddonCollectionGet') {
-        fastify.log.info({ category: 'Sync' }, `[${accountContext}] Refreshing addon collection from Stremio...`)
-    } else if (type === 'AddonCollectionSet') {
-        fastify.log.info({ category: 'Sync' }, `[${accountContext}] Pushing updated collection to Stremio (${payload.addons?.length || 0} addons)`)
-    } else if (type === 'DatastoreGet' || type === 'DatastorePut') {
-        fastify.log.info({ category: 'Sync' }, `[${accountContext}] Proxying library operation (${type}) for ${accountContext}`)
+    // Human-readable action mapping
+    const actionMap = {
+        'AddonCollectionGet': 'Refreshing Addons',
+        'AddonCollectionSet': 'Pushing Addon Updates',
+        'DatastoreGet': 'Syncing Library',
+        'DatastorePut': 'Updating Library Items'
+    }
+
+    const friendlyAction = actionMap[type] || `Operation: ${type}`
+
+    if (type === 'AddonCollectionGet' || type === 'AddonCollectionSet' || type === 'DatastoreGet' || type === 'DatastorePut') {
+        fastify.log.info({ category: 'Sync' }, `[${masked}] ${friendlyAction}...`)
     } else {
         // Strict Whitelist: Block unknown methods to prevent abuse
         fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked unauthorized Stremio API call: ${type}`)
@@ -1097,14 +1122,14 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
                 // HEALTH GUARD: Don't restore dead addons to Stremio
                 const isHealthy = await checkAddonHealthInternal(chain[idx])
                 if (!isHealthy) {
-                    fastify.log.warn({ category: 'Autopilot' }, `[${accountId}] Skipping restoration for DEAD addon: ${truncateUrl(chain[idx])}`)
+                    fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Skipping restoration for DEAD addon: ${truncateUrl(chain[idx])}`)
                     continue
                 }
 
                 if (remote) {
                     baseAddonList.push(remote);
                 } else if (remoteById) {
-                    fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Recovered manifest for swapped URL: ${truncateUrl(chain[idx])}`)
+                    fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Recovered manifest for swapped URL: ${truncateUrl(chain[idx])}`)
                     baseAddonList.push({ ...remoteById, transportUrl: chain[idx] });
                 } else if (stored && isSubstantial(stored.manifest)) {
                     // Use the rich stored manifest
@@ -1157,13 +1182,13 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
             authKey,
             addons: finalAddons
         }))
-        fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Stremio updated (Mirror): ${finalAddons.length} addons actively installed.`)
+        fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Stremio updated (Mirror): ${finalAddons.length} addons actively installed.`)
     } catch (err) {
         if (err.response?.status === 401) {
-            fastify.log.error({ category: 'Autopilot' }, `[${accountId}] Auth Key Expired (401). Disabling rule.`)
+            fastify.log.error({ category: 'Autopilot' }, `[${maskContext(accountId)}] Auth Key Expired (401). Disabling rule.`)
             await db.run('UPDATE autopilot_rules SET is_active = 0 WHERE account_id = $1', [accountId])
         }
-        fastify.log.error({ category: 'Autopilot' }, `[${accountId}] Mirror sync failed: ${err.message}`)
+        fastify.log.error({ category: 'Autopilot' }, `[${maskContext(accountId)}] Mirror sync failed: ${err.message}`)
         throw err
     }
 }
@@ -1257,11 +1282,11 @@ const processAutopilotRule = async (rule) => {
             chain = JSON.parse(rule.priority_chain)
         }
     } catch (e) {
-        fastify.log.warn({ category: 'Autopilot' }, `[${rule.account_id}] Chain parse failed: ${e.message}`)
+        fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Chain parse failed: ${e.message}`)
     }
 
     if (!Array.isArray(chain) || chain.length === 0) {
-        fastify.log.error({ category: 'Autopilot' }, `[${rule.account_id}] No valid priority chain. Skipping.`)
+        fastify.log.error({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] No valid priority chain. Skipping.`)
         return
     }
 
@@ -1275,7 +1300,7 @@ const processAutopilotRule = async (rule) => {
             addonList = JSON.parse(rule.addon_list)
         }
     } catch (e) {
-        fastify.log.warn({ category: 'Autopilot' }, `[${rule.account_id}] Addon list parse failed: ${e.message}`)
+        fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Addon list parse failed: ${e.message}`)
     }
 
     let stabilization = {}
@@ -1333,11 +1358,11 @@ const processAutopilotRule = async (rule) => {
 
     if (needsSync) {
         const statusMsg = foundOnline ? `Swapping to: ${normalizedTarget.substring(0, 40)}` : `Outage! Primary offline, keeping/forcing ${normalizedTarget.substring(0, 40)}`
-        fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] [Enforcement] ${statusMsg} (Swap: ${hasChanged}, Multi-Enabled: ${violationDetected})`)
+        fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] [Enforcement] ${statusMsg} (Swap: ${hasChanged}, Multi-Enabled: ${violationDetected})`)
 
         try {
             await syncStremioLive(decryptedAuthKey, chain, targetActiveUrl, rule.account_id, updatedAddonList)
-            fastify.log.info({ category: 'Autopilot' }, `[${rule.account_id}] Stremio synced: ${normalizedTarget.substring(0, 40)} active.`)
+            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Stremio synced: ${normalizedTarget.substring(0, 40)} active.`)
 
             if (hasChanged) {
                 const primaryUrl = chain[0]
@@ -1359,7 +1384,7 @@ const processAutopilotRule = async (rule) => {
                 }
             }
         } catch (syncErr) {
-            fastify.log.error({ category: 'Autopilot' }, `[${rule.account_id}] Stremio sync error: ${syncErr.message}`)
+            fastify.log.error({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Stremio sync error: ${syncErr.message}`)
         }
     }
 
@@ -1507,7 +1532,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.4
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.5
  ==============================================================================
 `;
         console.log(banner);
@@ -1572,7 +1597,7 @@ const start = async () => {
                 `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now])
             }
 
-            fastify.log.info({ category: 'Autopilot' }, `[${accountId}] Rule synced to server (Swap & Hide Mode).`)
+            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Rule synced to server (Swap & Hide Mode).`)
             return { success: true }
         })
 
@@ -1597,7 +1622,7 @@ const start = async () => {
                 }))
                 return { states, lastWorkerRun }
             } catch (err) {
-                fastify.log.error({ category: 'Autopilot' }, `State fetch failed for ${accountId}: ${err.message}`)
+                fastify.log.error({ category: 'Autopilot' }, `State fetch failed for ${maskContext(accountId)}: ${err.message}`)
                 return { states: [], lastWorkerRun }
             }
         })
@@ -1643,7 +1668,7 @@ const start = async () => {
         fastify.delete('/api/autopilot/account/:accountId', async (request, reply) => {
             const { accountId } = request.params
             const result = await db.run('DELETE FROM autopilot_rules WHERE account_id = $1', [accountId])
-            fastify.log.info({ category: 'Autopilot' }, `Bulk-deleted rules for account ${accountId.substring(0, 8)}...`)
+            fastify.log.info({ category: 'Autopilot' }, `Bulk-deleted rules for account ${maskContext(accountId)}...`)
             return { success: true, deleted: result?.changes || 0 }
         })
 

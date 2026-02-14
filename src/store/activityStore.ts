@@ -242,7 +242,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
             const accountPromises = accounts.map(async account => {
                 try {
                     const authKey = await decrypt(account.authKey, encryptionKey)
-                    const libraryItems = await stremioClient.getLibraryItems(authKey) as LibraryItem[]
+                    const libraryItems = await stremioClient.getLibraryItems(authKey, account.id) as LibraryItem[]
 
                     console.log(`[Activity] Fetched ${libraryItems.length} library items for ${account.name || account.id}`)
 
