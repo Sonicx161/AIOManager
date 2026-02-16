@@ -47,7 +47,16 @@ export function getWatchTimestamp(item: LibraryItem): Date {
         if (!isNaN(d.getTime())) times.push(d.getTime())
     }
     const now = Date.now()
-    const maxTime = times.length > 0 ? Math.max(...times) : now
+
+    // Filter out dates that are significantly in the future (> 5 mins)
+    // This protects against Stremio sending bad timestamps (e.g. 12h future) 
+    // which would otherwise be clamped to "now" and appear as "Just now"
+    const validTimes = times.filter(t => t <= now + 5 * 60 * 1000)
+
+    // If we have valid past/present times, use the latest of them.
+    // If all times were future (invalid), fall back to 'now' (safe default)
+    const maxTime = validTimes.length > 0 ? Math.max(...validTimes) : now
+
     return new Date(Math.min(maxTime, now))
 }
 

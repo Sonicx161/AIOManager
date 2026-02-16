@@ -9,12 +9,13 @@
 
   <br />
 
+  [![Version](https://img.shields.io/badge/version-1.7.1-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
-  [![Docker Pulls](https://img.shields.io/docker/pulls/sonicx161/aiomanager?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/sonicx161/aiomanager)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
-  [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
+  [![Docker Pulls](https://img.shields.io/docker/pulls/sonicx161/aiomanager?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/sonicx161/aiomanager)
   [![GitHub Stars](https://img.shields.io/github/stars/sonicx161/aiomanager?style=social)](https://github.com/sonicx161/aiomanager)
+  [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
 
   <br />
 
