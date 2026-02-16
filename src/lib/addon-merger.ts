@@ -36,6 +36,14 @@ export async function mergeAddons(
     const addonId = savedAddon.manifest.id
     const installUrl = savedAddon.installUrl
 
+    // 0. Pre-calculate effective metadata for this saved addon
+    // This handles the backward compatibility case where customName wasn't set in metadata
+    // We check against savedAddon.manifest.name because that's the baseline the user renamed FROM
+    const effectiveMetadata = { ...savedAddon.metadata }
+    if (!effectiveMetadata.customName && savedAddon.name && savedAddon.name !== savedAddon.manifest.name) {
+      effectiveMetadata.customName = savedAddon.name
+    }
+
     // 1. Smart Swap: Check for same Addon ID OR normalized same-URL 
     // This prevents duplicates if the URL protocol/trailing-slash changed
     const normInstallUrl = normalizeAddonUrl(installUrl).toLowerCase()
@@ -59,13 +67,12 @@ export async function mergeAddons(
 
       // Update existing instance
       try {
-        // ... rest of update logic ...
         const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
 
         const updatedDescriptor: AddonDescriptor = {
           transportUrl: installUrl, // Ensure we use the latest installUrl
           manifest: manifestToApply,
-          metadata: savedAddon.metadata
+          metadata: effectiveMetadata
         }
 
         updatedAddons[existingIndex] = updatedDescriptor
@@ -81,7 +88,7 @@ export async function mergeAddons(
         // Even if fetch fails, we still apply the metadata from the library
         updatedAddons[existingIndex] = {
           ...updatedAddons[existingIndex],
-          metadata: savedAddon.metadata
+          metadata: effectiveMetadata
         }
 
         result.skipped.push({
@@ -91,15 +98,13 @@ export async function mergeAddons(
       }
     } else {
       // 2. New instance (Additive)
-      // ... new instance logic ...
       try {
-        // Trust the saved manifest first to preserve patches
         const manifestToApply = savedAddon.manifest || (await fetchAddonManifest(installUrl, accountId)).manifest
 
         const newDescriptor: AddonDescriptor = {
-          transportUrl: installUrl,
+          transportUrl: installUrl, // Ensure we use the latest installUrl
           manifest: manifestToApply,
-          metadata: savedAddon.metadata
+          metadata: effectiveMetadata
         }
 
         updatedAddons.push(newDescriptor)
@@ -116,7 +121,7 @@ export async function mergeAddons(
         updatedAddons.push({
           transportUrl: installUrl,
           manifest: savedAddon.manifest,
-          metadata: savedAddon.metadata
+          metadata: effectiveMetadata
         })
 
         result.added.push({

@@ -44,14 +44,18 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
         .map((t) => normalizeTagName(t))
         .filter(Boolean)
 
+      const name = formData.name.trim()
+
       await updateSavedAddon(savedAddon.id, {
-        name: formData.name.trim(),
+        name,
         tags,
         installUrl: formData.installUrl.trim(),
       })
 
-      if (formData.customLogo !== (savedAddon.metadata?.customLogo || '')) {
+      // CRITICAL: Sync semantic name change to metadata so it applies on deploy
+      if (name !== savedAddon.name || formData.customLogo !== (savedAddon.metadata?.customLogo || '')) {
         await updateSavedAddonMetadata(savedAddon.id, {
+          customName: name,
           customLogo: formData.customLogo.trim() || undefined
         })
       }

@@ -398,28 +398,34 @@ export function SavedAddonLibrary() {
     try {
       const { useAccountStore } = await import('@/store/accountStore')
       const accountStore = useAccountStore.getState()
-      const addons = Array.from(selectedIds).map(id => library[id]).filter(Boolean)
 
-      let totalSuccess = 0
-      for (const accountId of accountIds) {
-        try {
-          // We use the account's authKey to perform the installs
-          const account = accountStore.accounts.find(a => a.id === accountId)
-          if (!account) continue
+      // Prepare accounts list with authKeys (required for bulkApply)
+      const targetAccounts = accountIds.map(id => {
+        const account = accountStore.accounts.find(a => a.id === id)
+        return account ? { id: account.id, authKey: account.authKey } : null
+      }).filter(Boolean) as { id: string, authKey: string }[]
 
-          for (const addon of addons) {
-            await accountStore.installAddonToAccount(accountId, addon.installUrl)
-          }
-          totalSuccess++
-        } catch (err) {
-          console.error(`Failed to deploy to account ${accountId}:`, err)
-        }
+      if (targetAccounts.length === 0) return
+
+      // Use the robust bulk applicator which preserves metadata/customizations
+      const result = await useAddonStore.getState().bulkApplySavedAddons(
+        Array.from(selectedIds),
+        targetAccounts,
+        true // allowProtected (deploying explicitly selected addons should override protection usually, or at least attempt to)
+      )
+
+      if (result.failed === 0) {
+        toast({
+          title: 'Deployment Complete',
+          description: `Successfully deployed ${selectedIds.size} addons to ${result.success} accounts.`,
+        })
+      } else {
+        toast({
+          title: 'Deployment Completed with Errors',
+          description: `Succeeded: ${result.success}, Failed: ${result.failed}. Check console for details.`,
+          variant: 'destructive',
+        })
       }
-
-      toast({
-        title: 'Deployment Complete',
-        description: `Successfully deployed to ${totalSuccess} of ${accountIds.length} accounts.`,
-      })
 
       setIsSelectionMode(false)
       setSelectedIds(new Set())
