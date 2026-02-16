@@ -1,3 +1,4 @@
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useActivityStore } from '@/store/activityStore'
@@ -21,7 +22,20 @@ import {
     Moon,
     Zap,
     CheckCircle,
+    Hammer,
+    RefreshCw,
 } from 'lucide-react'
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '../components/ui/avatar'
@@ -29,21 +43,20 @@ import { cn } from '@/lib/utils'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 export function MetricsPage() {
-    const { history, initialize, fetchActivity } = useActivityStore()
+    // const { history, initialize, fetchActivity } = useActivityStore() // Deprecated for display
+    const { initialize } = useActivityStore()
     const { accounts } = useAccountStore()
-    const { loading: cacheLoading, ensureLoaded } = useLibraryCache()
+    const { items: history, loading: cacheLoading, ensureLoaded } = useLibraryCache()
     const { results: stats, isComputing: workerLoading } = useMetricsWorker(history)
 
     useEffect(() => {
+        // We still init activityStore for background tasks/deletion logic availability
         initialize().then(() => {
             if (accounts.length > 0) {
                 ensureLoaded(accounts)
             }
-            // Background refresh if we already have history loaded from cache
-            const hasData = useActivityStore.getState().history.length > 0
-            fetchActivity(hasData)
         })
-    }, [initialize, fetchActivity, accounts, ensureLoaded])
+    }, [initialize, accounts, ensureLoaded, history.length])
 
     if (!stats || workerLoading) {
         return (
@@ -64,11 +77,52 @@ export function MetricsPage() {
                         Community Core insights and global statistics.
                     </p>
                 </div>
-                {(useActivityStore.getState().loading || cacheLoading) && (
+                {(cacheLoading) && (
                     <div className="flex items-center gap-2 text-xs font-bold text-indigo-500 animate-pulse bg-indigo-500/10 px-3 py-1.5 rounded-full border border-indigo-500/20">
                         <Activity className="h-3 w-3" />
                         Syncing...
                     </div>
+                )}
+                {!cacheLoading && (
+                    <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                            <Button
+                                className="h-8 bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-600/20 font-medium"
+                            >
+                                <Hammer className="mr-2 h-3.5 w-3.5" />
+                                Force Resync
+                            </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>Resync Activity Data?</AlertDialogTitle>
+                                <AlertDialogDescription className="space-y-2">
+                                    <p>
+                                        This will <strong>discard the local cache</strong> and re-fetch fresh data from Stremio.
+                                    </p>
+                                    <div className="bg-indigo-500/10 p-3 rounded-md border border-indigo-500/20 text-xs text-indigo-500 font-medium">
+                                        <p>✨ <strong>Self-Healing</strong></p>
+                                        <p className="mt-1 font-normal opacity-90">
+                                            If numbers look wrong or "phantom" items appear, this will fix it by mirroring exactly what is on your Stremio account.
+                                        </p>
+                                    </div>
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                <AlertDialogAction
+                                    onClick={() => {
+                                        useLibraryCache.getState().invalidate()
+                                        useLibraryCache.getState().ensureLoaded(accounts)
+                                    }}
+                                    className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                                >
+                                    <RefreshCw className="mr-2 h-4 w-4" />
+                                    Resync Now
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
                 )}
             </div>
 
@@ -180,9 +234,9 @@ export function MetricsPage() {
                                             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
                                                 <div className="text-white text-sm font-bold truncate">{item.name}</div>
                                             </div>
-                                        </a>
+                                        </a >
                                     ))}
-                                </div>
+                                </div >
                             ) : (
                                 <div className="flex items-center justify-center py-12 text-center">
                                     <div className="opacity-50">
@@ -192,11 +246,11 @@ export function MetricsPage() {
                                     </div>
                                 </div>
                             )}
-                        </div>
-                    </div>
+                        </div >
+                    </div >
 
                     {/* BINGE MASTERY HIGHLIGHT */}
-                    <div className="px-4">
+                    < div className="px-4" >
                         <Card className="bg-gradient-to-r from-orange-500/10 to-transparent border-orange-500/20">
                             <CardHeader>
                                 <CardTitle className="flex items-center gap-2 text-orange-500">
@@ -220,10 +274,10 @@ export function MetricsPage() {
                                 </div>
                             </CardContent>
                         </Card>
-                    </div>
+                    </div >
 
                     {/* COMMUNITY AWARDS */}
-                    <div className="px-4 space-y-6">
+                    < div className="px-4 space-y-6" >
                         <div className="flex items-center gap-3">
                             <Trophy className="h-6 w-6 text-yellow-500" />
                             <h2 className="text-2xl font-black">Community Awards</h2>
@@ -296,7 +350,7 @@ export function MetricsPage() {
                                 </CardContent>
                             </Card>
                         </div>
-                    </div>
+                    </div >
 
 
                     <div className="px-4 space-y-6">
@@ -377,12 +431,12 @@ export function MetricsPage() {
                             </CardContent>
                         </Card>
                     </div>
-                </TabsContent>
+                </TabsContent >
 
                 {/* TAB 2: COMMUNITY (Leaderboards) */}
-                <TabsContent value="community" className="space-y-12 px-4">
+                < TabsContent value="community" className="space-y-12 px-4" >
                     {/* 1. TOP STREAMERS (FULL LIST) - REDESIGNED */}
-                    <div className="space-y-6">
+                    < div className="space-y-6" >
                         <div className="flex items-center gap-3">
                             <Users className="h-6 w-6 text-blue-500" />
                             <h2 className="text-2xl font-black">Community Leaderboard</h2>
@@ -460,14 +514,14 @@ export function MetricsPage() {
                                 </Card>
                             ))}
                         </div>
-                    </div>
+                    </div >
 
                     {/* MOVED STREAK HALL OF FAME TO PULSE */}
 
-                </TabsContent>
+                </TabsContent >
 
                 {/* TAB 3: DEEP DIVE (Pro Stats) */}
-                <TabsContent value="deep-dive" className="space-y-8 px-4">
+                < TabsContent value="deep-dive" className="space-y-8 px-4" >
                     <div className="grid md:grid-cols-2 gap-6">
                         {/* THE ENDURANCE TEST (Rebranded Funnel) */}
                         <Card className="bg-muted/10 border-border/60">
@@ -691,10 +745,10 @@ export function MetricsPage() {
                             </div>
                         </div>
                     </div>
-                </TabsContent>
+                </TabsContent >
 
                 {/* TAB 4: THE VAULT (Hall of Fame) */}
-                <TabsContent value="vault" className="space-y-12 px-4">
+                < TabsContent value="vault" className="space-y-12 px-4" >
                     <div className="grid md:grid-cols-2 gap-8">
                         {/* GENRE DNA */}
                         <Card className="bg-muted/10 border-border/60">
@@ -794,14 +848,14 @@ export function MetricsPage() {
                         </div>
                     </div>
 
-                </TabsContent>
+                </TabsContent >
 
 
                 {/* TAB 6: PERSONALITY (Watch DNA) */}
-                <TabsContent value="personality" className="space-y-12 px-4 pb-20">
+                < TabsContent value="personality" className="space-y-12 px-4 pb-20" >
 
                     {/* Watch Personas */}
-                    <div className="space-y-6">
+                    < div className="space-y-6" >
                         <div className="flex items-center gap-3">
                             <Trophy className="h-6 w-6 text-yellow-500" />
                             <h2 className="text-2xl font-black">Watch Personas</h2>
@@ -830,12 +884,12 @@ export function MetricsPage() {
                                 </Card>
                             ))}
                         </div>
-                    </div>
+                    </div >
 
 
 
                     {/* User Traits Grid */}
-                    <div className="space-y-6">
+                    < div className="space-y-6" >
                         <div className="flex items-center gap-3">
                             <Zap className="h-6 w-6 text-orange-500" />
                             <h2 className="text-2xl font-black">Habit Profiles</h2>
@@ -940,8 +994,8 @@ export function MetricsPage() {
                                 )}
                             </div>
                         </div>
-                    </div>
-                </TabsContent>
+                    </div >
+                </TabsContent >
             </Tabs >
         </div >
     )

@@ -11,7 +11,7 @@
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
-  [![React](https://img.shields.io/badge/React-20232A?style=flat&logo=react&logoColor=61DAFB)](https://reactjs.org/)
+  [![Docker Pulls](https://img.shields.io/docker/pulls/sonicx161/aiomanager?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/sonicx161/aiomanager)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
   [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
   [![GitHub Stars](https://img.shields.io/github/stars/sonicx161/aiomanager?style=social)](https://github.com/sonicx161/aiomanager)
@@ -25,45 +25,65 @@
 ---
 
 > [!NOTE]
-> **Project Goal & Maintenance Status**
-> This project was developed as a personal tool to fill the gap in advanced Stremio account management. It is currently **feature-complete** for my personal needs. While I am happy to share it with the community, I am not looking for feature requests at this time. Pull Requests and bug reports are welcome, but maintenance is done on a best-effort basis.
+> **Maintenance Status**
+> AIOManager is now in maintenance mode. Active feature development has wrapped up with v1.7.0. Bug reports via GitHub Issues are welcome and PRs from the community are always open. Maintenance is done on a best-effort basis.
 
 ---
 
 ## ⚡ Features
 
 ### 🛠️ Total Management
-The soul of AIOManager is giving you complete authority over your Stremio ecosystem.
-*   **Addon Snapshots**: Save configurations for complex addons like AIOStreams or AIOMetadata to your private library.
-*   **Account Sync**: Seamlessly switch between multiple Stremio logins without losing your place.
-*   **Bulk Actions**: picking dozens of history items to move, or using **Bulk Install from URLs** to hydrate new accounts instantly.
-*   **Account Cloning**: Effortlessly clone one account's setup to another using the **Concatenate** strategy (Safe Copy).
-*   **Duplicate Support**: Manage multiple instances of the same addon (e.g., dual Debrid configs) with index-based targeting that prevents overwrites.
-*   **Granular Control**: Reorder profiles, customize addon branding, and manage your sidebar exactly how you want it.
-*   **Failover Logic**: Automatically switch to backup addons if your primary provider goes offline with real-time health flags.
 
-<div align="center">
-  <h4>Granular Addon Control</h4>
-  <img src="public/screenshots/addon-grid.png" width="100%" alt="Addon Management">
-  <br />
-  <h4>Advanced Failover Rules</h4>
-  <img src="public/screenshots/failover.png" width="100%" alt="Failover Rules">
-  <br />
-  <h4>Drag & Drop Reordering</h4>
-  <img src="public/screenshots/reorder.png" width="100%" alt="Reorder Addons">
-  <br />
-  <h4>Custom Addon Customization</h4>
-  <img src="public/screenshots/editor.png" width="100%" alt="Addon Editor">
-</div>
+The soul of AIOManager is giving you complete authority over your Stremio ecosystem.
+
+* **Addon Snapshots**: Save configurations for complex addons like AIOStreams or AIOMetadata to your private library and deploy them anywhere.
+* **Deploy from Library**: Select saved addons and push them directly to any of your accounts without leaving the library page.
+* **Account Sync**: Seamlessly switch between multiple Stremio logins without losing your place.
+* **Bulk Actions**: Install, remove, reinstall, enable, disable, protect, or clone addons across multiple accounts in one operation. Every action shows you a preview of what's about to happen before you execute.
+* **Reinstall Selected**: Pick specific addons and reinstall just those across all your selected accounts from their source URLs. No need to touch the rest.
+* **Sync Addon Order**: Copy the addon ordering from one account and apply it to all your selected accounts at once.
+* **Account Mirroring**: Copy one account's addon setup to any number of target accounts, with the choice to append or fully overwrite.
+* **Duplicate Support**: Manage multiple instances of the same addon (e.g., dual Debrid configs) with URL-based targeting that prevents overwrites.
+* **Granular Control**: Reorder profiles, customize addon branding, and manage your sidebar exactly how you want it.
+* **Failover Logic**: Automatically switch to backup addons if your primary provider goes offline with real-time health flags.
+
+#### Granular Addon Control
+![Addon Management](public/screenshots/addon-grid.png)
+
+#### Advanced Failover Rules
+![Failover Rules](public/screenshots/failover.png)
+
+#### Drag & Drop Reordering
+![Reorder Addons](public/screenshots/reorder.png)
+
+#### Custom Addon Customization
+![Addon Editor](public/screenshots/editor.png)
+
+### 📚 Saved Addon Library
+
+* **Profiles**: Organize your saved addons into profiles and deploy entire profiles to accounts in one click.
+* **Tags**: Tag addons for quick filtering and use tags as the basis for bulk install and bulk remove operations.
+* **Deploy & Remove**: Push or remove selected addons across specific accounts directly from the library.
+* **Manifest Updates**: Refresh the name, logo, and version of selected addons from their source URLs while keeping your tags and profile assignments intact.
+* **Conflict Resolution**: When saving addons from an account, choose to skip existing entries, update them with merged tags, or create a new copy.
 
 ### 📊 Mega Metrics
-*   **Pulse**: Real-time activity tracking, Trending Now clusters, and the **Streak Hall of Fame**.
-*   **Deep Dive**: Prime Time heatmaps, Retention Funnels, and "The Graveyard" for abandoned shows.
+
+* **Pulse**: Real-time activity tracking, Trending Now clusters, and the **Streak Hall of Fame**.
+* **Deep Dive**: Prime Time heatmaps, Retention Funnels, and "The Graveyard" for abandoned shows.
+* **Smart Repair**: If your watch stats look off, the repair tool finds and fixes corrupted duration data without wiping your history.
+
+### 🔐 Account Management
+
+* **OAuth Login**: Add accounts using the official Stremio OAuth flow. No email or password required.
+* **Email & Password**: Standard login with auto-registration. If the account doesn't exist it gets created instantly.
+* **Auth Key**: Add accounts directly via auth key for advanced setups.
 
 ### 🛡️ Privacy First Sync
-*   **Local First**: Your data stays in your browser via IndexedDB.
-*   **Encrypted Cloud**: Optional sync using AES-256-GCM encryption. User-side keys never leave your device.
-*   **Server-Side Protection**: [New] Autopilot rules and Stremio auth keys are now encrypted at rest on the server using a global `ENCRYPTION_KEY` secret.
+
+* **Local First**: Your data stays in your browser via IndexedDB.
+* **Encrypted Cloud**: Optional sync using AES-256-GCM encryption. User-side keys never leave your device.
+* **Server-Side Protection**: Autopilot rules and Stremio auth keys are encrypted at rest on the server using a global `ENCRYPTION_KEY` secret.
 
 ---
 
@@ -77,8 +97,11 @@ This is the easiest way to run AIOManager on your home server or VPS.
 docker compose pull && docker compose up -d
 ```
 
-### Unraid Support 🛠️
-AIOManager is now optimized for **Unraid**! You can find the template in the [unraid-template.xml](unraid-template.xml) file or simply add it via the **Community Applications** (search for AIOManager).
+### Unraid Support
+AIOManager includes a native Unraid template!
+1.  Copy the URL of the [unraid-template.xml](https://raw.githubusercontent.com/sonicx161/AIOManager/main/unraid-template.xml) file.
+2.  In Unraid, go to **Docker** > **Add Container**.
+3.  Paste the URL into the **Template URL** (or might be "Install from URL" via CA plugins).
 
 **Key Unraid Features:**
 - **Persistent AppData**: Standardized `/mnt/user/appdata/aiomanager` mapping.

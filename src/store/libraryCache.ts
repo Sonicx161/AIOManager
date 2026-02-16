@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import localforage from 'localforage'
-import { ActivityItem, LibraryItem } from './activityStore'
+import { ActivityItem, LibraryItem } from '@/types/activity'
 import { stremioClient } from '@/api/stremio-client'
 import { encrypt, decrypt as decryptData } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
@@ -28,70 +28,8 @@ interface LibraryCacheState {
     clear: () => Promise<void>
 }
 
-// Internal helpers from activityStore (duplicated to avoid circular dependencies or massive refactors)
+import { isActuallyWatched, transformLibraryItemToActivityItem } from '@/lib/activity-utils'
 
-function isActuallyWatched(item: LibraryItem): boolean {
-    const s = item.state || {}
-    if ((s.timeWatched ?? 0) > 0 || (s.overallTimeWatched ?? 0) > 0) return true
-    if (s.video_id && s.video_id.trim() !== '') return true
-    if ((s.timesWatched ?? 0) > 0) return true
-    return false
-}
-
-function getUniqueItemId(item: LibraryItem): string {
-    const baseId = item._id
-    if ((item.type === 'series' || item.type === 'anime') && item.state?.video_id) {
-        const videoId = item.state.video_id
-        const parts = videoId.split(':')
-        if (parts.length >= 3) return videoId
-        if (parts.length === 2) return `${parts[0]}:1:${parts[1]}`
-    }
-    return baseId
-}
-
-function getWatchTimestamp(item: LibraryItem): Date {
-    const times: number[] = []
-    if (item.state?.lastWatched) {
-        const d = new Date(item.state.lastWatched)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-    if (item._mtime) {
-        const d = new Date(item._mtime)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-    const now = Date.now()
-    const maxTime = times.length > 0 ? Math.max(...times) : now
-    // Clamp to now to prevent future dates (which cause "Now" badge bugs)
-    return new Date(Math.min(maxTime, now))
-}
-
-function getSeasonEpisode(item: LibraryItem): { season?: number; episode?: number } {
-    if ((item.type !== 'series' && item.type !== 'anime') || !item.state?.video_id) return {}
-    const parts = item.state.video_id.split(':')
-    const firstPart = parts[0]?.toLowerCase() || ''
-    const animeProviders = ['kitsu', 'mal', 'anilist', 'anidb', 'tmdb']
-    const isAnimeProvider = animeProviders.includes(firstPart)
-
-    if (parts.length >= 4) {
-        return {
-            season: parseInt(parts[parts.length - 2], 10) || 1,
-            episode: parseInt(parts[parts.length - 1], 10) || 0
-        }
-    }
-    if (parts.length === 3 && isAnimeProvider) {
-        return { season: 1, episode: parseInt(parts[2], 10) || 0 }
-    }
-    if (parts.length === 3) {
-        return {
-            season: parseInt(parts[1], 10) || 1,
-            episode: parseInt(parts[2], 10) || 0
-        }
-    }
-    if (parts.length === 2) {
-        return { season: 1, episode: parseInt(parts[1], 10) || 0 }
-    }
-    return { season: item.state.season ?? 1, episode: item.state.episode }
-}
 
 export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
     items: [],
@@ -225,30 +163,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
                 const accountActivity = libraryItems
                     .filter(item => isActuallyWatched(item))
-                    .map(item => {
-                        const uniqueItemId = getUniqueItemId(item)
-                        const { season, episode } = getSeasonEpisode(item)
-                        const duration = item.state?.duration || 0
-                        const timeOffset = item.state?.timeOffset || 0
-
-                        return {
-                            id: `${account.id}:${uniqueItemId}`,
-                            accountId: account.id,
-                            accountName: account.name || account.email?.split('@')[0] || account.id || 'Unknown',
-                            accountColorIndex: accounts.indexOf(account) % 10,
-                            itemId: item._id,
-                            uniqueItemId,
-                            name: item.name || 'Unknown Title',
-                            type: item.type || 'other',
-                            poster: item.poster || '',
-                            timestamp: getWatchTimestamp(item),
-                            duration,
-                            watched: timeOffset,
-                            progress: duration > 0 ? Math.min(100, Math.max(0, (timeOffset / duration) * 100)) : 0,
-                            season: season || 1,
-                            episode: episode || 1
-                        }
-                    })
+                    .map(item => transformLibraryItemToActivityItem(item, account, accounts))
 
                 // Memory Optimization: Push in place instead of creating new arrays with spread
                 // allItems.push(...accountActivity)

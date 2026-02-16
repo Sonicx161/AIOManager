@@ -4,51 +4,10 @@ import { useAccountStore } from '@/store/accountStore'
 import { useAuthStore } from '@/store/authStore'
 import localforage from 'localforage'
 import { create } from 'zustand'
+import { ActivityItem, LibraryItem } from '@/types/activity'
 
 const STORAGE_KEY = 'stremio-manager:activity'
 const DELETED_IDS_KEY = 'stremio-manager:activity-deleted'
-
-export interface LibraryItem {
-    _id: string
-    name: string
-    type: string
-    poster: string
-    background?: string
-    logo?: string
-    state: {
-        lastWatched?: string
-        timeOffset?: number
-        duration?: number
-        flaggedWatched?: number
-        timesWatched?: number
-        timeWatched?: number
-        overallTimeWatched?: number
-        video_id?: string
-        watched?: string
-        season?: number
-        episode?: number
-    }
-    _ctime?: string
-    _mtime?: string
-}
-
-export interface ActivityItem {
-    id: string // Unique ID: accountId:uniqueItemId (episode-aware)
-    accountId: string
-    accountName: string
-    accountColorIndex: number
-    itemId: string // Base item ID (e.g., tt123)
-    uniqueItemId: string // Episode-aware ID (e.g., tt123:1:5 for series)
-    name: string
-    type: string
-    poster: string
-    timestamp: Date
-    duration: number
-    watched: number
-    progress: number
-    season?: number
-    episode?: number
-}
 
 interface ActivityState {
     history: ActivityItem[]
@@ -60,139 +19,16 @@ interface ActivityState {
 
     initialize: () => Promise<void>
     fetchActivity: (silent?: boolean) => Promise<void>
+    repairHistory: () => Promise<void>
     clearHistory: () => Promise<void>
     deleteItems: (itemIds: string[], removeFromLibrary?: boolean) => Promise<void>
     deleteActivityForAccount: (accountId: string) => Promise<void>
     clearDeletedBlacklist: () => Promise<void>
+    reset: () => Promise<void>
 }
 
-/**
- * Syncio-aligned filter: checks if item was actually watched, not just added to library.
- */
-function isActuallyWatched(item: LibraryItem): boolean {
-    const s = item.state || {}
+import { isActuallyWatched, getUniqueItemId, transformLibraryItemToActivityItem } from '@/lib/activity-utils'
 
-    // Check for positive watch time
-    if ((s.timeWatched ?? 0) > 0 || (s.overallTimeWatched ?? 0) > 0) {
-        return true
-    }
-
-    // Check for a valid video_id (indicates specific content was played)
-    if (s.video_id && s.video_id.trim() !== '') {
-        return true
-    }
-
-    // Check for times watched > 0
-    if ((s.timesWatched ?? 0) > 0) {
-        return true
-    }
-
-    return false
-}
-
-/**
- * Generates a unique ID for an activity item, accounting for series episodes.
- */
-function getUniqueItemId(item: LibraryItem): string {
-    const baseId = item._id
-
-    // Handle both series and anime types
-    if ((item.type === 'series' || item.type === 'anime') && item.state?.video_id) {
-        const videoId = item.state.video_id
-        const parts = videoId.split(':')
-
-        // Standard format: "tt123:season:episode" (3 parts) or Kitsu "kitsu:id:s:e" (4 parts)
-        if (parts.length >= 3) {
-            return videoId // Already unique per episode
-        }
-        // Format: "tt123:episode" (2 parts, no season)
-        if (parts.length === 2) {
-            return `${parts[0]}:1:${parts[1]}` // Normalize to season 1
-        }
-    }
-
-    // For movies or items without video_id, use base ID
-    return baseId
-}
-
-/**
- * Gets the best timestamp for an activity item.
- */
-function getWatchTimestamp(item: LibraryItem): Date {
-    const times: number[] = []
-
-    if (item.state?.lastWatched) {
-        const d = new Date(item.state.lastWatched)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-    if (item._mtime) {
-        const d = new Date(item._mtime)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-
-    // Use the most recent timestamp
-    return times.length > 0 ? new Date(Math.max(...times)) : new Date()
-}
-
-/**
- * Extracts season/episode from video_id.
- * Handles multiple formats:
- * - IMDB: "tt123:season:episode" (3 parts, starts with 'tt')
- * - Kitsu/MAL: "kitsu:12345:episode" (3 parts, provider prefix = no season)
- * - Kitsu with season: "kitsu:12345:season:episode" (4 parts)
- * - Simple: "id:episode" (2 parts, season defaults to 1)
- */
-function getSeasonEpisode(item: LibraryItem): { season?: number; episode?: number } {
-    // Handle both series and anime types
-    if ((item.type !== 'series' && item.type !== 'anime') || !item.state?.video_id) {
-        return {}
-    }
-
-    const parts = item.state.video_id.split(':')
-    const firstPart = parts[0]?.toLowerCase() || ''
-
-    // Known anime providers that use format: provider:id:episode (no season)
-    const animeProviders = ['kitsu', 'mal', 'anilist', 'anidb', 'tmdb']
-    const isAnimeProvider = animeProviders.includes(firstPart)
-
-    // 4 parts: "kitsu:12345:season:episode" - extract last two
-    if (parts.length >= 4) {
-        return {
-            season: parseInt(parts[parts.length - 2], 10) || 1,
-            episode: parseInt(parts[parts.length - 1], 10) || 0
-        }
-    }
-
-    // 3 parts with anime provider: "kitsu:12345:episode" - NO season info
-    if (parts.length === 3 && isAnimeProvider) {
-        return {
-            season: 1, // Anime with provider prefix = season 1 by default
-            episode: parseInt(parts[2], 10) || 0
-        }
-    }
-
-    // 3 parts with IMDB format: "tt123:season:episode"
-    if (parts.length === 3) {
-        return {
-            season: parseInt(parts[1], 10) || 1,
-            episode: parseInt(parts[2], 10) || 0
-        }
-    }
-
-    // 2 parts: "id:episode" (no season info)
-    if (parts.length === 2) {
-        return {
-            season: 1,
-            episode: parseInt(parts[1], 10) || 0
-        }
-    }
-
-    // Fallback to state values if available
-    return {
-        season: item.state.season ?? 1,
-        episode: item.state.episode
-    }
-}
 
 export const useActivityStore = create<ActivityState>((set, get) => ({
     history: [],
@@ -254,34 +90,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
                             const blacklistKey = `${account.id}:${uniqueId}`
                             return !deletedItemIds.has(blacklistKey)
                         })
-                        .map(item => {
-                            const uniqueItemId = getUniqueItemId(item)
-                            const timestamp = getWatchTimestamp(item)
-                            const { season, episode } = getSeasonEpisode(item)
-                            const duration = item.state?.duration || 0
-                            const timeOffset = item.state?.timeOffset || 0
-                            const progress = duration > 0 ? (timeOffset / duration) * 100 : 0
-
-                            const accountColorIndex = accounts.indexOf(account) % 10
-
-                            return {
-                                id: `${account.id}:${uniqueItemId}`,
-                                accountId: account.id,
-                                accountName: account.name || account.email?.split('@')[0] || account.id || 'Unknown',
-                                accountColorIndex,
-                                itemId: item._id,
-                                uniqueItemId,
-                                name: item.name,
-                                type: item.type,
-                                poster: item.poster,
-                                timestamp,
-                                duration,
-                                watched: timeOffset,
-                                progress,
-                                season,
-                                episode
-                            }
-                        })
+                        .map(item => transformLibraryItemToActivityItem(item, account, accounts))
 
                     return activityItems
                 } catch (err) {
@@ -320,6 +129,49 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         } catch (err) {
             console.error('Fetch activity failed:', err)
             set({ error: err instanceof Error ? err.message : 'Failed to fetch activity' })
+        } finally {
+            set({ loading: false })
+        }
+    },
+
+    // Intelligent repair: Scans history for glitches (e.g. >24h duration) and fixes them
+    // WITHOUT wiping the entire history.
+    repairHistory: async () => {
+        set({ loading: true, error: null })
+        try {
+            const { history } = get()
+            let repairedCount = 0
+
+            // 1. Sanitize existing history
+            const sanitizedHistory = history.map(item => {
+                // Sanity check: Duration > 24 hours (86400000 ms) is likely a bug/glitch
+                const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
+                if (item.duration > TWENTY_FOUR_HOURS_MS) {
+                    console.warn(`[Smart Repair] Fixed glitchy duration for ${item.name}: ${item.duration}ms -> 0ms`)
+                    repairedCount++
+                    return { ...item, duration: 0, progress: 0, watched: 0 }
+                }
+                // Sanity check: Negative duration
+                if (item.duration < 0) {
+                    console.warn(`[Smart Repair] Fixed negative duration for ${item.name}: ${item.duration}ms -> 0ms`)
+                    repairedCount++
+                    return { ...item, duration: 0 }
+                }
+                return item
+            })
+
+            // 2. Save sanitized version
+            set({ history: sanitizedHistory, lastUpdated: new Date() })
+            await localforage.setItem(STORAGE_KEY, sanitizedHistory)
+
+            console.log(`[Smart Repair] Complete. Fixed ${repairedCount} items.`)
+
+            // 3. Fetch latest data to ensure we are up to date
+            await get().fetchActivity(true) // silent fetch
+
+        } catch (err) {
+            console.error('Smart Repair failed:', err)
+            set({ error: err instanceof Error ? err.message : 'Repair failed' })
         } finally {
             set({ loading: false })
         }
@@ -406,5 +258,11 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
         await localforage.removeItem(DELETED_IDS_KEY)
         // Re-fetch to restore previously deleted items
         await get().fetchActivity()
+    },
+
+    reset: async () => {
+        set({ history: [], deletedItemIds: new Set(), initialized: false, lastUpdated: null, error: null, loading: false })
+        await localforage.removeItem(STORAGE_KEY)
+        await localforage.removeItem(DELETED_IDS_KEY)
     }
 }))

@@ -101,7 +101,7 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
     const normLocal = normalizeAddonUrl(localAddon.transportUrl)
 
     // STRICT: Only match by transportUrl to support multiple instances of same manifest ID (e.g. AIOStreams variants)
-    let remoteAddon = remoteAddonMap.get(normLocal)
+    const remoteAddon = remoteAddonMap.get(normLocal)
 
     const isRecentLocalChange = localAddon.metadata?.lastUpdated && (now - localAddon.metadata.lastUpdated < MANIFEST_GRACE_PERIOD)
 

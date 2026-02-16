@@ -2,11 +2,12 @@ import { ActivityFeed } from '@/components/activity/ActivityFeed'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useActivityStore, ActivityItem } from '@/store/activityStore'
+import { useActivityStore } from '@/store/activityStore'
+import { ActivityItem } from '@/types/activity'
 import { useAccountStore } from '@/store/accountStore'
 import { useLibraryCache } from '@/store/libraryCache'
 
-import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity } from 'lucide-react'
+import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity, X } from 'lucide-react'
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -238,7 +239,7 @@ export function ActivityPage() {
                     <div className="flex flex-col items-end gap-1">
                         <div className="flex items-center gap-2 text-xs font-bold text-primary bg-primary/10 px-3 py-1.5 rounded-full whitespace-nowrap border border-primary/20">
                             <Activity className="h-3 w-3" />
-                            {history.length} items • {Math.round(history.reduce((acc, item) => acc + (item.watched || 0), 0) / 3600000)}h total
+                            {history.length} items • {Math.round(history.reduce((acc, item) => acc + (item.overallTimeWatched || item.watched || 0), 0) / 3600000)}h total
                             {sessionComparison.todayHrs > 0 && (
                                 <span className={cn(
                                     "ml-2 pl-2 border-l border-primary/30",
@@ -294,9 +295,17 @@ export function ActivityPage() {
                             placeholder="Search by title..."
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
-                            className="pl-9"
+                            className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors"
                             data-search-focus
                         />
+                        {searchTerm && (
+                            <button
+                                onClick={() => setSearchTerm('')}
+                                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors focus:outline-none"
+                            >
+                                <X className="h-4 w-4 text-muted-foreground" />
+                            </button>
+                        )}
                     </div>
 
                     {/* User Filter */}

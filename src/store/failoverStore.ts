@@ -4,6 +4,7 @@ import { useAccountStore } from '@/store/accountStore'
 import axios from 'axios'
 import { decrypt, encrypt, loadSessionKey } from '@/lib/crypto'
 import { normalizeAddonUrl } from '@/lib/utils'
+import { useAuthStore } from '@/store/authStore'
 
 const STORAGE_KEY = 'stremio-manager:failover-rules'
 
@@ -271,6 +272,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         if (rules.length === 0) return
 
         try {
+            // Guard: Do not attempt to sync if locked (prevents "Database is locked" error)
+            if (useAuthStore.getState().isLocked) return
+
             const { useSyncStore } = await import('@/store/syncStore')
             const { auth, serverUrl } = useSyncStore.getState()
 
@@ -436,6 +440,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             // ZERO-WRITE: We keep lastCheck in memory for the UI, but we don't 
             // force a localforage write unless a real change happens elsewhere.
             // This prevents "600,000 updates" issues on idle machines.
+
+            // Guard: Do not check rules if locked
+            if (useAuthStore.getState().isLocked) return
         } finally {
             set({ isChecking: false })
         }
@@ -755,7 +762,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
     reset: async () => {
         get().stopAutomation()
-        set({ rules: [], webhook: { url: '', enabled: false, updatedAt: 0 }, isMonitoring: false })
+        set({ rules: [], webhook: { url: '', enabled: false, updatedAt: 0 }, isMonitoring: false, lastWorkerRun: undefined })
         if (automationInterval) {
             clearInterval(automationInterval)
             automationInterval = null
@@ -764,7 +771,5 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             localforage.removeItem(STORAGE_KEY),
             localforage.removeItem(STORAGE_KEY + ':webhook')
         ])
-        const { useSyncStore } = await import('@/store/syncStore')
-        useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
 }))

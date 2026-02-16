@@ -89,9 +89,9 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className="sm:max-w-xl">
                 <DialogHeader className="pb-4 border-b">
-                    <DialogTitle>Bulk Edit {selectedCount} Addons</DialogTitle>
+                    <DialogTitle>Bulk Edit {selectedCount} Addon{selectedCount !== 1 ? 's' : ''}</DialogTitle>
                     <DialogDescription>
-                        Apply changes to all selected addons at once.
+                        Configure tags and profile assignment for all selected library items.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -138,19 +138,19 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
                         <CardHeader className="pb-3">
                             <CardTitle className="text-sm font-semibold flex items-center gap-2 uppercase tracking-wide text-muted-foreground">
                                 <User className="h-4 w-4" />
-                                Profile Assignment
+                                Profile Migration
                             </CardTitle>
                         </CardHeader>
                         <CardContent>
                             <div className="grid gap-2">
-                                <Label htmlFor="profile" className="text-xs font-medium">Move to Profile</Label>
+                                <Label htmlFor="profile" className="text-xs font-medium">Assign to Profile</Label>
                                 <Select value={selectedProfileId} onValueChange={setSelectedProfileId}>
                                     <SelectTrigger className="bg-background">
-                                        <SelectValue placeholder="Don't change profile" />
+                                        <SelectValue placeholder="No profile change" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        <SelectItem value="no-change">Don't change profile</SelectItem>
-                                        <SelectItem value="unassigned">Unassigned (No Profile)</SelectItem>
+                                        <SelectItem value="no-change"><i>Don't change profile</i></SelectItem>
+                                        <SelectItem value="unassigned">Move to Unassigned</SelectItem>
                                         {profiles.map((profile) => (
                                             <SelectItem key={profile.id} value={profile.id}>
                                                 {profile.name}
@@ -161,6 +161,25 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
                             </div>
                         </CardContent>
                     </Card>
+
+                    {/* Change Preview */}
+                    <div className="bg-muted/30 border border-dashed rounded-lg p-3 space-y-2">
+                        <h4 className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Change Preview</h4>
+                        <div className="text-xs space-y-1">
+                            {tagsToAdd.length > 0 && (
+                                <p>• Will add <b>{tagsToAdd.length}</b> tag{tagsToAdd.length !== 1 ? 's' : ''}: <span className="text-primary">{tagsToAdd.join(', ')}</span></p>
+                            )}
+                            {tagsToRemove.length > 0 && (
+                                <p>• Will remove <b>{tagsToRemove.length}</b> tag{tagsToRemove.length !== 1 ? 's' : ''}: <span className="text-destructive">{tagsToRemove.join(', ')}</span></p>
+                            )}
+                            {selectedProfileId !== 'no-change' && (
+                                <p>• Will move to <b>{selectedProfileId === 'unassigned' ? 'Unassigned' : profiles.find(p => p.id === selectedProfileId)?.name}</b> profile.</p>
+                            )}
+                            {tagsToAdd.length === 0 && tagsToRemove.length === 0 && selectedProfileId === 'no-change' && (
+                                <p className="italic text-muted-foreground">No changes configured.</p>
+                            )}
+                        </div>
+                    </div>
                 </div>
 
                 <DialogFooter className="pt-4 border-t">

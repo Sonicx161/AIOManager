@@ -1,6 +1,6 @@
 import { formatDistanceToNow } from 'date-fns'
 import { PlayCircle, CheckSquare, Activity } from 'lucide-react'
-import { ActivityItem } from '@/store/activityStore'
+import { ActivityItem } from '@/types/activity'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'

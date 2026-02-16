@@ -14,7 +14,7 @@ import { maskUrl, getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
 import { useAddonStore } from '@/store/addonStore'
 import { useUIStore } from '@/store/uiStore'
 import { SavedAddon } from '@/types/saved-addon'
-import { Copy, MoreVertical, Pencil, RefreshCw, Settings, Trash2 } from 'lucide-react'
+import { Copy, MoreVertical, Pencil, FileDown, Settings, Trash2 } from 'lucide-react'
 import { restorationManager } from '@/lib/autopilot/restorationManager'
 import { useState } from 'react'
 import { SavedAddonDetails } from './SavedAddonDetails'
@@ -270,7 +270,7 @@ export function SavedAddonCard({
               disabled={updating}
               className="w-full mt-3"
             >
-              <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
+              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
               {updating ? 'Updating...' : 'Update Addon'}
             </Button>
           )}

@@ -15,6 +15,12 @@ import { useAddonStore } from '@/store/addonStore'
 export function resetAllStores(): void {
   useAccountStore.getState().reset()
   useAddonStore.getState().reset()
+
+  // New reset methods implemented for data safety
+  import('@/store/failoverStore').then(({ useFailoverStore }) => useFailoverStore.getState().reset())
+  import('@/store/profileStore').then(({ useProfileStore }) => useProfileStore.getState().reset())
+  import('@/store/activityStore').then(({ useActivityStore }) => useActivityStore.getState().reset()) // Fixed: Now exists
+  import('@/store/syncStore').then(({ useSyncStore }) => useSyncStore.getState().reset()) // Fixed: Now exists
 }
 
 /**

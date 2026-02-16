@@ -1,5 +1,5 @@
 
-import { ActivityItem } from '@/store/activityStore'
+import { ActivityItem } from '@/types/activity'
 import { formatDistanceToNow } from 'date-fns'
 import { PlayCircle, Trash2, Tv, Film, Activity, CheckSquare } from 'lucide-react'
 import { memo } from 'react'

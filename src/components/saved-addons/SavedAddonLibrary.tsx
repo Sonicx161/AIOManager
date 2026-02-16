@@ -16,14 +16,16 @@ import { getHealthSummary } from '@/lib/addon-health'
 import { useAddonStore } from '@/store/addonStore'
 import { SavedAddon } from '@/types/saved-addon'
 import { ProfileReorderDialog } from '../profiles/ProfileReorderDialog'
-import { Plus, RefreshCw, Folder, Settings, User, Trash2, GripVertical, Pencil, Search, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import { Plus, Search, RefreshCw, X, Package, Layers, Trash2, FileDown, Settings, User, GripVertical, Pencil, Upload, UserMinus } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SavedAddonCard } from './SavedAddonCard'
 import { useProfileStore } from '@/store/profileStore'
 import { ProfileDialog } from '../profiles/ProfileDialog'
 import { cn, isNewerVersion } from '@/lib/utils'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { BulkEditDialog } from './BulkEditDialog'
+import { AccountPickerDialog } from '../accounts/AccountPickerDialog'
+import { TagInput } from '@/components/ui/tag-input'
 
 export function SavedAddonLibrary() {
 
@@ -42,11 +44,10 @@ export function SavedAddonLibrary() {
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [showAddDialog, setShowAddDialog] = useState(false)
   const [showProfileReorderDialog, setShowProfileReorderDialog] = useState(false)
-  const searchInputRef = useRef<HTMLInputElement>(null)
 
   const [addUrl, setAddUrl] = useState('')
   const [addName, setAddName] = useState('')
-  const [addTags, setAddTags] = useState('')
+  const [addTags, setAddTags] = useState<string[]>([])
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
@@ -223,11 +224,97 @@ export function SavedAddonLibrary() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [showBulkEditDialog, setShowBulkEditDialog] = useState(false)
   const [showBulkDeleteConfirmation, setShowBulkDeleteConfirmation] = useState(false)
+  const [showAccountPicker, setShowAccountPicker] = useState(false)
+  const [showRemoveAccountPicker, setShowRemoveAccountPicker] = useState(false)
+  const [showUpdateManifestConfirmation, setShowUpdateManifestConfirmation] = useState(false)
+  const [updatingManifests, setUpdatingManifests] = useState(false)
 
   // Calculate health summary
   const healthSummary = useMemo(() => {
     return getHealthSummary(savedAddons)
   }, [savedAddons])
+
+  const updatesCount = useMemo(() => {
+    return savedAddons.filter(addon => {
+      const latest = latestVersions[addon.manifest.id]
+      return latest && isNewerVersion(addon.manifest.version, latest)
+    }).length
+  }, [savedAddons, latestVersions])
+
+  // New Handlers for Enhancements
+  const handleUpdateSelectedManifests = async () => {
+    if (selectedIds.size === 0) return
+
+    setUpdatingManifests(true)
+    let successCount = 0
+    let failCount = 0
+    const total = selectedIds.size
+
+    toast({
+      title: 'Updating Manifests...',
+      description: `Starting update for ${total} addons.`,
+    })
+
+    for (const id of selectedIds) {
+      try {
+        await updateSavedAddonManifest(id)
+        successCount++
+      } catch (err) {
+        console.error(`Failed to update manifest for ${id}:`, err)
+        failCount++
+      }
+    }
+
+    toast({
+      title: 'Manifest Update Complete',
+      description: `Updated ${successCount} addons. ${failCount > 0 ? `Failed: ${failCount}` : ''}`,
+    })
+
+    setIsSelectionMode(false)
+    setSelectedIds(new Set())
+    setShowUpdateManifestConfirmation(false)
+    setUpdatingManifests(false)
+  }
+
+  const handleRemoveFromAccounts = async (accountIds: string[]) => {
+    if (selectedIds.size === 0 || accountIds.length === 0) return
+
+    try {
+      const { useAccountStore } = await import('@/store/accountStore')
+      const accountStore = useAccountStore.getState()
+      const addons = Array.from(selectedIds).map(id => library[id]).filter(Boolean)
+
+      let totalSuccess = 0
+      for (const accountId of accountIds) {
+        const account = accountStore.accounts.find(a => a.id === accountId)
+        if (!account) continue
+
+        for (const addon of addons) {
+          try {
+            await accountStore.removeAddonFromAccount(accountId, addon.installUrl)
+          } catch (e) {
+            console.error(`Failed to remove ${addon.name} from ${account.name}`, e)
+          }
+        }
+        totalSuccess++
+      }
+
+      toast({
+        title: 'Removal Complete',
+        description: `Removed selected addons from ${totalSuccess} accounts.`,
+      })
+
+      setIsSelectionMode(false)
+      setSelectedIds(new Set())
+      setShowRemoveAccountPicker(false)
+    } catch (err) {
+      toast({
+        title: 'Removal Failed',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    }
+  }
 
 
 
@@ -302,12 +389,54 @@ export function SavedAddonLibrary() {
 
     setIsSelectionMode(false)
     setSelectedIds(new Set())
+    setShowBulkEditDialog(false)
+  }
+
+  const handleDeployToAccounts = async (accountIds: string[]) => {
+    if (selectedIds.size === 0 || accountIds.length === 0) return
+
+    try {
+      const { useAccountStore } = await import('@/store/accountStore')
+      const accountStore = useAccountStore.getState()
+      const addons = Array.from(selectedIds).map(id => library[id]).filter(Boolean)
+
+      let totalSuccess = 0
+      for (const accountId of accountIds) {
+        try {
+          // We use the account's authKey to perform the installs
+          const account = accountStore.accounts.find(a => a.id === accountId)
+          if (!account) continue
+
+          for (const addon of addons) {
+            await accountStore.installAddonToAccount(accountId, addon.installUrl)
+          }
+          totalSuccess++
+        } catch (err) {
+          console.error(`Failed to deploy to account ${accountId}:`, err)
+        }
+      }
+
+      toast({
+        title: 'Deployment Complete',
+        description: `Successfully deployed to ${totalSuccess} of ${accountIds.length} accounts.`,
+      })
+
+      setIsSelectionMode(false)
+      setSelectedIds(new Set())
+      setShowAccountPicker(false)
+    } catch (err) {
+      toast({
+        title: 'Deployment Failed',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
+    }
   }
 
   const handleOpenAddDialog = () => {
     setAddUrl('')
     setAddName('')
-    setAddTags('')
+    setAddTags([])
     setAddError(null)
     setShowAddDialog(true)
   }
@@ -322,9 +451,6 @@ export function SavedAddonLibrary() {
     setAddError(null)
     try {
       const tags = addTags
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean)
 
       // createSavedAddon will fetch the manifest automatically
       await createSavedAddon(
@@ -335,8 +461,8 @@ export function SavedAddonLibrary() {
       )
 
       toast({
-        title: 'Addon Added',
-        description: 'Addon has been saved',
+        title: 'Saved to Library',
+        description: 'Addon has been saved to your library',
       })
       setShowAddDialog(false)
     } catch (err) {
@@ -404,7 +530,7 @@ export function SavedAddonLibrary() {
             className="w-full justify-start font-normal"
             onClick={() => setSelectedProfileId(null)}
           >
-            <Folder className="mr-2 h-4 w-4" />
+            <Layers className="mr-2 h-4 w-4" />
             All Addons
           </Button>
           <Button
@@ -412,7 +538,7 @@ export function SavedAddonLibrary() {
             className="w-full justify-start font-normal"
             onClick={() => setSelectedProfileId('unassigned')}
           >
-            <Folder className="mr-2 h-4 w-4 opacity-50" />
+            <Package className="mr-2 h-4 w-4 opacity-50" />
             Unassigned
           </Button>
         </div>
@@ -461,6 +587,29 @@ export function SavedAddonLibrary() {
       {/* Main Content */}
       <div className="flex-1 min-w-0 space-y-6">
         {/* Header */}
+        <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between mb-8">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">Saved Addon Library</h1>
+            <p className="text-muted-foreground mt-1">
+              Manage your curated collection of addons and profiles.
+            </p>
+            <div className="flex items-center gap-4 mt-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground/60">
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-green-500" />
+                <span>Online</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-red-500" />
+                <span>Offline</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-gray-400" />
+                <span>Unchecked</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div className="flex flex-col gap-4 w-full pt-2">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
             <div className="w-full min-w-0">
@@ -513,7 +662,7 @@ export function SavedAddonLibrary() {
                     <RefreshCw className={`h-4 w-4 mr-2 ${checkingUpdates || checkingHealth ? 'animate-spin' : ''}`} />
                     Refresh
                   </Button>
-                  {savedAddons.some(a => latestVersions[a.manifest.id] && isNewerVersion(a.manifest.version, latestVersions[a.manifest.id])) && (
+                  {updatesCount > 0 && (
                     <Button
                       variant="default"
                       size="sm"
@@ -521,8 +670,8 @@ export function SavedAddonLibrary() {
                       disabled={updatingAll}
                       className="bg-blue-600 hover:bg-blue-700 text-white"
                     >
-                      <RefreshCw className={`h-4 w-4 mr-2 ${updatingAll ? 'animate-spin' : ''}`} />
-                      {updatingAll ? `Updating (${updateProgress.current}/${updateProgress.total})` : 'Update All Available'}
+                      <FileDown className={`h-4 w-4 mr-2 ${updatingAll ? 'animate-spin' : ''}`} />
+                      {updatingAll ? `Updating (${updateProgress.current}/${updateProgress.total})` : `Update ${updatesCount} Available`}
                     </Button>
                   )}
                   <Button
@@ -543,7 +692,7 @@ export function SavedAddonLibrary() {
 
           {/* Bulk Selection Toolbar */}
           {isSelectionMode && (
-            <div className="sticky top-4 z-10 bg-card border rounded-lg p-3 shadow-md flex items-center justify-between animate-in fade-in slide-in-from-top-2 w-full">
+            <div className="sticky top-4 z-50 bg-card border rounded-lg p-3 shadow-md flex items-center justify-between animate-in fade-in slide-in-from-top-2 w-full">
               <div className="flex items-center gap-3">
                 <span className="font-medium text-sm ml-1">
                   {selectedIds.size} Selected
@@ -555,20 +704,52 @@ export function SavedAddonLibrary() {
               <div className="flex items-center gap-2">
                 <Button
                   size="sm"
+                  variant="outline"
+                  disabled={selectedIds.size === 0 || updatingManifests}
+                  onClick={() => setShowUpdateManifestConfirmation(true)}
+                  title="Update name/logo/version from source URL"
+                  className="hidden md:flex"
+                >
+                  <FileDown className="h-4 w-4 mr-2" />
+                  Update Manifests
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={selectedIds.size === 0}
+                  onClick={() => setShowAccountPicker(true)}
+                  className="border-indigo-200 hover:bg-indigo-50 dark:border-indigo-900/30 dark:hover:bg-indigo-900/20"
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  Deploy
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={selectedIds.size === 0}
+                  onClick={() => setShowRemoveAccountPicker(true)}
+                  className="border-red-200 hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
+                >
+                  <UserMinus className="h-4 w-4 mr-2" />
+                  Remove from Accts
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={selectedIds.size === 0}
+                  onClick={() => setShowBulkEditDialog(true)}
+                >
+                  <Pencil className="h-4 w-4 mr-2" />
+                  Edit
+                </Button>
+                <Button
+                  size="sm"
                   variant="destructive"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowBulkDeleteConfirmation(true)}
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
                   Delete
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={selectedIds.size === 0}
-                  onClick={() => setShowBulkEditDialog(true)}
-                >
-                  <Pencil className="h-4 w-4 mr-2" />
-                  Bulk Edit...
                 </Button>
               </div>
             </div>
@@ -586,24 +767,20 @@ export function SavedAddonLibrary() {
 
         {/* Search and Filters */}
         <div className="flex flex-col sm:flex-row gap-4">
-          <div className="relative flex-1">
+          <div className="relative w-full">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              ref={searchInputRef}
-              type="text"
-              placeholder="Search saved addons by name or tag..."
+              placeholder="Search by name, tags, or URL..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-9 text-xs"
-              data-search-focus
+              className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                title="Clear Search"
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors"
               >
-                <X className="h-4 w-4" />
+                <X className="h-4 w-4 text-muted-foreground" />
               </button>
             )}
           </div>
@@ -744,7 +921,7 @@ export function SavedAddonLibrary() {
                 return (
                   <div className="space-y-4">
                     <h3 className="text-xl font-semibold flex items-center gap-2 border-b pb-2">
-                      <Folder className="h-5 w-5" />
+                      <Package className="h-5 w-5" />
                       Unassigned
                       <span className="text-sm font-normal text-muted-foreground ml-2">
                         ({unassigned.length})
@@ -803,12 +980,12 @@ export function SavedAddonLibrary() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="addon-tags">Tags (comma separated)</Label>
-              <Input
-                id="addon-tags"
+              <Label htmlFor="addon-tags">Tags</Label>
+              <TagInput
                 value={addTags}
-                onChange={(e) => setAddTags(e.target.value)}
-                placeholder="e.g. Movies, Series, Debrid"
+                onChange={setAddTags}
+                placeholder="Add tags... (e.g. Movies, Series)"
+                suggestions={allTags}
               />
             </div>
 
@@ -832,7 +1009,11 @@ export function SavedAddonLibrary() {
         open={!!deleteProfileId}
         onOpenChange={(open) => !open && setDeleteProfileId(null)}
         title="Delete Profile?"
-        description="This will permanently delete this profile AND all addons associated with it. This action cannot be undone."
+        description={
+          <>
+            This will permanently delete the profile <b>"{profiles.find(p => p.id === deleteProfileId)?.name}"</b> AND <b>{Object.values(library).filter(a => a.profileId === deleteProfileId).length}</b> associated addons. This action cannot be undone.
+          </>
+        }
         confirmText="Delete Everything"
         isDestructive={true}
         onConfirm={handleDeleteProfile}
@@ -854,7 +1035,33 @@ export function SavedAddonLibrary() {
         confirmText="Delete"
         isDestructive={true}
         onConfirm={handleBulkDelete}
+        isLoading={loading}
       />
-    </div>
+
+      <AccountPickerDialog
+        open={showAccountPicker}
+        onOpenChange={setShowAccountPicker}
+        title={`Deploy ${selectedIds.size} Addon${selectedIds.size !== 1 ? 's' : ''}`}
+        description="Select the accounts where you want to install these addons."
+        onConfirm={handleDeployToAccounts}
+      />
+
+      <AccountPickerDialog
+        open={showRemoveAccountPicker}
+        onOpenChange={setShowRemoveAccountPicker}
+        title="Remove from Accounts"
+        description={`Select accounts to REMOVE the ${selectedIds.size} selected addons from.`}
+        onConfirm={handleRemoveFromAccounts}
+      />
+
+      <ConfirmationDialog
+        open={showUpdateManifestConfirmation}
+        onOpenChange={setShowUpdateManifestConfirmation}
+        title={`Update ${selectedIds.size} Manifests?`}
+        description="This will refresh the name, logo, and version of the selected addons from their source URLs. Your custom tags and profile assignments will be preserved."
+        confirmText="Update Manifests"
+        onConfirm={handleUpdateSelectedManifests}
+      />
+    </div >
   )
 }

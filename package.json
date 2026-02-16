@@ -1,7 +1,7 @@
 {
   "name": "aiomanager",
   "private": true,
-  "version": "1.6.5",
+  "version": "1.7.0",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",

@@ -134,7 +134,8 @@ interface AddonStore {
   ) => Promise<BulkResult>
   bulkReinstallAddons: (
     addonIds: string[],
-    accountIds: Array<{ id: string; authKey: string }>
+    accountIds: Array<{ id: string; authKey: string }>,
+    allowProtected?: boolean
   ) => Promise<BulkResult>
   bulkInstallFromUrls: (
     urls: string[],
@@ -145,6 +146,10 @@ interface AddonStore {
     sourceAccount: { id: string; authKey: string },
     targetAccountIds: Array<{ id: string; authKey: string }>,
     overwrite?: boolean
+  ) => Promise<BulkResult>
+  bulkSyncOrder: (
+    sourceAccountId: string,
+    targetAccountIds: Array<{ id: string; authKey: string }>
   ) => Promise<BulkResult>
   bulkReinstallAllOnAccount: (accountId: string, accountAuthKey: string) => Promise<BulkResult>
 
@@ -886,7 +891,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     return get().bulkRemoveAddons(transportUrls, accountIds, allowProtected)
   },
 
-  bulkReinstallAddons: async (addonIds, accountIds) => {
+  bulkReinstallAddons: async (addonIds, accountIds, allowProtected = false) => {
     set({ loading: true, error: null })
     try {
       const result: BulkResult = {
@@ -917,8 +922,26 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             : addonIds
 
           for (const addonId of idsToReinstall) {
+            // Check protection
+            const existingAddon = currentAddons.find(
+              (a) =>
+                normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addonId) ||
+                a.manifest.id === addonId
+            )
+
+            if (existingAddon?.flags?.protected && !allowProtected) {
+              skippedResults.push({
+                addonId,
+                reason: 'protected',
+              })
+              continue
+            }
+
             try {
-              const reinstallResult = await reinstallAddonApi(authKey, addonId, accountId)
+              // Use transportUrl if available (resolves Manifest ID -> URL), otherwise try ID as URL
+              const targetUrl = existingAddon ? existingAddon.transportUrl : addonId
+              const reinstallResult = await reinstallAddonApi(authKey, targetUrl, accountId)
+
               if (reinstallResult.updatedAddon) {
                 updateResults.push({
                   addonId,
@@ -1214,11 +1237,119 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
+  bulkSyncOrder: async (sourceAccountId, targetAccountIds) => {
+    set({ loading: true, error: null })
+    try {
+      // 1. Fetch Source Addons (Local state preferred)
+      const { useAccountStore } = await import('./accountStore')
+
+      // Ensure local state is fresh
+      if (useAccountStore.getState().accounts.length === 0) {
+        await useAccountStore.getState().initialize()
+      }
+
+      const localSourceAccount = useAccountStore.getState().accounts.find(a => a.id === sourceAccountId)
+      // If not in local state (unlikely), we might need to fetch, but reorder depends on IDs/URLs
+      // so local state is best.
+      if (!localSourceAccount) {
+        throw new Error('Source account not found in local state')
+      }
+
+      const result: BulkResult = {
+        success: 0,
+        failed: 0,
+        errors: [],
+        details: [],
+      }
+
+      // 2. Apply to Targets
+      for (const { id: accountId, authKey: accountAuthKey } of targetAccountIds) {
+        if (accountId === sourceAccountId) continue
+
+        try {
+          const authKey = await decrypt(accountAuthKey, getEncryptionKey())
+
+          // Get target addons (remote is safest for reorder, but local is ok too)
+          const localTarget = useAccountStore.getState().accounts.find(a => a.id === accountId)
+          const targetAddons = localTarget ? localTarget.addons : await getAddons(authKey, accountId)
+
+          // Reorder: Match source order, then append remaining
+          const reorderedTargetAddons: AddonDescriptor[] = []
+          let remainingTargetAddons = [...targetAddons]
+
+          // 1. Iterate source addons to build the new order
+          for (const sourceAddon of localSourceAccount.addons) {
+            const srcNormUrl = normalizeAddonUrl(sourceAddon.transportUrl)
+            const srcId = sourceAddon.manifest.id
+
+            // Find ALL matches for this source item in the target
+            // We do a primary match (exact or normalized) and then pull all "similar" items (Magnet Strategy)
+
+            // First, find the "best" primary match to anchor the group
+            let primaryMatchIndex = remainingTargetAddons.findIndex(t => t.transportUrl === sourceAddon.transportUrl)
+            if (primaryMatchIndex === -1) {
+              primaryMatchIndex = remainingTargetAddons.findIndex(t => normalizeAddonUrl(t.transportUrl) === srcNormUrl)
+            }
+            if (primaryMatchIndex === -1 && srcId) {
+              primaryMatchIndex = remainingTargetAddons.findIndex(t => t.manifest.id === srcId)
+            }
+
+            if (primaryMatchIndex >= 0) {
+              const primaryMatch = remainingTargetAddons[primaryMatchIndex]
+              reorderedTargetAddons.push(primaryMatch)
+
+              // Remove primary from remaining
+              remainingTargetAddons = remainingTargetAddons.filter((_, i) => i !== primaryMatchIndex)
+
+              // MAGNET: Pull all other target items that share the same Manifest ID to this position
+              if (srcId) {
+                const duplicates = remainingTargetAddons.filter(t => t.manifest.id === srcId)
+                if (duplicates.length > 0) {
+                  reorderedTargetAddons.push(...duplicates)
+                  // Remove duplicates from remaining
+                  remainingTargetAddons = remainingTargetAddons.filter(t => t.manifest.id !== srcId)
+                }
+              }
+            }
+          }
+
+          // 2. Append anything that wasn't in source (preserved at end)
+          reorderedTargetAddons.push(...remainingTargetAddons)
+
+          // 3. Save
+          await useAccountStore.getState().reorderAddons(accountId, reorderedTargetAddons)
+
+          result.success++
+          result.details.push({
+            accountId,
+            result: { added: [], updated: [], skipped: [], protected: [] }
+          })
+
+        } catch (error) {
+          result.failed++
+          result.errors.push({
+            accountId,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          })
+        }
+      }
+
+      return result
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to sync addon order'
+      set({ error: message })
+      throw error
+    } finally {
+      set({ loading: false })
+    }
+  },
+
   // === Sync ===
 
   syncAccountState: async (accountId, accountAuthKey) => {
     try {
       // Get current addons from Stremio
+      const { useAccountStore } = await import('./accountStore')
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
       const currentAddons = await getAddons(authKey, accountId)
 
@@ -1263,7 +1394,6 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       await saveAccountAddonStates(accountStates)
 
       // CRITICAL: Trigger Dashboard Refresh
-      const { useAccountStore } = await import('./accountStore')
       await useAccountStore.getState().syncAccount(accountId)
 
       // Sync the new account state to cloud immediately

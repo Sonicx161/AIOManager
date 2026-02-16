@@ -1,5 +1,5 @@
 
-import { ActivityItem } from '@/store/activityStore'
+import { ActivityItem } from '@/types/activity'
 import { isToday, isYesterday, format } from 'date-fns'
 import { PlayCircle, Activity, ArrowUp } from 'lucide-react'
 import { useMemo, useState, useEffect } from 'react'

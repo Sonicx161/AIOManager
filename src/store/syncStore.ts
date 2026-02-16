@@ -30,6 +30,7 @@ interface SyncState {
     setServerUrl: (url: string) => void
     setDisplayName: (name: string) => void
     deleteRemoteAccount: () => Promise<void>
+    reset: () => void
 }
 
 const DEFAULT_SERVER = '/api'
@@ -489,6 +490,16 @@ export const useSyncStore = create<SyncState>()(
 
                 if (!res.ok) throw new Error("Failed to delete account from server")
                 get().logout()
+            },
+
+            reset: () => {
+                set({
+                    auth: { id: '', password: '', name: '', isAuthenticated: false },
+                    serverUrl: '',
+                    lastSyncedAt: null,
+                    isSyncing: false,
+                    lastActionTimestamp: 0
+                })
             }
         }),
         {

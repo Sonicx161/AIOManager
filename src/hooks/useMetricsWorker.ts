@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ActivityItem } from '@/store/activityStore'
+import { ActivityItem } from '@/types/activity'
 
 export function useMetricsWorker(items: ActivityItem[]) {
     const [results, setResults] = useState<any>(null)

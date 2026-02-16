@@ -1,4 +1,5 @@
 import { AddonDescriptor } from '@/types/addon'
+import { LibraryItem } from '@/types/activity'
 import axios, { AxiosInstance } from 'axios'
 import { resilientFetch } from '@/lib/api-resilience'
 
@@ -19,17 +20,6 @@ export interface AddonCollectionResponse {
   lastModified: number
 }
 
-export interface LibraryItem {
-  _id: string
-  name: string
-  type: string
-  poster?: string
-  removed: boolean
-  temp?: boolean
-  _ctime?: string
-  _mtime?: string
-  state?: Record<string, unknown>
-}
 
 export class StremioClient {
   private client: AxiosInstance
@@ -104,6 +94,34 @@ export class StremioClient {
     }
 
     return data.result
+  }
+
+  async getUser(authKey: string): Promise<{ email: string, _id: string }> {
+    try {
+      const response = await this.serverClient.post('/stremio-proxy', {
+        type: 'GetUser',
+        authKey,
+      }, {
+        headers: {
+          'x-account-context': 'System Check'
+        }
+      })
+
+      if (response.data?.error) {
+        throw new Error(response.data.error.message || 'Failed to get user profile')
+      }
+
+      if (!response.data?.result) {
+        throw new Error('Invalid getUser response')
+      }
+
+      return response.data.result
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new Error(error.response?.data?.error || error.message || 'Failed to get user profile')
+      }
+      throw error
+    }
   }
 
   /**

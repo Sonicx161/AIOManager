@@ -60,7 +60,7 @@ function AccountSection() {
                         <User className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input
                             placeholder="Your Name"
-                            className="pl-9"
+                            className="pl-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors"
                             value={auth.name}
                             onChange={(e) => setDisplayName(e.target.value)}
                         />
@@ -217,6 +217,7 @@ function NotificationsSection() {
                             placeholder="https://discord.com/api/webhooks/..."
                             value={webhookUrl}
                             onChange={(e) => setWebhookUrl(e.target.value)}
+                            className="h-10 bg-background/50 border-muted focus:bg-background transition-colors"
                         />
                         <Button onClick={handleSave}>Save</Button>
                     </div>

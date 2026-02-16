@@ -34,6 +34,7 @@ interface BulkSaveDialogProps {
     onOpenChange: (open: boolean) => void
     addons: AddonDescriptor[]
     accountId: string
+    title?: string
 }
 
 export function BulkSaveDialog({
@@ -41,6 +42,7 @@ export function BulkSaveDialog({
     onOpenChange,
     addons,
     accountId,
+    title,
 }: BulkSaveDialogProps) {
     const { library, createSavedAddon } = useAddonStore()
     const { profiles, createProfile } = useProfileStore()
@@ -52,7 +54,7 @@ export function BulkSaveDialog({
     const [isCreatingProfile, setIsCreatingProfile] = useState(false)
     const [newProfileName, setNewProfileName] = useState('')
     const [saveTags, setSaveTags] = useState<string[]>([])
-    const [skipDuplicates] = useState(true)
+    const [saveMode, setSaveMode] = useState<'skip' | 'update' | 'copy'>('skip')
     const [excludeInternal, setExcludeInternal] = useState(true)
 
     const filteredAddons = excludeInternal
@@ -135,19 +137,67 @@ export function BulkSaveDialog({
             let failCount = 0
 
             // 3. Iterate and Save
+            const { updateSavedAddon, updateSavedAddonMetadata } = useAddonStore.getState()
+
             for (const addon of filteredAddons) {
-                // Check duplicate
-                if (skipDuplicates) {
-                    const isDuplicate = Object.values(library).some(
-                        (saved) =>
-                            saved.manifest.id === addon.manifest.id &&
-                            saved.installUrl === addon.transportUrl &&
-                            saved.profileId === finalProfileId
-                    )
-                    if (isDuplicate) {
+                // Check for existing saved addon (duplicate check)
+                // We match by ID && URL to be precise. Profile is part of the "duplicate" definition in the original code
+                // but for "Update" mode we probably want to find *any* instance of this addon?
+                // Original logic: match ID && URL && Profile.
+                // If we have multiple copies in library (different profiles), which one do we update?
+                // "Update" implies we target *one* specific entry? Or *all* matching?
+                // Let's stick to the previous strict definition: ID + URL.
+                // If multiple exist (e.g. same addon in multiple profiles), we might be ambiguous.
+                // BUT, `library` keys are UUIDs. We iterate `Object.values(library)`.
+
+                const existingAddons = Object.values(library).filter(
+                    (saved) =>
+                        saved.manifest.id === addon.manifest.id &&
+                        saved.installUrl === addon.transportUrl
+                )
+
+                // IF Profile is specified in target, we might want to narrow down?
+                // Actually, if I say "Save to Profile A", and it's already in Profile B...
+                // Skip: Don't touch.
+                // Update: Move to Profile A? Or just update tags?
+                // Copy: Create new in Profile A.
+
+                // Let's interpret "Existing" as "Same ID & URL".
+                const existing = existingAddons.find(s => s.profileId === finalProfileId) || existingAddons[0]
+
+                if (existing) {
+                    if (saveMode === 'skip') {
                         skippedCount++
                         continue
                     }
+
+                    if (saveMode === 'update') {
+                        try {
+                            // Merge tags
+                            const mergedTags = Array.from(new Set([...existing.tags, ...tags]))
+
+                            await updateSavedAddon(existing.id, {
+                                name: addon.manifest.name,
+                                tags: mergedTags,
+                                profileId: finalProfileId || existing.profileId, // Update profile if target is specified
+                            })
+
+                            // Update metadata if present
+                            if (addon.metadata) {
+                                await updateSavedAddonMetadata(existing.id, {
+                                    customName: addon.metadata.customName,
+                                    customLogo: addon.metadata.customLogo
+                                })
+                            }
+                            successCount++
+                            continue
+                        } catch (err) {
+                            console.error(`Failed to update ${addon.manifest.id}:`, err)
+                            failCount++
+                            continue
+                        }
+                    }
+                    // If 'copy', we just fall through to createSavedAddon
                 }
 
                 try {
@@ -168,7 +218,7 @@ export function BulkSaveDialog({
 
             toast({
                 title: 'Bulk Save Complete',
-                description: `Saved: ${successCount}. Skipped: ${skippedCount}. Failed: ${failCount}.`,
+                description: `Saved/Updated: ${successCount}. Skipped: ${skippedCount}. Failed: ${failCount}.`,
             })
 
             handleClose()
@@ -188,9 +238,9 @@ export function BulkSaveDialog({
         <Dialog open={open} onOpenChange={(_val) => !saving && handleClose()}>
             <DialogContent>
                 <DialogHeader>
-                    <DialogTitle>Save All Addons</DialogTitle>
+                    <DialogTitle>{title || 'Save Addons to Library'}</DialogTitle>
                     <DialogDescription>
-                        Save {filteredAddons.length} installed addons to your library.
+                        Save {filteredAddons.length} installed addon{filteredAddons.length !== 1 ? 's' : ''} to your library.
                     </DialogDescription>
                 </DialogHeader>
 
@@ -248,27 +298,54 @@ export function BulkSaveDialog({
                             placeholder="Type and press Enter to add..."
                             suggestions={allKnownTags}
                         />
-                        <Label>Merge Strategy</Label>
-                        <div className="text-sm text-muted-foreground mb-4">
-                            Addons will be added to your library. If an addon with the same ID already exists, it will be updated.
-                        </div>
+                        <Label>Configuration</Label>
+                        <div className="flex flex-col gap-3">
+                            <div className="space-y-2 p-3 bg-muted/30 rounded-lg border border-dashed">
+                                <Label className="text-xs font-semibold uppercase text-muted-foreground">Conflict Resolution</Label>
+                                <Select value={saveMode} onValueChange={(v: any) => setSaveMode(v)}>
+                                    <SelectTrigger className="h-8">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="skip">
+                                            <span className="font-medium">Skip Existing</span>
+                                            <span className="ml-2 text-muted-foreground text-xs text-nowrap hidden sm:inline">
+                                                (Don't add duplicates)
+                                            </span>
+                                        </SelectItem>
+                                        <SelectItem value="update">
+                                            <span className="font-medium">Update Existing</span>
+                                            <span className="ml-2 text-muted-foreground text-xs text-nowrap hidden sm:inline">
+                                                (Merge tags & details)
+                                            </span>
+                                        </SelectItem>
+                                        <SelectItem value="copy">
+                                            <span className="font-medium">Create Copy</span>
+                                            <span className="ml-2 text-muted-foreground text-xs text-nowrap hidden sm:inline">
+                                                (Allow duplicates)
+                                            </span>
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
 
-                        <div className="flex items-center gap-2 p-3 bg-muted/30 rounded-lg border border-dashed">
-                            <Checkbox
-                                id="exclude-internal"
-                                checked={excludeInternal}
-                                onCheckedChange={(checked) => setExcludeInternal(!!checked)}
-                            />
-                            <div className="grid gap-1.5 leading-none">
-                                <Label
-                                    htmlFor="exclude-internal"
-                                    className="text-sm font-medium leading-none cursor-pointer"
-                                >
-                                    Exclude internal Stremio addons
-                                </Label>
-                                <p className="text-[10px] text-muted-foreground">
-                                    Skip Cinemeta, Local, and other built-in addons.
-                                </p>
+                            <div className="flex items-center gap-2 p-3 bg-muted/30 rounded-lg border border-dashed">
+                                <Checkbox
+                                    id="exclude-internal"
+                                    checked={excludeInternal}
+                                    onCheckedChange={(checked) => setExcludeInternal(!!checked)}
+                                />
+                                <div className="grid gap-1.5 leading-none">
+                                    <Label
+                                        htmlFor="exclude-internal"
+                                        className="text-sm font-medium leading-none cursor-pointer"
+                                    >
+                                        Exclude internal Stremio addons
+                                    </Label>
+                                    <p className="text-[10px] text-muted-foreground">
+                                        Skip Cinemeta, Local, and other built-in Stremio components.
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -280,7 +357,9 @@ export function BulkSaveDialog({
                     </Button>
                     <Button onClick={handleBulkSave} disabled={saving}>
                         {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                        {isCreatingProfile ? 'Create & Save All' : 'Save All'}
+                        {isCreatingProfile
+                            ? (title?.includes('Selected') ? 'Create & Save Selected' : 'Create & Save All')
+                            : (title || 'Save Addons')}
                     </Button>
                 </DialogFooter>
             </DialogContent>

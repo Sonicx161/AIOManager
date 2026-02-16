@@ -76,6 +76,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
     // Wipe any existing data (could be from old encryption system)
     await wipeAllData()
+    resetAllStores()
 
     // Generate and save salt
     const salt = generateSalt()

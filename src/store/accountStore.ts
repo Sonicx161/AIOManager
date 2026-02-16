@@ -93,6 +93,11 @@ interface AccountStore {
             targetIndex?: number,
             isAutopilot?: boolean
       ) => Promise<void>
+      bulkToggleAddonEnabled: (
+            accountId: string,
+            addonUrls: string[],
+            isEnabled: boolean
+      ) => Promise<void>
       updateAddonSettings: (
             accountId: string,
             transportUrl: string,
@@ -151,15 +156,34 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       addAccountByAuthKey: async (authKey: string, name: string) => {
             set({ loading: true, error: null })
             try {
-                  const addons = await getAddons(authKey, 'New-Login-Check')
+                  const { stremioClient } = await import('@/api/stremio-client')
+
+                  // Fetch user and addons in parallel
+                  const [user, addons] = await Promise.all([
+                        stremioClient.getUser(authKey).catch(() => null),
+                        getAddons(authKey, 'Account Import')
+                  ])
+
                   const normalizedAddons = addons.map((addon) => ({
                         ...addon,
                         manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
                   }))
 
+                  // Log diagnostic info to help debug naming issues
+                  console.log('[AccountStore] Finalizing OAuth import:', {
+                        providedName: name,
+                        userEmail: user?.email,
+                        hasAddons: addons.length > 0
+                  })
+
+                  // Use provided name, or user email, or fallback
+                  const accountName = name.trim() || user?.email || 'Stremio Account'
+                  console.log('[AccountStore] Resolved account name:', accountName)
+
                   const account: StremioAccount = {
-                        id: authKey,
-                        name,
+                        id: crypto.randomUUID(), // Use UUID for consistency
+                        name: accountName,
+                        email: user?.email,
                         authKey: await encrypt(authKey, getEncryptionKey()!),
                         addons: normalizedAddons,
                         lastSync: new Date(),
@@ -905,6 +929,41 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
+      bulkToggleAddonEnabled: async (accountId: string, addonUrls: string[], isEnabled: boolean) => {
+            const account = get().accounts.find((acc) => acc.id === accountId)
+            if (!account) return
+
+            // Create a set of normalized URLs for O(1) lookup
+            const targetUrls = new Set(addonUrls.map(u => normalizeAddonUrl(u).toLowerCase()))
+
+            const updatedAddons = account.addons.map((addon) =>
+                  targetUrls.has(normalizeAddonUrl(addon.transportUrl).toLowerCase())
+                        ? {
+                              ...addon,
+                              flags: { ...addon.flags, enabled: isEnabled },
+                              metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                        }
+                        : addon
+            )
+
+            const accounts = get().accounts.map((acc) =>
+                  acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
+            )
+            set({ accounts })
+            await localforage.setItem(STORAGE_KEY, accounts)
+
+            const { useSyncStore } = await import('./syncStore')
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+            const authKey = await decrypt(account.authKey, getEncryptionKey())
+            await updateAddons(authKey, updatedAddons, accountId)
+
+            // Notify autopilot of manual changes for each toggled addon
+            addonUrls.forEach(url => {
+                  autopilotManager.handleManualToggle(accountId, url)
+            })
+      },
+
       reinstallAddon: async (accountId: string, transportUrl: string) => {
             set({ loading: true, error: null })
             try {
@@ -963,7 +1022,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             if (!account) return
             const updatedAddons = account.addons.map((addon, index) => {
                   if (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
-                        let newAddon = { ...addon }
+                        const newAddon = { ...addon }
 
                         // Update Metadata
                         if (settings.metadata) {
@@ -1009,6 +1068,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             await localforage.setItem(STORAGE_KEY, accounts)
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+            const authKey = await decrypt(account.authKey, getEncryptionKey())
+            await updateAddons(authKey, updatedAddons, accountId)
       },
 
       bulkProtectSelectedAddons: async (accountId: string, transportUrls: string[], isProtected: boolean) => {
@@ -1027,6 +1089,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             await localforage.setItem(STORAGE_KEY, accounts)
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+            const authKey = await decrypt(account.authKey, getEncryptionKey())
+            await updateAddons(authKey, updatedAddons, accountId)
       },
 
       removeLocalAddons: async (accountId: string, idsOrUrls: string[]) => {

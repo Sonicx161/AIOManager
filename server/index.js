@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.6.5'
+const VERSION = '1.7.0'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '50')
@@ -113,7 +113,7 @@ const maskContext = (context) => {
 
     // Whitelist for system labels to keep logs clear for the owner
     // Use includes() to catch "Library Check" even if surrounded by other characters or formatting
-    const systemLabels = ['system check', 'library check', 'auto check', 'background sync', 'sync manager', 'system', 'library-update-check', 'update-check']
+    const systemLabels = ['system check', 'library check', 'auto check', 'background sync', 'sync manager', 'system', 'library-update-check', 'update-check', 'account import', 'new-login-check']
     if (systemLabels.some(label => lower.includes(label))) return normalized
 
     // Standard pattern: keep first 2 and last 2 (e.g., dd***25)
@@ -568,12 +568,13 @@ fastify.post('/api/stremio-proxy', {
         'AddonCollectionGet': 'Refreshing Addons',
         'AddonCollectionSet': 'Pushing Addon Updates',
         'DatastoreGet': 'Syncing Library',
-        'DatastorePut': 'Updating Library Items'
+        'DatastorePut': 'Updating Library Items',
+        'GetUser': 'Fetching User Profile'
     }
 
     const friendlyAction = actionMap[type] || `Operation: ${type}`
 
-    if (type === 'AddonCollectionGet' || type === 'AddonCollectionSet' || type === 'DatastoreGet' || type === 'DatastorePut') {
+    if (type === 'AddonCollectionGet' || type === 'AddonCollectionSet' || type === 'DatastoreGet' || type === 'DatastorePut' || type === 'GetUser') {
         fastify.log.info({ category: 'Sync' }, `[${masked}] ${friendlyAction}...`)
     } else {
         // Strict Whitelist: Block unknown methods to prevent abuse
@@ -1357,12 +1358,12 @@ const processAutopilotRule = async (rule) => {
     const needsSync = hasChanged || violationDetected
 
     if (needsSync) {
-        const statusMsg = foundOnline ? `Swapping to: ${normalizedTarget.substring(0, 40)}` : `Outage! Primary offline, keeping/forcing ${normalizedTarget.substring(0, 40)}`
+        const statusMsg = foundOnline ? `Swapping to: ${truncateUrl(normalizedTarget)}` : `Outage! Primary offline, keeping/forcing ${truncateUrl(normalizedTarget)}`
         fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] [Enforcement] ${statusMsg} (Swap: ${hasChanged}, Multi-Enabled: ${violationDetected})`)
 
         try {
             await syncStremioLive(decryptedAuthKey, chain, targetActiveUrl, rule.account_id, updatedAddonList)
-            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Stremio synced: ${normalizedTarget.substring(0, 40)} active.`)
+            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Stremio synced: ${truncateUrl(normalizedTarget)} active.`)
 
             if (hasChanged) {
                 const primaryUrl = chain[0]
@@ -1532,7 +1533,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.6.5
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.7.0
  ==============================================================================
 `;
         console.log(banner);

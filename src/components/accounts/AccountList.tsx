@@ -177,20 +177,18 @@ export function AccountList() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search accounts..."
-              className="pl-9 h-9 text-xs"
+              className="pl-10 pr-10 h-10 bg-background/50 border-muted"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               data-search-focus
             />
             {searchQuery && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 hover:bg-transparent text-muted-foreground hover:text-foreground"
+              <button
                 onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors"
               >
-                <X className="h-4 w-4" />
-              </Button>
+                <X className="h-4 w-4 text-muted-foreground" />
+              </button>
             )}
           </div>
         </div>

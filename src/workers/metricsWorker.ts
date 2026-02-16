@@ -1,4 +1,17 @@
-import { ActivityItem } from '../store/activityStore'
+interface ActivityItem {
+    id: string
+    name: string
+    type: string
+    timestamp: Date
+    duration: number
+    watched: number
+    overallTimeWatched?: number
+    accountId: string
+    accountName: string
+    progress: number
+    itemId: string
+    poster: string
+}
 import { subHours, subDays } from 'date-fns'
 
 // Minimal types for worker environment
@@ -69,7 +82,23 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[] }>) => {
         const day = hDate.getDay()
 
         // 1. Totals
-        const minutes = (h.duration || 0) / 60000
+        let minutes = 0
+
+        // precise tracking: use overallTimeWatched if available (covers total series time from server)
+        if (h.overallTimeWatched && h.overallTimeWatched > 0) {
+            minutes = h.overallTimeWatched / 60000
+        } else {
+            // align with ActivityPage: use actual watched time, not full duration
+            minutes = (h.watched || 0) / 60000
+        }
+
+        // Sanity Check: If play duration > 24 hours (for single items) or > 50,000 hours (for series totals)
+        // 50,000h = ~5.7 years, which is a safe upper bound for valid watch time vs Unix timestamp junk (which is ~470k hours)
+        const limit = (h.overallTimeWatched && h.overallTimeWatched > 0) ? 50000 * 60 : 24 * 60
+        if (minutes > limit) {
+            minutes = 0
+        }
+
         totalDurationMinutes += minutes
         itemsByHour[hour]++
 

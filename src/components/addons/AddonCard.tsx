@@ -35,7 +35,7 @@ import { useProfileStore } from '@/store/profileStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor } from '@/types/addon'
 
-import { Copy, ExternalLink, Lock, Unlock, RefreshCw, Settings, Trash2, List, Pencil } from 'lucide-react'
+import { Copy, ExternalLink, Lock, Unlock, FileDown, Settings, Trash2, List, Pencil } from 'lucide-react'
 import { useMemo, useState, useEffect } from 'react'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
@@ -655,7 +655,7 @@ export function AddonCard({
               disabled={loading || updating}
               className="w-full"
             >
-              <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
+              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
               Update Available
             </Button>
           )}
@@ -668,7 +668,7 @@ export function AddonCard({
               disabled={loading || updating}
               className="w-full"
             >
-              <RefreshCw className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
+              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
               Reinstall
             </Button>
           )}

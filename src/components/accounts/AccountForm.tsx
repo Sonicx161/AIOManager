@@ -11,10 +11,20 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
-import { AlertCircle, ChevronDown, ChevronUp, ExternalLink, HelpCircle, Rocket, RefreshCw, Lock } from 'lucide-react'
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  HelpCircle,
+  Rocket,
+  RefreshCw,
+  Lock,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
+import { StremioOAuth } from './StremioOAuth'
 
 export function AccountForm() {
   const isOpen = useUIStore((state) => state.isAddAccountDialogOpen)
@@ -23,7 +33,7 @@ export function AccountForm() {
   const encryptionKey = useAuthStore((state) => state.encryptionKey)
   const { addAccountByAuthKey, addAccountByCredentials, updateAccount, loading } = useAccounts()
 
-  const [mode, setMode] = useState<'authKey' | 'credentials'>('credentials')
+  const [mode, setMode] = useState<'authKey' | 'credentials' | 'oauth'>('credentials')
   const [name, setName] = useState('')
   const [authKey, setAuthKey] = useState('')
   const [email, setEmail] = useState('')
@@ -61,7 +71,12 @@ export function AccountForm() {
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+    if (e) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
+
+    if (mode === 'oauth') return
     setError('')
 
     if (!encryptionKey) {
@@ -91,7 +106,7 @@ export function AccountForm() {
             return
           }
           await addAccountByAuthKey(authKey.trim(), name.trim() || 'My Account')
-        } else {
+        } else if (mode === 'credentials') {
           if (!email.trim() || !password.trim()) {
             setError('Email and password are required')
             return
@@ -129,16 +144,32 @@ export function AccountForm() {
               type="button"
               variant={mode === 'credentials' ? 'default' : 'ghost'}
               size="sm"
-              onClick={() => setMode('credentials')}
+              onClick={() => {
+                setMode('credentials')
+                setError('')
+              }}
             >
               Email & Password
-              {!isEditing && <span className="ml-2 text-xs opacity-75">(Recommended)</span>}
+            </Button>
+            <Button
+              type="button"
+              variant={mode === 'oauth' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => {
+                setMode('oauth')
+                setError('')
+              }}
+            >
+              Sign-In (OAuth)
             </Button>
             <Button
               type="button"
               variant={mode === 'authKey' ? 'default' : 'ghost'}
               size="sm"
-              onClick={() => setMode('authKey')}
+              onClick={() => {
+                setMode('authKey')
+                setError('')
+              }}
             >
               Auth Key
             </Button>
@@ -158,7 +189,8 @@ export function AccountForm() {
                   <div>
                     <h4 className="text-xs font-bold">Auto-Registration</h4>
                     <p className="text-[10px] text-muted-foreground leading-tight">
-                      Login with any email—if the Stremio account doesn't exist, we'll create it instantly for you. ✨
+                      Login with any email—if the Stremio account doesn't exist, we'll create it
+                      instantly for you. ✨
                     </p>
                   </div>
                 </div>
@@ -169,7 +201,8 @@ export function AccountForm() {
                   <div>
                     <h4 className="text-xs font-bold">Encrypted Multi-Sync</h4>
                     <p className="text-[10px] text-muted-foreground leading-tight">
-                      Your data is encrypted locally and synced across instances with military-grade security.
+                      Your data is encrypted locally and synced across instances with military-grade
+                      security.
                     </p>
                   </div>
                 </div>
@@ -184,10 +217,29 @@ export function AccountForm() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="My Account"
+              className="bg-background/50 border-muted focus:bg-background transition-colors"
             />
           </div>
 
-          {mode === 'authKey' ? (
+          {mode === 'oauth' ? (
+            <StremioOAuth
+              onAuthKey={async (key) => {
+                setAuthKey(key)
+                // If we're adding and have a name, or if it's default, we can auto-submit or just switch to authKey view
+                // For better UX, let's keep them in OAuth view but maybe highlight completion
+                if (!isEditing) {
+                  try {
+                    await addAccountByAuthKey(key, name.trim())
+                    handleClose()
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Failed to add account')
+                  }
+                }
+              }}
+              onError={setError}
+              disabled={loading}
+            />
+          ) : mode === 'authKey' ? (
             <div className="space-y-2">
               <Label htmlFor="authKey">Auth Key</Label>
               <Input
@@ -197,6 +249,7 @@ export function AccountForm() {
                 onChange={(e) => setAuthKey(e.target.value)}
                 placeholder={isEditing ? '••••• (encrypted)' : 'Enter your Stremio auth key'}
                 required={!isEditing}
+                className="bg-background/50 border-muted focus:bg-background transition-colors"
               />
               <div className="flex items-center justify-between">
                 <button
@@ -206,7 +259,11 @@ export function AccountForm() {
                 >
                   <HelpCircle className="h-3 w-3" />
                   {showHelp ? 'Hide instructions' : 'How to find your auth key?'}
-                  {showHelp ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  {showHelp ? (
+                    <ChevronUp className="h-3 w-3" />
+                  ) : (
+                    <ChevronDown className="h-3 w-3" />
+                  )}
                 </button>
                 <Link
                   to="/faq#account-setup"
@@ -221,10 +278,20 @@ export function AccountForm() {
                 <div className="mt-2 p-3 bg-muted/50 rounded-lg border border-white/5 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
                   <div className="space-y-2">
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      1. Log into <a href="https://web.stremio.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline italic">web.stremio.com</a>
+                      1. Log into{' '}
+                      <a
+                        href="https://web.stremio.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline italic"
+                      >
+                        web.stremio.com
+                      </a>
                     </p>
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      2. Press <kbd className="px-1 py-0.5 rounded bg-background border text-[9px]">F12</kbd> (Console) and run:
+                      2. Press{' '}
+                      <kbd className="px-1 py-0.5 rounded bg-background border text-[9px]">F12</kbd>{' '}
+                      (Console) and run:
                     </p>
                     <pre
                       className="text-[10px] bg-black/40 p-2 rounded border border-white/10 font-mono text-zinc-300 select-all cursor-pointer hover:bg-black/60 transition-colors"
@@ -257,6 +324,7 @@ export function AccountForm() {
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="your@email.com"
                   required={!isEditing}
+                  className="bg-background/50 border-muted focus:bg-background transition-colors"
                 />
               </div>
 
@@ -270,6 +338,7 @@ export function AccountForm() {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={isEditing ? 'Leave blank to keep unchanged' : 'Enter your password'}
                   required={!isEditing}
+                  className="bg-background/50 border-muted focus:bg-background transition-colors"
                 />
               </div>
             </>
@@ -295,17 +364,19 @@ export function AccountForm() {
             <Button type="button" variant="outline" onClick={handleClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={loading || !encryptionKey}>
-              {loading
-                ? isEditing
-                  ? 'Updating...'
-                  : 'Adding...'
-                : !encryptionKey
-                  ? 'Vault Locked'
-                  : isEditing
-                    ? 'Update Account'
-                    : 'Add Account'}
-            </Button>
+            {mode !== 'oauth' && (
+              <Button type="submit" disabled={loading || !encryptionKey}>
+                {loading
+                  ? isEditing
+                    ? 'Updating...'
+                    : 'Adding...'
+                  : !encryptionKey
+                    ? 'Vault Locked'
+                    : isEditing
+                      ? 'Update Account'
+                      : 'Add Account'}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>
