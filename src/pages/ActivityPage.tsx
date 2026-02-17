@@ -2,10 +2,12 @@ import { ActivityFeed } from '@/components/activity/ActivityFeed'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useActivityStore } from '@/store/activityStore'
 import { ActivityItem } from '@/types/activity'
 import { useAccountStore } from '@/store/accountStore'
 import { useLibraryCache } from '@/store/libraryCache'
+import { stremioClient } from '@/api/stremio-client'
+import { decrypt } from '@/lib/crypto'
+import { useAuthStore } from '@/store/authStore'
 
 import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity, X } from 'lucide-react'
 import { useEffect, useState, useMemo, useRef } from 'react'
@@ -24,7 +26,6 @@ import {
 import { Progress } from '@/components/ui/progress'
 
 export function ActivityPage() {
-    const { deleteItems } = useActivityStore()
     const { accounts } = useAccountStore()
     const {
         items: history,
@@ -32,7 +33,8 @@ export function ActivityPage() {
         loading,
         loadingProgress,
         invalidate: fetchActivityFull,
-        lastFetched: lastUpdated
+        lastFetched: lastUpdated,
+        removeItems
     } = useLibraryCache()
 
     // Map useLibraryCache functions to original b06e names for UI compatibility
@@ -68,7 +70,6 @@ export function ActivityPage() {
     })
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
     const [showDeleteDialog, setShowDeleteDialog] = useState(false)
-    const [removeFromLibrary, setRemoveFromLibrary] = useState(false)
     const [isBulkMode, setIsBulkMode] = useState(false)
 
     useEffect(() => {
@@ -197,15 +198,37 @@ export function ActivityPage() {
         setShowDeleteDialog(false)
         setSelectedItems(new Set())
 
-        await deleteItems(itemIds, removeFromLibrary)
-        fetchActivityFull() // Invalidate cache
+        // Remove from display immediately
+        removeItems(itemIds)
 
-        // Reset checkbox for next time
-        setRemoveFromLibrary(false)
+        // Fire Stremio API calls using items we actually have in cache
+        const { encryptionKey } = useAuthStore.getState()
+        if (encryptionKey) {
+            const itemsToDelete = history.filter(item => itemIds.includes(item.id))
+            const itemsByAccount: Record<string, typeof itemsToDelete> = {}
+            itemsToDelete.forEach(item => {
+                if (!itemsByAccount[item.accountId]) itemsByAccount[item.accountId] = []
+                itemsByAccount[item.accountId].push(item)
+            })
+            for (const [accountId, items] of Object.entries(itemsByAccount)) {
+                const account = accounts.find(a => a.id === accountId)
+                if (account) {
+                    try {
+                        const authKey = await decrypt(account.authKey, encryptionKey)
+                        await Promise.all(items.map(item =>
+                            stremioClient.removeLibraryItem(authKey, item.itemId, account.id)
+                                .catch(e => console.error(`Failed to remove ${item.itemId}:`, e))
+                        ))
+                    } catch (e) {
+                        console.error(`Failed to process deletions for account ${accountId}:`, e)
+                    }
+                }
+            }
+        }
 
         toast({
             title: 'Items Deleted',
-            description: `${count} item(s) removed from ${removeFromLibrary ? 'Stremio library and ' : ''}activity history.`
+            description: `${count} item(s) removed from Stremio history.`
         })
     }
 
@@ -423,9 +446,26 @@ export function ActivityPage() {
                     // If we manually select something, ensure we're in bulk mode for the UI
                     setIsBulkMode(true)
                 }}
-                onDelete={(id, removeRemote) => {
+                onDelete={async (id) => {
                     const ids = Array.isArray(id) ? id : [id]
-                    deleteItems(ids, removeRemote)
+                    removeItems(ids)
+
+                    const { encryptionKey } = useAuthStore.getState()
+                    if (encryptionKey) {
+                        const itemsToDelete = history.filter(item => ids.includes(item.id))
+                        for (const item of itemsToDelete) {
+                            const account = accounts.find(a => a.id === item.accountId)
+                            if (account) {
+                                try {
+                                    const authKey = await decrypt(account.authKey, encryptionKey)
+                                    await stremioClient.removeLibraryItem(authKey, item.itemId, account.id)
+                                } catch (e) {
+                                    console.error(`Failed to remove ${item.itemId}:`, e)
+                                }
+                            }
+                        }
+                    }
+
                     fetchActivityFull() // Invalidate cache
                     toast({
                         title: ids.length > 1 ? 'Episodes Deleted' : 'Item Deleted',
@@ -439,29 +479,17 @@ export function ActivityPage() {
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>Delete Selected Items?</AlertDialogTitle>
-                        <AlertDialogDescription className="space-y-4">
+                        <AlertDialogDescription className="space-y-3">
                             <p>
-                                This will remove {selectedItems.size} item(s) from your local activity cache.
+                                This will permanently remove {selectedItems.size} item(s) from your Stremio watch history. This cannot be undone.
                             </p>
-                            <div className="flex items-center space-x-2 pt-2">
-                                <input
-                                    type="checkbox"
-                                    id="removeFromLibrary"
-                                    checked={removeFromLibrary}
-                                    onChange={(e) => setRemoveFromLibrary(e.target.checked)}
-                                    className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
-                                />
-                                <label
-                                    htmlFor="removeFromLibrary"
-                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                                >
-                                    Also remove from Stremio library/history
-                                </label>
-                            </div>
+                            <p className="text-xs text-muted-foreground">
+                                Note: deleting a series removes the entire show, not individual episodes. This is a Stremio limitation.
+                            </p>
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel onClick={() => setRemoveFromLibrary(false)}>Cancel</AlertDialogCancel>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
                         <AlertDialogAction onClick={handleDeleteSelected} className="bg-destructive hover:bg-destructive/90">
                             Delete
                         </AlertDialogAction>

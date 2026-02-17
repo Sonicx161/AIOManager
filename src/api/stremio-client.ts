@@ -429,6 +429,20 @@ export class StremioClient {
         _id: itemId,
         removed: true,
         _mtime: new Date().toISOString(),
+        state: {
+          timeWatched: 0,
+          timesWatched: 0,
+          flaggedWatched: 0,
+          overallTimeWatched: 0,
+          timeOffset: 0,
+          lastWatched: '',
+          video_id: '',
+          watched: '',
+          noNotif: false,
+          season: 0,
+          episode: 0,
+          duration: 0
+        }
       }
 
       await this.serverClient.post('/stremio-proxy', {

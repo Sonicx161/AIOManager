@@ -9,7 +9,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/version-1.7.2-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
+  [![Version](https://img.shields.io/badge/version-1.7.5-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)

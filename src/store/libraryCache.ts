@@ -15,6 +15,10 @@ interface CacheData {
     lastMtimeByAccount: Record<string, string>
 }
 
+interface DeletedEntry {
+    deletedAt: number
+}
+
 interface LibraryCacheState {
     items: ActivityItem[]
     lastFetched: number
@@ -26,6 +30,9 @@ interface LibraryCacheState {
     ensureLoaded: (accounts: StremioAccount[]) => Promise<void>
     invalidate: () => void
     clear: () => Promise<void>
+    removeItems: (itemIds: string[]) => void
+    clearDeletedItems: () => void
+    deletedItemIds: Set<string>
 }
 
 import { isActuallyWatched, transformLibraryItemToActivityItem } from '@/lib/activity-utils'
@@ -38,6 +45,28 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
     loading: false,
     loadingProgress: { current: 0, total: 0 },
     isStale: false,
+    deletedItemIds: new Set(),
+
+    removeItems: (itemIds: string[]) => {
+        const { items, deletedItemIds } = get()
+        const newDeleted = new Set(deletedItemIds)
+        const now = Date.now()
+        itemIds.forEach(id => newDeleted.add(id))
+        const newItems = items.filter(item => !itemIds.includes(item.id))
+        set({ items: newItems, deletedItemIds: newDeleted })
+
+        // Load existing entries, add new ones with timestamp, save back
+        localforage.getItem<Record<string, DeletedEntry>>('aio_library_deleted').then(existing => {
+            const entries = existing || {}
+            itemIds.forEach(id => { entries[id] = { deletedAt: now } })
+            localforage.setItem('aio_library_deleted', entries)
+        })
+    },
+
+    clearDeletedItems: () => {
+        set({ deletedItemIds: new Set() })
+        localforage.removeItem('aio_library_deleted')
+    },
 
     invalidate: () => {
         set({ isStale: true })
@@ -45,8 +74,9 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
     },
 
     clear: async () => {
-        set({ items: [], lastFetched: 0, lastMtimeByAccount: {}, isStale: true })
+        set({ items: [], lastFetched: 0, lastMtimeByAccount: {}, isStale: true, deletedItemIds: new Set() })
         await localforage.removeItem(CACHE_KEY)
+        await localforage.removeItem('aio_library_deleted')
     },
 
     ensureLoaded: async (accounts: StremioAccount[]) => {
@@ -90,8 +120,15 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
             }
         }
 
+        // NEW: Load blacklist before fetching
+        const savedDeleted = await localforage.getItem<Record<string, DeletedEntry>>('aio_library_deleted')
+        if (savedDeleted) {
+            set({ deletedItemIds: new Set(Object.keys(savedDeleted)) })
+        }
+
         // 3. Mock Data Generator (conditional)
         if (import.meta.env.DEV && import.meta.env.VITE_MOCK_ACTIVITY === 'true') {
+            // ... MOCK DATA ... (simplified for brevity, original mock logic is preserved if not modified)
             console.log('[LibraryCache] Generating mock data...')
             set({ loading: true, loadingProgress: { current: 0, total: 30 } })
 
@@ -154,12 +191,21 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
         const allItems: ActivityItem[] = []
         const newMtimes: Record<string, string> = { ...state.lastMtimeByAccount }
+        const allMtimes = new Map<string, number>() // accountId:itemId -> mtime
 
         for (let i = 0; i < accounts.length; i++) {
             const account = accounts[i]
             try {
                 const authKey = await decryptData(account.authKey, encryptionKey)
                 const libraryItems = await stremioClient.getLibraryItems(authKey, account.id) as LibraryItem[]
+
+                // Populate mtime map
+                libraryItems.forEach(item => {
+                    if (item._mtime) {
+                        const key = `${account.id}:${item._id}`
+                        allMtimes.set(key, new Date(item._mtime).getTime())
+                    }
+                })
 
                 const accountActivity = libraryItems
                     .filter(item => isActuallyWatched(item))
@@ -196,8 +242,38 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
         // ONE SINGLE SORT & UPDATE AT THE END
         const finalItems = allItems.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
+        // Smart Restoration Logic
+        const savedDeletedMap = await localforage.getItem<Record<string, DeletedEntry>>('aio_library_deleted')
+        const deletedEntries = savedDeletedMap || {}
+        let entriesChanged = false
+
+        const filteredFinal = finalItems.filter(item => {
+            const entry = deletedEntries[item.id]
+            if (!entry) return true // Not blacklisted
+
+            // If Stremio shows a newer _mtime than when we deleted it,
+            // the user watched it again - remove from blacklist and show it
+            const itemMtimeKey = `${item.accountId}:${item.itemId}`
+            const itemMtime = allMtimes.get(itemMtimeKey) || 0
+
+            if (itemMtime > entry.deletedAt) {
+                delete deletedEntries[item.id]
+                entriesChanged = true
+                console.log(`[Smart Restore] Restoring ${item.name} (${item.id}) - watched again after deletion.`)
+                return true
+            }
+            return false
+        })
+
+        if (entriesChanged) {
+            await localforage.setItem('aio_library_deleted', deletedEntries)
+            set({ deletedItemIds: new Set(Object.keys(deletedEntries)) })
+        } else {
+            set({ deletedItemIds: new Set(Object.keys(deletedEntries)) })
+        }
+
         set({
-            items: finalItems,
+            items: filteredFinal,
             lastFetched: now,
             lastMtimeByAccount: newMtimes,
             loading: false,
@@ -206,7 +282,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
         if (encryptionKey) {
             const encrypted = await encrypt(JSON.stringify({
-                items: finalItems,
+                items: filteredFinal,
                 lastFetched: now,
                 lastMtimeByAccount: newMtimes
             }), encryptionKey)

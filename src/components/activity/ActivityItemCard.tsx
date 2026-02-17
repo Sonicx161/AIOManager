@@ -110,9 +110,9 @@ export const ActivityItemCard = memo(({
     const handleDelete = (e: React.MouseEvent) => {
         e.stopPropagation()
         if (cluster) {
-            onDelete?.(cluster.items.map(i => i.id), false)
+            onDelete?.(cluster.items.map(i => i.id), true)
         } else {
-            onDelete?.(item.id, false)
+            onDelete?.(item.id, true)
         }
     }
 

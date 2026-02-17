@@ -1281,6 +1281,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
           for (const sourceAddon of localSourceAccount.addons) {
             const srcNormUrl = normalizeAddonUrl(sourceAddon.transportUrl)
             const srcId = sourceAddon.manifest.id
+            const srcName = sourceAddon.manifest.name
 
             // Find ALL matches for this source item in the target
             // We do a primary match (exact or normalized) and then pull all "similar" items (Magnet Strategy)
@@ -1301,13 +1302,19 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
               // Remove primary from remaining
               remainingTargetAddons = remainingTargetAddons.filter((_, i) => i !== primaryMatchIndex)
 
-              // MAGNET: Pull all other target items that share the same Manifest ID to this position
-              if (srcId) {
-                const duplicates = remainingTargetAddons.filter(t => t.manifest.id === srcId)
+              // MAGNET: Pull all other target items that share the same Manifest ID OR same addon name to this position
+              if (srcId || srcName) {
+                const duplicates = remainingTargetAddons.filter(t =>
+                  t.manifest.id === srcId ||
+                  t.manifest.name === srcName
+                )
                 if (duplicates.length > 0) {
                   reorderedTargetAddons.push(...duplicates)
                   // Remove duplicates from remaining
-                  remainingTargetAddons = remainingTargetAddons.filter(t => t.manifest.id !== srcId)
+                  remainingTargetAddons = remainingTargetAddons.filter(t =>
+                    t.manifest.id !== srcId &&
+                    t.manifest.name !== srcName
+                  )
                 }
               }
             }

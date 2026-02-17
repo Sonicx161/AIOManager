@@ -79,7 +79,11 @@ export async function encrypt(data: string, key: CryptoKey): Promise<string> {
   combined.set(new Uint8Array(ciphertext), iv.length)
 
   // Return base64
-  return btoa(String.fromCharCode(...combined))
+  let binary = ''
+  for (let i = 0; i < combined.length; i++) {
+    binary += String.fromCharCode(combined[i])
+  }
+  return btoa(binary)
 }
 
 /**

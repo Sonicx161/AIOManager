@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.7.2'
+const VERSION = '1.7.5'
 const PORT = process.env.PORT || 1610
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '50')
@@ -234,6 +234,7 @@ const schema = `
     is_active INTEGER DEFAULT 1,
     is_automatic INTEGER DEFAULT 1,
     last_check BIGINT,
+    last_notification BIGINT,
     updated_at BIGINT
   );
 
@@ -266,6 +267,7 @@ try {
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS webhook_url TEXT`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS stabilization TEXT`) } catch (e) { }
+        try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_notification BIGINT`) } catch (e) { }
 
         // Migration: Ensure columns are TEXT/VARCHAR for encrypted strings, not JSONB
         // We use try/catch to avoid aborting if the types are already correct
@@ -292,6 +294,16 @@ try {
         if (!hasWebhookUrl) {
             await db.run(`ALTER TABLE autopilot_rules ADD COLUMN webhook_url TEXT`)
             fastify.log.info({ category: 'Database' }, 'Migrated: Added webhook_url column to autopilot_rules')
+        }
+        const hasStabilization = tableInfo.some(col => col.name === 'stabilization')
+        if (!hasStabilization) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN stabilization TEXT`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added stabilization column to autopilot_rules')
+        }
+        const hasLastNotification = tableInfo.some(col => col.name === 'last_notification')
+        if (!hasLastNotification) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN last_notification BIGINT`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added last_notification column to autopilot_rules')
         }
     }
 } catch (migrationErr) {
@@ -1272,6 +1284,7 @@ const processAutopilotRule = async (rule) => {
     const decryptedActiveUrl = decrypt(rule.active_url, FALLBACK_KEYS) || rule.active_url
     const decryptedStabilizationStr = rule.stabilization ? decrypt(rule.stabilization, FALLBACK_KEYS) : null
     const decryptedAddonListStr = rule.addon_list ? decrypt(rule.addon_list, FALLBACK_KEYS) : null
+    let shouldUpdateNotificationTime = false
 
     let chain = []
     try {
@@ -1374,14 +1387,25 @@ const processAutopilotRule = async (rule) => {
                     chain: normalizedChain,
                     activeUrl: normalizedTarget
                 })
-                const decryptedWebhook = rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : null
-                if (decryptedWebhook) {
-                    await sendDiscordNotification(decryptedWebhook, {
-                        type,
-                        message: msg,
-                        accountId: rule.account_id,
-                        activeName: targetActiveUrl
-                    })
+
+                // Cooldown: Only send webhook if last notification was >60s ago
+                const now = Date.now()
+                const lastNotification = rule.last_notification || 0
+                const cooldownMs = 60 * 1000
+
+                if (now - lastNotification >= cooldownMs) {
+                    const decryptedWebhook = rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : null
+                    if (decryptedWebhook) {
+                        await sendDiscordNotification(decryptedWebhook, {
+                            type,
+                            message: msg,
+                            accountId: rule.account_id,
+                            activeName: targetActiveUrl
+                        })
+                        shouldUpdateNotificationTime = true
+                    }
+                } else {
+                    fastify.log.debug({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Webhook skipped (cooldown: ${Math.round((cooldownMs - (now - lastNotification)) / 1000)}s remaining)`)
                 }
             }
         } catch (syncErr) {
@@ -1401,35 +1425,37 @@ const processAutopilotRule = async (rule) => {
     const chainToSave = encrypt(JSON.stringify(chain), PRIMARY_KEY)
     const stabilizationToSave = encrypt(JSON.stringify(stabilization), PRIMARY_KEY)
     const addonListToSave = encrypt(JSON.stringify(updatedAddonList), PRIMARY_KEY)
+    const now = Date.now()
+    const lastNotificationToSave = shouldUpdateNotificationTime ? now : (rule.last_notification || 0)
 
     if (db.type === 'postgres') {
         await db.run(`
             UPDATE autopilot_rules 
-            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, updated_at = $7 
-            WHERE id = $8 
+            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
+            WHERE id = $9 
             AND (
-                active_url IS DISTINCT FROM $9 OR 
-                priority_chain IS DISTINCT FROM $10 OR 
-                stabilization IS DISTINCT FROM $11 OR
-                addon_list IS DISTINCT FROM $12
+                active_url IS DISTINCT FROM $10 OR 
+                priority_chain IS DISTINCT FROM $11 OR 
+                stabilization IS DISTINCT FROM $12 OR
+                addon_list IS DISTINCT FROM $13
             )
         `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, Date.now(), Date.now(), rule.id,
+            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id,
             activeUrlToSave, chainToSave, stabilizationToSave, addonListToSave
         ])
     } else {
         await db.run(`
             UPDATE autopilot_rules 
-            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, updated_at = $7 
-            WHERE id = $8 
+            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
+            WHERE id = $9 
             AND (
-                active_url != $9 OR 
-                priority_chain != $10 OR 
-                stabilization != $11 OR
-                addon_list != $12
+                active_url != $10 OR 
+                priority_chain != $11 OR 
+                stabilization != $12 OR
+                addon_list != $13
             )
         `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, Date.now(), Date.now(), rule.id,
+            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id,
             activeUrlToSave, chainToSave, stabilizationToSave, addonListToSave
         ])
     }
@@ -1533,7 +1559,7 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.7.2
+  One manager to rule them all. Local-first, Encrypted, Powerful. v1.7.5
  ==============================================================================
 `;
         console.log(banner);
