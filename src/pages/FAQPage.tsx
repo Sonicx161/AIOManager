@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { GripVertical, Activity, LayoutGrid, ShieldAlert, Palette, Layers, Edit, FileText, Github, ExternalLink, Lightbulb, Key } from 'lucide-react'
+import { GripVertical, Activity, LayoutGrid, ShieldAlert, Palette, Layers, Edit, FileText, Github, ExternalLink, Lightbulb, Key, Zap, Shield, Cloud, Eye, HeartPulse } from 'lucide-react'
 import { useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
 
@@ -59,7 +59,7 @@ export function FAQPage() {
             <Layers className="h-5 w-5 text-blue-500" />
             Core Concepts
           </h2>
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle>The "Library"</CardTitle>
@@ -136,7 +136,7 @@ export function FAQPage() {
               </CardContent>
             </Card>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-2">
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base flex items-center gap-2">
@@ -176,16 +176,132 @@ export function FAQPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base flex items-center gap-2">
-                    <FileText className="h-4 w-4" /> Bulk Management
+                    <FileText className="h-4 w-4" /> Batch Operations
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
                   <p className="text-muted-foreground text-sm">
-                    Tag, move, or delete dozens of addons at once using <strong>Selection Mode</strong> in your library.
+                    Perform complex actions on multiple accounts at once. Install, remove, clone, or sync addons across your entire collection with just a few clicks. Access this via the <strong>Batch Operations</strong> dialog in the account list.
                   </p>
                 </CardContent>
               </Card>
             </div>
+          </div>
+        </section>
+
+        {/* Section: Autopilot & Automation */}
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <Zap className="h-5 w-5 text-primary" />
+            Autopilot & Automation
+          </h2>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Activity className="h-5 w-5 text-primary" />
+                Failover Chains
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3 text-muted-foreground text-sm">
+                <p>
+                  Create <strong>priority chains</strong> of addons — Autopilot monitors each addon's health and automatically swaps to the next in line if the primary goes down. When the primary recovers, it switches back.
+                </p>
+                <p>
+                  <strong>Quick setup:</strong> Select 2+ addons in the Installed tab, then click the <strong>⚡ Autopilot</strong> button to instantly create a failover chain.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <HeartPulse className="h-4 w-4 text-green-500" />
+                  Health Monitoring
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  Autopilot periodically pings each addon in your chains, tracking latency and reliability points. The <strong>Reliability Score</strong> reflects consecutive successful health checks.
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-amber-500" />
+                  Manual Override Detection
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  If you manually toggle an addon that's part of an active Autopilot rule, the system automatically pauses that rule to respect your choice. Re-enable it anytime.
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        {/* Section: Advanced Features */}
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <Shield className="h-5 w-5 text-emerald-500" />
+            Advanced Features
+          </h2>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Cloud className="h-4 w-4 text-blue-500" />
+                  Cloud Sync
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  Optionally sync your data across devices using your UUID. All synced data is <strong>end-to-end encrypted</strong> — the server never sees your credentials or addon configs in plaintext.
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Key className="h-4 w-4 text-orange-500" />
+                  Stremio OAuth
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  Add accounts without manual AuthKey entry. Click <strong>"Login with Stremio"</strong> in the Add Account dialog to authenticate via device code — no copy-pasting required.
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-violet-500" />
+                  Privacy Mode
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  Toggle <strong>Privacy Mode</strong> to mask account emails and sensitive data in the UI — perfect for streaming or screenshots.
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-blue-500" />
+                  Addon Protection
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-muted-foreground text-sm">
+                  Mark addons as <strong>protected</strong> to prevent accidental deletion during bulk operations. Protected addons display a shield badge.
+                </p>
+              </CardContent>
+            </Card>
           </div>
         </section>
 
@@ -206,7 +322,7 @@ export function FAQPage() {
                 </p>
               </CardContent>
             </Card>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-2">
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Reinstall Safety</CardTitle>
@@ -237,7 +353,7 @@ export function FAQPage() {
             <Lightbulb className="h-5 w-5 text-yellow-500" />
             Tips & Tricks
           </h2>
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2">
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Power User Shortcuts</CardTitle>
@@ -245,8 +361,10 @@ export function FAQPage() {
               <CardContent>
                 <ul className="list-disc list-inside space-y-2 text-sm text-muted-foreground">
                   <li><strong>Middle-click</strong> an addon's "Configure" button to open it in a new tab.</li>
-                  <li>Use the <strong>Global Search</strong> to filter accounts by their custom display names.</li>
+                  <li>Use the <strong>Global Search</strong> (<kbd className="px-1 py-0.5 rounded bg-muted border text-[10px]">Ctrl+K</kbd>) to quickly filter accounts and addons.</li>
                   <li><strong>Selection Mode</strong> in the library allows you to move dozens of addons between profiles in seconds.</li>
+                  <li>Press <kbd className="px-1 py-0.5 rounded bg-muted border text-[10px]">Esc</kbd> to exit selection mode, <kbd className="px-1 py-0.5 rounded bg-muted border text-[10px]">S</kbd> to save selected, <kbd className="px-1 py-0.5 rounded bg-muted border text-[10px]">Ctrl+A</kbd> to select all.</li>
+                  <li>Configure <strong>Discord/Ntfy webhooks</strong> in Autopilot to receive failover alerts on your phone.</li>
                 </ul>
               </CardContent>
             </Card>

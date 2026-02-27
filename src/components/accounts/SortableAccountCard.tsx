@@ -9,6 +9,7 @@ interface SortableAccountCardProps {
     onToggleSelect?: (accountId: string) => void
     onDelete?: () => void
     isSelectionMode?: boolean
+    isPrivacyMode?: boolean
 }
 
 export function SortableAccountCard({
@@ -17,6 +18,7 @@ export function SortableAccountCard({
     onToggleSelect,
     onDelete,
     isSelectionMode,
+    isPrivacyMode,
 }: SortableAccountCardProps) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
         id: account.id,
@@ -47,6 +49,7 @@ export function SortableAccountCard({
                 dragHandleProps={dragHandleProps}
                 isSelectionMode={isSelectionMode}
                 disableTransition={isDragging}
+                isPrivacyMode={isPrivacyMode}
             />
         </div>
     )

@@ -1,9 +1,10 @@
 import { formatDistanceToNow } from 'date-fns'
-import { PlayCircle, CheckSquare, Activity } from 'lucide-react'
+import { PlayCircle, Activity } from 'lucide-react'
 import { ActivityItem } from '@/types/activity'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { cn } from '@/lib/utils'
+import { Poster } from '@/components/common/Poster'
 
 interface ActivityCardProps {
     item: ActivityItem
@@ -50,16 +51,17 @@ export function ActivityCard({
                 }}
             >
                 {/* Selection Overlay */}
-                {(isBulkMode || isSelected) && (
-                    <div className={cn(
-                        "absolute top-2 left-2 z-30 w-5 h-5 rounded border-2 flex items-center justify-center transition-all",
-                        isSelected ? 'bg-primary border-primary' : 'bg-black/40 border-white/40'
-                    )}>
-                        {isSelected && <CheckSquare className="w-3.5 h-3.5 text-white" />}
+                {isSelected && (
+                    <div className="absolute -top-2 -right-2 z-30 w-6 h-6 rounded-full border-2 border-background shadow-lg flex items-center justify-center transition-all animate-in zoom-in-50 duration-200" style={{ background: 'hsl(var(--primary))' }}>
+                        <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
                     </div>
                 )}
-                <img
+                <Poster
                     src={item.poster}
+                    itemId={item.itemId}
+                    itemType={item.type}
                     alt={item.name}
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
                     loading="lazy"
@@ -72,7 +74,7 @@ export function ActivityCard({
                 {/* Play Icon on Hover */}
                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20 pointer-events-none">
                     {(!isBulkMode && !isSelected) && (
-                        <div className="bg-primary/20 backdrop-blur-md rounded-full p-3 border border-primary/50">
+                        <div className="bg-primary/40 rounded-full p-3 border border-primary/50 shadow-lg">
                             <PlayCircle className="w-8 h-8 text-white drop-shadow-lg" />
                         </div>
                     )}
@@ -81,7 +83,7 @@ export function ActivityCard({
                 {/* Bottom Layout: Left stack + Right user/time */}
                 <div className="absolute bottom-0 left-0 right-0 p-2.5 flex items-end justify-between gap-2 z-10">
                     <div className="flex flex-col gap-1 items-start min-w-0 flex-1">
-                        <div className="bg-black/60 backdrop-blur-sm rounded px-1.5 py-1 max-w-full">
+                        <div className="bg-black/80 rounded px-1.5 py-1 max-w-full">
                             <h3 className="font-black text-[11px] text-white leading-tight line-clamp-2">
                                 {item.name}
                             </h3>
@@ -109,14 +111,14 @@ export function ActivityCard({
                             )}
                         </div>
                         {!isLive && (
-                            <span className="text-[9px] text-white/80 font-semibold bg-black/50 backdrop-blur-sm rounded px-1.5 py-0.5">
+                            <span className="text-[9px] text-white/80 font-semibold bg-black/80 rounded px-1.5 py-0.5">
                                 {formatDistanceToNow(itemDate, { addSuffix: true })}
                             </span>
                         )}
                     </div>
 
                     <div className="flex flex-col gap-1 items-end shrink-0">
-                        <Badge variant="secondary" className="bg-black/60 hover:bg-black/70 text-white backdrop-blur-sm border-0 shadow-lg flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold">
+                        <Badge variant="secondary" className="bg-black/80 hover:bg-black/90 text-white border-0 shadow-lg flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold">
                             <Avatar className="h-3 w-3 border border-white/20">
                                 <AvatarFallback className={cn("text-[6px] font-bold", getAvatarColor(item.accountColorIndex))}>
                                     {userName[0]?.toUpperCase()}

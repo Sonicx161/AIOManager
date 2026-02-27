@@ -3,15 +3,16 @@ import {
       removeAddon as apiRemoveAddon,
       getAddons,
       updateAddons,
+      fetchAddonManifest as apiFetchAddonManifest,
 } from '@/api/addons'
-import { normalizeAddonUrl, mergeAddons } from '@/lib/utils'
+import { normalizeAddonUrl, mergeAddons, ACCOUNT_COLORS } from '@/lib/utils'
 import { loginWithCredentials } from '@/api/auth'
 import { LoginResponse } from '@/api/stremio-client'
 import { decrypt, encrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import { updateLatestVersions as updateLatestVersionsCoordinator } from '@/lib/store-coordinator'
 import { toast } from '@/hooks/use-toast'
-import { StremioAccount } from '@/types/account'
+import { StremioAccount, AddonChangelogEntry } from '@/types/account'
 import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
 import { CinemetaManifest } from '@/types/cinemeta'
@@ -25,6 +26,7 @@ import { getEffectiveManifest } from '@/lib/addon-utils'
 import { create } from 'zustand'
 
 const STORAGE_KEY = 'stremio-manager:accounts'
+const CHANGELOG_KEY = 'stremio-manager:changelog'
 
 // Manifest Cache to speed up sync baseline recovery
 const MANIFEST_CACHE: Record<string, { manifest: AddonDescriptor['manifest']; timestamp: number }> =
@@ -59,12 +61,13 @@ interface AccountStore {
       accounts: StremioAccount[]
       loading: boolean
       error: string | null
+      changelog: AddonChangelogEntry[]
 
       // Actions
       initialize: () => Promise<void>
       updateLatestVersions: (versions: Record<string, string>) => void
-      addAccountByAuthKey: (authKey: string, name: string) => Promise<void>
-      addAccountByCredentials: (email: string, password: string, name: string) => Promise<void>
+      addAccountByAuthKey: (authKey: string, name: string, accentColor?: string, emoji?: string) => Promise<void>
+      addAccountByCredentials: (email: string, password: string, name: string, accentColor?: string, emoji?: string) => Promise<void>
       removeAccount: (id: string) => Promise<void>
       syncAccount: (id: string, forceRefresh?: boolean) => Promise<void>
       syncAllAccounts: (silent?: boolean) => Promise<void>
@@ -77,7 +80,7 @@ interface AccountStore {
       importAccounts: (json: string, isSilent?: boolean, mode?: 'merge' | 'mirror') => Promise<void>
       updateAccount: (
             id: string,
-            data: { name: string; authKey?: string; email?: string; password?: string }
+            data: { name: string; authKey?: string; email?: string; password?: string; accentColor?: string; emoji?: string }
       ) => Promise<void>
       toggleAddonProtection: (
             accountId: string,
@@ -102,7 +105,7 @@ interface AccountStore {
             accountId: string,
             transportUrl: string,
             settings: {
-                  metadata?: { customName?: string; customLogo?: string; customDescription?: string },
+                  metadata?: { customName?: string; customLogo?: string; customDescription?: string; syncToLibrary?: boolean },
                   catalogOverrides?: { removed: string[] }
             },
             targetIndex?: number
@@ -112,17 +115,19 @@ interface AccountStore {
       bulkProtectAddons: (accountId: string, isProtected: boolean) => Promise<void>
       bulkProtectSelectedAddons: (accountId: string, transportUrls: string[], isProtected: boolean) => Promise<void>
       removeLocalAddons: (accountId: string, transportUrls: string[]) => Promise<void>
-      replaceTransportUrl: (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any) => Promise<void>
+      replaceTransportUrl: (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any, metadata?: any) => Promise<void>
       reinstallAddon: (accountId: string, transportUrl: string) => Promise<void>
       syncAutopilotRules: (accountId: string) => Promise<void>
       clearError: () => void
       reset: () => Promise<void>
+      addChangelogEntry: (entry: Omit<AddonChangelogEntry, 'id' | 'timestamp'>) => Promise<void>
 }
 
 export const useAccountStore = create<AccountStore>((set, get) => ({
       accounts: [],
       loading: false,
       error: null,
+      changelog: [],
 
       syncAutopilotRules: async (accountId: string) => {
             try {
@@ -136,12 +141,31 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       initialize: async () => {
             try {
                   const storedAccounts = await localforage.getItem<StremioAccount[]>(STORAGE_KEY)
+                  const storedChangelog = await localforage.getItem<AddonChangelogEntry[]>(CHANGELOG_KEY)
+
                   if (storedAccounts && Array.isArray(storedAccounts)) {
                         const accounts = storedAccounts.map((acc) => ({
                               ...acc,
                               lastSync: new Date(acc.lastSync),
                         }))
-                        set({ accounts })
+
+                        // One-time migration: colorIndex -> accentColor
+                        const migratedAccounts = accounts.map(acc => {
+                              if ((acc as any).colorIndex !== undefined && !acc.accentColor) {
+                                    return {
+                                          ...acc,
+                                          accentColor: ACCOUNT_COLORS[(acc as any).colorIndex % ACCOUNT_COLORS.length],
+                                          colorIndex: undefined
+                                    }
+                              }
+                              return acc
+                        })
+
+                        set({ accounts: migratedAccounts })
+                  }
+
+                  if (storedChangelog && Array.isArray(storedChangelog)) {
+                        set({ changelog: storedChangelog })
                   }
             } catch (error) {
                   console.error('Failed to load accounts from storage:', error)
@@ -153,7 +177,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             updateLatestVersionsCoordinator(versions)
       },
 
-      addAccountByAuthKey: async (authKey: string, name: string) => {
+      addAccountByAuthKey: async (authKey: string, name: string, accentColor?: string, emoji?: string) => {
             set({ loading: true, error: null })
             try {
                   const { stremioClient } = await import('@/api/stremio-client')
@@ -181,13 +205,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   console.log('[AccountStore] Resolved account name:', accountName)
 
                   const account: StremioAccount = {
-                        id: crypto.randomUUID(), // Use UUID for consistency
+                        id: crypto.randomUUID(),
                         name: accountName,
                         email: user?.email,
                         authKey: await encrypt(authKey, getEncryptionKey()!),
                         addons: normalizedAddons,
                         lastSync: new Date(),
                         status: 'active',
+                        accentColor,
+                        emoji
                   }
 
                   const accounts = [...get().accounts, account]
@@ -205,7 +231,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      addAccountByCredentials: async (email: string, password: string, name: string) => {
+      addAccountByCredentials: async (email: string, password: string, name: string, accentColor?: string, emoji?: string) => {
             set({ loading: true, error: null })
             try {
                   let response: LoginResponse
@@ -246,6 +272,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         addons: normalizedAddons,
                         lastSync: new Date(),
                         status: 'active',
+                        accentColor,
+                        emoji
                   }
 
                   const accounts = [...get().accounts, account]
@@ -339,7 +367,6 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const mergedAddons = mergeAddons(account.addons, normalizedAddons)
 
                   set({ loading: true })
-                  const { stremioClient } = await import('@/api/stremio-client')
 
                   const repairedAddons = await Promise.all(
                         mergedAddons.map(async (addon) => {
@@ -368,7 +395,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     if (cached && now - cached.timestamp < CACHE_TTL) {
                                           manifestRaw = cached.manifest
                                     } else {
-                                          const { manifest } = await stremioClient.fetchAddonManifest(
+                                          const { manifest } = await apiFetchAddonManifest(
                                                 addon.transportUrl,
                                                 account.id
                                           )
@@ -386,8 +413,40 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           }) as AddonDescriptor['manifest']
                                     }
 
-                                    const finalManifest = getEffectiveManifest({ ...addon, manifest: repairedManifest })
-                                    return { ...addon, manifest: finalManifest }
+                                    // EXTRACT METADATA OVERRIDES FROM STREMIO
+                                    // If the manifest from Stremio collection differs from the technical manifest,
+                                    // treat those differences as custom metadata.
+                                    const metadata = { ...(addon.metadata || {}) }
+                                    const stremioManifest = addon.manifest
+                                    if (stremioManifest && repairedManifest) {
+                                          const { getHostnameIdentifier } = await import('@/lib/addon-identifier')
+                                          const hostFallback = getHostnameIdentifier(addon.transportUrl)
+
+                                          // Name: Only save as custom if it's NOT the manifest name AND NOT the hostname fallback
+                                          if (stremioManifest.name &&
+                                                stremioManifest.name !== repairedManifest.name &&
+                                                stremioManifest.name !== hostFallback) {
+                                                console.log(`[Sync] Detected custom name for "${repairedManifest.name}": "${stremioManifest.name}"`)
+                                                metadata.customName = stremioManifest.name
+                                          }
+                                          // Logo: Save as custom if it differs from Technical Manifest
+                                          if (stremioManifest.logo && stremioManifest.logo !== repairedManifest.logo) {
+                                                console.log(`[Sync] Detected custom logo for "${repairedManifest.name}"`)
+                                                metadata.customLogo = stremioManifest.logo
+                                          }
+                                          // Description: Only save as custom if it's NOT the manifest description 
+                                          // AND NOT the legacy hostname fallback ("Addon from ...")
+                                          const isFallbackDesc = (s: string) => s.startsWith('Addon from ') && (s.includes(hostFallback) || addon.transportUrl.includes(s.split('Addon from ')[1] || '____'))
+                                          if (stremioManifest.description &&
+                                                stremioManifest.description !== repairedManifest.description &&
+                                                !isFallbackDesc(stremioManifest.description)) {
+                                                console.log(`[Sync] Detected custom description for "${repairedManifest.name}"`)
+                                                metadata.customDescription = stremioManifest.description
+                                          }
+                                    }
+
+                                    const finalManifest = getEffectiveManifest({ ...addon, manifest: repairedManifest, metadata })
+                                    return { ...addon, manifest: finalManifest, metadata }
                               } catch (e) {
                                     console.warn(`[Sync] Failed to baseline ${addon.manifest?.name || 'addon'}:`, e)
                                     return { ...addon, manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl) }
@@ -412,6 +471,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+                  const { useAddonStore } = await import('./addonStore')
+                  await useAddonStore.getState().syncAccountState(id, account.authKey, repairedAddons).catch(console.error)
             } catch (error) {
                   const message = error instanceof Error ? error.message : 'Failed to sync account'
                   const accounts = get().accounts.map((acc) =>
@@ -434,6 +496,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
             set({ loading: true, error: null })
             const accounts = get().accounts
+            let hasAnyChange = false
 
             await Promise.all(
                   accounts.map(async (account) => {
@@ -447,6 +510,13 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               }))
 
                               const mergedAddons = mergeAddons(account.addons, normalizedAddons)
+
+                              // Dirty check: Compare transport URL lists
+                              const isDirty = JSON.stringify(mergedAddons.map(a => a.transportUrl).sort()) !==
+                                    JSON.stringify(account.addons.map(a => a.transportUrl).sort())
+
+                              if (isDirty) hasAnyChange = true
+
                               const finalAddons = mergedAddons.map(addon => ({
                                     ...addon,
                                     manifest: getEffectiveManifest(addon)
@@ -463,6 +533,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     acc.id === account.id ? updatedAccount : acc
                               )
                               set({ accounts: updatedAccounts })
+
+                              const { useAddonStore } = await import('./addonStore')
+                              await useAddonStore.getState().syncAccountState(account.id, account.authKey, finalAddons).catch(console.error)
                         } catch (error) {
                               const updatedAccounts = get().accounts.map((acc) =>
                                     acc.id === account.id ? { ...acc, status: 'error' as const } : acc
@@ -472,8 +545,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   })
             )
 
-            await localforage.setItem(STORAGE_KEY, structuredClone(get().accounts))
-            if (!silent) {
+            if (hasAnyChange) {
+                  await localforage.setItem(STORAGE_KEY, structuredClone(get().accounts))
+            }
+
+            if (!silent && hasAnyChange) {
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
             }
@@ -517,6 +593,21 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
                   get().syncAutopilotRules(accountId)
+
+                  const { useAddonStore } = await import('./addonStore')
+                  await useAddonStore.getState().syncAccountState(accountId, account.authKey, finalAddons).catch(console.error)
+
+                  // Log to changelog
+                  const installedAddon = finalAddons.find(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addonUrl))
+                  if (installedAddon) {
+                        await get().addChangelogEntry({
+                              accountId,
+                              addonId: installedAddon.manifest.id,
+                              addonName: installedAddon.manifest.name,
+                              addonLogo: installedAddon.manifest.logo,
+                              action: 'installed'
+                        })
+                  }
             } catch (error) {
                   const message = error instanceof Error ? error.message : 'Failed to install addon'
                   set({ error: message })
@@ -557,6 +648,19 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
                   get().syncAutopilotRules(accountId)
+
+                  // Log to changelog
+                  const removedAddon = account.addons.find(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(transportUrl))
+                  const removedAddonName = removedAddon?.manifest.name || 'Unknown Addon'
+                  const removedAddonLogo = removedAddon?.manifest.logo
+
+                  await get().addChangelogEntry({
+                        accountId,
+                        addonId: transportUrl,
+                        addonName: removedAddonName,
+                        addonLogo: removedAddonLogo,
+                        action: 'removed'
+                  })
             } catch (error) {
                   const message = error instanceof Error ? error.message : 'Failed to remove addon'
                   set({ error: message })
@@ -594,6 +698,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const accounts = get().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
                   set({ accounts })
                   await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
+
+                  // Log to changelog
+                  await get().addChangelogEntry({
+                        accountId,
+                        addonId: transportUrl,
+                        addonName: addonToRemove.manifest.name,
+                        addonLogo: addonToRemove.manifest.logo,
+                        action: 'removed'
+                  })
 
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -677,6 +790,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     includeCredentialsValue && acc.password
                                           ? await decrypt(acc.password, getEncryptionKey()!)
                                           : undefined,
+                              accentColor: acc.accentColor,
+                              emoji: acc.emoji,
                               addons: processAddons(acc.addons),
                         }))
                   )
@@ -762,6 +877,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           manifest: sanitizeAddonManifest(ad.manifest || manifestMap[ad.manifestId], ad.transportUrl),
                                     }))
                                     : [],
+                              accentColor: acc.accentColor,
+                              emoji: acc.emoji,
                               lastSync: new Date(),
                               status: 'active' as const,
                         }
@@ -811,7 +928,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                                 ? ra.rawKey
                                                 : await encrypt(ra.rawKey, encryptionKey)
                                           : matchedAccount.authKey,
-                                    addons: mergeAddons(matchedAccount.addons, ra.addons),
+                                    accentColor: ra.accentColor || matchedAccount.accentColor,
+                                    emoji: ra.emoji || matchedAccount.emoji,
+                                    addons: mode === 'mirror' ? ra.addons : mergeAddons(matchedAccount.addons, ra.addons),
                                     lastSync: ra.lastSync || new Date(),
                                     status: 'active' as const,
                               }
@@ -848,13 +967,18 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      updateAccount: async (id: string, data: { name: string; authKey?: string; email?: string; password?: string }) => {
+      updateAccount: async (id: string, data: { name: string; authKey?: string; email?: string; password?: string; accentColor?: string; emoji?: string }) => {
             set({ loading: true, error: null })
             try {
                   const account = get().accounts.find((acc) => acc.id === id)
                   if (!account) throw new Error('Account not found')
 
-                  const updatedAccount = { ...account, name: data.name }
+                  const updatedAccount: StremioAccount = {
+                        ...account,
+                        name: data.name,
+                        accentColor: data.accentColor,
+                        emoji: data.emoji,
+                  }
                   if (data.authKey || (data.email && data.password)) {
                         const authKey =
                               data.authKey || (await loginWithCredentials(data.email!, data.password!)).authKey
@@ -903,15 +1027,82 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       toggleAddonEnabled: async (accountId: string, transportUrl: string, isEnabled: boolean, silent: boolean = false, targetIndex?: number, isAutopilot: boolean = false) => {
             const account = get().accounts.find((acc) => acc.id === accountId)
             if (!account) return
-            const updatedAddons = account.addons.map((addon, index) =>
-                  (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
-                        ? {
-                              ...addon,
-                              flags: { ...addon.flags, enabled: isEnabled },
-                              metadata: { ...addon.metadata, lastUpdated: Date.now() }
+
+            let updatedAddons = account.addons
+
+            // BugFix: Prevent stale read race condition by fetching fresh addons when Autopilot disables
+            if (isAutopilot && !isEnabled && !silent) {
+                  try {
+                        const { getAddons } = await import('@/api/addons')
+                        const decryptedKey = await decrypt(account.authKey, getEncryptionKey())
+                        const freshAddons = await getAddons(decryptedKey, 'Autopilot-Disable')
+
+                        const addonIndex = freshAddons.findIndex(a =>
+                              normalizeAddonUrl(a.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()
+                        )
+
+                        if (addonIndex !== -1) {
+                              // We found the addon in the live stremio collection
+                              const newFreshAddons = [...freshAddons]
+                              newFreshAddons[addonIndex] = {
+                                    ...newFreshAddons[addonIndex],
+                                    flags: { ...newFreshAddons[addonIndex].flags, enabled: isEnabled }
+                              }
+                              await updateAddons(decryptedKey, newFreshAddons, 'Autopilot-Disable')
+
+                              // Carry over the live changes to our local state
+                              updatedAddons = account.addons.map((a, i) =>
+                                    (targetIndex !== undefined ? i === targetIndex : normalizeAddonUrl(a.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
+                                          ? { ...a, flags: { ...a.flags, enabled: isEnabled }, metadata: { ...a.metadata, lastUpdated: Date.now() } }
+                                          : a
+                              )
+                        } else {
+                              console.warn(`[Autopilot] Fallback addon not found in remote collection: ${transportUrl}`)
+                              // Fall back to updating local state anyway
+                              updatedAddons = account.addons.map((addon, index) =>
+                                    (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
+                                          ? {
+                                                ...addon,
+                                                flags: { ...addon.flags, enabled: isEnabled },
+                                                metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                                          }
+                                          : addon
+                              )
                         }
-                        : addon
-            )
+                  } catch (e) {
+                        console.error("[Autopilot] Fresh fetch failed, falling back to local state", e)
+                        updatedAddons = account.addons.map((addon, index) =>
+                              (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
+                                    ? {
+                                          ...addon,
+                                          flags: { ...addon.flags, enabled: isEnabled },
+                                          metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                                    }
+                                    : addon
+                        )
+                        if (!silent) {
+                              const authKey = await decrypt(account.authKey, getEncryptionKey())
+                              await updateAddons(authKey, updatedAddons, accountId)
+                        }
+                  }
+            } else {
+                  // Standard flow
+                  updatedAddons = account.addons.map((addon, index) =>
+                        (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase())
+                              ? {
+                                    ...addon,
+                                    flags: { ...addon.flags, enabled: isEnabled },
+                                    metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                              }
+                              : addon
+                  )
+
+                  if (!silent) {
+                        const authKey = await decrypt(account.authKey, getEncryptionKey())
+                        await updateAddons(authKey, updatedAddons, accountId)
+                  }
+            }
+
             const accounts = get().accounts.map((acc) =>
                   acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
             )
@@ -919,10 +1110,6 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             await localforage.setItem(STORAGE_KEY, accounts)
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
-            if (!silent) {
-                  const authKey = await decrypt(account.authKey, getEncryptionKey())
-                  await updateAddons(authKey, updatedAddons, accountId)
-            }
 
             if (!isAutopilot) {
                   autopilotManager.handleManualToggle(accountId, transportUrl)
@@ -966,6 +1153,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       reinstallAddon: async (accountId: string, transportUrl: string) => {
             set({ loading: true, error: null })
+
+            // Safety Timeout: Prevent infinite loading animation if network hangs
+            const timeoutId = setTimeout(() => {
+                  if (get().loading) {
+                        set({ loading: false })
+                        console.warn("[AccountStore] Reinstall timeout reached. Forcing loading off.")
+                  }
+            }, 15000)
+
             try {
                   const account = get().accounts.find((acc) => acc.id === accountId)
                   if (!account) throw new Error('Account not found')
@@ -998,13 +1194,52 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   set({ accounts })
                   await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
 
+                  // Push the metadata-enriched addons back to Stremio
+                  // apiReinstallAddon pushed with remote metadata (which may be empty),
+                  // so we re-push with local metadata baked into the manifest
+                  await updateAddons(authKey, updatedAddons, accountId)
+
                   const { useSyncStore } = await import('./syncStore')
                   useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+                  const { useAddonStore } = await import('./addonStore')
+                  await useAddonStore.getState().syncAccountState(accountId, account.authKey, updatedAddons).catch(console.error)
+
+                  // SYNC TO LIBRARY: Update the saved addon in the library to clear the blue "Update" badge globally
+                  if (updatedAddon) {
+                        const addonStore = useAddonStore.getState()
+                        const normUrl = normalizeAddonUrl(transportUrl).toLowerCase()
+
+                        const savedAddonId = Object.keys(addonStore.library).find(
+                              id => normalizeAddonUrl(addonStore.library[id].installUrl).toLowerCase() === normUrl
+                        )
+
+                        if (savedAddonId) {
+                              const savedAddon = addonStore.library[savedAddonId]
+                              const freshManifest = updatedAddon.manifest
+                              await addonStore.updateSavedAddon(savedAddonId, {
+                                    // Use getEffectiveManifest to respect any custom metadata/overrides in the library item
+                                    manifest: getEffectiveManifest({ ...savedAddon, manifest: freshManifest }),
+                              })
+                        }
+                  }
+
+                  // Log to changelog
+                  if (updatedAddon) {
+                        await get().addChangelogEntry({
+                              accountId,
+                              addonId: updatedAddon.manifest.id,
+                              addonName: updatedAddon.manifest.name,
+                              addonLogo: updatedAddon.manifest.logo,
+                              action: 'updated'
+                        })
+                  }
             } catch (error) {
                   const message = error instanceof Error ? error.message : 'Failed to reinstall addon'
                   set({ error: message })
                   throw error
             } finally {
+                  clearTimeout(timeoutId)
                   set({ loading: false })
             }
       },
@@ -1013,25 +1248,65 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             accountId: string,
             transportUrl: string,
             settings: {
-                  metadata?: { customName?: string; customLogo?: string; customDescription?: string },
+                  metadata?: { customName?: string; customLogo?: string; customDescription?: string; syncToLibrary?: boolean },
                   catalogOverrides?: { removed: string[] }
             },
             targetIndex?: number
       ) => {
             const account = get().accounts.find((a) => a.id === accountId)
             if (!account) return
-            const updatedAddons = account.addons.map((addon, index) => {
+            const updatedAddons = await Promise.all(account.addons.map(async (addon, index) => {
                   if (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()) {
                         const newAddon = { ...addon }
 
                         // Update Metadata
                         if (settings.metadata) {
                               const cleanMetadata = { ...(addon.metadata || {}) } as any
+                              const clearedFields: string[] = []
                               Object.keys(settings.metadata).forEach((k) => {
-                                    if ((settings.metadata as any)[k] === undefined) delete cleanMetadata[k]
+                                    if ((settings.metadata as any)[k] === undefined) {
+                                          delete cleanMetadata[k]
+                                          clearedFields.push(k)
+                                    }
                                     else cleanMetadata[k] = (settings.metadata as any)[k]
                               })
                               newAddon.metadata = cleanMetadata
+
+                              // When metadata overrides are cleared (reset),
+                              // rebuild the manifest to remove stale custom values.
+                              // getEffectiveManifest previously baked overrides into manifest fields,
+                              // so clearing metadata without fixing manifest causes sync to re-detect them.
+                              if (clearedFields.length > 0) {
+                                    const fieldMap: Record<string, string> = {
+                                          customName: 'name',
+                                          customLogo: 'logo',
+                                          customDescription: 'description'
+                                    }
+                                    // Get original manifest values from cache or fresh fetch
+                                    let originalManifest = MANIFEST_CACHE[addon.transportUrl]?.manifest
+                                    if (!originalManifest) {
+                                          try {
+                                                const fetched = await apiFetchAddonManifest(addon.transportUrl, accountId, true)
+                                                originalManifest = fetched.manifest
+                                                MANIFEST_CACHE[addon.transportUrl] = { manifest: originalManifest, timestamp: Date.now() }
+                                          } catch (e) {
+                                                console.warn('[Reset] Could not fetch original manifest:', e)
+                                          }
+                                    }
+                                    if (originalManifest) {
+                                          const baseManifest = { ...newAddon.manifest }
+                                          for (const field of clearedFields) {
+                                                const manifestKey = fieldMap[field]
+                                                if (manifestKey && (originalManifest as any)[manifestKey]) {
+                                                      (baseManifest as any)[manifestKey] = (originalManifest as any)[manifestKey]
+                                                }
+                                          }
+                                          newAddon.manifest = baseManifest
+                                    }
+                              }
+
+                              // Re-apply effective manifest with updated metadata
+                              newAddon.manifest = getEffectiveManifest(newAddon)
                         }
 
                         // Update Catalog Overrides
@@ -1042,7 +1317,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         return newAddon
                   }
                   return addon
-            })
+            }))
             const accounts = get().accounts.map((acc) =>
                   acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
             )
@@ -1052,6 +1327,23 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             useSyncStore.getState().syncToRemote(true).catch(console.error)
             const authKey = await decrypt(account.authKey, getEncryptionKey())
             await updateAddons(authKey, updatedAddons, accountId)
+
+            // Inbound Sync: If metadata changed and this addon is linked to a library item with syncWithInstalled enabled, update the library
+            if (settings.metadata) {
+                  // INBOUND SYNC: Find a library item matching this URL that has syncWithInstalled enabled
+                  const { useAddonStore } = await import('./addonStore')
+                  const addonStore = useAddonStore.getState()
+
+                  const savedAddon = Object.values(addonStore.library).find(s =>
+                        normalizeAddonUrl(s.installUrl).toLowerCase() === normalizeAddonUrl(transportUrl).toLowerCase()
+                        && s.syncWithInstalled === true
+                  )
+
+                  if (savedAddon) {
+                        console.log(`[AccountStore] Inbound Sync: Updating library metadata for "${savedAddon.name}"`)
+                        await addonStore.updateSavedAddonMetadata(savedAddon.id, settings.metadata)
+                  }
+            }
       },
 
       bulkProtectAddons: async (accountId: string, isProtected: boolean) => {
@@ -1117,7 +1409,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             useSyncStore.getState().syncToRemote(true).catch(console.error)
       },
 
-      replaceTransportUrl: async (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any) => {
+      replaceTransportUrl: async (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: any, metadata?: any) => {
             const normOld = normalizeAddonUrl(oldUrl).toLowerCase()
             const modifiedAccountIds = new Set<string>()
 
@@ -1137,8 +1429,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     transportUrl: newUrl,
                                     // SILENT REINSTALL: Update the technical manifest if provided,
                                     // but keep the metadata overrides (customName, customLogo, etc)
+                                    // UNLESS provided explicitly.
                                     manifest: freshManifest || addon.manifest,
-                                    metadata: { ...addon.metadata, lastUpdated: Date.now() }
+                                    metadata: { ...(metadata || addon.metadata), lastUpdated: Date.now() }
                               }
                         }
                         return addon
@@ -1148,6 +1441,10 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             })
 
             set({ accounts: updatedAccounts })
+
+            // Early return if no accounts were modified
+            if (modifiedAccountIds.size === 0) return
+
             await localforage.setItem(STORAGE_KEY, updatedAccounts)
 
             // Task: Immediate Stremio Push for URL Swap
@@ -1195,7 +1492,22 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       clearError: () => set({ error: null }),
       reset: async () => {
-            set({ accounts: [], loading: false, error: null })
+            set({ accounts: [], loading: false, error: null, changelog: [] })
             await localforage.removeItem(STORAGE_KEY)
+            await localforage.removeItem(CHANGELOG_KEY)
       },
+
+      addChangelogEntry: async (entry) => {
+            const newEntry: AddonChangelogEntry = {
+                  ...entry,
+                  id: Math.random().toString(36).substring(2, 11),
+                  timestamp: new Date().toISOString()
+            }
+
+            set(state => {
+                  const newChangelog = [newEntry, ...state.changelog].slice(0, 100)
+                  localforage.setItem(CHANGELOG_KEY, newChangelog).catch(console.error)
+                  return { changelog: newChangelog }
+            })
+      }
 }))

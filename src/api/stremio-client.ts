@@ -24,6 +24,7 @@ export interface AddonCollectionResponse {
 export class StremioClient {
   private client: AxiosInstance
   private serverClient: AxiosInstance
+  private syncTimeouts: Map<string, any> = new Map()
 
   constructor() {
     this.client = axios.create({
@@ -127,7 +128,7 @@ export class StremioClient {
   /**
    * Get user's addon collection
    */
-  async getAddonCollection(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
+  async getAddonCollection(authKey: string, accountContext: string = 'System Check'): Promise<AddonDescriptor[]> {
     try {
       // Use the server proxy for collection management to enable backend logging
       const response = await this.serverClient.post('/stremio-proxy', {
@@ -176,7 +177,7 @@ export class StremioClient {
   /**
    * Update user's addon collection
    */
-  async setAddonCollection(authKey: string, addons: AddonDescriptor[], accountContext: string = 'Unknown'): Promise<void> {
+  async setAddonCollection(authKey: string, addons: AddonDescriptor[], accountContext: string = 'System Check'): Promise<void> {
     try {
       // Use the server proxy for collection management to enable backend logging
       const response = await this.serverClient.post('/stremio-proxy', {
@@ -193,7 +194,11 @@ export class StremioClient {
         throw new Error(response.data.error.message || 'Failed to update addon collection')
       }
       // We wait a short moment for Stremio's consistency and then verify.
-      setTimeout(async () => {
+      if (this.syncTimeouts.has(authKey)) {
+        clearTimeout(this.syncTimeouts.get(authKey))
+      }
+
+      this.syncTimeouts.set(authKey, setTimeout(async () => {
         try {
           const verified = await this.getAddonCollection(authKey, accountContext)
           if (verified.length < addons.length) {
@@ -201,8 +206,10 @@ export class StremioClient {
           }
         } catch (e) {
           console.warn('[Sync] Post-sync verification failed:', e)
+        } finally {
+          this.syncTimeouts.delete(authKey)
         }
-      }, 2000)
+      }, 2000))
     } catch (error) {
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 401) {
@@ -230,7 +237,7 @@ export class StremioClient {
    * Uses CORS proxy to avoid cross-origin issues with addon servers
    * Some domains (like official Stremio services) are fetched directly
    */
-  async fetchAddonManifest(transportUrl: string, accountContext: string = 'Unknown', retries = 2): Promise<AddonDescriptor> {
+  async fetchAddonManifest(transportUrl: string, accountContext: string = 'System Check', force: boolean = false, retries = 2): Promise<AddonDescriptor> {
     // Determine the manifest URL
     let manifestUrl: string
     if (transportUrl.endsWith('/manifest.json') || transportUrl.includes('/manifest.json?')) {
@@ -249,7 +256,7 @@ export class StremioClient {
 
     // Add a 30-minute cache buster (1800000ms = 30 minutes)
     // Increased from 5 minutes to reduce proxy usage and improve performance
-    const interval = Math.floor(Date.now() / 1800000)
+    const interval = force ? Date.now() : Math.floor(Date.now() / 1800000)
     const cacheBuster = `cb=${interval}`
     const separator = manifestUrl.includes('?') ? '&' : '?'
     const finalManifestUrl = `${manifestUrl}${separator}${cacheBuster}`
@@ -309,7 +316,7 @@ export class StremioClient {
    * Get user's library items (Watch History)
    * Uses datastoreGet with collection: 'libraryItem' to match Syncio's implementation
    */
-  async getLibraryItems(authKey: string, accountContext: string = 'Unknown'): Promise<LibraryItem[]> {
+  async getLibraryItems(authKey: string, accountContext: string = 'System Check'): Promise<LibraryItem[]> {
     try {
       const response = await this.serverClient.post('/stremio-proxy', {
         type: 'DatastoreGet',
@@ -385,7 +392,7 @@ export class StremioClient {
     name: string
     type: string
     poster?: string
-  }, accountContext: string = 'Unknown'): Promise<void> {
+  }, accountContext: string = 'System Check'): Promise<void> {
     try {
       const libraryItem = {
         _id: item.id,
@@ -423,7 +430,7 @@ export class StremioClient {
   /**
    * Remove an item from a user's library (marks as removed)
    */
-  async removeLibraryItem(authKey: string, itemId: string, accountContext: string = 'Unknown'): Promise<void> {
+  async removeLibraryItem(authKey: string, itemId: string, accountContext: string = 'System Check'): Promise<void> {
     try {
       const libraryItem = {
         _id: itemId,

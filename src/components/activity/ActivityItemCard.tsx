@@ -1,13 +1,14 @@
 
 import { ActivityItem } from '@/types/activity'
 import { formatDistanceToNow } from 'date-fns'
-import { PlayCircle, Trash2, Tv, Film, Activity, CheckSquare } from 'lucide-react'
+import { PlayCircle, Trash2, Tv, Film, Activity } from 'lucide-react'
 import { memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
-import { cn } from '@/lib/utils'
+import { cn, openStremioDetail } from '@/lib/utils'
+import { Poster } from '@/components/common/Poster'
 
 // Cluster Type Definition
 export type HistoryCluster = {
@@ -71,7 +72,7 @@ export const ActivityItemCard = memo(({
             'border-cyan-500/50 hover:border-cyan-500 bg-cyan-500/5',
             'border-orange-500/50 hover:border-orange-500 bg-orange-500/5',
             'border-pink-500/50 hover:border-pink-500 bg-pink-500/5',
-            'border-indigo-500/50 hover:border-indigo-500 bg-indigo-500/5',
+            'border-violet-500/50 hover:border-violet-500 bg-violet-500/5',
             'border-emerald-500/50 hover:border-emerald-500 bg-emerald-500/5',
         ]
         return colors[index % colors.length]
@@ -87,7 +88,7 @@ export const ActivityItemCard = memo(({
             'bg-cyan-500/20 text-cyan-400',
             'bg-orange-500/20 text-orange-400',
             'bg-pink-500/20 text-pink-400',
-            'bg-indigo-500/20 text-indigo-400',
+            'bg-violet-500/20 text-violet-400',
             'bg-emerald-500/20 text-emerald-400',
         ]
         return colors[index % colors.length]
@@ -102,8 +103,7 @@ export const ActivityItemCard = memo(({
             }
         } else {
             // Open in Stremio Desktop App
-            const type = item.type === 'anime' ? 'series' : item.type
-            window.location.href = `stremio:///detail/${type}/${item.itemId}`
+            openStremioDetail(item.type, item.itemId)
         }
     }
 
@@ -125,13 +125,17 @@ export const ActivityItemCard = memo(({
                 onClick={handleClick}
             >
                 {/* Selection Overlay */}
-                {(isBulkMode || isSelected) && (
-                    <div className={`absolute top-2 left-2 z-30 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-primary border-primary' : 'bg-black/40 border-white/40'}`}>
-                        {isSelected && <CheckSquare className="w-3.5 h-3.5 text-white" />}
+                {isSelected && (
+                    <div className="absolute -top-2 -right-2 z-30 w-6 h-6 rounded-full border-2 border-background shadow-lg flex items-center justify-center transition-all animate-in zoom-in-50 duration-200" style={{ background: 'hsl(var(--primary))' }}>
+                        <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
                     </div>
                 )}
-                <img
+                <Poster
                     src={item.poster}
+                    itemId={item.itemId}
+                    itemType={item.type}
                     alt={item.name}
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
                     loading="lazy"
@@ -141,7 +145,7 @@ export const ActivityItemCard = memo(({
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20 pointer-events-none">
                     {(!isBulkMode && !isSelected) && (
-                        <div className="bg-primary/20 backdrop-blur-md rounded-full p-3 border border-primary/50">
+                        <div className="bg-primary/40 rounded-full p-3 border border-primary/50 shadow-lg">
                             <PlayCircle className="w-8 h-8 text-white drop-shadow-lg" />
                         </div>
                     )}
@@ -151,7 +155,7 @@ export const ActivityItemCard = memo(({
                 <div className="absolute bottom-0 left-0 right-0 p-2.5 flex items-end justify-between gap-2 z-10">
                     {/* Left Stack: Title, Season/Ep, Timestamp */}
                     <div className="flex flex-col gap-1 items-start min-w-0 flex-1">
-                        <div className="bg-black/60 backdrop-blur-sm rounded px-1.5 py-1 max-w-full">
+                        <div className="bg-black/80 rounded px-1.5 py-1 max-w-full">
                             <h3 className="font-black text-[11px] text-white leading-tight line-clamp-2">
                                 {item.name}
                             </h3>
@@ -173,7 +177,7 @@ export const ActivityItemCard = memo(({
                             )}
                         </div>
                         {!isLive && (
-                            <span className="text-[9px] text-white/80 font-semibold bg-black/50 backdrop-blur-sm rounded px-1.5 py-0.5">
+                            <span className="text-[9px] text-white/80 font-semibold bg-black/80 rounded px-1.5 py-0.5">
                                 {formatDistanceToNow(itemDate, { addSuffix: true })}
                             </span>
                         )}
@@ -181,7 +185,7 @@ export const ActivityItemCard = memo(({
 
                     {/* Right: User + Time Left */}
                     <div className="flex flex-col gap-1 items-end shrink-0">
-                        <Badge variant="secondary" className="bg-black/60 hover:bg-black/70 text-white backdrop-blur-sm border-0 shadow-lg flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold">
+                        <Badge variant="secondary" className="bg-black/80 hover:bg-black/90 text-white border-0 shadow-lg flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-bold">
                             <Avatar className="h-3 w-3 border border-white/20">
                                 <AvatarFallback className={cn("text-[6px] font-bold", getAvatarColor(item.accountColorIndex))}>
                                     {userName[0]?.toUpperCase()}
@@ -219,13 +223,21 @@ export const ActivityItemCard = memo(({
             onClick={handleClick}
         >
             {/* Selection Checkbox (List) */}
-            {(isBulkMode || isSelected) && (
-                <div className={`shrink-0 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${isSelected ? 'bg-primary border-primary' : 'bg-muted-foreground/20 border-border'}`}>
-                    {isSelected && <CheckSquare className="w-3.5 h-3.5 text-white" />}
+            {isSelected && (
+                <div className="shrink-0 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all bg-primary border-primary">
+                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
                 </div>
             )}
             <div className="relative w-24 h-36 shrink-0 rounded-lg overflow-hidden border border-white/10 bg-muted shadow-sm group-hover:shadow-md transition-all">
-                <img src={item.poster} className="w-full h-full object-cover" loading="lazy" />
+                <Poster
+                    src={item.poster}
+                    itemId={item.itemId}
+                    itemType={item.type}
+                    className="w-full h-full object-cover"
+                    loading="lazy"
+                />
                 {item.progress > 0 && (
                     <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
                         <div

@@ -32,6 +32,45 @@ export function getStremioLink(url: string): string {
   return url.replace(/^https?:\/\//, 'stremio://')
 }
 
+/**
+ * Robustly opens a Stremio detail page.
+ * Tries deep link first, then falls back to web.stremio.com for a better web/mobile experience.
+ */
+export function openStremioDetail(type: string, id: string) {
+  const normalizedType = type === 'anime' ? 'series' : type
+  const deepLink = `stremio:///detail/${normalizedType}/${id}`
+  const webLink = `https://web.stremio.com/#/detail/${normalizedType}/${id}`
+
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+
+  if (isMobile) {
+    // On mobile, just use the deep link, browsers handle it better with a prompt
+    window.location.href = deepLink
+    // Fallback if they don't have it? We can't easily detect.
+    // But we can offer a button in the UI if we want to be fancy.
+    return
+  }
+
+  // Desktop/Web logic
+  const start = Date.now()
+  let blurred = false
+
+  const onBlur = () => { blurred = true }
+  window.addEventListener('blur', onBlur)
+
+  // Try deep link
+  window.location.href = deepLink
+
+  setTimeout(() => {
+    window.removeEventListener('blur', onBlur)
+    if (!blurred && (Date.now() - start < 1000)) {
+      // If we didn't blur and it's been ~500ms, the protocol probably isn't handled.
+      // We open the web version as a fallback.
+      window.open(webLink, '_blank')
+    }
+  }, 500)
+}
+
 export function getAddonConfigureUrl(installUrl: string): string {
   return installUrl.replace('manifest.json', 'configure')
 }
@@ -48,6 +87,34 @@ export function normalizeAddonUrl(url: string): string {
   normalized = normalized.replace(/\/manifest\.json$/i, '')
   normalized = normalized.replace(/\/+$/, '')
   return normalized
+}
+
+/**
+ * Strips user-specific UUID segments (20+ chars, hex/hyphen) from the path.
+ * This ensures that multiple configs of the same self-hosted addon are grouped.
+ */
+export function getCanonicalAddonUrl(url: string): string {
+  const normalized = normalizeAddonUrl(url)
+  try {
+    const urlObj = new URL(normalized.startsWith('http') ? normalized : `https://${normalized}`)
+    const segments = urlObj.pathname.split('/')
+    const filteredSegments = segments.filter(s => !/^[0-9a-fA-F-]{20,}$/i.test(s))
+    return `${urlObj.hostname}${filteredSegments.join('/')}`.toLowerCase()
+  } catch {
+    return normalized.toLowerCase()
+  }
+}
+
+/**
+ * Returns a reliable grouping key for an addon across different accounts.
+ * Primary match is manifest.id. If missing or invalid, falls back to canonical URL.
+ */
+export function getAddonGroupKey(addon: AddonDescriptor): string {
+  const id = addon.manifest?.id
+  if (id && id !== 'unknown') {
+    return id.toLowerCase()
+  }
+  return getCanonicalAddonUrl(addon.transportUrl)
 }
 
 /**
@@ -118,31 +185,64 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
       const localManifest = localAddon.manifest;
       const useLocalManifest = (isSubstantial(localManifest) && !isSubstantial(remoteManifest)) || isRecentLocalChange;
 
+      // Metadata: start from local (which carries customName, customLogo, etc.)
+      let mergedMetadata = localAddon.metadata
+        ? { ...localAddon.metadata }
+        : (remoteAddon.metadata ? { ...remoteAddon.metadata } : undefined)
+
+      // MIGRATION: If we chose the remote manifest over local, check whether the
+      // local manifest had a different name/description/logo. If so, the local value
+      // was a user customization that was baked into the manifest but never migrated
+      // to the metadata fields. Migrate it now so it survives all future merges.
+      // Guard: only migrate if metadata doesn't already have an explicit override.
+      if (!useLocalManifest && localManifest && remoteManifest) {
+        if (localManifest.name && localManifest.name !== remoteManifest.name && !mergedMetadata?.customName) {
+          mergedMetadata = { ...(mergedMetadata || {}), customName: localManifest.name }
+        }
+        if (localManifest.description && localManifest.description !== remoteManifest.description && !mergedMetadata?.customDescription) {
+          mergedMetadata = { ...(mergedMetadata || {}), customDescription: localManifest.description }
+        }
+        if (localManifest.logo && localManifest.logo !== remoteManifest.logo && !mergedMetadata?.customLogo) {
+          mergedMetadata = { ...(mergedMetadata || {}), customLogo: localManifest.logo }
+        }
+      }
+
+      // NAME COLLISION GUARD: If the remote name looks like a hostname/URL, and we have a local customized name,
+      // favor the local name more aggressively to avoid showing "https://..." in the UI.
+      const isHostname = (s: string) => /^[a-z0-9-]+\.[a-z0-9-]{2,}/i.test(s) || s.startsWith('http');
+      if (remoteManifest.name && isHostname(remoteManifest.name) && mergedMetadata?.customName) {
+        // Local customName is already in mergedMetadata from the logic above or existing state
+      }
+
+      let finalManifest = useLocalManifest ? localManifest : remoteManifest;
+
       finalAddons.push({
         ...remoteAddon,
-        transportUrl: localAddon.transportUrl, // PRESERVE LOCAL URL (The user's new one)
-        manifest: useLocalManifest ? localManifest : remoteManifest,
+        transportUrl: localAddon.transportUrl,
+        manifest: finalManifest,
         flags: {
           ...remoteAddon.flags,
           protected: localAddon.flags?.protected,
-          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : true, // Trust remote presence UNLESS we just changed it locally
+          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : true,
         },
-        metadata: localAddon.metadata,
+        metadata: mergedMetadata,
         catalogOverrides: localAddon.catalogOverrides,
       })
 
       processedRemoteNormUrls.add(normalizeAddonUrl(remoteAddon.transportUrl))
       processedRemoteNormUrls.add(normLocal)
-    } else {
-      // Missing from remote: mark as disabled locally UNLESS it was recently changed (e.g. just enabled)
+    } else if (isRecentLocalChange) {
+      // Missing from remote but was RECENTLY changed locally (e.g. just installed or enabled)
+      // We keep it so it can be pushed to remote in the next sync cycle.
       finalAddons.push({
         ...localAddon,
         flags: {
           ...(localAddon.flags || {}),
-          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : false
+          enabled: localAddon.flags?.enabled !== false
         },
       })
     }
+    // If not in remote AND not recently changed -> DROP (1:1 Mirroring)
   })
 
   // 3. Append any NEW remote addons that weren't accounted for
@@ -161,4 +261,43 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
   })
 
   return finalAddons
+}
+
+export const ACCOUNT_COLORS = [
+  '#3b82f6', // blue
+  '#a855f7', // purple
+  '#22c55e', // green
+  '#f59e0b', // amber
+  '#f43f5e', // rose
+  '#06b2d2', // cyan
+  '#f97316', // orange
+  '#ec4899', // pink
+  '#8b5cf6', // violet
+  '#10b981', // emerald
+]
+
+export function getTimeAgo(date: Date): string {
+  const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000)
+
+  let interval = seconds / 31536000
+  if (interval > 1) {
+    return Math.floor(interval) + 'y ago'
+  }
+  interval = seconds / 2592000
+  if (interval > 1) {
+    return Math.floor(interval) + 'mo ago'
+  }
+  interval = seconds / 86400
+  if (interval > 1) {
+    return Math.floor(interval) + 'd ago'
+  }
+  interval = seconds / 3600
+  if (interval > 1) {
+    return Math.floor(interval) + 'h ago'
+  }
+  interval = seconds / 60
+  if (interval > 1) {
+    return Math.floor(interval) + 'm ago'
+  }
+  return Math.floor(seconds) + 's ago'
 }

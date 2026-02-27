@@ -3,11 +3,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { RefreshCw, Users, GripHorizontal, Search, X, Layers, Trash2 } from 'lucide-react'
+import { Search, Trash2, RefreshCw, Users, GripHorizontal, X, Layers, Check } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { useState } from 'react'
 import { AccountCard } from './AccountCard'
-import { BulkActionsDialog } from './BulkActionsDialog'
+import { BatchOperationsDialog } from './BatchOperationsDialog'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import {
   DndContext,
@@ -40,6 +40,7 @@ export function AccountList() {
   }>({ open: false, accountIds: [] })
 
   const [isSelectionMode, setIsSelectionMode] = useState(false)
+  const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
 
   const toggleAccountSelection = (accountId: string) => {
     setSelectedAccountIds((prev) => {
@@ -81,9 +82,7 @@ export function AccountList() {
 
   const confirmDelete = async () => {
     const ids = deleteConfirmation.accountIds
-    for (const id of ids) {
-      await removeAccount(id)
-    }
+    await Promise.all(ids.map(id => removeAccount(id)))
     setDeleteConfirmation({ open: false, accountIds: [] })
     clearSelection()
   }
@@ -129,7 +128,6 @@ export function AccountList() {
     )
   })
 
-  const selectedAccounts = accounts.filter((a) => selectedAccountIds.has(a.id))
 
   const checkRules = useFailoverStore((state) => state.checkRules)
 
@@ -170,9 +168,11 @@ export function AccountList() {
       {/* Bulk Actions Toolbar */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-card border rounded-md p-3 gap-3">
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 w-full sm:w-auto">
-          <span className="text-sm font-medium whitespace-nowrap text-foreground">
-            {selectedAccountIds.size} of {accounts.length} selected
-          </span>
+          {isSelectionMode && (
+            <span className="text-sm font-medium whitespace-nowrap text-foreground">
+              {selectedAccountIds.size} of {accounts.length} selected
+            </span>
+          )}
           <div className="relative w-full sm:w-64 max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -252,6 +252,7 @@ export function AccountList() {
             onClick={toggleSelectionMode}
             className="flex-1 sm:flex-none"
           >
+            <Check className="h-4 w-4 mr-2" />
             {isSelectionMode ? 'Cancel' : 'Select'}
           </Button>
           {!isSelectionMode && (
@@ -278,6 +279,7 @@ export function AccountList() {
                   onToggleSelect={toggleAccountSelection}
                   onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
                   isSelectionMode={isSelectionMode}
+                  isPrivacyMode={isPrivacyModeEnabled}
                 />
               ))}
             </div>
@@ -297,16 +299,19 @@ export function AccountList() {
               </Button>
             </div>
           ) : (
-            filteredAccounts.map((account) => (
-              <AccountCard
-                key={account.id}
-                account={account}
-                isSelected={selectedAccountIds.has(account.id)}
-                onToggleSelect={toggleAccountSelection}
-                onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
-                isSelectionMode={isSelectionMode}
-              />
-            ))
+            <>
+              {filteredAccounts.map((account) => (
+                <AccountCard
+                  key={account.id}
+                  account={account}
+                  isSelected={selectedAccountIds.has(account.id)}
+                  onToggleSelect={toggleAccountSelection}
+                  onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
+                  isSelectionMode={isSelectionMode}
+                  isPrivacyMode={isPrivacyModeEnabled}
+                />
+              ))}
+            </>
           )}
         </div>
       )}
@@ -317,8 +322,8 @@ export function AccountList() {
           <DialogHeader>
             <DialogTitle>Bulk Actions</DialogTitle>
           </DialogHeader>
-          <BulkActionsDialog
-            selectedAccounts={selectedAccounts}
+          <BatchOperationsDialog
+            selectedAccounts={accounts.filter((a) => selectedAccountIds.has(a.id))}
             allAccounts={accounts}
             onClose={() => {
               setShowBulkActions(false)

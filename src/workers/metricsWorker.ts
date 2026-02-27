@@ -218,7 +218,7 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[] }>) => {
         const badges = []
         if (completionRate > 80 && data.totalFinishes > 10) badges.push({ type: 'The Completer', icon: 'CheckCircle', color: 'emerald' })
         if (completionRate < 30 && data.totalStarts > 20) badges.push({ type: 'The Sampler', icon: 'Ghost', color: 'pink' })
-        if (data.midnightPlays > data.totalStarts * 0.3) badges.push({ type: 'The Night Owl', icon: 'Moon', color: 'indigo' })
+        if (data.midnightPlays > data.totalStarts * 0.3) badges.push({ type: 'The Night Owl', icon: 'Moon', color: 'violet' })
         if (bingeLen > 8) badges.push({ type: 'Binge King', icon: 'Flame', color: 'orange' })
         if (data.weekendPlays > data.totalStarts * 0.6) badges.push({ type: 'Weekend Warrior', icon: 'Zap', color: 'yellow' })
         return { id, name: u.name, badges }
@@ -235,7 +235,7 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[] }>) => {
         if (max > 0) {
             if (max === morning) chronotype = { label: 'Early Bird', icon: 'Sun', color: 'orange' }
             else if (max === afternoon) chronotype = { label: 'Day Dreamer', icon: 'Coffee', color: 'blue' }
-            else if (max === evening) chronotype = { label: 'Prime Time Player', icon: 'Tv', color: 'indigo' }
+            else if (max === evening) chronotype = { label: 'Prime Time Player', icon: 'Tv', color: 'violet' }
             else chronotype = { label: 'Night Owl', icon: 'Moon', color: 'purple' }
         }
 

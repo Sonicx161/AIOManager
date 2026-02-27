@@ -4,23 +4,23 @@ import { Label } from '@/components/ui/label'
 import { normalizeTagName } from '@/lib/addon-validator'
 import { useAddonStore } from '@/store/addonStore'
 import { useUIStore } from '@/store/uiStore'
+import { Switch } from '@/components/ui/switch'
 import { SavedAddon } from '@/types/saved-addon'
 import { useState } from 'react'
+import { useToast } from '@/hooks/use-toast'
 
-interface SavedAddonDetailsProps {
-  savedAddon: SavedAddon
-  onClose: () => void
-}
-
-export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProps) {
+export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAddon, onClose: () => void }) {
   const { updateSavedAddon, updateSavedAddonMetadata, replaceTransportUrlUniversally, loading, error } = useAddonStore()
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
+  const { toast } = useToast()
 
   const [formData, setFormData] = useState({
     name: savedAddon.name,
     tags: savedAddon.tags.join(', '),
     installUrl: savedAddon.installUrl,
     customLogo: savedAddon.metadata?.customLogo || '',
+    customDescription: savedAddon.metadata?.customDescription || '',
+    syncWithInstalled: savedAddon.syncWithInstalled ?? false,
   })
 
   const [formError, setFormError] = useState<string | null>(null)
@@ -31,7 +31,9 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
   const hasChanges =
     formData.name !== savedAddon.name ||
     formData.tags !== savedAddon.tags.join(', ') ||
-    formData.customLogo !== (savedAddon.metadata?.customLogo || '')
+    formData.customLogo !== (savedAddon.metadata?.customLogo || '') ||
+    formData.customDescription !== (savedAddon.metadata?.customDescription || '') ||
+    formData.syncWithInstalled !== (savedAddon.syncWithInstalled ?? false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -50,15 +52,13 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
         name,
         tags,
         installUrl: formData.installUrl.trim(),
-      })
-
-      // CRITICAL: Sync semantic name change to metadata so it applies on deploy
-      if (name !== savedAddon.name || formData.customLogo !== (savedAddon.metadata?.customLogo || '')) {
-        await updateSavedAddonMetadata(savedAddon.id, {
+        syncWithInstalled: formData.syncWithInstalled,
+        metadata: {
           customName: name,
-          customLogo: formData.customLogo.trim() || undefined
-        })
-      }
+          customLogo: formData.customLogo.trim() || undefined,
+          customDescription: formData.customDescription.trim() || undefined
+        }
+      })
 
       onClose()
     } catch (err) {
@@ -83,12 +83,12 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
 
   return (
     <div className="space-y-6">
-      {/* Error Display */}
       {(formError || error) && (
         <div className="p-3 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
           <p className="text-sm text-red-600 dark:text-red-400">{formError || error}</p>
         </div>
       )}
+
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Saved Addon Name */}
@@ -126,6 +126,32 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
             value={formData.customLogo}
             onChange={(e) => setFormData((prev) => ({ ...prev, customLogo: e.target.value }))}
             placeholder="https://... (Leave empty for default)"
+          />
+        </div>
+
+        {/* Custom Description */}
+        <div className="space-y-2">
+          <Label htmlFor="edit-description">Custom Description</Label>
+          <textarea
+            id="edit-description"
+            className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+            value={formData.customDescription}
+            onChange={(e) => setFormData((prev) => ({ ...prev, customDescription: e.target.value }))}
+            placeholder={savedAddon.manifest.description}
+          />
+        </div>
+
+        <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/30">
+          <div className="space-y-0.5">
+            <Label htmlFor="sync-with-installed" className="text-sm font-semibold">Keep in sync with installed versions</Label>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-tight">
+              When enabled, changing this addon's URL or metadata in the library will automatically update it across all accounts where it is installed.
+            </p>
+          </div>
+          <Switch
+            id="sync-with-installed"
+            checked={formData.syncWithInstalled}
+            onCheckedChange={(checked) => setFormData(prev => ({ ...prev, syncWithInstalled: checked }))}
           />
         </div>
 
@@ -225,6 +251,64 @@ export function SavedAddonDetails({ savedAddon, onClose }: SavedAddonDetailsProp
 
         {/* Actions */}
         <div className="flex justify-end gap-2 pt-4">
+          <Button
+            type="button"
+            variant="outline"
+            className="mr-auto"
+            disabled={loading || replacingUrl}
+            onClick={async () => {
+              try {
+                // Fetch the original manifest from the addon URL
+                const { fetchAddonManifest } = await import('@/api/addons')
+                const fetched = await fetchAddonManifest(savedAddon.installUrl)
+                const originalManifest = fetched.manifest
+
+                await updateSavedAddonMetadata(savedAddon.id, {
+                  customName: undefined,
+                  customLogo: undefined,
+                  customDescription: undefined
+                })
+                await updateSavedAddon(savedAddon.id, {
+                  name: originalManifest.name || savedAddon.manifest.name
+                })
+
+                setFormData(prev => ({
+                  ...prev,
+                  name: originalManifest.name || savedAddon.manifest.name,
+                  customLogo: '',
+                  customDescription: ''
+                }))
+
+                toast({
+                  title: 'Reset Complete',
+                  description: `Restored original manifest values for "${originalManifest.name}".`,
+                })
+              } catch (err) {
+                console.error('Reset failed:', err)
+                // Fallback: reset using stored manifest values
+                await updateSavedAddonMetadata(savedAddon.id, {
+                  customName: undefined,
+                  customLogo: undefined,
+                  customDescription: undefined
+                })
+                await updateSavedAddon(savedAddon.id, {
+                  name: savedAddon.manifest.name
+                })
+                setFormData(prev => ({
+                  ...prev,
+                  name: savedAddon.manifest.name,
+                  customLogo: '',
+                  customDescription: ''
+                }))
+                toast({
+                  title: 'Reset Complete',
+                  description: 'Reset to stored defaults (could not reach addon server).',
+                })
+              }
+            }}
+          >
+            Reset to Defaults
+          </Button>
           <Button type="submit" disabled={loading || !hasChanges}>
             {loading ? 'Saving...' : 'Save Changes'}
           </Button>

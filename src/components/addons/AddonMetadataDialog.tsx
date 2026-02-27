@@ -17,6 +17,7 @@ interface AddonMetadataDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     addon: AddonDescriptor
+    accountId: string
     onSave: (metadata: { customName?: string; customLogo?: string; customDescription?: string }) => Promise<void>
     onReplaceUrl?: (newUrl: string) => Promise<void>
 }
@@ -25,6 +26,7 @@ export function AddonMetadataDialog({
     open,
     onOpenChange,
     addon,
+    accountId,
     onSave,
     onReplaceUrl,
 }: AddonMetadataDialogProps) {
@@ -37,6 +39,7 @@ export function AddonMetadataDialog({
     const [newUrl, setNewUrl] = useState('')
     const [replacingUrl, setReplacingUrl] = useState(false)
 
+
     // Initialize form with existing metadata
     useEffect(() => {
         if (open) {
@@ -44,10 +47,13 @@ export function AddonMetadataDialog({
             setCustomLogo(addon.metadata?.customLogo || '')
             setCustomDescription(addon.metadata?.customDescription || '')
             setNewUrl(addon.transportUrl)
+
+
+
             setShowAdvanced(false)
             setError(null)
         }
-    }, [open, addon])
+    }, [open, addon, accountId])
 
     const handleSave = async () => {
         setSaving(true)
@@ -71,7 +77,7 @@ export function AddonMetadataDialog({
         setSaving(true)
         setError(null)
         try {
-            // Send undefined to clearing overrides
+            // Clear all custom overrides by sending undefined
             await onSave({
                 customName: undefined,
                 customLogo: undefined,
@@ -80,7 +86,7 @@ export function AddonMetadataDialog({
             setCustomName('')
             setCustomLogo('')
             setCustomDescription('')
-            // Keep open as requested
+            onOpenChange(false) // Close dialog so parent re-renders with fresh addon data
         } catch (err) {
             console.error(err)
             setError('Failed to reset defaults.')
@@ -183,6 +189,8 @@ export function AddonMetadataDialog({
                                 </Button>
                             </div>
                         </div>
+
+
 
                         {/* Error Message */}
                         {error && <p className="text-sm text-destructive font-medium">{error}</p>}

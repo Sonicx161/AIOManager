@@ -31,17 +31,19 @@ import { CinemetaManifest } from '@/types/cinemeta'
 import { getStremioLink, maskUrl, isNewerVersion } from '@/lib/utils'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
+import { getHostnameIdentifier } from '@/lib/addon-identifier'
 import { useProfileStore } from '@/store/profileStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor } from '@/types/addon'
 
-import { Copy, ExternalLink, Lock, Unlock, FileDown, Settings, Trash2, List, Pencil } from 'lucide-react'
+import { Copy, ExternalLink, List, Pencil, Trash2 } from 'lucide-react'
 import { useMemo, useState, useEffect } from 'react'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
 import { CatalogEditorDialog } from './CatalogEditorDialog'
 import { Switch } from '@/components/ui/switch'
 import { usePendingRemoval } from '@/hooks/useSyncManager'
+import { AnimatedUpdateIcon, AnimatedRefreshIcon, AnimatedShieldIcon, AnimatedSettingsIcon, AnimatedHeartIcon } from '../ui/AnimatedIcons'
 
 // --- URL Helpers ---
 const MANIFEST_SUFFIX_REGEX = /\/manifest(\.[^/?#]+)?$/i
@@ -149,7 +151,7 @@ export function AddonCard({
   selectionId,
   index
 }: AddonCardProps) {
-  const { library, createSavedAddon, loading: storeLoading } = useAddonStore()
+  const { library, createSavedAddon } = useAddonStore()
   const { profiles, initialize: initProfiles, createProfile } = useProfileStore()
   const accounts = useAccountStore(state => state.accounts)
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
@@ -166,13 +168,14 @@ export function AddonCard({
   const [saveProfileId, setSaveProfileId] = useState<string>('unassigned')
   const [isCreatingProfile, setIsCreatingProfile] = useState(false)
   const [newProfileName, setNewProfileName] = useState('')
-
   const [saveError, setSaveError] = useState<string | null>(null)
+
   const [showConfigDialog, setShowConfigDialog] = useState(false)
   const [configuring, setConfiguring] = useState(false)
   const [showCatalogEditor, setShowCatalogEditor] = useState(false)
   const [showUnprotectConfirmation, setShowUnprotectConfirmation] = useState(false)
   const [showMetadataDialog, setShowMetadataDialog] = useState(false)
+  const [showReinstallConfirm, setShowReinstallConfirm] = useState(false)
   const isPendingRemoval = usePendingRemoval(accountId, addon.transportUrl)
 
   useEffect(() => {
@@ -222,16 +225,6 @@ export function AddonCard({
     }
   }
 
-  const isInLibrary = useMemo(() => {
-    return Object.values(library).some(
-      (savedAddon) =>
-        savedAddon.manifest.id === addon.manifest.id && savedAddon.installUrl === addon.transportUrl
-    )
-  }, [library, addon.manifest.id, addon.transportUrl])
-
-  const canSaveToLibrary = !addon.flags?.protected && !addon.flags?.official && !isInLibrary
-  const hasUpdate = latestVersion ? isNewerVersion(addon.manifest.version, latestVersion) : false
-  const canUpdate = !!onUpdate
   const isCinemeta = useMemo(() => isCinemetaAddon(addon), [addon])
 
   const isPatched = useMemo(() => {
@@ -240,24 +233,36 @@ export function AddonCard({
     return Object.values(status).some(val => val === true)
   }, [isCinemeta, addon.manifest])
 
+  const isInstalled = useMemo(() => {
+    return Object.values(library).some(
+      (savedAddon) =>
+        savedAddon.manifest.id === addon.manifest.id && savedAddon.installUrl === addon.transportUrl
+    )
+  }, [library, addon.manifest.id, addon.transportUrl])
+
+  const isExternal = useMemo(() => {
+    return !addon.flags?.protected && !addon.flags?.official
+  }, [addon.flags?.protected, addon.flags?.official])
+
+  const canSaveToLibrary = useMemo(() => {
+    return isExternal && !isInstalled
+  }, [isExternal, isInstalled])
+
+  const hasUpdate = latestVersion ? isNewerVersion(addon.manifest.version, latestVersion) : false
+  const canUpdate = !!onUpdate
+
   const openSaveModal = () => {
     setSaveName(addon.manifest.name)
     setSaveTags('')
 
-    // Smart Defaulting: Try to find a profile that matches the current account name
     const currentAccount = accounts.find(a => a.id === accountId)
-
     const customName = currentAccount?.name?.trim()
     const emailName = currentAccount?.email?.split('@')[0]?.trim()
 
-    // 1. Try matching Custom Name first
     let matchingProfile = undefined
-
     if (customName) {
       matchingProfile = profiles.find(p => p.name.trim().toLowerCase() === customName.trim().toLowerCase())
     }
-
-    // 2. Fallback to Email match
     if (!matchingProfile && emailName) {
       matchingProfile = profiles.find(p => p.name.trim().toLowerCase() === emailName.trim().toLowerCase())
     }
@@ -266,10 +271,9 @@ export function AddonCard({
       setSaveProfileId(matchingProfile.id)
       setIsCreatingProfile(false)
     } else {
-      // If no matching profile exists, default to CREATING one to reduce friction
       setSaveProfileId('unassigned')
       setNewProfileName(customName || emailName || 'My Profile')
-      setIsCreatingProfile(true) // Auto-enable creation mode
+      setIsCreatingProfile(true)
     }
 
     setSaveError(null)
@@ -300,12 +304,10 @@ export function AddonCard({
 
       let finalProfileId = saveProfileId === 'unassigned' ? undefined : saveProfileId
 
-      // One-Click Create & Save Logic
       if (isCreatingProfile && newProfileName.trim()) {
         try {
           const newProfile = await createProfile(newProfileName.trim())
           finalProfileId = newProfile.id
-          // Toast is handled by store probably, but good to know
         } catch (createErr) {
           console.error('Failed to auto-create profile:', createErr)
           setSaveError('Failed to create profile. Please try again.')
@@ -348,9 +350,20 @@ export function AddonCard({
     window.location.href = getStremioLink(addon.transportUrl)
   }
 
-  const handleUpdate = async () => {
+  const handleUpdate = () => {
+    // Skip confirmation for updates — no harm in updating
+    // Only show confirmation for manual reinstalls (same version)
+    if (hasUpdate) {
+      handleConfirmUpdate()
+    } else {
+      setShowReinstallConfirm(true)
+    }
+  }
+
+  const handleConfirmUpdate = async () => {
     if (!onUpdate) return
     setUpdating(true)
+    setShowReinstallConfirm(false)
     try {
       await onUpdate(accountId, addon.transportUrl)
       toast({
@@ -370,12 +383,10 @@ export function AddonCard({
 
   const handleReplaceUrl = async (targetNewUrl: string) => {
     try {
-      // 1. Find the saved addon if it exists in the library
       const savedAddon = Object.values(library).find(
         (s) => s.manifest.id === addon.manifest.id && s.installUrl === addon.transportUrl
       )
 
-      // 2. Call the universal replacement action
       await useAddonStore.getState().replaceTransportUrlUniversally(
         savedAddon ? savedAddon.id : null,
         addon.transportUrl,
@@ -383,7 +394,6 @@ export function AddonCard({
         accountId
       )
 
-      // 3. Refresh local account state to reflect changes
       await useAccountStore.getState().syncAccount(accountId)
 
       toast({
@@ -420,27 +430,22 @@ export function AddonCard({
     }
 
     setConfiguring(true)
-
-    // Probing logic
     const openUrl = (url: string) => {
       window.open(url, '_blank')
       return true
     }
 
     const bestCandidate = candidateUrls.find(u => u.endsWith('/configure')) || candidateUrls[0]
-
     if (bestCandidate) {
       openUrl(bestCandidate)
     } else {
       const url = addon.transportUrl.replace('/manifest.json', '')
       openUrl(url.endsWith('/') ? `${url}configure` : `${url}/configure`)
     }
-
     setConfiguring(false)
   }
 
   const handleToggleProtection = () => {
-    // Check if we are UNPROTECTING Cinemeta
     if (addon.flags?.protected && isCinemeta) {
       setShowUnprotectConfirmation(true)
       return
@@ -481,6 +486,13 @@ export function AddonCard({
           }
         }}
       >
+        {isSelected && (
+          <div className="absolute -top-2 -right-2 z-30 w-6 h-6 rounded-full border-2 border-background shadow-lg flex items-center justify-center transition-all animate-in zoom-in-50 duration-200" style={{ background: 'hsl(var(--primary))' }}>
+            <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+        )}
         <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
           <div className="flex items-center gap-3 min-w-0">
             {(addon.metadata?.customLogo || addon.manifest.logo) && (
@@ -497,7 +509,8 @@ export function AddonCard({
             )}
             <div className="flex flex-col min-w-0">
               <CardTitle className="text-base font-semibold truncate leading-tight">
-                {addon.metadata?.customName || addon.manifest.name}
+                {addon.metadata?.customName ||
+                  (addon.manifest.name && addon.manifest.name !== 'Unknown Addon' ? addon.manifest.name : getHostnameIdentifier(addon.transportUrl))}
               </CardTitle>
               <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
                 <span className="text-xs truncate">v{addon.manifest.version}</span>
@@ -543,7 +556,6 @@ export function AddonCard({
                 onCheckedChange={async (checked) => {
                   useAccountStore.getState().toggleAddonEnabled(accountId, addon.transportUrl, checked, false, index)
 
-                  // Autopilot awareness: Check if this addon is part of an active rule
                   const { useFailoverStore } = await import('@/store/failoverStore')
                   const failoverStore = useFailoverStore.getState()
                   const rule = failoverStore.rules.find((r: any) => r.accountId === accountId && r.isActive && r.priorityChain.some((url: string) => url === addon.transportUrl))
@@ -568,14 +580,17 @@ export function AddonCard({
               onClick={handleToggleProtection}
               title={addon.flags?.protected ? "Unprotect Addon" : "Protect Addon"}
             >
-              {addon.flags?.protected ? <Lock className="h-4 w-4" /> : <Unlock className="h-4 w-4" />}
+              <AnimatedShieldIcon className="h-4 w-4" isAnimating={addon.flags?.protected} />
             </Button>
+
           </div>
         </CardHeader>
 
         <CardContent className="flex-grow py-2 min-w-0">
           <p className="text-sm text-muted-foreground line-clamp-2 mb-3 h-10 w-full">
-            {addon.metadata?.customDescription || addon.manifest.description}
+            {addon.metadata?.customDescription ||
+              addon.manifest.description ||
+              (!addon.manifest.description ? `Addon from ${getHostnameIdentifier(addon.transportUrl)}` : '')}
           </p>
 
           <div className="flex items-center gap-2 w-full min-w-0">
@@ -597,92 +612,106 @@ export function AddonCard({
           </div>
         </CardContent>
 
-        <CardFooter className="flex flex-col gap-2 pt-2">
-          {canSaveToLibrary && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={openSaveModal}
-              disabled={loading || storeLoading || saving}
-              className="w-full"
-            >
-              <Settings className="h-4 w-4 mr-2" />
-              Save
-            </Button>
-          )}
-
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handleConfigure}
-            disabled={configuring}
-            className="w-full"
-          >
-            <Settings className="h-4 w-4 mr-2" />
-            Configure
-          </Button>
-
-          {hasCatalogs && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setShowCatalogEditor(true)}
-              className="w-full"
-            >
-              <List className="h-4 w-4 mr-2" />
-              Edit Catalogs ({
-                (addon.manifest.catalogs || []).filter(c => !(addon.catalogOverrides?.removed || []).includes(c.id)).length
-              })
-            </Button>
-          )}
-
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setShowMetadataDialog(true)}
-            className="w-full"
-          >
-            <Pencil className="h-4 w-4 mr-2" />
-            Customize
-          </Button>
-
-
+        <CardFooter className="flex flex-col gap-2 pt-2 border-t bg-muted/5 mt-auto">
+          {/* Update Available — full width when present */}
           {canUpdate && hasUpdate && (
             <Button
-              variant='default'
+              variant="default"
               size="sm"
               onClick={handleUpdate}
-              disabled={loading || updating}
-              className="w-full"
+              disabled={loading || updating || removing}
+              className="w-full font-bold bg-amber-500 hover:bg-amber-400 text-black border-none shadow-sm"
             >
-              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
-              Update Available
+              <AnimatedUpdateIcon className="h-4 w-4 mr-2" isAnimating={updating} />
+              {updating ? 'Updating...' : 'Update Available'}
             </Button>
           )}
 
-          {canUpdate && !hasUpdate && (
+          {/* 2×2 action grid */}
+          <div className="grid grid-cols-2 gap-1.5 w-full">
             <Button
               variant="secondary"
               size="sm"
-              onClick={handleUpdate}
-              disabled={loading || updating}
-              className="w-full"
+              onClick={handleConfigure}
+              disabled={configuring || removing}
+              className="font-semibold text-xs"
+              title="Open addon configuration page"
             >
-              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
-              Reinstall
+              <AnimatedSettingsIcon className="h-3.5 w-3.5 mr-1.5" isAnimating={configuring} />
+              Configure
             </Button>
-          )}
+
+            {hasCatalogs ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowCatalogEditor(true)}
+                disabled={removing}
+                className="font-semibold text-xs"
+                title={`Edit Catalogs (${(addon.manifest.catalogs || []).filter(c => !(addon.catalogOverrides?.removed || []).includes(c.id)).length})`}
+              >
+                <List className="h-3.5 w-3.5 mr-1.5" />
+                Catalogs
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled
+                className="font-semibold text-xs opacity-50"
+              >
+                <List className="h-3.5 w-3.5 mr-1.5" />
+                Catalogs
+              </Button>
+            )}
+
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowMetadataDialog(true)}
+              disabled={removing}
+              className="font-semibold text-xs"
+            >
+              <Pencil className="h-3.5 w-3.5 mr-1.5" />
+              Customize
+            </Button>
+
+            {canSaveToLibrary ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={openSaveModal}
+                disabled={saving || removing}
+                className="font-semibold text-xs text-primary hover:text-primary hover:bg-primary/10"
+              >
+                <AnimatedHeartIcon className="h-3.5 w-3.5 mr-1.5" isAnimating={saving} />
+                Save to Library
+              </Button>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleUpdate}
+                disabled={loading || updating || removing}
+                className="font-semibold text-xs"
+                title="Reinstalls this addon — also useful after making config changes to refresh settings without losing anything"
+              >
+                <AnimatedRefreshIcon className="h-3.5 w-3.5 mr-1.5" isAnimating={updating} />
+                Reinstall
+              </Button>
+            )}
+          </div>
 
           {!addon.flags?.protected && (
             <Button
               variant="destructive"
               size="sm"
               onClick={handleRemove}
-              disabled={loading}
-              className="w-full"
+              disabled={removing}
+              className="w-full mt-1 font-bold h-9 bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white border border-red-500/20 transition-all duration-200"
             >
               <Trash2 className="h-4 w-4 mr-2" />
-              Remove
+              Remove Addon
             </Button>
           )}
         </CardFooter>
@@ -824,8 +853,32 @@ export function AddonCard({
         open={showMetadataDialog}
         onOpenChange={setShowMetadataDialog}
         addon={addon}
+        accountId={accountId}
         onSave={handleSaveMetadata}
         onReplaceUrl={handleReplaceUrl}
+      />
+      <ConfirmationDialog
+        open={showReinstallConfirm}
+        onOpenChange={setShowReinstallConfirm}
+        title={hasUpdate ? "Update Addon?" : "Reinstall Addon?"}
+        description={
+          <div className="space-y-3">
+            <p>
+              {hasUpdate
+                ? `Update "${addon.manifest.name}" to version ${latestVersion}?`
+                : `Reinstall "${addon.manifest.name}"?`
+              }
+            </p>
+            <div className="p-3 bg-primary/5 rounded-lg border border-primary/10 text-xs text-muted-foreground leading-relaxed">
+              Reinstalling will refresh the addon manifest and ensure you have the latest version.
+              Your custom settings, catalog overrides, and tags will be <strong>preserved</strong>.
+            </div>
+          </div>
+        }
+        confirmText={updating ? "Updating..." : (hasUpdate ? "Update Now" : "Reinstall")}
+        onConfirm={handleConfirmUpdate}
+        isLoading={updating}
+        disabled={updating}
       />
     </>
   )

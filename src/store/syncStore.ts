@@ -1,14 +1,29 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { v4 as uuidv4 } from 'uuid'
+
 import { useAccountStore } from './accountStore'
 import { useAddonStore } from './addonStore'
 import { useProfileStore } from './profileStore'
 import { useFailoverStore } from './failoverStore'
 import { useAuthStore } from './authStore'
-import { v4 as uuidv4 } from 'uuid'
+import { useVaultStore } from './vaultStore'
 import { toast } from '@/hooks/use-toast'
 import { deriveSyncToken } from '@/lib/crypto'
 import { resilientFetch } from '@/lib/api-resilience'
+
+// Suppress toasts during initial boot to prevent React "state update on unmounted component" warnings
+let _appReady = false
+setTimeout(() => { _appReady = true }, 3000)
+
+export interface SyncHistoryEntry {
+    id: string
+    timestamp: string
+    type: 'push' | 'pull' | 'force-push' | 'force-mirror'
+    status: 'success' | 'error'
+    message: string
+    isAuto: boolean
+}
 
 interface SyncState {
     auth: {
@@ -20,13 +35,22 @@ interface SyncState {
     serverUrl: string
     lastSyncedAt: string | null
     isSyncing: boolean
+    isRefreshingFromCloud: boolean  // true only during the post-unlock pull — separate from write syncs
+    isInitialSyncCompleted: boolean // Safety flag to prevent stale devices from pushing before they've pulled
     lastActionTimestamp: number
+    lastSeenVersion: string | null
+    _syncDebounceTimer: any // Internal use only, not persisted
+    history: SyncHistoryEntry[]
     // Actions
+    setLastSeenVersion: (version: string) => void
     register: (password: string, name?: string) => Promise<void>
-    login: (id: string, password: string, isSilent?: boolean) => Promise<void>
+    login: (id: string, password: string, isSilent?: boolean, bypassGuard?: boolean) => Promise<void>
     logout: () => void
     syncToRemote: (isAuto?: boolean) => Promise<void>
     syncFromRemote: (isSilent?: boolean) => Promise<void>
+    refreshFromCloud: () => Promise<void>
+    forcePushState: () => Promise<void>
+    forceMirrorState: () => Promise<void>
     setServerUrl: (url: string) => void
     setDisplayName: (name: string) => void
     deleteRemoteAccount: () => Promise<void>
@@ -47,7 +71,28 @@ export const useSyncStore = create<SyncState>()(
             serverUrl: '',
             lastSyncedAt: null,
             isSyncing: false,
+            isRefreshingFromCloud: false,
+            isInitialSyncCompleted: false, // Reset on every boot or logout
             lastActionTimestamp: 0,
+            lastSeenVersion: null,
+            _syncDebounceTimer: null,
+            history: [],
+
+            setLastSeenVersion: (version: string) => {
+                set({ lastSeenVersion: version })
+                get().syncToRemote(true).catch(console.error)
+            },
+
+            addLogEntry: (data: Omit<SyncHistoryEntry, 'id' | 'timestamp'>) => {
+                const entry: SyncHistoryEntry = {
+                    ...data,
+                    id: uuidv4(),
+                    timestamp: new Date().toISOString()
+                }
+                set(state => ({
+                    history: [entry, ...state.history].slice(0, 50)
+                }))
+            },
 
             setServerUrl: (url) => set({ serverUrl: url }),
 
@@ -65,6 +110,47 @@ export const useSyncStore = create<SyncState>()(
                 if (!auth.isAuthenticated) return
                 // Reuse login logic which performs the fetch & merge
                 await get().login(auth.id, auth.password, isSilent)
+            },
+
+            /**
+             * Post-unlock pull: fetches latest cloud state unconditionally.
+             * Unlike syncFromRemote(), this bypasses the isSyncing guard because
+             * isSyncing protects write/push operations, not read pulls.
+             * Sets isRefreshingFromCloud for UI feedback.
+             */
+            refreshFromCloud: async () => {
+                const { auth, isSyncing } = get()
+                if (!auth.isAuthenticated || !auth.id || !auth.password) return
+
+                // Safety: Don't trigger if already syncing or if we haven't even finished basic initialization
+                if (isSyncing) return
+
+                set({ isRefreshingFromCloud: true })
+                try {
+                    // This call might throw if decryption fails (e.g. wrong password or corrupt data)
+                    await get().login(auth.id, auth.password, true, true)
+                    set({ isInitialSyncCompleted: true })
+                } catch (e) {
+                    console.error('[Sync] Post-unlock cloud refresh failed:', e)
+                    // Only show alert if it's NOT a silent failure (decryption/auth issues are never silent)
+                    const message = e instanceof Error ? e.message : 'Unknown sync error'
+                    if (message.toLowerCase().includes('decrypt') || message.toLowerCase().includes('password')) {
+                        toast({
+                            variant: 'destructive',
+                            title: 'Sync Error',
+                            description: message
+                        })
+                    } else {
+                        // Generic network/server failure - less alarming
+                        toast({
+                            variant: 'destructive',
+                            title: 'Refresh Failed',
+                            description: 'Could not reach sync server. Using local data.'
+                        })
+                    }
+                } finally {
+                    set({ isRefreshingFromCloud: false })
+                }
             },
 
             register: async (password: string, name: string = '') => {
@@ -120,6 +206,9 @@ export const useSyncStore = create<SyncState>()(
                         lastSyncedAt: new Date().toISOString()
                     })
 
+                    // Set flag to show post-login reminder (Since the registration dialog is hidden too fast)
+                    localStorage.setItem('aiom_show_sync_id_reminder', 'true')
+
                     toast({ title: "Account Created", description: "Welcome to AIOManager." })
                 } catch (e) {
                     toast({ variant: "destructive", title: "Registration Failed", description: (e as Error).message })
@@ -127,8 +216,8 @@ export const useSyncStore = create<SyncState>()(
                 }
             },
 
-            login: async (id: string, password: string, isSilent: boolean = false) => {
-                if (get().isSyncing) return
+            login: async (id: string, password: string, isSilent: boolean = false, bypassGuard: boolean = false) => {
+                if (get().isSyncing && !bypassGuard) return
                 set({ isSyncing: true })
                 const { serverUrl } = get()
                 const baseUrl = serverUrl || DEFAULT_SERVER
@@ -191,9 +280,11 @@ export const useSyncStore = create<SyncState>()(
                             addons: data?.addons || { version: '1.0', savedAddons: [] },
                             profiles: Array.isArray(data?.profiles) ? data.profiles : [],
                             failover: data?.failover || [],
+                            vault: data?.vault || [],
                             salt: data?.salt,
                             name: data?.name,
-                            syncedAt: data?.syncedAt
+                            syncedAt: data?.syncedAt,
+                            lastSeenVersion: data?.lastSeenVersion || null
                         }
 
                     } catch (e) {
@@ -239,6 +330,8 @@ export const useSyncStore = create<SyncState>()(
                     const isLocalNewer = localTime > remoteTime
                     const isEqual = remoteTime === localTime
 
+                    let decision = 'passive merge'
+
                     if (data.accounts) {
                         const localAccounts = useAccountStore.getState().accounts
                         // Handle potential array vs object wrapper (legacy compatibility)
@@ -248,32 +341,23 @@ export const useSyncStore = create<SyncState>()(
                         const hasRemoteData = remoteAccounts.length > 0
                         const hasLocalData = localAccounts.length > 0
 
-                        // ANTI-WIPE GUARD:
-                        // If remote is Empty, we NEVER Mirror. We treat it as "Server Needs Healing".
-                        // This overrides timestamp logic.
+                        // SIMPLIFIED SYNC: Source of Truth Model
+                        // We compare timestamps. Newest timestamp is the 1:1 state.
                         if (!hasRemoteData && hasLocalData) {
-                            console.warn("[Sync] Anti-Wipe Triggered: Remote is empty. Pushing Local state.")
+                            decision = 'Seed Cloud (local data exists, cloud is empty)'
+                            // Seed the cloud with local data
                             await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
                             setTimeout(() => get().syncToRemote(true), 1500)
                         } else if (isLocalNewer) {
-                            // Local changes are strictly newer.
-                            console.log("[Sync] Local state is fresher. Merging remote changes safely & Pushing.")
-                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
-                            // Force push to update the stale server
-                            setTimeout(() => get().syncToRemote(true), 2000)
+                            decision = 'Push Local (local is newer)'
+                            // Keep local, push to remote
+                            setTimeout(() => get().syncToRemote(true), 1500)
                         } else if (isEqual) {
-                            // Perfect Sync. Passive Merge (Just in case).
-                            console.log("[Sync] State is synchronized. Passive merge.")
-                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
+                            decision = 'Synchronized'
                         } else {
-                            // Remote is newer.
-                            if (hasRemoteData) {
-                                console.log("[Sync] Remote is newer. Mirroring cloud state.")
-                                await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'mirror')
-                            } else {
-                                console.warn("[Sync] Remote is newer but EMPTY? Passive merging instead of mirroring to avoid wipe.")
-                                await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'merge')
-                            }
+                            // Remote is newer OR both empty -> MIRROR
+                            decision = 'Mirror Cloud (cloud is source of truth)'
+                            await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'mirror')
                         }
                     }
 
@@ -283,19 +367,19 @@ export const useSyncStore = create<SyncState>()(
 
                         if ((!remoteAddons || remoteAddons.length === 0) && localAddons > 0) {
                             console.warn(`[Sync] Remote has 0 addons (Safety net triggered). Switching to MERGE + PUSH.`)
-                            await useAddonStore.getState().importLibrary(data, true)
+                            await useAddonStore.getState().importLibrary(data, true, false, true)
                             setTimeout(() => get().syncToRemote(true), 1500)
                         } else if (isLocalNewer) {
                             console.log("[Sync] Local addons are fresher. Merging & Pushing.")
-                            await useAddonStore.getState().importLibrary(data, true)
+                            await useAddonStore.getState().importLibrary(data, true, false, true)
                             // Force push to update the stale server
                             setTimeout(() => get().syncToRemote(true), 2000)
                         } else if (isEqual) {
                             console.log("[Sync] Addons synchronized. Passive import.")
-                            await useAddonStore.getState().importLibrary(data, true, true)
+                            await useAddonStore.getState().importLibrary(data, true, true, true)
                         } else {
                             // Mirror
-                            await useAddonStore.getState().importLibrary(data, false, true)
+                            await useAddonStore.getState().importLibrary(data, false, true, true)
                         }
                         await useAddonStore.getState().initialize()
                     }
@@ -316,22 +400,37 @@ export const useSyncStore = create<SyncState>()(
                         }
                     }
 
+                    if (data.vault) {
+                        const { useVaultStore } = await import('./vaultStore')
+                        await useVaultStore.getState().importVault(data.vault)
+                    }
+
                     set({
-                        auth: {
-                            id,
-                            password,
-                            name: data.name || '',
-                            isAuthenticated: true
-                        },
-                        lastSyncedAt: data.syncedAt || new Date().toISOString()
+                        auth: { id, password, name: data.name || '', isAuthenticated: true },
+                        lastSyncedAt: data.syncedAt || new Date().toISOString(),
+                        lastSeenVersion: data.lastSeenVersion || get().lastSeenVersion
                     })
+
+                        ; (get() as any).addLogEntry({
+                            type: remoteTime === 0 ? 'pull' : 'pull',
+                            status: 'success',
+                            message: `Fetched cloud state. Decision: ${decision}`,
+                            isAuto: isSilent
+                        })
 
                     if (!isSilent) {
                         toast({ title: "Login Successful", description: "Your data has been loaded." })
                     }
                 } catch (e) {
+                    const msg = (e as Error).message
+                        ; (get() as any).addLogEntry({
+                            type: 'pull',
+                            status: 'error',
+                            message: `Pull Failed: ${msg}`,
+                            isAuto: isSilent
+                        })
                     if (!isSilent) {
-                        toast({ variant: "destructive", title: "Login Failed", description: (e as Error).message })
+                        toast({ variant: "destructive", title: "Login Failed", description: msg })
                     }
                     throw e
                 } finally {
@@ -357,23 +456,40 @@ export const useSyncStore = create<SyncState>()(
             },
 
             syncToRemote: async (isAuto: boolean = false) => {
-                const { auth, serverUrl, isSyncing } = get()
+                const { auth, serverUrl, isSyncing, isInitialSyncCompleted } = get()
                 const { isLocked } = useAuthStore.getState()
                 if (!auth.isAuthenticated || isSyncing || isLocked) return
 
-                set({ isSyncing: true })
-
-                // Server Protection: Debounce check
-                const now = Date.now()
-                const lastSync = get().lastActionTimestamp
-                const COOLDOWN = 1000 // 1 second minimum between syncs
-
-                if (isAuto && now - lastSync < COOLDOWN) {
-                    set({ isSyncing: false })
+                // SAFETY LOCK: If we haven't successfully synced FROM the cloud yet, 
+                // we are NOT allowed to sync TO the cloud. This prevents stale clients 
+                // from overwriting the source of truth with their old local state.
+                if (isAuto && !isInitialSyncCompleted) {
+                    console.log("[Sync] Skipping auto-push: Initial pull not yet completed (Source of Truth Protection)")
                     return
                 }
 
-                set({ lastActionTimestamp: now })
+                set({ isSyncing: true })
+
+                // Server Protection: Strict Debounce check for auto-syncs
+                // Instead of dropping, we defer the sync so the *last* change always pushes
+                if (isAuto) {
+                    if (get()._syncDebounceTimer) clearTimeout(get()._syncDebounceTimer)
+                    const timer = setTimeout(() => {
+                        set({ _syncDebounceTimer: null })
+                        get().syncToRemote(false) // Fire actual real sync
+                    }, 1500)
+                    set({ _syncDebounceTimer: timer, isSyncing: false })
+                    return
+                }
+
+                (get() as any).addLogEntry({
+                    type: isAuto ? 'push' : 'push',
+                    status: 'success', // Provisional, updated on error
+                    message: isAuto ? 'Auto-sync started' : 'Manual push started',
+                    isAuto
+                })
+
+                set({ lastActionTimestamp: Date.now() })
                 const baseUrl = serverUrl || DEFAULT_SERVER
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
 
@@ -412,9 +528,11 @@ export const useSyncStore = create<SyncState>()(
                             rules: useFailoverStore.getState().rules,
                             webhook: useFailoverStore.getState().webhook
                         },
+                        vault: useVaultStore.getState().keys,
                         salt: saltBase64,
                         name: auth.name,
-                        syncedAt: new Date().toISOString()
+                        syncedAt: new Date().toISOString(),
+                        lastSeenVersion: get().lastSeenVersion
                     }
 
                     const { AES } = await import('crypto-js')
@@ -452,23 +570,121 @@ export const useSyncStore = create<SyncState>()(
                         set({ lastSyncedAt: new Date().toISOString() })
                     }
 
-                    if (!isAuto) {
+                    (get() as any).addLogEntry({
+                        type: 'push',
+                        status: 'success',
+                        message: 'Sync successful',
+                        isAuto
+                    })
+
+                    if (!isAuto && _appReady) {
                         toast({ title: "Saved", description: "Changes saved to cloud." })
                     }
                 } catch (e) {
                     const message = (e as Error).message
-                    const isNetworkError = message === 'Failed to fetch' || (typeof message === 'string' && message.includes('Failed to reach server'))
-
-                    if (!isAuto) {
-                        toast({
-                            variant: "destructive",
-                            title: "Save Failed",
-                            description: isNetworkError
-                                ? `Check your connection. App could not reach ${apiPath}`
-                                : message
-                        })
-                    }
                     console.error("Sync error:", apiPath, e)
+                        ; (get() as any).addLogEntry({
+                            type: 'push',
+                            status: 'error',
+                            message: `Push Failed: ${message}`,
+                            isAuto
+                        })
+                    if (!isAuto && _appReady) {
+                        toast({ variant: "destructive", title: "Save Failed", description: message })
+                    }
+                } finally {
+                    set({ isSyncing: false })
+                }
+            },
+
+            forcePushState: async () => {
+                const { auth } = get()
+                if (!auth.isAuthenticated) return
+
+                // 1. Artificially inflate the local timestamp to ensure server accepts it
+                set({ lastActionTimestamp: Date.now() + 10000 })
+
+                    // 2. Add log entry
+                    ; (get() as any).addLogEntry({
+                        type: 'force-push',
+                        status: 'success',
+                        message: 'Force push initiated (timestamp inflated)',
+                        isAuto: false
+                    })
+
+                // 3. Trigger standard sync
+                await get().syncToRemote(false)
+            },
+
+            forceMirrorState: async () => {
+                const { auth, serverUrl } = get()
+                if (!auth.isAuthenticated) return
+                set({ isSyncing: true })
+
+                const baseUrl = serverUrl || DEFAULT_SERVER
+                const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl
+
+                try {
+                    const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
+                        headers: { 'x-sync-password': await deriveSyncToken(auth.password) }
+                    })
+
+                    if (!res.ok) throw new Error(`Cloud Sync Server error (${res.status})`)
+
+                    const text = await res.text()
+                    let data: any
+                    const raw = JSON.parse(text)
+
+                    if (raw.isEncrypted && raw.data) {
+                        const { AES, enc } = await import('crypto-js')
+                        const bytes = AES.decrypt(raw.data, auth.password)
+                        const decryptedStr = bytes.toString(enc.Utf8)
+                        if (!decryptedStr) throw new Error("Decryption failed")
+                        data = JSON.parse(decryptedStr)
+                    } else {
+                        data = raw
+                    }
+
+                    // Strict Mirror: No timestamp comparisons
+                    if (data.accounts) {
+                        await useAccountStore.getState().importAccounts(JSON.stringify(data), true, 'mirror')
+                    }
+                    if (data.addons) {
+                        await useAddonStore.getState().importLibrary(data, false, true)
+                        await useAddonStore.getState().initialize()
+                    }
+                    if (data.profiles && Array.isArray(data.profiles)) {
+                        await useProfileStore.getState().importProfiles(data.profiles)
+                    }
+                    if (data.failover) {
+                        const strategy = 'mirror'
+                        if (Array.isArray(data.failover)) {
+                            await useFailoverStore.getState().importRules(data.failover, strategy, true)
+                        } else if (typeof data.failover === 'object') {
+                            if (data.failover.rules) await useFailoverStore.getState().importRules(data.failover.rules, strategy, true)
+                            if (data.failover.webhook) await useFailoverStore.getState().importWebhook(data.failover.webhook, true)
+                        }
+                    }
+
+                    set({ lastSyncedAt: data.syncedAt || new Date().toISOString() })
+
+                        ; (get() as any).addLogEntry({
+                            type: 'force-mirror',
+                            status: 'success',
+                            message: 'Cloud state mirrored verbatim (bypassed merge)',
+                            isAuto: false
+                        })
+
+                    toast({ title: "Mirror Complete", description: "Local state replaced by cloud data." })
+                } catch (e) {
+                    const msg = (e as Error).message
+                    toast({ variant: "destructive", title: "Mirror Failed", description: msg })
+                        ; (get() as any).addLogEntry({
+                            type: 'force-mirror',
+                            status: 'error',
+                            message: `Mirror Failed: ${msg}`,
+                            isAuto: false
+                        })
                 } finally {
                     set({ isSyncing: false })
                 }
@@ -498,6 +714,7 @@ export const useSyncStore = create<SyncState>()(
                     serverUrl: '',
                     lastSyncedAt: null,
                     isSyncing: false,
+                    isRefreshingFromCloud: false,
                     lastActionTimestamp: 0
                 })
             }
@@ -508,6 +725,9 @@ export const useSyncStore = create<SyncState>()(
             partialize: (state) => ({
                 auth: state.auth,
                 lastSyncedAt: state.lastSyncedAt,
+                serverUrl: state.serverUrl,
+                lastActionTimestamp: state.lastActionTimestamp,
+                lastSeenVersion: state.lastSeenVersion
             }),
         }
     )

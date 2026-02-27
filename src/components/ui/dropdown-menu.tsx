@@ -3,6 +3,7 @@ import * as React from 'react'
 
 interface DropdownMenuProps {
   children: React.ReactNode
+  onOpenChange?: (open: boolean) => void
 }
 
 interface DropdownMenuContextValue {
@@ -12,8 +13,12 @@ interface DropdownMenuContextValue {
 
 const DropdownMenuContext = React.createContext<DropdownMenuContextValue | undefined>(undefined)
 
-const DropdownMenu = ({ children }: DropdownMenuProps) => {
+const DropdownMenu = ({ children, onOpenChange }: DropdownMenuProps) => {
   const [open, setOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    onOpenChange?.(open)
+  }, [open, onOpenChange])
 
   return (
     <DropdownMenuContext.Provider value={{ open, setOpen }}>

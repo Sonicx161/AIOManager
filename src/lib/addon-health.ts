@@ -15,33 +15,41 @@ export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> 
   let domain = addonUrl;
   try { domain = new URL(addonUrl).origin } catch (e) { console.warn('[AddonHealth] Invalid URL for origin extraction:', addonUrl) }
 
-  const performCheck = async (target: string, timeoutMs: number): Promise<{ ok: boolean, error?: string }> => {
+  const performCheck = async (target: string, timeoutMs: number, useProxy: boolean = false): Promise<{ ok: boolean, error?: string }> => {
     try {
       const controller = new AbortController()
       const id = setTimeout(() => controller.abort(), timeoutMs)
 
-      // Priority 1: HEAD
-      const response = await fetch(target, {
-        method: 'HEAD',
-        signal: controller.signal,
-        cache: 'no-cache'
-      })
+      const fetchUrl = useProxy ? `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}` : target;
 
-      if (response.ok || response.status === 405) {
-        clearTimeout(id)
-        return { ok: true }
+      // Priority 1: HEAD
+      try {
+        const response = await fetch(fetchUrl, {
+          method: useProxy ? 'GET' : 'HEAD', // allorigins only supports GET
+          signal: controller.signal,
+          mode: useProxy ? 'cors' : 'no-cors',
+          cache: 'no-cache'
+        })
+
+        if (response.ok || (response.type as string) === 'opaque' || response.status === 405 || response.status === 302) {
+          clearTimeout(id)
+          return { ok: true }
+        }
+      } catch (headErr) {
+        // Fall through to GET if HEAD fails (often CORS restricts HEAD but allows GET, or proxy needed)
       }
 
       // Priority 2: GET
-      const response2 = await fetch(target, {
+      const response2 = await fetch(fetchUrl, {
         method: 'GET',
         signal: controller.signal,
+        mode: useProxy ? 'cors' : 'no-cors',
         cache: 'no-cache'
       })
 
       clearTimeout(id)
-      if (response2.ok) return { ok: true }
-      return { ok: false, error: `HTTP ${response2.status}: ${response2.statusText}` }
+      if (response2.ok || (response2.type as string) === 'opaque' || response2.status === 302) return { ok: true }
+      return { ok: false, error: (response2.type as string) === 'opaque' ? 'Network Error' : `HTTP ${response2.status}: ${response2.statusText}` }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         return { ok: false, error: 'Request Timeout' }
@@ -50,36 +58,30 @@ export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> 
     }
   }
 
-  // 1. Silent Domain-Only Check (Anti-Flood)
-  const domainCheck = await performCheck(domain, 10000)
+  // 1. Silent Domain-Only Check (Direct)
+  const domainCheck = await performCheck(domain, 5000)
   if (domainCheck.ok) {
     return { isOnline: true }
   }
 
-  // 2. Definitive Manifest Check (Fallback)
+  // 2. Definitive Manifest Check (Direct)
   const manifestUrl = addonUrl.endsWith('/manifest.json') ? addonUrl : `${addonUrl}/manifest.json`
-  const manifestCheck = await performCheck(manifestUrl, 10000)
+  const manifestCheck = await performCheck(manifestUrl, 5000)
   if (manifestCheck.ok) {
     return { isOnline: true }
   }
 
-  // 3. Final Proxy Fallback - Last resort
+  // 3. Final Proxy Fallback - Because CORS often blocks direct browser fetch to addons
   try {
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(domain)}`
-    const controller = new AbortController()
-    const id = setTimeout(() => controller.abort(), 10000)
+    const proxyDomainCheck = await performCheck(domain, 8000, true);
+    if (proxyDomainCheck.ok) return { isOnline: true };
 
-    const response = await fetch(proxyUrl, {
-      method: 'GET',
-      signal: controller.signal,
-      cache: 'no-cache'
-    })
+    const proxyManifestCheck = await performCheck(manifestUrl, 8000, true);
+    if (proxyManifestCheck.ok) return { isOnline: true };
 
-    clearTimeout(id)
-    if (response.ok) return { isOnline: true }
-    return { isOnline: false, error: manifestCheck.error || 'Connection Failed' }
+    return { isOnline: false, error: proxyManifestCheck.error || manifestCheck.error || 'Connection Failed' }
   } catch (err) {
-    return { isOnline: false, error: manifestCheck.error || 'Connection Failed' }
+    return { isOnline: false, error: 'Connection Failed via Proxy' }
   }
 }
 

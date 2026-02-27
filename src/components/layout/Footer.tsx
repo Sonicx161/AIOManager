@@ -2,6 +2,7 @@ import { Github, Laptop, Heart, Box, FileText, Globe } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import React from 'react'
 import pkg from '../../../package.json'
+import { useUIStore } from '@/store/uiStore'
 
 export function Footer() {
   const isDev = import.meta.env?.DEV
@@ -109,9 +110,13 @@ export function Footer() {
                   </a>
                   <span className="text-muted-foreground/30">•</span>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] sm:text-xs font-mono text-muted-foreground/40 select-none uppercase tracking-widest">
+                    <button
+                      onClick={() => useUIStore.getState().setWhatsNewOpen(true)}
+                      className="text-[10px] sm:text-xs font-mono text-muted-foreground/40 hover:text-primary select-none uppercase tracking-widest transition-colors"
+                      title="View release notes"
+                    >
                       v{version}
-                    </span>
+                    </button>
                     {updateAvailable && (
                       <a
                         href="https://github.com/sonicx161/AIOManager/releases"

@@ -32,6 +32,7 @@ export interface SavedAddon {
 
   // Health & Restoration
   autoRestore?: boolean
+  syncWithInstalled?: boolean
   health?: {
     isOnline: boolean
     error?: string
@@ -55,6 +56,12 @@ export interface InstalledAddon {
   installedAt: Date
   installedVia: 'saved-addon' | 'tag' | 'manual'
   appliedTags?: string[] // Tags that were used to apply this addon
+  syncToLibrary?: boolean
+  flags?: {
+    official?: boolean
+    protected?: boolean
+    enabled?: boolean
+  }
 }
 
 /**

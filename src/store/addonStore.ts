@@ -1,6 +1,5 @@
 import {
   getAddons,
-  reinstallAddon as reinstallAddonApi,
   updateAddons,
   fetchAddonManifest,
 
@@ -8,7 +7,7 @@ import {
 import { identifyAddon } from '@/lib/addon-identifier'
 import { checkAllAddonsHealth } from '@/lib/addon-health'
 import { mergeAddons, removeAddons } from '@/lib/addon-merger'
-import { normalizeAddonUrl } from '@/lib/utils'
+import { normalizeAddonUrl, getCanonicalAddonUrl } from '@/lib/utils'
 import {
   findSavedAddonByUrl,
   loadAccountAddonStates,
@@ -32,12 +31,28 @@ import { create } from 'zustand'
 import localforage from 'localforage'
 import { restorationManager } from '@/lib/autopilot/restorationManager'
 
-
 // Helper function to get encryption key from auth store
 const getEncryptionKey = () => {
   const key = useAuthStore.getState().encryptionKey
   if (!key) throw new Error('App is locked')
   return key
+}
+
+const _outboundSyncInProgress = new Set<string>()
+
+// Module-level timer for debounced library writes
+let _saveDebounceTimer: any = null
+
+const _saveLibraryDebounced = (getState: () => AddonStore) => {
+  if (_saveDebounceTimer) clearTimeout(_saveDebounceTimer)
+  _saveDebounceTimer = setTimeout(async () => {
+    try {
+      await saveAddonLibrary(getState().library)
+      _saveDebounceTimer = null
+    } catch (err) {
+      console.error('[AddonStore] Debounced save failed:', err)
+    }
+  }, 500)
 }
 
 interface AddonStore {
@@ -68,11 +83,12 @@ interface AddonStore {
   ) => Promise<string>
   updateSavedAddon: (
     id: string,
-    updates: Partial<Pick<SavedAddon, 'name' | 'tags' | 'installUrl' | 'profileId'>>
+    updates: Partial<Pick<SavedAddon, 'name' | 'tags' | 'installUrl' | 'profileId' | 'syncWithInstalled' | 'manifest'>> & { metadata?: SavedAddon['metadata'] }
   ) => Promise<void>
   updateSavedAddonMetadata: (
     id: string,
-    metadata: { customName?: string; customLogo?: string }
+    metadata: Record<string, any>,
+    skipOutbound?: boolean
   ) => Promise<void>
   bulkUpdateSavedAddons: (
     ids: string[],
@@ -154,7 +170,7 @@ interface AddonStore {
   bulkReinstallAllOnAccount: (accountId: string, accountAuthKey: string) => Promise<BulkResult>
 
   // === Sync ===
-  syncAccountState: (accountId: string, accountAuthKey: string) => Promise<void>
+  syncAccountState: (accountId: string, accountAuthKey: string, addons?: AddonDescriptor[]) => Promise<void>
 
   syncAllAccountStates: (accounts: Array<{ id: string; authKey: string }>) => Promise<void>
   toggleAutoRestore: (id: string, enabled: boolean) => Promise<void>
@@ -162,7 +178,7 @@ interface AddonStore {
 
   // === Import/Export ===
   exportLibrary: () => string
-  importLibrary: (json: string, merge: boolean, isSilent?: boolean) => Promise<void>
+  importLibrary: (json: string, merge: boolean, isSilent?: boolean, isImmediate?: boolean) => Promise<void>
 
   // === Health Checking ===
   checkAllHealth: () => Promise<void>
@@ -173,6 +189,7 @@ interface AddonStore {
   reset: () => Promise<void>
   deleteAccountState: (accountId: string) => Promise<void>
   repairLibrary: () => Promise<void>
+  setAddonSyncToLibrary: (accountId: string, transportUrl: string, value: boolean) => Promise<void>
   replaceTransportUrlUniversally: (savedAddonId: string | null, oldUrl: string, newUrl: string, accountId?: string) => Promise<void>
 }
 
@@ -207,9 +224,6 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         accountStates,
         latestVersions: latestVersions || {},
       })
-
-      // Run repair on invalid profile IDs automatically
-      get().repairLibrary()
     } catch (error) {
       console.error('Failed to initialize addon store:', error)
       set({ error: 'Failed to load addon data' })
@@ -234,12 +248,66 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
     if (hasChanges) {
       set({ library })
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
       console.log(`[Rescue] Successfully rescued ${fixedCount} addons from the abyss!`)
       // Sync fixed state back to cloud
       const { useSyncStore } = await import('./syncStore')
       useSyncStore.getState().syncToRemote(true).catch(console.error)
     }
+  },
+
+  setAddonSyncToLibrary: async (accountId, transportUrl, value) => {
+    const { accountStates } = get()
+    const newAccountStates = { ...accountStates }
+    const accountState = newAccountStates[accountId]
+
+    if (!accountState) return
+
+    // 1. Update the target account
+    let targetFound = false
+    const updatedInstalledAddons = accountState.installedAddons.map(addon => {
+      if (addon.installUrl === transportUrl) {
+        targetFound = true
+        return { ...addon, syncToLibrary: value }
+      }
+      return addon
+    })
+
+    if (!targetFound) return
+
+    newAccountStates[accountId] = {
+      ...accountState,
+      installedAddons: updatedInstalledAddons,
+      lastSync: new Date()
+    }
+
+    // 2. If enabling, disable it for the same addon on all OTHER accounts (Exclusive Enforcement)
+    if (value) {
+      Object.keys(newAccountStates).forEach(otherAccountId => {
+        if (otherAccountId === accountId) return
+
+        const otherState = newAccountStates[otherAccountId]
+        let otherChanged = false
+        const otherUpdatedAddons = otherState.installedAddons.map(addon => {
+          if (addon.installUrl === transportUrl && addon.syncToLibrary) {
+            otherChanged = true
+            return { ...addon, syncToLibrary: false }
+          }
+          return addon
+        })
+
+        if (otherChanged) {
+          newAccountStates[otherAccountId] = {
+            ...otherState,
+            installedAddons: otherUpdatedAddons,
+            lastSync: new Date()
+          }
+        }
+      })
+    }
+
+    set({ accountStates: newAccountStates })
+    await saveAccountAddonStates(newAccountStates)
   },
 
   updateLatestVersions: (versions) => {
@@ -303,6 +371,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         metadata,
         catalogOverrides,
         autoRestore: false,
+        syncWithInstalled: false, // Default to false per user request
         createdAt: new Date(),
         updatedAt: new Date(),
         sourceType: 'manual',
@@ -310,8 +379,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       const library = { ...get().library, [savedAddon.id]: savedAddon }
       set({ library })
-
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
 
       // Sync to cloud immediately
       const { useSyncStore } = await import('./syncStore')
@@ -340,6 +408,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       // Update other fields
       if (updates.name !== undefined) {
         updatedSavedAddon.name = updates.name.trim()
+        // Sync metadata.customName with the new name to ensure account-level consistency
+        updatedSavedAddon.metadata = {
+          ...(updatedSavedAddon.metadata || {}),
+          customName: updatedSavedAddon.name
+        }
       }
       if (updates.tags !== undefined) {
         updatedSavedAddon.tags = updates.tags.map(normalizeTagName).filter(Boolean)
@@ -347,13 +420,56 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       if (updates.profileId !== undefined) {
         updatedSavedAddon.profileId = updates.profileId
       }
+      if (updates.syncWithInstalled !== undefined) {
+        updatedSavedAddon.syncWithInstalled = updates.syncWithInstalled
+      }
+
+      if (updates.manifest !== undefined) {
+        updatedSavedAddon.manifest = updates.manifest
+      }
+
+      // If URL changed and syncWithInstalled is enabled, trigger universal replacement (Outbound Sync)
+      if (updates.installUrl && updates.installUrl !== savedAddon.installUrl && (updates.syncWithInstalled ?? savedAddon.syncWithInstalled)) {
+        console.log(`[AddonStore] Outbound Sync: Updating all accounts for "${savedAddon.name}" due to library URL change.`)
+        // This helper already updates the library entry and account states
+        await get().replaceTransportUrlUniversally(id, savedAddon.installUrl, updates.installUrl)
+        return // replaceTransportUrlUniversally handles the library save and sync
+      }
+
+      // Update Metadata if provided (Batching support for 2g)
+      if (updates.metadata !== undefined) {
+        updatedSavedAddon.metadata = { ...updatedSavedAddon.metadata, ...updates.metadata }
+        // Ensure name is kept in sync if customName changed
+        if (updates.metadata.customName) {
+          updatedSavedAddon.name = updates.metadata.customName
+        }
+      }
 
       updatedSavedAddon.updatedAt = new Date()
 
+      // Outbound Sync: If syncWithInstalled is enabled, propagate metadata/name changes to all linked accounts
+      const hasMetadataChanges = updates.metadata !== undefined || (updates.name !== undefined && updates.name !== savedAddon.name)
+      const hasSyncToggleEnabled = updates.syncWithInstalled === true && savedAddon.syncWithInstalled !== true
+      if ((updates.syncWithInstalled ?? savedAddon.syncWithInstalled) && (hasMetadataChanges || hasSyncToggleEnabled)) {
+        _outboundSyncInProgress.add(id)
+        try {
+          console.log(`[AddonStore] Outbound Sync: Propagating library state for "${savedAddon.name}" to all accounts.`)
+          const { useAccountStore } = await import('./accountStore')
+          await useAccountStore.getState().replaceTransportUrl(
+            updatedSavedAddon.installUrl,
+            updatedSavedAddon.installUrl, // Same URL, just updating metadata/name
+            undefined, // All accounts
+            undefined, // No manifest change
+            updatedSavedAddon.metadata
+          )
+        } finally {
+          _outboundSyncInProgress.delete(id)
+        }
+      }
+
       const library = { ...get().library, [id]: updatedSavedAddon }
       set({ library })
-
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
       // Sync to cloud
       const { useSyncStore } = await import('./syncStore')
       useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -366,7 +482,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
-  updateSavedAddonMetadata: async (id, metadata) => {
+  updateSavedAddonMetadata: async (id, metadata, skipOutbound = false) => {
     try {
       set({ loading: true, error: null })
       const savedAddon = get().library[id]
@@ -385,12 +501,35 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const updatedSavedAddon = {
         ...savedAddon,
         metadata: cleanMetadata,
+        name: cleanMetadata.customName || savedAddon.manifest.name,
         updatedAt: new Date()
       }
 
       const library = { ...get().library, [id]: updatedSavedAddon }
       set({ library })
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
+
+      // Detection: Only propagate if something actually changed
+      const hasChanged = JSON.stringify(savedAddon.metadata) !== JSON.stringify(cleanMetadata)
+
+      // Outbound Sync: If syncWithInstalled is enabled, propagate metadata to all linked accounts
+      if (updatedSavedAddon.syncWithInstalled && !skipOutbound && hasChanged) {
+        _outboundSyncInProgress.add(id)
+        try {
+          console.log(`[AddonStore] Outbound Sync: Propagating metadata update for "${savedAddon.name}" to all accounts.`)
+          const { useAccountStore } = await import('./accountStore')
+          await useAccountStore.getState().replaceTransportUrl(
+            savedAddon.installUrl,
+            savedAddon.installUrl, // Same URL, just updating metadata
+            undefined, // All accounts
+            undefined, // No manifest change
+            cleanMetadata
+          )
+        } finally {
+          _outboundSyncInProgress.delete(id)
+        }
+      }
+
       // Sync to cloud
       const { useSyncStore } = await import('./syncStore')
       useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -413,7 +552,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     const previousVersion = savedAddon.manifest.version
 
     // Fetch fresh manifest from the install URL and sanitize it
-    const addonDescriptor = await fetchAddonManifest(savedAddon.installUrl, 'System-Check')
+    const addonDescriptor = await fetchAddonManifest(savedAddon.installUrl, 'System-Check', true)
     const freshManifest = identifyAddon(savedAddon.installUrl, addonDescriptor.manifest)
 
     // Verify manifest ID matches (prevent replacing with wrong addon)
@@ -446,6 +585,18 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     // Sync to cloud immediately
     const { useSyncStore } = await import('./syncStore')
     useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+    // If syncWithInstalled is enabled, propagate the manifest update to all linked accounts (Outbound Sync)
+    if (updatedSavedAddon.syncWithInstalled) {
+      console.log(`[AddonStore] Outbound Sync: Propagating manifest update for "${savedAddon.name}" to all accounts.`)
+      const { useAccountStore } = await import('./accountStore')
+      await useAccountStore.getState().replaceTransportUrl(
+        savedAddon.installUrl,
+        savedAddon.installUrl, // Same URL, but different manifest
+        undefined, // All accounts
+        freshManifest
+      )
+    }
   },
 
   deleteSavedAddonsByProfile: async (profileId) => {
@@ -481,7 +632,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       const library = { ...get().library, [id]: updatedSavedAddon }
       set({ library })
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
 
       const { useSyncStore } = await import('./syncStore')
       useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -901,10 +1052,16 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         details: [],
       }
 
+      // 1. Manifest Cache: Avoid redundant fetches for the same addon across many accounts
+      const manifestCache = new Map<string, any>()
       for (const { id: accountId, authKey: accountAuthKey } of accountIds) {
         try {
           const authKey = await decrypt(accountAuthKey, getEncryptionKey())
           const currentAddons = await getAddons(authKey, accountId)
+
+          // Optimization: Clone the collection and update incrementally
+          const targetCollection = [...currentAddons]
+          let needsRemotePush = false
 
           // Reinstall each addon in place to preserve ordering
           const updateResults: Array<{
@@ -923,40 +1080,100 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
           for (const addonId of idsToReinstall) {
             // Check protection
-            const existingAddon = currentAddons.find(
-              (a) =>
-                normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addonId) ||
-                a.manifest.id === addonId
+            const canonId = getCanonicalAddonUrl(addonId)
+
+            // Look for it in the target collection (which might already have some updates applied)
+            const existingIdx = targetCollection.findIndex(
+              (a) => getCanonicalAddonUrl(a.transportUrl) === canonId || a.manifest.id === addonId
             )
+            const existingAddon = existingIdx >= 0 ? targetCollection[existingIdx] : null
 
             if (existingAddon?.flags?.protected && !allowProtected) {
-              skippedResults.push({
-                addonId,
-                reason: 'protected',
-              })
+              skippedResults.push({ addonId, reason: 'protected' })
               continue
             }
 
             try {
               // Use transportUrl if available (resolves Manifest ID -> URL), otherwise try ID as URL
               const targetUrl = existingAddon ? existingAddon.transportUrl : addonId
-              const reinstallResult = await reinstallAddonApi(authKey, targetUrl, accountId)
+              const normUrl = normalizeAddonUrl(targetUrl).toLowerCase()
 
-              if (reinstallResult.updatedAddon) {
+              let freshDescriptor: AddonDescriptor | null = null
+
+              // Check cache first
+              if (manifestCache.has(normUrl)) {
+                freshDescriptor = manifestCache.get(normUrl)
+              } else {
+                // Fetch fresh manifest
+                try {
+                  freshDescriptor = await fetchAddonManifest(targetUrl, accountId, true)
+                  if (freshDescriptor) {
+                    manifestCache.set(normUrl, freshDescriptor)
+
+                    // SYNC TO LIBRARY: Update the saved addon in the library to clear the blue "Update" badge
+                    const savedAddonId = Object.keys(get().library).find(
+                      id => normalizeAddonUrl(get().library[id].installUrl).toLowerCase() === normUrl
+                    )
+                    if (savedAddonId) {
+                      const savedAddon = get().library[savedAddonId]
+                      const freshManifest = freshDescriptor.manifest
+                      const updatedSavedAddon = {
+                        ...savedAddon,
+                        manifest: getEffectiveManifest({ ...savedAddon, manifest: freshManifest }),
+                        updatedAt: new Date(),
+                      }
+                      set(state => ({ library: { ...state.library, [savedAddonId]: updatedSavedAddon } }))
+                      _saveLibraryDebounced(get)
+                    }
+                  }
+                } catch (manifestError) {
+                  console.warn(`[Bulk] Failed to fetch manifest for ${targetUrl}:`, manifestError)
+                }
+              }
+
+              if (freshDescriptor) {
+                const previousVersion = existingAddon?.manifest.version
+                const newVersion = freshDescriptor.manifest.version
+
                 updateResults.push({
                   addonId,
-                  previousVersion: reinstallResult.previousVersion,
-                  newVersion: reinstallResult.newVersion,
+                  previousVersion,
+                  newVersion,
                 })
+
+                // Only update the targetCollection if the addon actually exists in Stremio's remote list
+                if (existingIdx >= 0) {
+                  targetCollection[existingIdx] = {
+                    ...freshDescriptor,
+                    flags: { ...existingAddon!.flags, ...freshDescriptor.flags },
+                    metadata: { ...existingAddon!.metadata },
+                    catalogOverrides: existingAddon!.catalogOverrides,
+                  }
+                  needsRemotePush = true
+                }
+
+                // Log to changelog
+                const { useAccountStore } = await import('@/store/accountStore')
+                useAccountStore.getState().addChangelogEntry({
+                  accountId,
+                  addonId: freshDescriptor.manifest.id,
+                  addonName: freshDescriptor.manifest.name,
+                  addonLogo: freshDescriptor.manifest.logo,
+                  action: 'updated'
+                }).catch(console.error)
               }
             } catch (error) {
-              // Log but continue with other addons
               console.warn(`Failed to reinstall addon ${addonId} on account ${accountId}: `, error)
-              skippedResults.push({
-                addonId,
-                reason: 'fetch-failed'
-              })
+              skippedResults.push({ addonId, reason: 'fetch-failed' })
             }
+          }
+
+          // PUSH once per account if any remote-visible changes occurred
+          if (needsRemotePush) {
+            console.log(`[Bulk] Pushing batched updates for account ${accountId} (${updateResults.length} addons)`)
+            await updateAddons(authKey, targetCollection, accountId)
+            // Immediately update local state to reflect the push (Race Condition Mitigation)
+            await get().syncAccountState(accountId, authKey, targetCollection).catch(console.error)
           }
 
           result.success++
@@ -976,8 +1193,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
             },
           })
 
-          // Sync account state
-          await get().syncAccountState(accountId, accountAuthKey)
+          // Sync account state locally to reflect the new manifests (even if not pushed to remote)
+          // We pass targetCollection to avoid a redundant getAddons() call inside syncAccountState
+          await get().syncAccountState(accountId, accountAuthKey, targetCollection)
         } catch (error) {
           result.failed++
           result.errors.push({
@@ -1002,7 +1220,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     try {
       // 1. Fetch manifests for all URLs first
       const manifestsResults = await Promise.allSettled(
-        urls.map((url) => fetchAddonManifest(url, 'Bulk-Pre-Install'))
+        urls.map((url) => fetchAddonManifest(url, 'Bulk-Pre-Install', true))
       )
 
       const validDescriptors: any[] = [] // Type safety fallback
@@ -1353,42 +1571,120 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
   // === Sync ===
 
-  syncAccountState: async (accountId, accountAuthKey) => {
+  syncAccountState: async (accountId, accountAuthKey, addons) => {
     try {
-      // Get current addons from Stremio
-      const { useAccountStore } = await import('./accountStore')
+      // Get current addons from Stremio (or use provided ones to skip fetch)
       const authKey = await decrypt(accountAuthKey, getEncryptionKey())
-      const currentAddons = await getAddons(authKey, accountId)
+      const currentAddons = addons || await getAddons(authKey, accountId)
 
       // Get existing state
       const existingState = get().accountStates[accountId]
       const installedAddons: InstalledAddon[] = []
 
       for (const addon of currentAddons) {
+        // 1. Direct URL match (existing logic)
         const existing = existingState?.installedAddons.find(
           (a) => a.installUrl === addon.transportUrl
         )
 
         if (existing) {
-          // Update existing
+          // Detect Inbound Sync Metadata Updates
+          // If the account descriptor (from Stremio) has different metadata than our library,
+          // and syncWithInstalled is enabled, pull it back into the library.
+          if (existing.savedAddonId) {
+            const savedAddon = get().library[existing.savedAddonId]
+            if (savedAddon && existing.syncToLibrary && !_outboundSyncInProgress.has(savedAddon.id)) {
+              // PROTECTION: Strictly detect changes and avoid partial wipes from Stremio
+              const incomingMetadata = addon.metadata || {}
+
+              // Only consider incoming metadata if it's actually providing values
+              const hasNameChange = incomingMetadata.customName &&
+                incomingMetadata.customName !== savedAddon.metadata?.customName
+              const hasLogoChange = incomingMetadata.customLogo &&
+                incomingMetadata.customLogo !== savedAddon.metadata?.customLogo
+              const hasDescChange = incomingMetadata.customDescription &&
+                incomingMetadata.customDescription !== savedAddon.metadata?.customDescription
+
+              if (hasNameChange || hasLogoChange || hasDescChange) {
+                console.log(`[AddonStore] Inbound Sync: Detected metadata change for "${savedAddon.name}" on source account ${accountId}. Updating library.`)
+                await get().updateSavedAddonMetadata(savedAddon.id, {
+                  // Only update what's present to prevent wipes
+                  ...(hasNameChange && { customName: incomingMetadata.customName }),
+                  ...(hasLogoChange && { customLogo: incomingMetadata.customLogo }),
+                  ...(hasDescChange && { customDescription: incomingMetadata.customDescription }),
+                }, true).catch(console.error)
+              }
+            }
+          }
+
           installedAddons.push({
             ...existing,
             installUrl: addon.transportUrl,
+            syncToLibrary: existing.syncToLibrary ?? false,
+            flags: addon.flags,
           })
-        } else {
-          // New addon - try to auto-link to saved addon
-          const matchingSavedAddon = findSavedAddonByUrl(get().library, addon.transportUrl)
+          continue
+        }
+
+        // 2. No direct URL match - check for Inbound Sync (Account -> Library)
+        // If we have a saved addon with same ID that has syncWithInstalled enabled
+        const addonId = addon.manifest?.id || ''
+        const syncableSavedAddon = Object.values(get().library).find(
+          s => s.manifest.id === addonId && s.syncWithInstalled
+        )
+
+        if (syncableSavedAddon && syncableSavedAddon.installUrl !== addon.transportUrl) {
+          console.log(`[AddonStore] Inbound Sync: Updating library URL for "${syncableSavedAddon.name}" from account ${accountId}`)
+          // Update library entry and PROPAGATE to all other accounts (non-blocking)
+          // We pass accountId to skip redundant push to the triggering account
+          get().replaceTransportUrlUniversally(syncableSavedAddon.id, syncableSavedAddon.installUrl, addon.transportUrl, accountId).catch(console.error)
 
           installedAddons.push({
-            savedAddonId: matchingSavedAddon?.id || null,
-            addonId: addon.manifest?.id || '',
+            savedAddonId: syncableSavedAddon.id,
+            addonId,
             installUrl: addon.transportUrl,
             installedAt: new Date(),
-            installedVia: matchingSavedAddon ? 'saved-addon' : 'manual',
-            appliedTags: matchingSavedAddon?.tags,
+            installedVia: 'saved-addon',
+            appliedTags: syncableSavedAddon.tags,
+            flags: addon.flags,
           })
+          continue
+        }
+
+        // 3. New addon - try to auto-link to saved addon (legacy behavior)
+        const matchingSavedAddon = findSavedAddonByUrl(get().library, addon.transportUrl)
+
+        installedAddons.push({
+          savedAddonId: matchingSavedAddon?.id || null,
+          addonId: addonId || addon.manifest?.id || '',
+          installUrl: addon.transportUrl,
+          installedAt: new Date(),
+          installedVia: matchingSavedAddon ? 'saved-addon' : 'manual',
+          appliedTags: matchingSavedAddon?.tags,
+          flags: addon.flags,
+        })
+      }
+
+      // 4. PRESERVATION: Keep addons that were disabled locally but are missing from remote
+      const remoteUrls = new Set(currentAddons.map(a => normalizeAddonUrl(a.transportUrl).toLowerCase()))
+      if (existingState) {
+        for (const existing of existingState.installedAddons) {
+          const normUrl = normalizeAddonUrl(existing.installUrl).toLowerCase()
+          if (!remoteUrls.has(normUrl)) {
+            // Only preserve if it was explicitly disabled OR if it's protected and we want to be safe
+            if (existing.flags?.enabled === false || existing.flags?.protected) {
+              // But don't dupe if we somehow already added it
+              if (!installedAddons.some(a => normalizeAddonUrl(a.installUrl).toLowerCase() === normUrl)) {
+                installedAddons.push(existing)
+              }
+            }
+          }
         }
       }
+
+      const existingInstalled = existingState?.installedAddons || []
+      const isDirty = JSON.stringify(installedAddons.map(a => a.installUrl).sort()) !==
+        JSON.stringify(existingInstalled.map(a => a.installUrl).sort())
 
       const state: AccountAddonState = {
         accountId,
@@ -1398,14 +1694,14 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
       const accountStates = { ...get().accountStates, [accountId]: state }
       set({ accountStates })
-      await saveAccountAddonStates(accountStates)
 
-      // CRITICAL: Trigger Dashboard Refresh
-      await useAccountStore.getState().syncAccount(accountId)
+      if (isDirty) {
+        await saveAccountAddonStates(accountStates)
 
-      // Sync the new account state to cloud immediately
-      const { useSyncStore } = await import('./syncStore')
-      useSyncStore.getState().syncToRemote(true).catch(console.error)
+        // Sync the new account state to cloud immediately
+        const { useSyncStore } = await import('./syncStore')
+        useSyncStore.getState().syncToRemote(true).catch(console.error)
+      }
     } catch (error) {
       console.error('Failed to sync account state:', error)
       throw error
@@ -1437,7 +1733,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     )
   },
 
-  importLibrary: async (json, merge, isSilent = false) => {
+  importLibrary: async (json, merge, isSilent = false, isImmediate = false) => {
     set({ loading: true, error: null })
     console.log("%c[AddonStore] Importing library with SECURE HARDENING", "color: green; font-weight: bold;")
     try {
@@ -1555,7 +1851,12 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       }
 
       set({ library: currentLibrary })
-      await saveAddonLibrary(currentLibrary)
+
+      if (isImmediate) {
+        await saveAddonLibrary(currentLibrary)
+      } else {
+        _saveLibraryDebounced(get)
+      }
 
       if (!isSilent) {
         const { useSyncStore } = await import('./syncStore')
@@ -1664,7 +1965,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
     if (hasChanges) {
       set({ library })
-      await saveAddonLibrary(library)
+      _saveLibraryDebounced(get)
     }
   },
 
@@ -1721,14 +2022,15 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
           const library = { ...get().library, [savedAddonId]: updatedSavedAddon }
           set({ library })
-          await saveAddonLibrary(library)
+          _saveLibraryDebounced(get)
           console.log(`[AddonStore] Library URL updated for "${savedAddon.name}"`)
         }
       }
 
       // 3. Update accounts via AccountStore (with optional scoping)
       const { useAccountStore } = await import('@/store/accountStore')
-      await useAccountStore.getState().replaceTransportUrl(oldUrl, newUrl, accountId, freshManifest)
+      const metadata = savedAddonId ? get().library[savedAddonId]?.metadata : undefined
+      await useAccountStore.getState().replaceTransportUrl(oldUrl, newUrl, accountId, freshManifest, metadata)
 
       // 4. Update Autopilot rules via FailoverStore (with optional scoping)
       const { useFailoverStore } = await import('@/store/failoverStore')

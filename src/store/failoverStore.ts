@@ -11,6 +11,7 @@ const STORAGE_KEY = 'stremio-manager:failover-rules'
 export interface FailoverRule {
     id: string
     accountId: string
+    name?: string // User-defined name for the rule
     priorityChain: string[] // URLs in order of preference
     isActive: boolean
     lastCheck?: Date
@@ -19,6 +20,7 @@ export interface FailoverRule {
     activeUrl?: string // Track which one is currently pushed to Stremio
     isAutomatic?: boolean // Toggle for automatic health-based switching
     stabilization?: Record<string, number> // Addon health score
+    cooldown_ms?: number // Custom webhook cooldown for this rule
 }
 
 export interface WebhookConfig {
@@ -38,7 +40,7 @@ interface FailoverStore {
 
     initialize: () => Promise<void>
     setWebhook: (url: string, enabled: boolean) => Promise<void>
-    addRule: (accountId: string, priorityChain: string[]) => Promise<void>
+    addRule: (accountId: string, priorityChain: string[], name?: string, cooldown_ms?: number) => Promise<void>
     updateRule: (ruleId: string, updates: Partial<FailoverRule>) => Promise<void>
     removeRule: (ruleId: string) => Promise<void>
     toggleRuleActive: (ruleId: string, isActive: boolean) => Promise<void>
@@ -80,13 +82,15 @@ const syncRuleToServer = async (rule: FailoverRule) => {
         await axios.post(`${apiPath}/autopilot/sync`, {
             id: rule.id,
             accountId: rule.accountId,
+            name: rule.name,
             authKey,
             priorityChain: rule.priorityChain,
             activeUrl: rule.activeUrl,
             is_active: rule.isActive ? 1 : 0,
             is_automatic: rule.isAutomatic !== false ? 1 : 0,
             addonList,
-            webhookUrl: useFailoverStore.getState().webhook.url
+            webhookUrl: useFailoverStore.getState().webhook.url,
+            cooldown_ms: rule.cooldown_ms
         })
         console.log(`[Autopilot] Rule ${rule.id} synced to server (Live Mode).`)
     } catch (err) {
@@ -181,6 +185,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                 const processedRule: FailoverRule = {
                                     id: serverRule.id,
                                     accountId: accountId,
+                                    name: serverRule.name,
+                                    cooldown_ms: serverRule.cooldownMs,
                                     priorityChain: serverRule.priorityChain || [],
                                     isActive: serverRule.isActive !== undefined ? serverRule.isActive : true,
                                     isAutomatic: serverRule.isAutomatic !== undefined ? serverRule.isAutomatic : true,
@@ -382,16 +388,18 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         useSyncStore.getState().syncToRemote(true).catch(console.error)
     },
 
-    addRule: async (accountId, priorityChain) => {
+    addRule: async (accountId, priorityChain, name, cooldown_ms) => {
         const safeChain = Array.isArray(priorityChain) ? priorityChain : []
         const newRule: FailoverRule = {
             id: crypto.randomUUID(),
             accountId,
+            name,
             priorityChain: safeChain,
             isActive: true,
             isAutomatic: true,
             status: 'idle',
-            activeUrl: safeChain[0]
+            activeUrl: safeChain[0],
+            cooldown_ms
         }
 
         const rules = [...get().rules, newRule]
@@ -735,12 +743,12 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
 
-        // Sync each modified rule
-        for (const rule of rules) {
-            if (rule.accountId === accountId) {
-                await syncRuleToServer(rule)
-            }
-        }
+        // Sync each modified rule via Promise.all
+        const syncPromises = rules
+            .filter(rule => rule.accountId === accountId)
+            .map(rule => syncRuleToServer(rule))
+
+        await Promise.all(syncPromises)
 
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
@@ -751,10 +759,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
 
-        // Sync all rules
-        for (const rule of rules) {
-            await syncRuleToServer(rule)
-        }
+        // Sync all rules via Promise.all
+        await Promise.all(rules.map(rule => syncRuleToServer(rule)))
 
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)

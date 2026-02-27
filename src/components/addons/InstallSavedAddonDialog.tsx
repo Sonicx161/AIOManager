@@ -16,9 +16,10 @@ import {
 } from "@/components/ui/select"
 import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore } from '@/store/accountStore'
+import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
 import { useState, useMemo } from 'react'
-import { Search, Filter, Check, AlertCircle, Package, LayoutGrid, List } from 'lucide-react'
+import { Search, Filter, Check, AlertCircle, Package, LayoutGrid, List, ShieldCheck } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
 import { AddonTag } from './AddonTag'
@@ -53,6 +54,9 @@ export function InstallSavedAddonDialog({
   // Filter states
   const [searchTerm, setSearchTerm] = useState('')
   const [tagFilter, setTagFilter] = useState<string>('all')
+  const [profileFilter, setProfileFilter] = useState<string>('all')
+
+  const { profiles } = useProfileStore()
 
   // Memoized data
   const savedAddons = useMemo(() =>
@@ -83,9 +87,10 @@ export function InstallSavedAddonDialog({
       const matchesSearch = addon.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         addon.manifest.name.toLowerCase().includes(searchTerm.toLowerCase())
       const matchesTag = tagFilter === 'all' || addon.tags.includes(tagFilter)
-      return matchesSearch && matchesTag
+      const matchesProfile = profileFilter === 'all' || addon.profileId === profileFilter
+      return matchesSearch && matchesTag && matchesProfile
     })
-  }, [savedAddons, searchTerm, tagFilter])
+  }, [savedAddons, searchTerm, tagFilter, profileFilter])
 
 
   const toggleSavedAddon = (savedAddonId: string) => {
@@ -162,8 +167,8 @@ export function InstallSavedAddonDialog({
           </DialogDescription>
 
           {/* Toolbar */}
-          <div className="flex flex-col sm:flex-row gap-3 mt-4">
-            <div className="relative flex-1">
+          <div className="flex flex-wrap gap-2 mt-4">
+            <div className="relative min-w-[160px] flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder="Search saved addons..."
@@ -173,16 +178,33 @@ export function InstallSavedAddonDialog({
               />
             </div>
             <Select value={tagFilter} onValueChange={setTagFilter}>
-              <SelectTrigger className="w-[160px]">
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Filter className="h-3.5 w-3.5" />
-                  <span className="truncate text-foreground">{tagFilter === 'all' ? 'All Tags' : tagFilter}</span>
+              <SelectTrigger className="w-[160px] shrink-0">
+                <div className="flex items-center gap-2 text-muted-foreground min-w-0 flex-1">
+                  <Filter className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate text-foreground text-left">{tagFilter === 'all' ? 'All Tags' : tagFilter}</span>
                 </div>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Tags</SelectItem>
                 {allTags.map(tag => (
                   <SelectItem key={tag} value={tag}>{tag}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={profileFilter} onValueChange={setProfileFilter}>
+              <SelectTrigger className="w-[180px] shrink-0">
+                <div className="flex items-center gap-2 text-muted-foreground min-w-0 flex-1">
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate text-foreground text-left">
+                    {profileFilter === 'all' ? 'All Profiles' : profiles.find(p => p.id === profileFilter)?.name || 'Unknown'}
+                  </span>
+                </div>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Profiles</SelectItem>
+                {profiles.map(profile => (
+                  <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -211,7 +233,7 @@ export function InstallSavedAddonDialog({
               variant="outline"
               size="sm"
               onClick={selectAll}
-              className="ml-auto shrink-0 min-w-[105px]"
+              className="shrink-0 min-w-[105px]"
               disabled={filteredAddons.length === 0}
             >
               <Check className={cn("mr-2 h-3.5 w-3.5", selectedSavedAddonIds.size === filteredAddons.length ? "opacity-100" : "opacity-0")} />

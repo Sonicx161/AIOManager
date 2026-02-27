@@ -1,7 +1,10 @@
 import { ReactNode, useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Footer } from './Footer'
 import { Header } from './Header'
+import { SyncIdReminder } from './SyncIdReminder'
 import { useAddonStore } from '@/store/addonStore'
+import { CommandPalette } from '@/components/CommandPalette'
 
 interface LayoutProps {
   children: ReactNode
@@ -9,23 +12,10 @@ interface LayoutProps {
 
 export function Layout({ children }: LayoutProps) {
   const { checkAllHealth } = useAddonStore()
+  const location = useLocation()
 
-  // Global Ctrl+K / Cmd+K shortcut to focus page search
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Focus search input
-      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-        e.preventDefault()
-        const searchInput = document.querySelector<HTMLInputElement>('[data-search-focus]')
-        if (searchInput) {
-          searchInput.focus()
-          searchInput.select()
-        }
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [])
+  // Use a more robust check for Replay mode
+  const isReplay = location.pathname.includes('/replay')
 
   // Auto-refresh health when window is focused (with store-level 3m cooldown)
   useEffect(() => {
@@ -36,11 +26,23 @@ export function Layout({ children }: LayoutProps) {
     return () => window.removeEventListener('focus', handleFocus)
   }, [checkAllHealth])
 
+  if (isReplay) {
+    return (
+      <div className="min-h-screen bg-[#08080f] flex flex-col overflow-hidden">
+        <main className="flex-1 overflow-hidden">{children}</main>
+        <CommandPalette />
+      </div>
+    )
+  }
+
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="min-h-screen bg-background flex flex-col pb-20 md:pb-0">
+      <SyncIdReminder />
       <Header />
-      <main className="container mx-auto px-4 py-10 flex-1">{children}</main>
+      <main className="container mx-auto px-4 py-6 md:py-10 flex-1">{children}</main>
       <Footer />
+      <CommandPalette />
     </div>
   )
 }
+

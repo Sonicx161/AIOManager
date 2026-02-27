@@ -8,8 +8,12 @@ import { useLibraryCache } from '@/store/libraryCache'
 import { stremioClient } from '@/api/stremio-client'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
+import { ActivityPageSkeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { FloatingActionBar } from '@/components/ui/floating-action-bar'
 
-import { RefreshCw, Trash2, Grid, List, Search, CheckSquare, XSquare, Activity, X } from 'lucide-react'
+import { Grid, List, Search, Check, Activity, X } from 'lucide-react'
+import { AnimatedRefreshIcon, AnimatedTrashIcon } from '@/components/ui/AnimatedIcons'
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
@@ -33,7 +37,6 @@ export function ActivityPage() {
         loading,
         loadingProgress,
         invalidate: fetchActivityFull,
-        lastFetched: lastUpdated,
         removeItems
     } = useLibraryCache()
 
@@ -45,8 +48,17 @@ export function ActivityPage() {
         }
     }
 
+    const [searchInput, setSearchInput] = useState('')
     const [searchTerm, setSearchTerm] = useState('')
     const searchInputRef = useRef<HTMLInputElement>(null)
+
+    // Debounce search input
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setSearchTerm(searchInput)
+        }, 200)
+        return () => clearTimeout(timer)
+    }, [searchInput])
 
     const [userFilter, setUserFilter] = useState('all')
     const [timeFilter, setTimeFilter] = useState(() => {
@@ -237,11 +249,10 @@ export function ActivityPage() {
     // LOADING STATE
     if (loading) {
         return (
-            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center p-8 opacity-50 animate-pulse">
-                <Activity className="h-16 w-16 mb-4 text-indigo-500" />
-                <h2 className="text-2xl font-bold">Gathering watch history...</h2>
-                <div className="mt-2 text-sm text-indigo-400 font-mono">
-                    {loadingProgress.current > 0 ? `Synced ${loadingProgress.current} accounts` : 'Connecting to Stremio...'}
+            <div>
+                <ActivityPageSkeleton />
+                <div className="mt-4 text-center text-sm text-muted-foreground font-mono animate-pulse">
+                    {loadingProgress.current > 0 ? `Synced ${loadingProgress.current} of ${loadingProgress.total} accounts` : 'Connecting to Stremio...'}
                 </div>
             </div>
         )
@@ -272,11 +283,6 @@ export function ActivityPage() {
                                 </span>
                             )}
                         </div>
-                        {lastUpdated && (
-                            <span className="text-[10px] text-muted-foreground mr-2 font-mono opacity-60">
-                                Last synced: {new Date(lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                            </span>
-                        )}
                     </div>
                 )}
                 {/* Actions Toolbar (Mobile) */}
@@ -290,40 +296,42 @@ export function ActivityPage() {
                             else setIsBulkMode(true)
                         }}
                     >
-                        <CheckSquare className="mr-2 h-4 w-4" />
+                        <Check className="mr-2 h-4 w-4" />
                         {isSelecting ? 'Cancel' : 'Select'}
                     </Button>
                     <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="flex-1">
-                        <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                        <AnimatedRefreshIcon className="mr-2 h-4 w-4" isAnimating={loading} />
                         Refresh
                     </Button>
                 </div>
             </div>
 
             {/* PROGRESS BAR */}
-            {loading && (
-                <div className="relative h-1 w-full bg-muted overflow-hidden rounded-full">
-                    <Progress value={(loadingProgress.current / loadingProgress.total) * 100} className="h-full bg-primary transition-all duration-300" />
-                </div>
-            )}
+            {
+                loading && (
+                    <div className="relative h-1 w-full bg-muted overflow-hidden rounded-full">
+                        <Progress value={(loadingProgress.current / loadingProgress.total) * 100} className="h-full bg-primary transition-all duration-300" />
+                    </div>
+                )
+            }
 
             {/* Controls Row */}
             <div className="flex flex-col xl:flex-row gap-3 items-end xl:items-center">
-                <div className="flex flex-1 w-full gap-3 flex-col sm:flex-row">
+                <div className="flex flex-1 w-full gap-3 flex-col lg:flex-row items-center">
                     {/* Search */}
-                    <div className="relative flex-1">
+                    <div className="relative flex-[2] w-full lg:w-auto">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                         <Input
                             ref={searchInputRef}
-                            placeholder="Search by title..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors"
+                            placeholder="Search history..."
+                            value={searchInput}
+                            onChange={(e) => setSearchInput(e.target.value)}
+                            className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors w-full"
                             data-search-focus
                         />
-                        {searchTerm && (
+                        {searchInput && (
                             <button
-                                onClick={() => setSearchTerm('')}
+                                onClick={() => setSearchInput('')}
                                 className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors focus:outline-none"
                             >
                                 <X className="h-4 w-4 text-muted-foreground" />
@@ -331,71 +339,58 @@ export function ActivityPage() {
                         )}
                     </div>
 
-                    {/* User Filter */}
-                    <Select value={userFilter} onValueChange={setUserFilter}>
-                        <SelectTrigger className="w-full sm:w-[150px]">
-                            <SelectValue placeholder="All Users" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="all">All Users</SelectItem>
-                            {accountOptions.map(account => (
-                                <SelectItem key={account.id} value={account.id}>
-                                    {account.name}
-                                </SelectItem>
-                            ))}
-                        </SelectContent>
-                    </Select>
+                    <div className="flex flex-1 w-full lg:w-auto gap-3">
+                        {/* User Filter - Conditional */}
+                        {accountOptions.length > 1 && (
+                            <Select value={userFilter} onValueChange={setUserFilter}>
+                                <SelectTrigger className="flex-1 lg:w-[150px]">
+                                    <SelectValue placeholder="All Users" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="all">All Users</SelectItem>
+                                    {accountOptions.map(account => (
+                                        <SelectItem key={account.id} value={account.id}>
+                                            {account.name}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+                        )}
 
-                    {/* Time Filter */}
-                    <Select value={timeFilter} onValueChange={(val) => {
-                        setTimeFilter(val)
-                        localStorage.setItem('activity-time-filter', val)
-                    }}>
-                        <SelectTrigger className="w-full sm:w-[150px]">
-                            <SelectValue placeholder="All Time" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="all">All Time</SelectItem>
-                            <SelectItem value="24h">Last 24 Hours</SelectItem>
-                            <SelectItem value="7d">Last 7 Days</SelectItem>
-                            <SelectItem value="30d">Last 30 Days</SelectItem>
-                            <SelectItem value="since">Since…</SelectItem>
-                        </SelectContent>
-                    </Select>
+                        {/* Time Filter */}
+                        <Select value={timeFilter} onValueChange={(val) => {
+                            setTimeFilter(val)
+                            localStorage.setItem('activity-time-filter', val)
+                        }}>
+                            <SelectTrigger className="flex-1 lg:w-[150px]">
+                                <SelectValue placeholder="All Time" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All Time</SelectItem>
+                                <SelectItem value="24h">Last 24 Hours</SelectItem>
+                                <SelectItem value="7d">Last 7 Days</SelectItem>
+                                <SelectItem value="30d">Last 30 Days</SelectItem>
+                                <SelectItem value="since">Since…</SelectItem>
+                            </SelectContent>
+                        </Select>
 
-                    {/* Since Date Picker (inline, only visible when "Since" is selected) */}
-                    {timeFilter === 'since' && (
-                        <Input
-                            type="date"
-                            value={customStartDate}
-                            onChange={(e) => {
-                                setCustomStartDate(e.target.value)
-                                localStorage.setItem('activity-since-date', e.target.value)
-                            }}
-                            className="w-full sm:w-[170px]"
-                        />
-                    )}
+                        {/* Since Date Picker */}
+                        {timeFilter === 'since' && (
+                            <Input
+                                type="date"
+                                value={customStartDate}
+                                onChange={(e) => {
+                                    setCustomStartDate(e.target.value)
+                                    localStorage.setItem('activity-since-date', e.target.value)
+                                }}
+                                className="flex-1 lg:w-[170px]"
+                            />
+                        )}
+                    </div>
                 </div>
 
                 {/* Actions */}
-                <div className="flex gap-2 w-full xl:w-auto overflow-x-auto pb-1 xl:pb-0 shrink-0">
-                    {isSelecting && (
-                        <>
-                            <Button variant="outline" size="sm" onClick={handleSelectAll} disabled={filteredHistory.length === 0} className="whitespace-nowrap">
-                                <CheckSquare className="mr-2 h-4 w-4" />
-                                Select All ({filteredHistory.length})
-                            </Button>
-                            <Button variant="outline" size="sm" onClick={handleDeselectAll} className="whitespace-nowrap">
-                                <XSquare className="mr-2 h-4 w-4" />
-                                Deselect ({selectedItems.size})
-                            </Button>
-                            <Button variant="destructive" size="sm" onClick={() => setShowDeleteDialog(true)} className="whitespace-nowrap">
-                                <Trash2 className="mr-2 h-4 w-4" />
-                                Delete ({selectedItems.size})
-                            </Button>
-                        </>
-                    )}
-
+                <div className="flex gap-2 w-full xl:w-auto overflow-x-auto pb-1 xl:pb-0 shrink-0 items-center">
                     <Button
                         variant={isSelecting ? "secondary" : "outline"}
                         size="sm"
@@ -403,36 +398,30 @@ export function ActivityPage() {
                             if (isBulkMode || selectedItems.size > 0) handleDeselectAll()
                             else setIsBulkMode(true)
                         }}
-                        className="hidden md:flex whitespace-nowrap"
+                        className="h-10 whitespace-nowrap"
                     >
-                        <CheckSquare className="mr-2 h-4 w-4" />
+                        <Check className="mr-2 h-4 w-4" />
                         {isSelecting ? 'Cancel' : 'Select'}
                     </Button>
 
-                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="whitespace-nowrap hidden md:flex">
-                        <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                    <Button size="sm" onClick={() => fetchActivity()} disabled={loading} className="h-10 whitespace-nowrap">
+                        <AnimatedRefreshIcon className="mr-2 h-4 w-4" isAnimating={loading} />
                         Refresh
                     </Button>
 
-                    {/* View Mode Toggle */}
-                    <div className="flex rounded-md border ml-auto xl:ml-0">
-                        <Button
-                            variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
-                            size="icon"
-                            className="h-9 w-9 rounded-r-none"
-                            onClick={() => handleViewModeChange('grid')}
-                        >
-                            <Grid className="h-4 w-4" />
-                        </Button>
-                        <Button
-                            variant={viewMode === 'list' ? 'secondary' : 'ghost'}
-                            size="icon"
-                            className="h-9 w-9 rounded-l-none"
-                            onClick={() => handleViewModeChange('list')}
-                        >
-                            <List className="h-4 w-4" />
-                        </Button>
-                    </div>
+                    {/* View Mode Toggle - Segmented Control */}
+                    <Tabs value={viewMode} onValueChange={(v) => handleViewModeChange(v as 'grid' | 'list')} className="ml-auto xl:ml-0 h-10">
+                        <TabsList className="grid w-full grid-cols-2 h-full bg-muted/50 p-1">
+                            <TabsTrigger value="grid" className="h-full data-[state=active]:shadow-sm">
+                                <Grid className="h-4 w-4 mr-2" />
+                                <span className="hidden sm:inline">Grid</span>
+                            </TabsTrigger>
+                            <TabsTrigger value="list" className="h-full data-[state=active]:shadow-sm">
+                                <List className="h-4 w-4 mr-2" />
+                                <span className="hidden sm:inline">List</span>
+                            </TabsTrigger>
+                        </TabsList>
+                    </Tabs>
                 </div>
             </div>
 
@@ -479,13 +468,15 @@ export function ActivityPage() {
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle>Delete Selected Items?</AlertDialogTitle>
-                        <AlertDialogDescription className="space-y-3">
-                            <p>
-                                This will permanently remove {selectedItems.size} item(s) from your Stremio watch history. This cannot be undone.
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                                Note: deleting a series removes the entire show, not individual episodes. This is a Stremio limitation.
-                            </p>
+                        <AlertDialogDescription asChild>
+                            <div className="space-y-3">
+                                <p>
+                                    This will permanently remove {selectedItems.size} item(s) from your Stremio watch history. This cannot be undone.
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                    Note: deleting a series removes the entire show, not individual episodes. This is a Stremio limitation.
+                                </p>
+                            </div>
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -496,6 +487,29 @@ export function ActivityPage() {
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
-        </div>
+
+            {/* Floating Action Bar for Bulk Deletion */}
+            <FloatingActionBar
+                open={selectedItems.size > 0}
+                selectedCount={selectedItems.size}
+                totalCount={filteredHistory.length}
+                onClearSelection={handleDeselectAll}
+                actions={[
+                    {
+                        label: 'Select All',
+                        onClick: handleSelectAll,
+                        variant: 'outline',
+                        icon: <Check className="h-4 w-4" />,
+                        disabled: selectedItems.size === filteredHistory.length
+                    },
+                    {
+                        label: 'Delete History',
+                        onClick: () => setShowDeleteDialog(true),
+                        variant: 'destructive',
+                        icon: <AnimatedTrashIcon className="h-4 w-4" />
+                    },
+                ].filter(Boolean) as any}
+            />
+        </div >
     )
 }

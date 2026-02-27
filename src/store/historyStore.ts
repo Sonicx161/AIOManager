@@ -47,11 +47,14 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
                     const baseUrl = serverUrl || ''
                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
-                    // Fetch for all accounts
+                    // Fetch for all accounts via Promise.all
                     const accountStore = (await import('@/store/accountStore')).useAccountStore.getState()
-                    for (const account of accountStore.accounts) {
-                        const response = await axios.get(`${apiPath}/autopilot/history/${account.id}`)
-                        if (response.data?.history) {
+                    const promiseResults = await Promise.all(accountStore.accounts.map(account =>
+                        axios.get(`${apiPath}/autopilot/history/${account.id}`).catch(() => null)
+                    ))
+
+                    promiseResults.forEach((response) => {
+                        if (response?.data?.history) {
                             const serverLogs = response.data.history.map((h: any) => ({
                                 id: h.id,
                                 timestamp: new Date(Number(h.timestamp)),
@@ -64,7 +67,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
                             }))
                             allLogs = [...allLogs, ...serverLogs]
                         }
-                    }
+                    })
                 } catch (serverErr) {
                     console.error('Failed to fetch server history logs:', serverErr)
                 }
@@ -99,7 +102,27 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     },
 
     clearLogs: async () => {
+        try {
+            const { useSyncStore } = await import('@/store/syncStore')
+            const { auth, serverUrl } = useSyncStore.getState()
+
+            if (auth.isAuthenticated) {
+                const baseUrl = serverUrl || ''
+                const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+
+                const accountStore = (await import('@/store/accountStore')).useAccountStore.getState()
+                await Promise.all(accountStore.accounts.map(account =>
+                    axios.delete(`${apiPath}/autopilot/history/${account.id}`, {
+                        headers: { 'x-sync-password': auth.password }
+                    }).catch(console.warn)
+                ))
+            }
+        } catch (err) {
+            console.warn('Server log clear failed, clearing locally anyway:', err)
+        }
+
+        // Always clear local state
         set({ logs: [] })
-        await localforage.removeItem(STORAGE_KEY)
+        await localforage.setItem(STORAGE_KEY, [])
     }
 }))

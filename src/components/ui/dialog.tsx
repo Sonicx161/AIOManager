@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 import { X } from 'lucide-react'
 
@@ -13,16 +14,17 @@ interface DialogProps {
 const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
   if (!open) return null
 
-  return (
+  return createPortal(
     <DialogContext.Provider value={{ onOpenChange }}>
       <div className="fixed inset-0 z-50">
         <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+          className="fixed inset-0 bg-black/80"
           onClick={() => onOpenChange?.(false)}
         />
         {children}
       </div>
-    </DialogContext.Provider>
+    </DialogContext.Provider>,
+    document.body
   )
 }
 
@@ -33,7 +35,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTML
       <div
         ref={ref}
         className={cn(
-          'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-xl animate-pop-in duration-200 sm:rounded-lg overflow-y-auto max-h-[95vh]',
+          'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-md animate-pop-in duration-200 sm:rounded-lg overflow-y-auto max-h-[95vh]',
           className
         )}
         {...props}
@@ -77,10 +79,10 @@ const DialogTitle = React.forwardRef<HTMLHeadingElement, React.HTMLAttributes<HT
 DialogTitle.displayName = 'DialogTitle'
 
 const DialogDescription = React.forwardRef<
-  HTMLParagraphElement,
-  React.HTMLAttributes<HTMLParagraphElement>
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => (
-  <p ref={ref} className={cn('text-sm text-muted-foreground', className)} {...props} />
+  <div ref={ref} className={cn('text-sm text-muted-foreground', className)} {...props} />
 ))
 DialogDescription.displayName = 'DialogDescription'
 

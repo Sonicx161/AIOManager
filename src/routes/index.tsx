@@ -6,8 +6,11 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 
 import { ActivityPage } from '@/pages/ActivityPage'
 import { MetricsPage } from '@/pages/MetricsPage'
-import { SettingsPage } from '@/pages/SettingsPage'
 import { FAQPage } from '@/pages/FAQPage'
+import { SettingsPage } from '@/pages/SettingsPage'
+import { lazy, Suspense } from 'react'
+
+const ReplayPage = lazy(() => import('@/pages/ReplayPage').then(m => ({ default: m.ReplayPage })))
 
 export function AppRoutes() {
   return (
@@ -17,6 +20,11 @@ export function AppRoutes() {
 
       <Route path="/activity" element={<ActivityPage />} />
       <Route path="/metrics" element={<MetricsPage />} />
+      <Route path="/replay" element={
+        <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Replay...</div>}>
+          <ReplayPage />
+        </Suspense>
+      } />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/faq" element={<FAQPage />} />
       <Route path="/account/:accountId" element={<AccountDetailPage />} />

@@ -1,13 +1,6 @@
 import { Button } from "@/components/ui/button"
 import axios from "axios"
 import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle,
-} from "@/components/ui/card"
-import {
     Select,
     SelectContent,
     SelectItem,
@@ -16,14 +9,6 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-} from "@/components/ui/table"
 import { useAccountStore } from "@/store/accountStore"
 import { useFailoverStore } from "@/store/failoverStore"
 import { useHistoryStore } from "@/store/historyStore"
@@ -33,11 +18,12 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { ArrowRight, AlertTriangle, Activity, Trash2, Plus, History, Pencil, Webhook, Check, Copy, Download } from "lucide-react"
+import { ArrowRight, AlertTriangle, Activity, Trash2, Plus, History, Pencil, Webhook, Check, Copy, Download, FlaskConical, XCircle, Loader2 } from "lucide-react"
 import { useState, useEffect, useMemo } from "react"
 import { identifyAddon } from "@/lib/addon-identifier"
 import { toast } from "@/hooks/use-toast"
 import { formatDistanceToNow } from "date-fns"
+import { checkAddonHealth } from "@/lib/addon-health"
 import { Input } from "@/components/ui/input"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
 
@@ -63,6 +49,11 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
     const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
     const [webhookUrl, setWebhookUrl] = useState("")
     const [showWebhookConfirm, setShowWebhookConfirm] = useState(false)
+    const [simulatingRuleId, setSimulatingRuleId] = useState<string | null>(null)
+    const [simulationResults, setSimulationResults] = useState<Record<string, { healthy: boolean; checking: boolean; error?: string }>>({})
+
+    const [ruleName, setRuleName] = useState("")
+    const [cooldownMinutes, setCooldownMinutes] = useState<string>("")
 
     useEffect(() => {
         setWebhookUrl(webhook.url)
@@ -96,10 +87,30 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
             .filter(a => a.ruleCount > 0)
     }, [accounts, accountId, rules])
 
+    // Build a cross-account addon lookup ONLY for name resolution of imported/copied rules.
+    // This should NOT be used for the selection dropdown.
+    const allAddonsForLabeling = useMemo(() => {
+        const localAddons = accounts.find(a => a.id === accountId)?.addons || []
+        const merged = [...localAddons]
+        for (const acc of accounts) {
+            if (acc.id === accountId) continue
+            for (const addon of acc.addons) {
+                if (!merged.some(a => a.transportUrl === addon.transportUrl)) {
+                    merged.push(addon)
+                }
+            }
+        }
+        return merged
+    }, [accounts, accountId])
+
     if (!account) return null
 
     const accountRules = rules.filter(r => r.accountId === accountId)
-    const addons = account.addons
+    const localAddons = account.addons
+
+    // Use allAddonsForLabeling for name resolution in rule display,
+    // but localAddons for the selection dropdown to prevent cross-account leaks.
+    const addons = allAddonsForLabeling
 
     const handleSaveRule = async () => {
         const filteredChain = chain.filter(url => !!url)
@@ -108,16 +119,25 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
             return
         }
 
+        const cooldownMs = cooldownMinutes ? parseInt(cooldownMinutes) * 60 * 1000 : undefined
+
         if (editingRuleId) {
-            await updateRule(editingRuleId, { priorityChain: filteredChain, activeUrl: filteredChain[0] })
-            toast({ title: "Rule Updated", description: "Priority chain modified." })
+            await updateRule(editingRuleId, {
+                priorityChain: filteredChain,
+                activeUrl: filteredChain[0],
+                name: ruleName.trim() || undefined,
+                cooldown_ms: cooldownMs
+            })
+            toast({ title: "Rule Updated", description: "Rule settings modified." })
             setEditingRuleId(null)
         } else {
-            await addRule(accountId, filteredChain)
+            await addRule(accountId, filteredChain, ruleName.trim() || undefined, cooldownMs)
             toast({ title: "Rule Created", description: "Autopilot is now monitoring this chain." })
         }
 
         setChain(["", ""])
+        setRuleName("")
+        setCooldownMinutes("")
     }
 
     const addToChain = () => setChain([...chain, ""])
@@ -130,6 +150,8 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
 
     const handleCancelEdit = () => {
         setChain(["", ""])
+        setRuleName("")
+        setCooldownMinutes("")
         setEditingRuleId(null)
     }
 
@@ -155,156 +177,227 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
         })
     }
 
+    const handleSimulateRule = async (ruleId: string, chain: string[]) => {
+        setSimulatingRuleId(ruleId)
+        setSimulationResults({})
+
+        for (const url of chain) {
+            setSimulationResults(prev => ({
+                ...prev,
+                [url]: { healthy: false, checking: true }
+            }))
+
+            try {
+                const health = await checkAddonHealth(url)
+                setSimulationResults(prev => ({
+                    ...prev,
+                    [url]: { healthy: health.isOnline, checking: false, error: health.error }
+                }))
+            } catch (err) {
+                setSimulationResults(prev => ({
+                    ...prev,
+                    [url]: { healthy: false, checking: false, error: 'Check failed' }
+                }))
+            }
+        }
+    }
+
     return (
         <div className="space-y-6">
             <Tabs defaultValue="rules" className="space-y-6">
-                <TabsList>
-                    <TabsTrigger value="rules" className="flex items-center gap-2">
-                        <Activity className="w-4 h-4" /> Autopilot Rules
+                <TabsList className="flex h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap overflow-x-auto scrollbar-hide pb-2">
+                    <TabsTrigger
+                        value="rules"
+                        className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm transition-all"
+                    >
+                        <Activity className="w-4 h-4 mr-2" />
+                        Autopilot Rules
                     </TabsTrigger>
-                    <TabsTrigger value="history" className="flex items-center gap-2">
-                        <History className="w-4 h-4" /> Failover History
+                    <TabsTrigger
+                        value="history"
+                        className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm transition-all"
+                    >
+                        <History className="w-4 h-4 mr-2" />
+                        Failover History
                     </TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="rules" className="space-y-6">
-                    <Card className="border-indigo-500/20 bg-indigo-500/5">
-                        <CardHeader>
-                            <CardTitle className="flex items-center gap-2">
-                                <Webhook className="w-5 h-5 text-indigo-500" />
-                                Health Webhooks
-                            </CardTitle>
-                            <CardDescription>
-                                Receive identifiable Discord/Ntfy alerts for account <code className="bg-indigo-500/10 px-1 rounded text-xs">{accountId.slice(0, 8)}...</code>
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4">
-                            <div className="flex gap-4">
-                                <Input
-                                    placeholder="https://discord.com/api/webhooks/..."
-                                    value={webhookUrl}
-                                    onChange={(e) => setWebhookUrl(e.target.value)}
-                                    className="bg-background"
-                                />
-                                <div className="flex gap-2">
-                                    <Button size="sm" onClick={handleSaveWebhook}>Set Webhook</Button>
-                                    {webhook.url && (
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            onClick={async () => {
-                                                try {
-                                                    const { useSyncStore } = await import('@/store/syncStore')
-                                                    const { serverUrl } = useSyncStore.getState()
-                                                    const baseUrl = serverUrl || ''
-                                                    const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-
-                                                    await axios.post(`${apiPath}/autopilot/test-webhook`, {
-                                                        webhookUrl: webhook.url,
-                                                        accountName: account.name
-                                                    })
-                                                    toast({ title: 'Test Sent', description: 'Check your Discord channel.' })
-                                                } catch (err) {
-                                                    toast({ title: 'Test Failed', description: 'Invalid webhook URL or server error.', variant: 'destructive' })
-                                                }
-                                            }}
-                                        >
-                                            Test
-                                        </Button>
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-4">
+                        <div className="flex items-start justify-between">
+                            <div>
+                                <h3 className="flex items-center gap-2 text-lg font-bold">
+                                    <Webhook className="w-5 h-5 text-primary" />
+                                    Health Webhooks
+                                </h3>
+                                <div className="flex items-center gap-2 mt-2">
+                                    {webhook.url ? (
+                                        <>
+                                            <span className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]"></span>
+                                            <span className="text-xs font-mono font-bold text-green-400/80 uppercase tracking-widest">ACTIVE</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="w-2 h-2 rounded-full bg-white/20"></span>
+                                            <span className="text-xs font-mono font-bold text-white/30 uppercase tracking-widest">NOT CONFIGURED</span>
+                                        </>
                                     )}
                                 </div>
                             </div>
-                        </CardContent>
-                    </Card>
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+                            <Input
+                                placeholder="https://discord.com/api/webhooks/..."
+                                value={webhookUrl}
+                                onChange={(e) => setWebhookUrl(e.target.value)}
+                                className="bg-white/5 border-white/10 rounded-[10px]"
+                            />
+                            <div className="flex gap-2">
+                                <Button size="sm" onClick={handleSaveWebhook}>Set Webhook</Button>
+                                {webhook.url && (
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={async () => {
+                                            try {
+                                                const { useSyncStore } = await import('@/store/syncStore')
+                                                const { serverUrl } = useSyncStore.getState()
+                                                const baseUrl = serverUrl || ''
+                                                const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
-                    <Card>
-                        <CardHeader>
-                            <CardTitle className="text-lg flex items-center gap-2">
-                                {editingRuleId ? <Pencil className="w-5 h-5" /> : <Plus className="w-5 h-5 text-primary" />}
+                                                await axios.post(`${apiPath}/autopilot/test-webhook`, {
+                                                    webhookUrl: webhook.url,
+                                                    accountName: account.name
+                                                })
+                                                toast({ title: 'Test Sent', description: 'Check your Discord channel.' })
+                                            } catch (err) {
+                                                toast({ title: 'Test Failed', description: 'Invalid webhook URL or server error.', variant: 'destructive' })
+                                            }
+                                        }}
+                                    >
+                                        Test
+                                    </Button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-5">
+                        <div className="pb-1 text-left">
+                            <h3 className="text-lg font-bold flex items-center gap-2 mb-1.5">
+                                {editingRuleId ? <Pencil className="w-5 h-5 text-primary" /> : <Plus className="w-5 h-5 text-primary" />}
                                 {editingRuleId ? "Edit Priority Chain" : "Create New Autopilot Rule"}
-                            </CardTitle>
-                            <CardDescription>
+                            </h3>
+                            <p className="text-sm text-white/50">
                                 Define an ordered list of fallbacks. Autopilot will always try to keep the highest priority addon active.
-                            </CardDescription>
-                        </CardHeader>
-                        <CardContent className="space-y-4">
-                            <div className="space-y-3">
-                                {chain.map((url, index) => (
-                                    <div key={index} className="flex items-center gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-xs font-bold border">
-                                            {index + 1}
-                                        </div>
-                                        <Select value={url} onValueChange={(val) => updateChainUrl(index, val)}>
-                                            <SelectTrigger className="flex-1">
-                                                <SelectValue placeholder={`Select Tier ${index + 1} addon...`}>
-                                                    {(() => {
-                                                        const selectedAddon = addons.find(a => a.transportUrl === url)
-                                                        if (!selectedAddon) return null
-                                                        return (
-                                                            <div className="flex items-center gap-2">
-                                                                {(selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo) && (
-                                                                    <img
-                                                                        src={selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo}
-                                                                        alt=""
-                                                                        className="w-4 h-4 rounded object-contain"
-                                                                        onError={(e) => {
-                                                                            e.currentTarget.style.display = 'none'
-                                                                        }}
-                                                                    />
-                                                                )}
-                                                                <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
-                                                            </div>
-                                                        )
-                                                    })()}
-                                                </SelectValue>
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                {addons.map(addon => (
-                                                    <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
+                            </p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/30 ml-1">Rule Name (Optional)</label>
+                                <Input
+                                    placeholder="e.g. My Primary Movies"
+                                    value={ruleName}
+                                    onChange={(e) => setRuleName(e.target.value)}
+                                    className="bg-white/5 border-white/10 rounded-xl"
+                                />
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/30 ml-1">Notifications Cooldown (Mins)</label>
+                                <Input
+                                    type="number"
+                                    placeholder="10"
+                                    value={cooldownMinutes}
+                                    onChange={(e) => setCooldownMinutes(e.target.value)}
+                                    className="bg-white/5 border-white/10 rounded-xl"
+                                />
+                            </div>
+                        </div>
+                        <div className="space-y-3">
+                            {chain.map((url, index) => (
+                                <div key={index} className="bg-white/5 border border-white/10 rounded-xl px-4 py-3 flex flex-col gap-1.5">
+                                    <div className="flex items-center justify-between">
+                                        <span className="font-mono text-[10px] font-bold tracking-wider text-white/25">TIER {index + 1}</span>
+                                        <button
+                                            className="text-white/20 hover:text-red-400 transition-colors disabled:opacity-30 disabled:hover:text-white/20"
+                                            onClick={() => removeFromChain(index)}
+                                            disabled={chain.length <= 2}
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                    <Select value={url} onValueChange={(val) => updateChainUrl(index, val)}>
+                                        <SelectTrigger className="w-full bg-transparent border-0 p-0 h-8 hover:bg-transparent focus:ring-0 shadow-none text-base font-medium focus-visible:ring-0">
+                                            <SelectValue placeholder={`Select Tier ${index + 1} addon...`}>
+                                                {(() => {
+                                                    const selectedAddon = addons.find(a => a.transportUrl === url)
+                                                    if (!selectedAddon) return null
+                                                    return (
                                                         <div className="flex items-center gap-2">
-                                                            {(addon.metadata?.customLogo || addon.manifest.logo) && (
+                                                            {(selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo) && (
                                                                 <img
-                                                                    src={addon.metadata?.customLogo || addon.manifest.logo}
+                                                                    src={selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo}
                                                                     alt=""
-                                                                    className="w-5 h-5 rounded object-contain bg-muted/50 p-0.5"
+                                                                    className="w-5 h-5 rounded object-contain"
                                                                     onError={(e) => {
                                                                         e.currentTarget.style.display = 'none'
                                                                     }}
                                                                 />
                                                             )}
-                                                            <span>{addon.metadata?.customName || addon.manifest.name}</span>
+                                                            <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
                                                         </div>
-                                                    </SelectItem>
-                                                ))}
-                                            </SelectContent>
-                                        </Select>
-                                        <Button variant="ghost" size="icon" onClick={() => removeFromChain(index)} disabled={chain.length <= 2}>
-                                            <Trash2 className="w-4 h-4" />
-                                        </Button>
-                                    </div>
-                                ))}
-                                <Button variant="outline" size="sm" onClick={addToChain} className="w-full border-dashed">
-                                    <Plus className="w-3 h-3 mr-2" /> Add Fallback Tier
-                                </Button>
-                            </div>
+                                                    )
+                                                })()}
+                                            </SelectValue>
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {localAddons.map(addon => (
+                                                <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
+                                                    <div className="flex items-center gap-2">
+                                                        {(addon.metadata?.customLogo || addon.manifest.logo) && (
+                                                            <img
+                                                                src={addon.metadata?.customLogo || addon.manifest.logo}
+                                                                alt=""
+                                                                className="w-5 h-5 rounded object-contain bg-white/5 p-0.5"
+                                                                onError={(e) => {
+                                                                    e.currentTarget.style.display = 'none'
+                                                                }}
+                                                            />
+                                                        )}
+                                                        <span>{addon.metadata?.customName || addon.manifest.name}</span>
+                                                    </div>
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                            ))}
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={addToChain}
+                                className="w-full bg-white/5 border border-dashed border-white/10 hover:bg-white/10 text-white/50 hover:text-white h-12 rounded-xl border-opacity-50"
+                            >
+                                <Plus className="w-4 h-4 mr-2" /> Add Fallback Tier
+                            </Button>
+                        </div>
 
-                            <div className="flex gap-2 pt-4 border-t">
-                                <Button
-                                    size="sm"
-                                    className="flex-1 md:w-auto"
-                                    onClick={handleSaveRule}
-                                    disabled={chain.filter(u => !!u).length < 2}
-                                >
-                                    {editingRuleId ? "Update Chain" : "Enable Autopilot"}
+                        <div className="flex gap-2 pt-4 border-t border-white/10">
+                            <Button
+                                size="sm"
+                                className="flex-1 md:w-auto bg-[#eab308] hover:bg-[#fbbf24] text-black font-[900]"
+                                onClick={handleSaveRule}
+                                disabled={chain.filter(u => !!u).length < 2}
+                            >
+                                {editingRuleId ? "Update Chain" : "Enable Autopilot"}
+                            </Button>
+                            {editingRuleId && (
+                                <Button variant="outline" size="sm" onClick={handleCancelEdit}>
+                                    Cancel
                                 </Button>
-                                {editingRuleId && (
-                                    <Button variant="outline" size="sm" onClick={handleCancelEdit}>
-                                        Cancel
-                                    </Button>
-                                )}
-                            </div>
-                        </CardContent>
-                    </Card>
+                            )}
+                        </div>
+                    </div>
 
                     <div className="space-y-4">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -352,19 +445,21 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                 )}
                             </div>
                             {lastWorkerRun && (
-                                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider">
+                                <div
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider"
+                                    style={(Date.now() - new Date(lastWorkerRun).getTime()) < 120000
+                                        ? { background: 'rgba(34,197,94,0.1)', borderStyle: 'solid', borderWidth: '1px', borderColor: 'rgba(34,197,94,0.2)', color: '#4ade80' }
+                                        : { background: 'rgba(245,158,11,0.1)', borderStyle: 'solid', borderWidth: '1px', borderColor: 'rgba(245,158,11,0.2)', color: '#fbbf24' }
+                                    }
+                                >
                                     <span className={`w-2 h-2 rounded-full ${(Date.now() - new Date(lastWorkerRun).getTime()) < 120000
-                                        ? 'bg-green-500 animate-pulse'
-                                        : 'bg-muted'
+                                        ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)] animate-pulse'
+                                        : 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
                                         }`} />
-                                    <span className="text-muted-foreground whitespace-nowrap">Autopilot: {
+                                    <span className="whitespace-nowrap font-mono">{
                                         (Date.now() - new Date(lastWorkerRun).getTime()) < 120000
-                                            ? (accountRules.length === 0
-                                                ? 'Live & Standby'
-                                                : accountRules.some(r => r.isActive)
-                                                    ? 'Live & Monitoring'
-                                                    : 'Live & Paused')
-                                            : 'Last Heartbeat ' + formatDistanceToNow(new Date(lastWorkerRun), { addSuffix: true })
+                                            ? 'LIVE'
+                                            : 'STANDBY'
                                     }</span>
                                 </div>
                             )}
@@ -379,122 +474,212 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                         <div className="grid gap-4">
                             {accountRules.map(rule => {
                                 if (!rule || !rule.priorityChain) return null;
-                                const activeAddon = addons.find(a => a.transportUrl === rule.activeUrl)
                                 const isPrimary = rule.activeUrl === rule.priorityChain[0]
 
                                 const lastCheckDate = rule.lastCheck ? new Date(rule.lastCheck) : null
                                 const isValidDate = lastCheckDate && !isNaN(lastCheckDate.getTime())
 
                                 return (
-                                    <Card key={rule.id} className={`transition-all ${!isPrimary ? 'border-amber-500/50 bg-amber-500/5' : ''}`}>
-                                        <CardContent className="p-4 flex flex-col gap-4">
-                                            <div className="flex items-center justify-between">
-                                                <div className="flex items-center gap-3">
-                                                    <div className={`p-2 rounded-full ${!isPrimary ? 'bg-amber-500/10 text-amber-500' : 'bg-primary/10 text-primary'}`}>
-                                                        {!isPrimary ? <AlertTriangle className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
+                                    <div key={rule.id} className="bg-white/5 border border-white/10 rounded-2xl p-5 flex flex-col gap-6">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <div className="font-mono text-[10px] font-bold tracking-wider text-white/30 uppercase bg-white/5 px-2 py-0.5 rounded">
+                                                    {rule.name || `RULE ${rule.id.slice(0, 8)}`}
+                                                </div>
+                                                {rule.cooldown_ms && (
+                                                    <div className="flex items-center gap-1.5 font-mono text-[9px] font-bold text-amber-400 opacity-60">
+                                                        <Activity className="w-3 h-3" />
+                                                        {Math.round(rule.cooldown_ms / 60000)}m
                                                     </div>
-                                                    <div>
-                                                        <div className="flex items-center gap-2">
-                                                            {(activeAddon?.metadata?.customLogo || activeAddon?.manifest.logo) && (
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="flex items-center gap-2 mr-2">
+                                                    <span className={`text-[10px] uppercase font-bold ${rule.isActive ? 'text-primary' : 'text-white/30'}`}>
+                                                        {rule.isActive ? 'Enabled' : 'Disabled'}
+                                                    </span>
+                                                    <Switch
+                                                        checked={rule.isActive}
+                                                        onCheckedChange={(c) => updateRule(rule.id, {
+                                                            isActive: c,
+                                                            isAutomatic: c
+                                                        })}
+                                                    />
+                                                </div>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className={`h-8 w-8 hover:bg-white/10 ${simulatingRuleId === rule.id ? 'text-primary anima-pulse' : 'text-white/50'}`}
+                                                    onClick={() => handleSimulateRule(rule.id, rule.priorityChain)}
+                                                    title="Simulate Autopilot Health Check"
+                                                >
+                                                    <FlaskConical className="w-4 h-4" />
+                                                </Button>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-white/10 hover:text-white text-white/50" onClick={() => handleDuplicateRule(rule)} title="Duplicate this chain">
+                                                    <Copy className="w-4 h-4" />
+                                                </Button>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-red-500/20 hover:text-red-400 text-white/50" onClick={() => removeRule(rule.id)}>
+                                                    <Trash2 className="w-4 h-4" />
+                                                </Button>
+                                            </div>
+                                        </div>
+
+                                        {/* Vertical Chain Layout */}
+                                        <div className="flex flex-col relative w-full px-2">
+                                            {rule.priorityChain.map((url, idx) => {
+                                                const addon = addons.find(a => a.transportUrl === url)
+                                                const isActiveInRule = url === rule.activeUrl
+                                                const isTier1 = idx === 0
+                                                const isFailedOver = isActiveInRule && !isTier1
+
+                                                return (
+                                                    <div key={idx} className="flex flex-col">
+                                                        <div
+                                                            className="flex items-center gap-3 py-3 px-4 rounded-xl relative z-10 transition-colors"
+                                                            style={isActiveInRule
+                                                                ? (isTier1
+                                                                    ? { background: 'rgba(255,255,255,0.08)', borderLeft: '3px solid hsl(var(--primary))' }
+                                                                    : { background: 'rgba(245,158,11,0.08)', borderLeft: '3px solid #f59e0b' })
+                                                                : { background: 'rgba(255,255,255,0.03)', borderLeft: '3px solid transparent' }
+                                                            }
+                                                        >
+                                                            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
+                                                                {idx + 1}
+                                                            </div>
+                                                            {(addon?.metadata?.customLogo || addon?.manifest.logo) && (
                                                                 <img
-                                                                    src={activeAddon.metadata?.customLogo || activeAddon.manifest.logo}
+                                                                    src={addon.metadata?.customLogo || addon.manifest.logo}
                                                                     alt=""
-                                                                    className="w-5 h-5 rounded object-contain bg-muted/50 p-0.5"
-                                                                    onError={(e) => {
-                                                                        e.currentTarget.style.display = 'none'
-                                                                    }}
+                                                                    className="w-6 h-6 rounded object-contain shrink-0"
+                                                                    onError={(e) => { e.currentTarget.style.display = 'none' }}
                                                                 />
                                                             )}
-                                                            <div className="font-bold flex items-center gap-2">
-                                                                {activeAddon?.metadata?.customName || identifyAddon(rule.activeUrl || '', activeAddon?.manifest).name}
-                                                                {!isPrimary && <span className="text-[10px] bg-amber-500 text-white px-1.5 py-0.5 rounded uppercase font-bold">Failed Over</span>}
+                                                            <span className="font-bold truncate text-sm flex-1">{addon?.metadata?.customName || identifyAddon(url, addon?.manifest).name}</span>
+
+                                                            <div className="flex items-center gap-2 shrink-0">
+                                                                {isTier1 && <span className="text-[8px] font-mono font-bold text-primary bg-primary/10 px-1.5 py-0.5 rounded">PRIMARY</span>}
+                                                                {isFailedOver && <span className="text-[8px] font-mono font-bold text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">ACTIVE</span>}
                                                             </div>
                                                         </div>
-                                                        <div className="text-[10px] text-muted-foreground font-mono">
-                                                            ID: {rule.id.slice(0, 8)}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <div className="flex items-center gap-2 mr-2">
-                                                        <span className={`text-[10px] uppercase font-bold ${rule.isActive ? 'text-primary' : 'text-muted-foreground'}`}>
-                                                            {rule.isActive ? 'Enabled' : 'Disabled'}
-                                                        </span>
-                                                        <Switch
-                                                            checked={rule.isActive}
-                                                            onCheckedChange={(c) => updateRule(rule.id, {
-                                                                isActive: c,
-                                                                isAutomatic: c
-                                                            })}
-                                                        />
-                                                    </div>
-                                                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleDuplicateRule(rule)} title="Duplicate this chain">
-                                                        <Copy className="w-4 h-4 text-muted-foreground" />
-                                                    </Button>
-                                                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeRule(rule.id)}>
-                                                        <Trash2 className="w-4 h-4 text-destructive" />
-                                                    </Button>
-                                                </div>
-                                            </div>
-
-                                            <div className="flex flex-wrap gap-2 items-center text-xs">
-                                                {rule.priorityChain.map((url, idx) => {
-                                                    const addon = addons.find(a => a.transportUrl === url)
-                                                    const isActiveInRule = url === rule.activeUrl
-                                                    const reliability = rule.stabilization?.[url] || 0
-
-                                                    return (
-                                                        <div key={idx} className="flex items-center gap-1 group">
-                                                            <div className={`px-2 py-1 rounded flex items-center gap-2 border ${isActiveInRule ? 'bg-primary text-primary-foreground border-primary' : 'bg-muted border-transparent'}`}>
-                                                                <span className="opacity-70 font-bold">{idx + 1}</span>
-                                                                {(addon?.metadata?.customLogo || addon?.manifest.logo) && (
-                                                                    <img
-                                                                        src={addon.metadata?.customLogo || addon.manifest.logo}
-                                                                        alt=""
-                                                                        className="w-4 h-4 rounded object-contain"
-                                                                        onError={(e) => {
-                                                                            e.currentTarget.style.display = 'none'
-                                                                        }}
-                                                                    />
-                                                                )}
-                                                                <span className="font-medium truncate max-w-[100px]">{addon?.metadata?.customName || identifyAddon(url, addon?.manifest).name}</span>
-                                                                {reliability > 0 && (
-                                                                    <span className={`text-[8px] px-1 rounded ${isActiveInRule ? 'bg-white/20' : 'bg-primary/10 text-primary'}`} title="Consecutive successful health checks">
-                                                                        {reliability} pts
-                                                                    </span>
-                                                                )}
+                                                        {idx < rule.priorityChain.length - 1 && (
+                                                            <div className="w-full flex justify-center py-1">
+                                                                <div className="w-px h-4 bg-white/10 relative">
+                                                                    <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 border-l-4 border-r-4 border-t-[4px] border-l-transparent border-r-transparent border-t-white/10" />
+                                                                </div>
                                                             </div>
-                                                            {idx < rule.priorityChain.length - 1 && <ArrowRight className="w-3 h-3 text-muted-foreground opacity-30" />}
-                                                        </div>
-                                                    )
-                                                })}
-                                            </div>
+                                                        )}
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
 
-                                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t text-muted-foreground">
-                                                <div className="flex gap-6 sm:gap-8">
-                                                    <div className="flex flex-col gap-0.5" title="High-Scale optimization: Database persistence occurs only during system events to maximize disk longevity.">
-                                                        <span className="text-[9px] uppercase font-bold opacity-60">Reliability</span>
-                                                        <span className="text-primary font-bold flex items-center gap-1.5 text-xs">
-                                                            {Object.values(rule.stabilization || {}).reduce((a: number, b: unknown) => a + (Number(b) || 0), 0) === 0
-                                                                ? <>Optimized & Healthy <Check className="w-3.5 h-3.5 text-green-500" /></>
-                                                                : `${Object.values(rule.stabilization || {}).reduce((a: number, b: unknown) => a + (Number(b) || 0), 0)} Points`}
-                                                        </span>
+                                        {/* Simulation Results Panel */}
+                                        {simulatingRuleId === rule.id && (
+                                            <div className="mx-2 p-4 rounded-xl bg-primary/5 border border-primary/20 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2 text-primary">
+                                                        <FlaskConical className="w-4 h-4" />
+                                                        <span className="text-xs font-bold uppercase tracking-widest">Autopilot Simulation</span>
                                                     </div>
-                                                    <div className="flex flex-col gap-0.5">
-                                                        <span className="text-[9px] uppercase font-bold opacity-60">Last Check</span>
-                                                        <span className="text-foreground font-medium text-xs">
-                                                            {formatDistanceToNow(lastWorkerRun || (isValidDate && lastCheckDate) || new Date(), { addSuffix: true })}
-                                                        </span>
-                                                    </div>
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        className="h-6 px-2 text-[10px] font-bold text-white/30 hover:text-white"
+                                                        onClick={() => setSimulatingRuleId(null)}
+                                                    >
+                                                        CLOSE
+                                                    </Button>
                                                 </div>
-                                                <Button variant="link" size="sm" className="h-auto p-0 text-xs opacity-70 hover:opacity-100" onClick={() => {
-                                                    setChain(rule.priorityChain)
-                                                    setEditingRuleId(rule.id)
-                                                    window.scrollTo({ top: 0, behavior: 'smooth' })
-                                                }}>Edit Chain</Button>
+
+                                                <div className="space-y-2">
+                                                    {rule.priorityChain.map((url, idx) => {
+                                                        const result = simulationResults[url]
+                                                        const addon = addons.find(a => a.transportUrl === url)
+                                                        return (
+                                                            <div key={idx} className="flex items-center justify-between text-xs">
+                                                                <div className="flex items-center gap-2 text-white/70">
+                                                                    <span className="font-mono text-[10px] opacity-30">T{idx + 1}</span>
+                                                                    <span className="truncate max-w-[150px]">{addon?.metadata?.customName || identifyAddon(url, addon?.manifest).name}</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    {result?.checking ? (
+                                                                        <Loader2 className="w-3 h-3 text-primary animate-spin" />
+                                                                    ) : result?.healthy ? (
+                                                                        <Check className="w-3 h-3 text-emerald-500" />
+                                                                    ) : result ? (
+                                                                        <div className="flex items-center gap-1.5">
+                                                                            <span className="text-[10px] text-red-400/50 italic">{result.error || 'Offline'}</span>
+                                                                            <XCircle className="w-3 h-3 text-red-500" />
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="w-3 h-3 rounded-full border border-white/10" />
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )
+                                                    })}
+                                                </div>
+
+                                                {/* Conclusion */}
+                                                {!rule.priorityChain.some(url => simulationResults[url]?.checking) && Object.keys(simulationResults).length > 0 && (
+                                                    <div className="pt-2 border-t border-primary/10">
+                                                        <p className="text-[11px] text-white/90 leading-relaxed">
+                                                            <span className="font-bold text-primary mr-1">CONCLUSION:</span>
+                                                            {(() => {
+                                                                const primaryUrl = rule.priorityChain[0]
+                                                                const isPrimaryHealthy = simulationResults[primaryUrl]?.healthy
+                                                                if (isPrimaryHealthy) {
+                                                                    const addon = addons.find(a => a.transportUrl === primaryUrl)
+                                                                    return `${addon?.metadata?.customName || identifyAddon(primaryUrl, addon?.manifest).name} is healthy — no failover needed.`
+                                                                }
+
+                                                                const healthyFallback = rule.priorityChain.find((url, idx) => idx > 0 && simulationResults[url]?.healthy)
+                                                                if (healthyFallback) {
+                                                                    const fallbackAddon = addons.find(a => a.transportUrl === healthyFallback)
+                                                                    const primaryAddon = addons.find(a => a.transportUrl === primaryUrl)
+                                                                    return `Would failover from ${primaryAddon?.metadata?.customName || identifyAddon(primaryUrl, primaryAddon?.manifest).name} to ${fallbackAddon?.metadata?.customName || identifyAddon(healthyFallback, fallbackAddon?.manifest).name} (first healthy fallback).`
+                                                                }
+
+                                                                return "All addons in the chain are currently unreachable. Rule would stay in its current state."
+                                                            })()}
+                                                        </p>
+                                                    </div>
+                                                )}
                                             </div>
-                                        </CardContent>
-                                    </Card>
+                                        )}
+
+                                        {/* Status Footer */}
+                                        <div className="flex items-center justify-between border-t border-white/10 pt-4 px-2">
+                                            <div className="flex items-center gap-2">
+                                                <span
+                                                    className="w-2.5 h-2.5 rounded-full"
+                                                    style={isPrimary
+                                                        ? { background: '#22c55e', boxShadow: '0 0 10px rgba(34,197,94,0.5)' }
+                                                        : { background: '#f59e0b', boxShadow: '0 0 10px rgba(245,158,11,0.5)' }}
+                                                />
+                                                <span className="font-bold text-sm tracking-tight">{isPrimary ? 'Healthy' : 'Degraded'}</span>
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest">
+                                                    {isValidDate && lastCheckDate ? formatDistanceToNow(lastCheckDate, { addSuffix: true }) : 'Pending'}
+                                                </span>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="h-6 p-0 text-white/40 hover:text-white"
+                                                    onClick={() => {
+                                                        setChain(rule.priorityChain)
+                                                        setRuleName(rule.name || "")
+                                                        setCooldownMinutes(rule.cooldown_ms ? (rule.cooldown_ms / 60000).toString() : "")
+                                                        setEditingRuleId(rule.id)
+                                                        window.scrollTo({ top: 0, behavior: 'smooth' })
+                                                    }}
+                                                >
+                                                    <Pencil className="w-3.5 h-3.5" />
+                                                </Button>
+                                            </div>
+                                        </div>
+                                    </div>
                                 )
                             })}
                         </div>
@@ -502,7 +687,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                 </TabsContent>
 
                 <TabsContent value="history">
-                    <FailoverHistory />
+                    <FailoverHistory addons={addons} />
                 </TabsContent>
             </Tabs>
 
@@ -518,8 +703,25 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
     )
 }
 
-function FailoverHistory() {
+function FailoverHistory({ addons }: { addons: any[] }) {
     const { logs, initialize, clearLogs } = useHistoryStore()
+
+    const resolveUrlToName = (url: string) => {
+        if (!url || !url.startsWith('http')) return url;
+        const cleanUrl = url.replace(/[,.]$/, '');
+        const addon = addons.find(a => a.manifestUrl === cleanUrl || a.transportUrl === cleanUrl);
+        let name = cleanUrl;
+        if (addon) {
+            name = addon.metadata?.customName || identifyAddon(cleanUrl, addon.manifest).name;
+        } else {
+            try {
+                name = new URL(cleanUrl).hostname;
+            } catch {
+                name = cleanUrl;
+            }
+        }
+        return url.replace(cleanUrl, name);
+    }
 
     useEffect(() => {
         initialize()
@@ -535,74 +737,80 @@ function FailoverHistory() {
     }
 
     return (
-        <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-4">
+            <div className="flex items-center justify-between mb-4">
                 <div>
-                    <CardTitle>Event Log</CardTitle>
-                    <CardDescription>Recent failover and recovery actions.</CardDescription>
+                    <h3 className="text-lg font-bold">Event Log</h3>
+                    <p className="text-sm text-white/50">Recent failover and recovery actions.</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={clearLogs}>
+                <Button variant="outline" size="sm" onClick={clearLogs} className="bg-white/5 border-white/10 hover:bg-white/10 text-white/50 hover:text-white">
                     Clear Log
                 </Button>
-            </CardHeader>
-            <CardContent>
-                <Table>
-                    <TableHeader>
-                        <TableRow>
-                            <TableHead>Time</TableHead>
-                            <TableHead>Event</TableHead>
-                            <TableHead>Chain Context</TableHead>
-                            <TableHead>Message</TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        {logs.map((log) => {
-                            const logDate = log.timestamp ? new Date(log.timestamp) : null;
-                            const isValidLogDate = logDate && !isNaN(logDate.getTime());
+            </div>
+            <div className="relative pl-6 space-y-6 before:absolute before:inset-y-0 before:left-[11px] before:border-l-[2px] before:border-white/5 py-2">
+                {logs.map((log) => {
+                    const logDate = log.timestamp ? new Date(log.timestamp) : null;
+                    const isValidLogDate = logDate && !isNaN(logDate.getTime());
 
-                            return (
-                                <TableRow key={log.id}>
-                                    <TableCell className="whitespace-nowrap font-medium text-xs text-muted-foreground">
+                    let Icon = Activity;
+                    let color = 'rgba(255,255,255,0.2)';
+                    let bg = '#1f2937';
+
+                    if (log.type === 'failover') {
+                        Icon = AlertTriangle;
+                        color = '#f87171';
+                        bg = 'rgba(248,113,113,0.1)';
+                    } else if (log.type === 'recovery') {
+                        Icon = Check;
+                        color = '#4ade80';
+                        bg = 'rgba(74,222,128,0.1)';
+                    } else if (log.type === 'self-healing') {
+                        Icon = Activity;
+                        color = '#60a5fa';
+                        bg = 'rgba(96,165,250,0.1)';
+                    }
+
+                    return (
+                        <div key={log.id} className="relative">
+                            <div className="absolute -left-6 top-0 w-6 h-6 rounded-full flex items-center justify-center border-2 border-[#12121c]" style={{ backgroundColor: '#12121c' }}>
+                                <div className="w-5 h-5 rounded-full flex items-center justify-center" style={{ backgroundColor: bg }}>
+                                    <Icon className="w-3 h-3" style={{ color }} />
+                                </div>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <div className="flex items-center justify-between">
+                                    <span style={{ color }} className="text-xs font-bold uppercase tracking-wider">{log.type}</span>
+                                    <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest">
                                         {isValidLogDate && logDate ? formatDistanceToNow(logDate, { addSuffix: true }) : 'Unknown time'}
-                                    </TableCell>
-                                    <TableCell>
-                                        <BadgeForType type={log.type} />
-                                    </TableCell>
-                                    <TableCell className="text-sm">
-                                        {log.metadata?.chain ? (
-                                            <div className="flex items-center gap-1 text-[10px] opacity-70">
-                                                {(log.metadata.chain as any[]).length} tiers
-                                                <ArrowRight className="w-2 h-2" />
-                                                {(log.metadata.activeUrl as string)?.slice(-8)}
+                                    </span>
+                                </div>
+                                <div className="text-sm font-medium">
+                                    {log.metadata?.chain ? (
+                                        <div className="flex items-center gap-1.5 opacity-90 text-xs">
+                                            <span className="text-white/50">Chain:</span>
+                                            <div className="flex gap-1 overflow-hidden" style={{ maxWidth: '300px' }}>
+                                                {(log.metadata.chain as string[]).map((url, i, arr) => (
+                                                    <span key={i} className="flex items-center">
+                                                        <span className="truncate max-w-[120px]" title={url}>{resolveUrlToName(url)}</span>
+                                                        {i < arr.length - 1 && <ArrowRight className="w-3 h-3 text-white/30 mx-1 shrink-0" />}
+                                                    </span>
+                                                ))}
                                             </div>
-                                        ) : (
-                                            <div className="text-xs truncate max-w-[100px]">
-                                                {log.primaryName || 'System'}
-                                            </div>
-                                        )}
-                                    </TableCell>
-                                    <TableCell className="text-sm text-muted-foreground">
-                                        {log.message}
-                                    </TableCell>
-                                </TableRow>
-                            )
-                        })}
-                    </TableBody>
-                </Table>
-            </CardContent>
-        </Card>
+                                        </div>
+                                    ) : (
+                                        <div className="truncate">
+                                            {resolveUrlToName(log.primaryName || 'System')}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="text-xs text-white/50 leading-relaxed mt-0.5">
+                                    {log.message.split(' ').map(word => word.startsWith('http') ? resolveUrlToName(word) : word).join(' ')}
+                                </div>
+                            </div>
+                        </div>
+                    )
+                })}
+            </div>
+        </div>
     )
-}
-
-function BadgeForType({ type }: { type: string }) {
-    switch (type) {
-        case 'failover':
-            return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-destructive/10 text-destructive">Failover</span>
-        case 'recovery':
-            return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-600 dark:text-green-400">Recovery</span>
-        case 'self-healing':
-            return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400">Self-Healing</span>
-        default:
-            return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-muted text-muted-foreground">Info</span>
-    }
 }

@@ -124,7 +124,9 @@ export function AccountPickerDialog({
                                             <User className="h-4 w-4 text-primary" />
                                         </div>
                                         <div className="min-w-0">
-                                            <p className="text-sm font-medium truncate">{account.name}</p>
+                                            <div className="flex items-center gap-2">
+                                                <p className="text-sm font-medium truncate">{account.name}</p>
+                                            </div>
                                             <p className="text-xs text-muted-foreground truncate">{account.email}</p>
                                         </div>
                                     </div>

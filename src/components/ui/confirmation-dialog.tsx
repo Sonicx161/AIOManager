@@ -43,12 +43,8 @@ export function ConfirmationDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            {typeof description === "string" ? (
-              description
-            ) : (
-              <div className="space-y-2">{description}</div>
-            )}
+          <DialogDescription className="space-y-2">
+            {description}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

@@ -38,6 +38,23 @@ const URL_PATTERNS = [
 ]
 
 /**
+ * Generates a readable name from a transport URL hostname.
+ */
+export function getHostnameIdentifier(transportUrl: string): string {
+    try {
+        const hostname = new URL(transportUrl).hostname
+        return hostname
+            .replace(/^www\./, '')
+            .replace(/\.[^.]+$/, '')
+            .split(/[.-]/)
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+            .join(' ')
+    } catch {
+        return 'Unknown Addon'
+    }
+}
+
+/**
  * Robustly identifies an addon even if the manifest is missing or partial.
  * Non-destructive: Preserves all existing fields (catalogs, behaviorHints, etc.) while filling gaps.
  */
@@ -72,27 +89,6 @@ export function identifyAddon(transportUrl: string, manifest?: Partial<AddonDesc
         }
     }
 
-    // 3. Fallback: hostname-based identification
-    if (isUnknown) {
-        if (!transportUrl || !transportUrl.startsWith('http')) {
-            return wrap({})
-        }
-
-        try {
-            const hostname = new URL(transportUrl).hostname
-            const readableName = hostname
-                .replace(/^www\./, '')
-                .replace(/\.[^.]+$/, '')
-                .split(/[.-]/)
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ')
-
-            return wrap({ name: readableName, description: `Addon from ${hostname}` })
-        } catch {
-            return wrap({})
-        }
-    }
-
-    // 4. Return existing manifest with core defaults ensured
+    // 3. Fallback: Return empty wrap (No baking of fallbacks into the manifest object)
     return wrap({})
 }

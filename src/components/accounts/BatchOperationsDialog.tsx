@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 // import { Textarea } from '@/components/ui/textarea' 
+import { getAddonGroupKey } from '@/lib/utils'
 import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore } from '@/store/accountStore'
 import { useProfileStore } from '@/store/profileStore'
@@ -18,12 +19,11 @@ import { StremioAccount } from '@/types/account'
 import { BulkResult } from '@/types/saved-addon'
 import { AlertTriangle, CheckCircle2, Copy, Globe, GripVertical, LayoutGrid, Library, Loader2, PlusCircle, ShieldAlert, ShieldCheck, Trash2, Zap, UserMinus, FileDown, Search, Tags, X } from 'lucide-react'
 import { useState, useEffect } from 'react'
-import { normalizeAddonUrl } from '@/lib/utils'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 
 
-interface BulkActionsDialogProps {
+interface BatchOperationsDialogProps {
   selectedAccounts: StremioAccount[]
 
   // We need all accounts for cloning (to pick source)
@@ -63,7 +63,7 @@ const ACTION_TITLES: Record<BulkAction, string> = {
   'unprotect-all': 'Unprotect All'
 }
 
-export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose }: BulkActionsDialogProps) {
+export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onClose }: BatchOperationsDialogProps) {
   const {
     library,
     getAllTags,
@@ -130,13 +130,12 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
   const isInvalidTag = isTagAction && selectedInstallTagName !== '' && currentTagAddonsCount === 0
 
   // Collect all unique addons across selected accounts, and track which accounts have them
-  // We key by Normalize URL to distinguish different configurations of the same addon
+  // We key by canonical URL to correctly group UUID-based configurations of the same addon
   const allAddonsMap = new Map<string, { addon: any, accounts: StremioAccount[] }>()
 
-  selectedAccounts.forEach(acc => {
-    acc.addons.forEach(addon => {
-      // Use normalized URL as key to distinguish configs
-      const key = normalizeAddonUrl(addon.transportUrl)
+  selectedAccounts.forEach((acc: StremioAccount) => {
+    acc.addons.forEach((addon: any) => {
+      const key = getAddonGroupKey(addon)
       if (!allAddonsMap.has(key)) {
         allAddonsMap.set(key, { addon, accounts: [] })
       }
@@ -184,7 +183,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
     setError(null)
     setSuccess(false)
 
-    const accountsData = selectedAccounts.map((a) => ({
+    const accountsData = selectedAccounts.map((a: StremioAccount) => ({
       id: a.id,
       authKey: a.authKey,
     }))
@@ -385,7 +384,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-semibold flex items-center gap-2 uppercase tracking-wide text-muted-foreground">
               <LayoutGrid className="h-4 w-4" />
-              Select Action
+              Operation Mode
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -543,10 +542,10 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             {/* Add Saved Addons */}
             {action === 'add-saved-addons' && (
               <div className="space-y-3">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <Label>Select Saved Addons</Label>
-                  <div className="flex gap-3 items-center">
-                    <div className="relative w-32 mr-1">
+                  <div className="flex gap-3 items-center w-full sm:w-auto">
+                    <div className="relative flex-1 sm:w-32">
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
                       <Input
                         placeholder="Filter..."
@@ -563,22 +562,24 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                         </button>
                       )}
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-primary px-2"
-                      onClick={() => setSelectedSavedAddonIds(new Set(sortedSavedAddons.map(a => a.id)))}
-                    >
-                      Select All
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-muted-foreground px-2"
-                      onClick={() => setSelectedSavedAddonIds(new Set())}
-                    >
-                      Clear
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-primary px-2"
+                        onClick={() => setSelectedSavedAddonIds(new Set(sortedSavedAddons.map(a => a.id)))}
+                      >
+                        All
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-muted-foreground px-2"
+                        onClick={() => setSelectedSavedAddonIds(new Set())}
+                      >
+                        None
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 <div className="border rounded-md max-h-60 overflow-y-auto bg-background">
@@ -841,7 +842,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             {/* Remove Addons */}
             {action === 'remove-addons' && (
               <div className="space-y-3">
-                <div className="flex justify-between items-center bg-card p-1">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-card p-1 gap-3">
                   <div className="space-y-0.5">
                     <Label>Select Addons to Remove</Label>
                     <div className="flex items-center gap-2">
@@ -853,8 +854,8 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                       <span className="text-[10px] text-muted-foreground">Show Protected</span>
                     </div>
                   </div>
-                  <div className="flex gap-2 items-center">
-                    <div className="relative w-32 mr-2">
+                  <div className="flex gap-2 items-center w-full sm:w-auto">
+                    <div className="relative flex-1 sm:w-32">
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
                       <Input
                         placeholder="Filter..."
@@ -863,22 +864,24 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                         onChange={e => setFilterQuery(e.target.value)}
                       />
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-primary px-2"
-                      onClick={() => setSelectedAddonIds(new Set(allAddons.map(i => i.addon.transportUrl)))}
-                    >
-                      Select All
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-muted-foreground px-2"
-                      onClick={() => setSelectedAddonIds(new Set())}
-                    >
-                      None
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-primary px-2"
+                        onClick={() => setSelectedAddonIds(new Set(allAddons.map(i => i.addon.transportUrl)))}
+                      >
+                        All
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-muted-foreground px-2"
+                        onClick={() => setSelectedAddonIds(new Set())}
+                      >
+                        None
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 <div className="border rounded-md max-h-60 overflow-y-auto bg-background">
@@ -948,7 +951,7 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
             {/* Update Addons */}
             {action === 'update-addons' && (
               <div className="space-y-3">
-                <div className="flex justify-between items-center bg-card p-1">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-card p-1 gap-3">
                   <div className="space-y-0.5">
                     <Label>Select Addons to Update</Label>
                     <div className="flex items-center gap-2">
@@ -960,8 +963,8 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                       <span className="text-[10px] text-muted-foreground">Show Protected</span>
                     </div>
                   </div>
-                  <div className="flex gap-2 items-center">
-                    <div className="relative w-32 mr-2">
+                  <div className="flex gap-2 items-center w-full sm:w-auto">
+                    <div className="relative flex-1 sm:w-32">
                       <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
                       <Input
                         placeholder="Filter..."
@@ -970,22 +973,24 @@ export function BulkActionsDialog({ selectedAccounts, allAccounts = [], onClose 
                         onChange={e => setFilterQuery(e.target.value)}
                       />
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-primary px-2"
-                      onClick={() => setSelectedUpdateAddonIds(new Set(allAddons.map(i => i.addon.transportUrl)))}
-                    >
-                      Select All
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs text-muted-foreground px-2"
-                      onClick={() => setSelectedUpdateAddonIds(new Set())}
-                    >
-                      None
-                    </Button>
+                    <div className="flex gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-primary px-2"
+                        onClick={() => setSelectedUpdateAddonIds(new Set(allAddons.map(i => i.addon.transportUrl)))}
+                      >
+                        All
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-muted-foreground px-2"
+                        onClick={() => setSelectedUpdateAddonIds(new Set())}
+                      >
+                        None
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground mb-2">

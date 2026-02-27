@@ -9,6 +9,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
 import { encrypt, decrypt, generateRandomKey } from './crypto.js'
+// let LZString import removed - obsolete
 
 let PRIMARY_KEY = process.env.ENCRYPTION_KEY
 let FALLBACK_KEYS = []
@@ -21,10 +22,11 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // --- Configuration ---
-const VERSION = '1.7.5'
-const PORT = process.env.PORT || 1610
+const VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version
+const PORT = process.env.PORT || 16100
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const PROXY_CONCURRENCY_LIMIT = parseInt(process.env.PROXY_CONCURRENCY_LIMIT || '50')
+const MAX_QUEUE_SIZE = 500
 const DOMAIN_THROTTLE_MS = 200
 const STREMIO_API = 'https://api.strem.io/api'
 
@@ -59,7 +61,17 @@ const processQueue = async () => {
     }
 
     // Mark domain as busy
-    if (domainLastRequestTime.size > 1000) domainLastRequestTime.clear()
+    if (domainLastRequestTime.size > 1000) {
+        const pruneThreshold = Date.now() - (5 * 60 * 1000) // 5 minutes
+        for (const [domain, lastTime] of domainLastRequestTime.entries()) {
+            if (lastTime < pruneThreshold) domainLastRequestTime.delete(domain)
+        }
+        // If still over limit after pruning stale, clear oldest 20%
+        if (domainLastRequestTime.size > 1000) {
+            const keys = Array.from(domainLastRequestTime.keys()).slice(0, 200)
+            keys.forEach(k => domainLastRequestTime.delete(k))
+        }
+    }
     domainLastRequestTime.set(origin, now)
     activeProxyRequests++
 
@@ -76,6 +88,10 @@ const processQueue = async () => {
 
 const enqueueProxyRequest = (url, task) => {
     return new Promise((resolve, reject) => {
+        if (proxyQueue.length >= MAX_QUEUE_SIZE) {
+            reject(new Error('Proxy queue saturated. Please try again in a moment.'))
+            return
+        }
         proxyQueue.push({ url, task, resolve, reject })
         processQueue()
     })
@@ -208,9 +224,21 @@ if (db.type === 'sqlite') {
     await db.pragma('cache_size = -2000') // 2MB cache
     await db.pragma('auto_vacuum = INCREMENTAL') // Keeps file small over time
 
-    // Run a manual vacuum on startup to clean up bloat if needed
-    fastify.log.info({ category: 'Database' }, 'Running startup maintenance (VACUUM)...')
-    await db.exec('VACUUM')
+    // Schedule VACUUM weekly instead of on every startup (prevents blocking request handling)
+    const VACUUM_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+    const scheduleVacuum = () => {
+        setTimeout(async () => {
+            try {
+                fastify.log.info({ category: 'Database' }, 'Running scheduled weekly VACUUM...')
+                await db.exec('VACUUM')
+                fastify.log.info({ category: 'Database' }, 'VACUUM complete.')
+            } catch (e) {
+                fastify.log.warn({ category: 'Database' }, `VACUUM failed: ${e.message}`)
+            }
+            scheduleVacuum() // reschedule
+        }, VACUUM_INTERVAL_MS)
+    }
+    scheduleVacuum()
 }
 
 // Initialize Schema
@@ -231,12 +259,14 @@ const schema = `
     active_url TEXT,
     webhook_url TEXT,
     stabilization TEXT,
-    is_active INTEGER DEFAULT 1,
     is_automatic INTEGER DEFAULT 1,
     last_check BIGINT,
     last_notification BIGINT,
-    updated_at BIGINT
+    updated_at BIGINT,
+    name TEXT,
+    cooldown_ms INTEGER
   );
+
 
   CREATE TABLE IF NOT EXISTS failover_history (
     id TEXT PRIMARY KEY,
@@ -255,8 +285,6 @@ const schema = `
 `
 
 // Execute schema creation
-// PostgreSQL requires splitting multi-statement strings if using client.query sometimes,
-// but db.exec should handle it.
 await db.exec(schema)
 
 // Migration: Add addon_list column if it doesn't exist (for existing databases)
@@ -268,6 +296,8 @@ try {
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS stabilization TEXT`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_notification BIGINT`) } catch (e) { }
+        try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS name TEXT`) } catch (e) { }
+        try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS cooldown_ms INTEGER`) } catch (e) { }
 
         // Migration: Ensure columns are TEXT/VARCHAR for encrypted strings, not JSONB
         // We use try/catch to avoid aborting if the types are already correct
@@ -290,6 +320,16 @@ try {
             await db.run(`ALTER TABLE autopilot_rules ADD COLUMN is_automatic INTEGER DEFAULT 1`)
             fastify.log.info({ category: 'Database' }, 'Migrated: Added is_automatic column to autopilot_rules')
         }
+        const hasName = tableInfo.some(col => col.name === 'name')
+        if (!hasName) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN name TEXT`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added name column to autopilot_rules')
+        }
+        const hasCooldownMs = tableInfo.some(col => col.name === 'cooldown_ms')
+        if (!hasCooldownMs) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN cooldown_ms INTEGER`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added cooldown_ms column to autopilot_rules')
+        }
         const hasWebhookUrl = tableInfo.some(col => col.name === 'webhook_url')
         if (!hasWebhookUrl) {
             await db.run(`ALTER TABLE autopilot_rules ADD COLUMN webhook_url TEXT`)
@@ -311,8 +351,13 @@ try {
 }
 
 // Register CORS
+// Supports CORS_ORIGINS env var: comma-separated list of allowed origins.
+// Falls back to origin: true (allow all) when unset — safe for self-hosted setups.
+const corsOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+    : true
 await fastify.register(cors, {
-    origin: true
+    origin: corsOrigins
 })
 
 // Register Gzip Compression (Reduces network payload size by ~80%)
@@ -329,7 +374,8 @@ if (fs.existsSync(distPath)) {
     // SPA Routing: Fallback to index.html for all non-API 404s
     fastify.setNotFoundHandler((request, reply) => {
         if (request.url.startsWith('/api')) {
-            return reply.code(404).send({ error: `API route ${request.method}:${request.url} not found` })
+            reply.status(404);
+            return { error: `API route ${request.method}:${request.url} not found` }
         }
         return reply.sendFile('index.html')
     })
@@ -372,14 +418,15 @@ fastify.get('/api/health', {
 
     // Return 503 if DB is down (helps load balancers route away from unhealthy instances)
     if (!dbHealthy) {
-        return reply.code(503).send({
+        reply.status(503);
+        return {
             status: 'degraded',
             version: VERSION,
             mode: 'multi-tenant',
             optimized: true,
             database: { type: db.type, healthy: false },
             autopilot: { lastRun: lastWorkerRun, running: isWorkerRunning }
-        })
+        }
     }
 
     return {
@@ -420,21 +467,24 @@ fastify.get('/api/sync/:id', {
     const password = request.headers['x-sync-password']
 
     if (!id || !password) {
-        return reply.code(400).send({ error: 'Missing ID or Password header' })
+        reply.status(400);
+        return { error: 'Missing ID or Password header' }
     }
 
     try {
         const row = await db.get('SELECT value, password FROM kv_store WHERE key = $1', [id])
 
         if (!row) {
-            return reply.code(404).send({ error: 'Not found' })
+            reply.status(404);
+            return { error: 'Not found' }
         }
 
         // 1. Decrypt password for comparison (Silent migration fallback)
         const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
         if (decryptedPassword !== password) {
             fastify.log.warn({ category: 'Sync' }, `[${id}] Unauthorized: Password mismatch.`)
-            return reply.code(401).send({ error: 'Unauthorized: Invalid Password' })
+            reply.status(401);
+            return { error: 'Unauthorized: Invalid Password' }
         }
 
         // 2. Decrypt value for client (Silent migration fallback)
@@ -461,10 +511,11 @@ fastify.get('/api/sync/:id', {
                 syncData = {}
             }
         }
-        return reply.send(syncData && typeof syncData === 'object' ? syncData : {})
+        return syncData && typeof syncData === 'object' ? syncData : {}
     } catch (err) {
         fastify.log.error({ category: 'Sync' }, `[${id}] GET Error: ${err.message}`)
-        return reply.code(500).send({ error: 'Server error, please try again later.', details: err.message })
+        reply.status(500);
+        return { error: 'Server error, please try again later.', details: err.message }
     }
 })
 
@@ -505,7 +556,8 @@ fastify.get('/api/meta-proxy', {
 
     if (!isSafeUrl(url)) {
         fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request: ${truncateUrl(url)}`)
-        return reply.code(403).send({ error: 'Access Denied: Unsafe URL' })
+        reply.status(403);
+        return { error: 'Access Denied: Unsafe URL' }
     }
 
     return enqueueProxyRequest(url, async () => {
@@ -517,27 +569,31 @@ fastify.get('/api/meta-proxy', {
                 signal: controller.signal,
                 headers: {
                     'User-Agent': `AIOManager/${VERSION} (Internal Proxy; Hardened)`,
-                    'Accept': 'application/json, text/plain, */*'
+                    'Accept': 'application/json, text/plain, */*',
+                    ...(request.headers['authorization'] ? { 'Authorization': request.headers['authorization'] } : {})
                 }
             })
 
             clearTimeout(timeout)
 
             if (!response.ok) {
-                return reply.code(response.status).send({ error: `Upstream returned ${response.status}` })
+                reply.status(response.status);
+                return { error: `Upstream returned ${response.status}` }
             }
 
             // 1. Content-Type Check (Allow JSON/Text/Web, block Media)
             const contentType = response.headers.get('content-type') || ''
             if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
-                return reply.code(415).send({ error: 'Unsupported Media Type' })
+                reply.status(415);
+                return { error: 'Unsupported Media Type' }
             }
             if (contentType) reply.type(contentType)
 
             // 2. Size Limit Check (5MB)
             const contentLength = parseInt(response.headers.get('content-length') || '0')
             if (contentLength > 5 * 1024 * 1024) {
-                return reply.code(413).send({ error: 'Payload Too Large (>5MB)' })
+                reply.status(413);
+                return { error: 'Payload Too Large (>5MB)' }
             }
 
             // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
@@ -546,19 +602,77 @@ fastify.get('/api/meta-proxy', {
 
             // Double-check buffer size just in case content-length was missing/fake
             if (buffer.length > 5 * 1024 * 1024) {
-                return reply.code(413).send({ error: 'Payload Too Large (>5MB)' })
+                reply.status(413);
+                return { error: 'Payload Too Large (>5MB)' }
             }
 
-            return reply.send(buffer)
+            return buffer
         } catch (err) {
             if (err.name === 'AbortError') {
                 fastify.log.error({ category: 'MetaProxy' }, `Timeout after 6s: ${truncateUrl(url)}`)
-                return reply.code(504).send({ error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>6s)' })
+                reply.status(504);
+                return { error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>6s)' }
             }
             fastify.log.error({ category: 'MetaProxy' }, `Failed to fetch ${truncateUrl(url)}: ${err.message}`)
-            return reply.code(500).send({ error: 'Internal Proxy Error', details: err.message })
+            reply.status(500);
+            return { error: 'Internal Proxy Error', details: err.message }
         }
     })
+})
+
+// PROXY: Image Relayer (For html2canvas CORS bypass)
+fastify.get('/api/proxy-image', {
+    schema: {
+        querystring: {
+            type: 'object',
+            required: ['url'],
+            properties: {
+                url: { type: 'string', format: 'uri' }
+            }
+        }
+    }
+}, async (request, reply) => {
+    const { url } = request.query
+
+    if (!isSafeUrl(url)) {
+        reply.status(403);
+        return { error: 'Access Denied: Unsafe URL' }
+    }
+
+    try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 10000)
+
+        const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+                'User-Agent': `AIOManager/${VERSION} (Image Proxy)`,
+                'Accept': 'image/*'
+            }
+        })
+
+        clearTimeout(timeout)
+
+        if (!response.ok) {
+            reply.status(response.status);
+            return { error: `Upstream returned ${response.status}` }
+        }
+
+        const contentType = response.headers.get('content-type') || 'application/octet-stream'
+
+        const arrayBuffer = await response.arrayBuffer()
+        const buffer = Buffer.from(arrayBuffer)
+
+        reply.header('Access-Control-Allow-Origin', '*')
+        reply.header('Cache-Control', 'public, max-age=31536000')
+        reply.type(contentType)
+
+        return buffer
+    } catch (err) {
+        fastify.log.error({ category: 'Proxy' }, `Failed to fetch image proxy ${url}: ${err.message}`)
+        reply.status(500);
+        return { error: 'Image Proxy Error' }
+    }
 })
 
 // PROXY: Stremio API Proxy (Enables backend logging of Stremio activities)
@@ -591,7 +705,8 @@ fastify.post('/api/stremio-proxy', {
     } else {
         // Strict Whitelist: Block unknown methods to prevent abuse
         fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked unauthorized Stremio API call: ${type}`)
-        return reply.code(403).send({ error: 'Method Not Allowed' })
+        reply.status(403);
+        return { error: 'Method Not Allowed' }
     }
 
     // Stremio library items must have valid ISO dates, and StremThru's Go-based worker 
@@ -651,7 +766,7 @@ fastify.post('/api/stremio-proxy', {
                 })
             }
 
-            return reply.send(data)
+            return data
         } catch (err) {
             clearTimeout(timeoutId)
             lastError = err
@@ -666,7 +781,8 @@ fastify.post('/api/stremio-proxy', {
     }
 
     fastify.log.error({ category: 'Server' }, `Stremio Proxy Final Failure (${type}): ${lastError.message}`)
-    return reply.code(500).send({ error: 'Stremio API Proxy Failed', details: lastError.message })
+    reply.status(500);
+    return { error: 'Stremio API Proxy Failed', details: lastError.message }
 })
 
 // SYNC: Save State (Claim or Update)
@@ -687,7 +803,8 @@ fastify.post('/api/sync/:id', {
     const data = request.body
 
     if (!id || !password) {
-        return reply.code(400).send({ error: 'Missing ID or Password header' })
+        reply.status(400);
+        return { error: 'Missing ID or Password header' }
     }
 
     // Check existing
@@ -704,7 +821,8 @@ fastify.post('/api/sync/:id', {
         // Verify ownership (Decrypt legacy or fresh)
         const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
         if (decryptedPassword !== password) {
-            return reply.code(401).send({ error: 'Unauthorized: Password mismatch' })
+            reply.status(401);
+            return { error: 'Unauthorized: Password mismatch' }
         }
 
         // Update (Always Save Encrypted)
@@ -733,20 +851,23 @@ fastify.delete('/api/sync/:id', async (request, reply) => {
 
     if (!id || !password) {
         fastify.log.warn({ category: 'Server' }, `DELETE failed: Missing header for ID ${id}`)
-        return reply.code(400).send({ error: 'Missing ID or Password header' })
+        reply.status(400);
+        return { error: 'Missing ID or Password header' }
     }
 
     const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [id])
 
     if (!row) {
         fastify.log.warn({ category: 'Server' }, `DELETE failed: ID ${id} not found`)
-        return reply.code(404).send({ error: 'Not found' })
+        reply.status(404);
+        return { error: 'Not found' }
     }
 
     const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
     if (decryptedPassword !== password) {
         fastify.log.warn({ category: 'Server' }, `DELETE failed: Password mismatch for ID ${id}`)
-        return reply.code(401).send({ error: 'Unauthorized: Invalid Password' })
+        reply.status(401);
+        return { error: 'Unauthorized: Invalid Password' }
     }
 
     fastify.log.info({ category: 'Server' }, `Deleting account data for ID: ${id}`)
@@ -770,13 +891,15 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
         originalUrl = config.url
     } catch (e) {
         fastify.log.warn({ category: 'Proxy' }, `Failed to decode token: ${e.message}`)
-        return reply.code(400).send({ error: 'Invalid Token' })
+        reply.status(400);
+        return { error: 'Invalid Token' }
     }
 
     // SSRF Protection for Manifest Rewriter
     if (!isSafeUrl(originalUrl)) {
         fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request (Manifest Rewriter): ${truncateUrl(originalUrl)}`)
-        return reply.code(403).send({ error: 'Access Denied: Unsafe URL' })
+        reply.status(403);
+        return { error: 'Access Denied: Unsafe URL' }
     }
 
     return enqueueProxyRequest(targetDomain, async () => {
@@ -787,7 +910,8 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             const { url: originalUrl, name: customName, logo: customLogo } = config
 
             if (!originalUrl) {
-                return reply.code(400).send({ error: 'Invalid proxy configuration' })
+                reply.status(400);
+                return { error: 'Invalid proxy configuration' }
             }
 
             // 2. Resolve Target URL
@@ -808,7 +932,8 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             })
 
             if (!response.ok) {
-                return reply.code(response.status).send(response.statusText)
+                reply.status(response.status);
+                return response.statusText
             }
 
             // 4. Handle Manifest Modification
@@ -817,7 +942,7 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
                 if (customName) manifest.name = customName
                 if (customLogo) manifest.logo = customLogo
                 manifest.description = (manifest.description || '') + '\n[Proxied by AIOManager]'
-                return reply.send(manifest)
+                return manifest
             }
 
             // 5. Pass-through
@@ -826,14 +951,14 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
             const arrayBuffer = await response.arrayBuffer()
             const buffer = Buffer.from(arrayBuffer)
-            return reply.send(buffer)
+            return buffer
 
         } catch (err) {
             // PROXY RESILIENCE: If upstream is dead (offline), we MUST return a valid manifest
             // so Stremio doesn't delete the addon or show garbage.
             if ((pathSuffix === 'manifest.json' || pathSuffix === '') && customName) {
                 fastify.log.warn({ category: 'Proxy' }, `Upstream offline: ${targetDomain}. Serving fallback manifest for ${customName}.`)
-                return reply.send({
+                return {
                     id: 'proxy-offline-' + Date.now(),
                     name: customName,
                     version: '0.0.1',
@@ -842,11 +967,12 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
                     resources: [],
                     types: [],
                     catalogs: []
-                })
+                }
             }
 
             fastify.log.error({ category: 'Proxy' }, `Fatal Error: ${err.message}`)
-            return reply.code(502).send({ error: 'Proxy Error', details: 'Upstream Unreachable' })
+            reply.status(502);
+            return { error: 'Proxy Error', details: 'Upstream Unreachable' }
         }
     })
 })
@@ -969,6 +1095,55 @@ const sanitizeManifest = (manifest, transportUrl = '') => {
     }
 }
 
+/**
+ * Helper to check if a manifest is substantial (has real metadata)
+ */
+function isSubstantial(manifest) {
+    if (!manifest) return false;
+    // If it's the "Restoring Addon..." placeholder, it's NOT substantial
+    if (manifest.name === 'Restoring Addon...' || manifest.name === 'Unknown Addon') return false;
+    // If it's just a derived name from URL and has no description/logo/catalogs, it's likely not substantial enough
+    const hasMeta = manifest.logo || manifest.description || (manifest.catalogs && manifest.catalogs.length > 0) || (manifest.resources && manifest.resources.length > 0);
+    return !!hasMeta;
+}
+
+/**
+ * Internal manifest fetcher that respects proxy limits
+ */
+async function fetchManifestRaw(url, accountId) {
+    try {
+        const config = {
+            headers: { 'x-stremio-account': accountId || 'autopilot-sync' },
+            timeout: 10000
+        };
+        const response = await enqueueProxyRequest(url, config);
+        if (response.data && response.data.manifest) {
+            return response.data.manifest;
+        }
+    } catch (err) {
+        // Silent fail
+    }
+    return null;
+}
+
+/**
+ * Helper to compare two collections to avoid redundant writes.
+ */
+function areCollectionsDifferent(collA, collB) {
+    if (collA.length !== collB.length) return true;
+    for (let i = 0; i < collA.length; i++) {
+        const a = collA[i];
+        const b = collB[i];
+        if (normalizeAddonUrl(a.transportUrl).toLowerCase() !== normalizeAddonUrl(b.transportUrl).toLowerCase()) return true;
+        if (a.flags?.enabled !== b.flags?.enabled) return true;
+
+        // Deep manifest change detection (Version or substantial metadata change)
+        if (a.manifest?.version !== b.manifest?.version) return true;
+        if (a.manifest?.name !== b.manifest?.name) return true;
+    }
+    return false;
+}
+
 // Helper: Merge remote addons with local addons (Mirror of frontend accountStore.ts)
 const mergeAddons = (localAddons, remoteAddons, managedChain = []) => {
     const remoteAddonMap = new Map((remoteAddons || []).map(a => [normalizeAddonUrl(a.transportUrl).toLowerCase(), a]));
@@ -992,14 +1167,6 @@ const mergeAddons = (localAddons, remoteAddons, managedChain = []) => {
             local.manifest?.id === id &&
             managedChain.includes(normalizeAddonUrl(local.transportUrl).toLowerCase())
         );
-    };
-
-    // ANTI-WIPE GUARD: Favor local manifest if remote is 'broken' or 'ghost'.
-    const isSubstantial = (m) => {
-        if (!m || !m.name || m.name === 'Unknown Addon') return false;
-        const v = (m.version || '').replace(/^v/, '');
-        const hasResources = Array.isArray(m.resources) && m.resources.length > 0;
-        return v !== '0.0.0' && v !== '' && hasResources;
     };
 
     // 1. Mirror Local List (Source of Truth for Order & Failover Flags)
@@ -1120,10 +1287,6 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
                 // Try to find it in remote first
                 const remote = remoteAddons.find(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normUrl);
 
-                // CRITICAL FIX: Scavenge from the stored account addons if missing from remote
-                // Only scavenge if the stored manifest is substantial
-                const isSubstantial = (m) => m && m.name && m.name !== 'Unknown Addon' && m.name !== 'Restoring Addon...' && Array.isArray(m.resources) && m.resources.length > 0;
-
                 // NEW: Try to find by ID in remoteAddons (Detects URL Swap)
                 const remoteById = remoteAddons.find(a =>
                     a.manifest?.id &&
@@ -1133,17 +1296,30 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
                 const stored = (storedAddonList || []).find(a => normalizeAddonUrl(a.transportUrl).toLowerCase() === normUrl);
 
                 // HEALTH GUARD: Don't restore dead addons to Stremio
-                const isHealthy = await checkAddonHealthInternal(chain[idx])
+                let isHealthy = await checkAddonHealthInternal(chain[idx])
                 if (!isHealthy) {
                     fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Skipping restoration for DEAD addon: ${truncateUrl(chain[idx])}`)
                     continue
                 }
 
+                // RESTORATION UPGRADE: If healthy but manifest is placeholder, attempt background recovery
+                let recoveredManifest = null;
+                if (isHealthy) {
+                    const currentBest = remote?.manifest || remoteById?.manifest || stored?.manifest;
+                    if (!isSubstantial(currentBest)) {
+                        fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Restoration Recovery: Attempting manifest fetch for ${truncateUrl(chain[idx])}`);
+                        recoveredManifest = await fetchManifestRaw(chain[idx], accountId);
+                        if (recoveredManifest && isSubstantial(recoveredManifest)) {
+                            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Restoration Success! Recovered metadata for ${recoveredManifest.name}`);
+                        }
+                    }
+                }
+
                 if (remote) {
-                    baseAddonList.push(remote);
+                    baseAddonList.push(recoveredManifest ? { ...remote, manifest: recoveredManifest } : remote);
                 } else if (remoteById) {
                     fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Recovered manifest for swapped URL: ${truncateUrl(chain[idx])}`)
-                    baseAddonList.push({ ...remoteById, transportUrl: chain[idx] });
+                    baseAddonList.push({ ...remoteById, transportUrl: chain[idx], manifest: recoveredManifest || remoteById.manifest });
                 } else if (stored && isSubstantial(stored.manifest)) {
                     // Use the rich stored manifest
                     baseAddonList.push({
@@ -1152,6 +1328,7 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
                     });
                 } else {
                     // Disaster Recovery: Add a robust placeholder
+                    // Scavenge metadata to preserve custom names/icons even while offline
                     baseAddonList.push({
                         transportUrl: chain[idx],
                         manifest: {
@@ -1161,7 +1338,8 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
                             types: ['other'],
                             resources: []
                         },
-                        flags: { enabled: false }
+                        flags: { enabled: false },
+                        metadata: stored?.metadata || remoteById?.metadata || {}
                     });
                 }
             }
@@ -1187,15 +1365,20 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
             throw new Error('Sync produced an empty list, aborting to prevent wiping Stremio collection.')
         }
 
-        // 4. Push back
-        // High-Scale Optimization: Route Stremio API calls through the Proxy Queue 
-        // to honor the same concurrency/throttling limits as health checks.
-        await enqueueProxyRequest(STREMIO_API, () => axios.post(`${STREMIO_API}/addonCollectionSet`, {
-            type: 'AddonCollectionSet',
-            authKey,
-            addons: finalAddons
-        }))
-        fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Stremio updated (Mirror): ${finalAddons.length} addons actively installed.`)
+        // 4. Push back (Optimized with Dirty Check)
+        // Only write to Stremio if the collections actually differ.
+        if (areCollectionsDifferent(finalAddons, remoteAddons)) {
+            // High-Scale Optimization: Route Stremio API calls through the Proxy Queue 
+            // to honor the same concurrency/throttling limits as health checks.
+            await enqueueProxyRequest(STREMIO_API, () => axios.post(`${STREMIO_API}/addonCollectionSet`, {
+                type: 'AddonCollectionSet',
+                authKey,
+                addons: finalAddons
+            }))
+            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Stremio updated (Mirror): ${finalAddons.length} addons actively installed.`)
+        } else {
+            fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Stremio already in sync, skipping write.`)
+        }
     } catch (err) {
         if (err.response?.status === 401) {
             fastify.log.error({ category: 'Autopilot' }, `[${maskContext(accountId)}] Auth Key Expired (401). Disabling rule.`)
@@ -1331,11 +1514,49 @@ const processAutopilotRule = async (rule) => {
     }
 
     // 2. Health Sweep & Target Selection
+    const FAILOVER_THRESHOLD = 2  // consecutive failures needed to failover
+    const RECOVERY_THRESHOLD = 2  // consecutive successes needed to recover
+
     let targetActiveUrl = chain[0] // Default to primary
     let foundOnline = false
-    for (const url of chain) {
+    const currentActiveNorm = normalizeAddonUrl(decryptedActiveUrl || chain[0]).toLowerCase()
+
+    for (let i = 0; i < chain.length; i++) {
+        const url = chain[i]
         const isHealthy = await checkAddonHealthInternal(url)
+        const normUrl = normalizeAddonUrl(url).toLowerCase()
+
         if (isHealthy) {
+            stabilization[normUrl] = { failures: 0, successes: (stabilization[normUrl]?.successes || 0) + 1 }
+        } else {
+            stabilization[normUrl] = { failures: (stabilization[normUrl]?.failures || 0) + 1, successes: 0 }
+        }
+
+        const successes = stabilization[normUrl]?.successes || 0
+        const failures = stabilization[normUrl]?.failures || 0
+
+        // SELECTION STRATEGY:
+        // 1. If it's the current active and it's healthy, stay here.
+        if (isHealthy && normUrl === currentActiveNorm) {
+            targetActiveUrl = url
+            foundOnline = true
+            break
+        }
+
+        // 2. If it's healthy and it's a higher priority than current active, 
+        //    require RECOVERY_THRESHOLD (stabilization) to prevent flapping.
+        if (isHealthy && successes >= RECOVERY_THRESHOLD) {
+            targetActiveUrl = url
+            foundOnline = true
+            break
+        }
+
+        // 3. If the current active is dead (failures >= threshold), and this is the first healthy backup, 
+        //    grab it IMMEDIATELY without waiting for stabilization.
+        const activeStats = stabilization[currentActiveNorm]
+        const activeIsDead = (activeStats?.failures || 0) >= FAILOVER_THRESHOLD
+
+        if (isHealthy && activeIsDead) {
             targetActiveUrl = url
             foundOnline = true
             break
@@ -1388,10 +1609,10 @@ const processAutopilotRule = async (rule) => {
                     activeUrl: normalizedTarget
                 })
 
-                // Cooldown: Only send webhook if last notification was >60s ago
+                // Cooldown: Use per-rule cooldown or default to 10 minutes
                 const now = Date.now()
                 const lastNotification = rule.last_notification || 0
-                const cooldownMs = 60 * 1000
+                const cooldownMs = rule.cooldown_ms || (10 * 60 * 1000)
 
                 if (now - lastNotification >= cooldownMs) {
                     const decryptedWebhook = rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : null
@@ -1413,9 +1634,14 @@ const processAutopilotRule = async (rule) => {
         }
     }
 
-    // DB Update: Zero-Write logic
-    // We only update the DB if something meaningful changed.
-    if (!needsSync) {
+    // DB Update: Save state and stats
+    // We update if we synced, or if stabilization stats/timestamps changed (heartbeat).
+    const stabilizationToSave = encrypt(JSON.stringify(stabilization), PRIMARY_KEY)
+    const now = Date.now()
+
+    const needsStatsUpdate = stabilizationToSave !== rule.stabilization || (now - (rule.last_check || 0)) > 300000
+
+    if (!needsSync && !needsStatsUpdate) {
         // Absolutely zero idle writes during stable periods.
         return
     }
@@ -1423,9 +1649,7 @@ const processAutopilotRule = async (rule) => {
     const activeUrlToSave = encrypt(targetActiveUrl, PRIMARY_KEY)
     const authKeyToSave = encrypt(decryptedAuthKey, PRIMARY_KEY)
     const chainToSave = encrypt(JSON.stringify(chain), PRIMARY_KEY)
-    const stabilizationToSave = encrypt(JSON.stringify(stabilization), PRIMARY_KEY)
     const addonListToSave = encrypt(JSON.stringify(updatedAddonList), PRIMARY_KEY)
-    const now = Date.now()
     const lastNotificationToSave = shouldUpdateNotificationTime ? now : (rule.last_notification || 0)
 
     if (db.type === 'postgres') {
@@ -1433,30 +1657,16 @@ const processAutopilotRule = async (rule) => {
             UPDATE autopilot_rules 
             SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
             WHERE id = $9 
-            AND (
-                active_url IS DISTINCT FROM $10 OR 
-                priority_chain IS DISTINCT FROM $11 OR 
-                stabilization IS DISTINCT FROM $12 OR
-                addon_list IS DISTINCT FROM $13
-            )
         `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id,
-            activeUrlToSave, chainToSave, stabilizationToSave, addonListToSave
+            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
         ])
     } else {
         await db.run(`
             UPDATE autopilot_rules 
             SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
             WHERE id = $9 
-            AND (
-                active_url != $10 OR 
-                priority_chain != $11 OR 
-                stabilization != $12 OR
-                addon_list != $13
-            )
         `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id,
-            activeUrlToSave, chainToSave, stabilizationToSave, addonListToSave
+            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
         ])
     }
 }
@@ -1559,17 +1769,18 @@ const start = async () => {
   /_/  |_\\_\\____/_/  /_/\\__,_/_/ /_/\\__,/\\__, /\\___/_/      
                                          /____/              
  ==============================================================================
-  One manager to rule them all. Local-first, Encrypted, Powerful. v1.7.5
+  One manager to rule them all. Local-first, Encrypted, Powerful. v${VERSION}
  ==============================================================================
 `;
         console.log(banner);
 
         // --- Autopilot Sync Endpoint ---
         fastify.post('/api/autopilot/sync', async (request, reply) => {
-            const { id, accountId, authKey, priorityChain, activeUrl, is_active, is_automatic, addonList, webhookUrl } = request.body
+            const { id, accountId, name, authKey, priorityChain, activeUrl, is_active, is_automatic, addonList, webhookUrl, cooldown_ms } = request.body
 
             if (!id || !accountId || !authKey || !priorityChain) {
-                return reply.status(400).send({ error: 'Missing required Autopilot data' })
+                reply.status(400);
+                return { error: 'Missing required Autopilot data' }
             }
 
             // Encrypt sensitive data for storage
@@ -1582,9 +1793,10 @@ const start = async () => {
             const now = Date.now()
             if (db.type === 'postgres') {
                 await db.run(`
-                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, webhook_url, is_active, is_automatic, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    INSERT INTO autopilot_rules (id, account_id, name, auth_key, priority_chain, addon_list, active_url, webhook_url, is_active, is_automatic, updated_at, cooldown_ms)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (id) DO UPDATE SET
+                        name = EXCLUDED.name,
                         auth_key = EXCLUDED.auth_key,
                         priority_chain = EXCLUDED.priority_chain,
                         addon_list = EXCLUDED.addon_list,
@@ -1592,20 +1804,24 @@ const start = async () => {
                         webhook_url = EXCLUDED.webhook_url,
                         is_active = EXCLUDED.is_active,
                         is_automatic = EXCLUDED.is_automatic,
-                        updated_at = EXCLUDED.updated_at
+                        updated_at = EXCLUDED.updated_at,
+                        cooldown_ms = EXCLUDED.cooldown_ms
                     WHERE 
+                        autopilot_rules.name IS DISTINCT FROM EXCLUDED.name OR
                         autopilot_rules.auth_key IS DISTINCT FROM EXCLUDED.auth_key OR
                         autopilot_rules.priority_chain IS DISTINCT FROM EXCLUDED.priority_chain OR
                         autopilot_rules.addon_list IS DISTINCT FROM EXCLUDED.addon_list OR
                         autopilot_rules.webhook_url IS DISTINCT FROM EXCLUDED.webhook_url OR
                         autopilot_rules.is_active IS DISTINCT FROM EXCLUDED.is_active OR
-                        autopilot_rules.is_automatic IS DISTINCT FROM EXCLUDED.is_automatic
-                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now])
+                        autopilot_rules.is_automatic IS DISTINCT FROM EXCLUDED.is_automatic OR
+                        autopilot_rules.cooldown_ms IS DISTINCT FROM EXCLUDED.cooldown_ms
+                `, [id, accountId, name, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now, cooldown_ms])
             } else {
                 await db.run(`
-                    INSERT INTO autopilot_rules (id, account_id, auth_key, priority_chain, addon_list, active_url, webhook_url, is_active, is_automatic, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    INSERT INTO autopilot_rules (id, account_id, name, auth_key, priority_chain, addon_list, active_url, webhook_url, is_active, is_automatic, updated_at, cooldown_ms)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
                         auth_key = excluded.auth_key,
                         priority_chain = excluded.priority_chain,
                         addon_list = excluded.addon_list,
@@ -1613,15 +1829,18 @@ const start = async () => {
                         webhook_url = excluded.webhook_url,
                         is_active = excluded.is_active,
                         is_automatic = excluded.is_automatic,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        cooldown_ms = excluded.cooldown_ms
                     WHERE 
+                        autopilot_rules.name != excluded.name OR
                         autopilot_rules.auth_key != excluded.auth_key OR
                         autopilot_rules.priority_chain != excluded.priority_chain OR
                         autopilot_rules.addon_list != excluded.addon_list OR
                         autopilot_rules.webhook_url != excluded.webhook_url OR
                         autopilot_rules.is_active != excluded.is_active OR
-                        autopilot_rules.is_automatic != excluded.is_automatic
-                `, [id, accountId, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now])
+                        autopilot_rules.is_automatic != excluded.is_automatic OR
+                        autopilot_rules.cooldown_ms != excluded.cooldown_ms
+                `, [id, accountId, name, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, is_active ? 1 : 0, is_automatic === 0 ? 0 : 1, now, cooldown_ms])
             }
 
             fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Rule synced to server (Swap & Hide Mode).`)
@@ -1634,11 +1853,13 @@ const start = async () => {
             const { accountId } = request.params
 
             try {
-                const rules = await db.query('SELECT id, priority_chain, active_url, webhook_url, is_active, is_automatic, last_check, stabilization FROM autopilot_rules WHERE account_id = $1', [accountId])
+                const rules = await db.query('SELECT id, priority_chain, active_url, webhook_url, is_active, is_automatic, last_check, stabilization, name, cooldown_ms FROM autopilot_rules WHERE account_id = $1', [accountId])
 
                 // Decrypt priority_chain, active_url, and stabilization for each rule
                 const states = (rules || []).map(rule => ({
                     id: rule.id,
+                    name: rule.name || null,
+                    cooldownMs: rule.cooldown_ms || null,
                     priorityChain: rule.priority_chain ? JSON.parse(decrypt(rule.priority_chain, FALLBACK_KEYS) || '[]') : [],
                     activeUrl: rule.active_url ? decrypt(rule.active_url, FALLBACK_KEYS) : null,
                     webhookUrl: rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : '',
@@ -1673,7 +1894,10 @@ const start = async () => {
         // --- Test Webhook ---
         fastify.post('/api/autopilot/test-webhook', async (request, reply) => {
             const { webhookUrl, accountName } = request.body
-            if (!webhookUrl) return reply.code(400).send({ error: 'Webhook URL required' })
+            if (!webhookUrl) {
+                reply.status(400);
+                return { error: 'Webhook URL required' }
+            }
 
             await sendDiscordNotification(webhookUrl, {
                 type: 'info',
@@ -1699,6 +1923,37 @@ const start = async () => {
             return { success: true, deleted: result?.changes || 0 }
         })
 
+        // New: Delete ALL autopilot history for a specific account
+        fastify.delete('/api/autopilot/history/:accountId', async (request, reply) => {
+            const { accountId } = request.params
+            const password = request.headers['x-sync-password']
+
+            if (!password) {
+                reply.status(401)
+                return { error: 'Unauthorized' }
+            }
+
+            // Verify ownership: check that a kv_store row for this accountId exists with matching password
+            const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [accountId])
+            if (!row) {
+                reply.status(404)
+                return { error: 'Account not found' }
+            }
+
+            // The value in kv_store for accounts is their sync password
+            const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
+            if (decryptedPassword !== password) {
+                reply.status(401)
+                return { error: 'Unauthorized' }
+            }
+
+            const result = await db.run('DELETE FROM failover_history WHERE account_id = $1', [accountId])
+            fastify.log.info({ category: 'Autopilot' }, `Cleared autopilot history for account ${maskContext(accountId)}`)
+            return { success: true, deleted: result?.changes || 0 }
+        })
+
+
+        // --- Stateless Catalog Sharing removed ---
 
         await fastify.listen({ port: PORT, host: '0.0.0.0' })
         fastify.log.info({ category: 'Server' }, `Listening on port ${PORT}`)
@@ -1706,7 +1961,6 @@ const start = async () => {
             fastify.log.info({ category: 'Database' }, `Path: ${dbPath}`)
         }
         fastify.log.info({ category: 'Security' }, 'Zero-Knowledge mode active. 🛡️')
-
 
         // --- Start Autopilot Worker ---
         startAutopilotWorker()

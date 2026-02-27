@@ -46,4 +46,5 @@ export interface AddonDescriptor {
   catalogOverrides?: {
     removed: string[]
   }
+  syncToLibrary?: boolean
 }

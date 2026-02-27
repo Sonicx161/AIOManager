@@ -1,6 +1,5 @@
 import { CinemetaManifest, CinemetaConfigState, CinemetaPatchStatus } from '@/types/cinemeta'
 import { AddonDescriptor } from '@/types/addon'
-import { stremioClient } from '@/api/stremio-client'
 
 // ============================================================================
 // Detection Functions (read-only)
@@ -11,6 +10,7 @@ import { stremioClient } from '@/api/stremio-client'
  * Returns true if the search catalogs and extras are missing (patch applied)
  */
 export function detectSearchArtifactsPatched(manifest: CinemetaManifest): boolean {
+  if (!manifest || !Array.isArray(manifest.catalogs)) return false
   const catalogs = manifest.catalogs || []
 
   // Check if search catalogs are missing
@@ -38,6 +38,7 @@ export function detectSearchArtifactsPatched(manifest: CinemetaManifest): boolea
  *   (only 'Remove Cinemeta Catalogs' ON but 'Remove Cinemeta Search' OFF)
  */
 export function detectStandardCatalogsPatched(manifest: CinemetaManifest): boolean {
+  if (!manifest || !Array.isArray(manifest.catalogs)) return false
   const catalogs = manifest.catalogs || []
 
   // Check if standard catalogs exist
@@ -215,7 +216,8 @@ export async function fetchOriginalCinemetaManifest(
   transportUrl: string,
   accountId: string = 'Unknown'
 ): Promise<CinemetaManifest> {
-  const descriptor = await stremioClient.fetchAddonManifest(transportUrl, accountId)
+  const { fetchAddonManifest } = await import('@/api/addons')
+  const descriptor = await fetchAddonManifest(transportUrl, accountId)
   return descriptor.manifest as CinemetaManifest
 }
 
@@ -229,7 +231,7 @@ export function isCinemetaAddon(addon: AddonDescriptor): boolean {
 
   return (
     CINEMETA_IDS.includes(addon.manifest.id) ||
-    addon.manifest.name.toLowerCase() === 'cinemeta' ||
+    addon.manifest.name?.toLowerCase() === 'cinemeta' ||
     transportUrl.includes('v3-cinemeta.strem.io') ||
     (addon.flags?.official === true && addon.manifest.name === 'Cinemeta')
   )
@@ -289,4 +291,27 @@ export function detectAllPatches(manifest: CinemetaManifest): CinemetaPatchStatu
     standardCatalogsPatched: detectStandardCatalogsPatched(manifest),
     metaResourcePatched: detectMetaResourcePatched(manifest),
   }
+}
+
+// ============================================================================
+// Poster Helpers
+// ============================================================================
+
+/**
+ * Returns the proxyable poster URL for a given item type and IMDB ID.
+ * Falls back to cinemeta's official images.
+ */
+export function getCinemetaPosterUrl(itemId: string): string {
+  if (!itemId) return ''
+  // itemId is expected to be an IMDB ID (e.g., tt123)
+  return `https://images.metahub.space/poster/small/${itemId}/img`
+}
+
+/**
+ * Detects if a URL should be proxied to avoid CORS issues
+ */
+export function isProxyableUrl(url: string | undefined): boolean {
+  if (!url) return false
+  const PROXYABLE_DOMAINS = ['metahub.space', 'strem.io']
+  return PROXYABLE_DOMAINS.some(domain => url.includes(domain))
 }

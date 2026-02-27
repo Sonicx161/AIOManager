@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
-import { ClipboardPaste } from 'lucide-react'
+import { ClipboardPaste, Zap } from 'lucide-react'
 
 export function AddonInstaller() {
   const isOpen = useUIStore((state) => state.isAddAddonDialogOpen)
@@ -23,6 +23,33 @@ export function AddonInstaller() {
 
   const [addonUrl, setAddonUrl] = useState('')
   const [error, setError] = useState('')
+  const [isClipboardScanActive, setIsClipboardScanActive] = useState(false)
+
+  useEffect(() => {
+    if (!isOpen) {
+      setIsClipboardScanActive(false)
+      return
+    }
+
+    const checkClipboard = async () => {
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text && (text.startsWith('stremio://') || (text.includes('/manifest.json') && text.startsWith('http')))) {
+          setAddonUrl(text)
+          setIsClipboardScanActive(true)
+          // Hide hint after 3 seconds
+          setTimeout(() => setIsClipboardScanActive(false), 3000)
+        }
+      } catch (err) {
+        // Silently swallow NotAllowedError/privacy blocks
+      }
+    }
+
+    window.addEventListener('focus', checkClipboard)
+    checkClipboard() // Initial check when opened
+
+    return () => window.removeEventListener('focus', checkClipboard)
+  }, [isOpen])
 
   const handleClose = () => {
     setAddonUrl('')
@@ -104,7 +131,14 @@ export function AddonInstaller() {
               onChange={(e) => setAddonUrl(e.target.value)}
               placeholder="https://example.com/addon/manifest.json"
               required
+              className={isClipboardScanActive ? "ring-2 ring-primary/50" : ""}
             />
+            {isClipboardScanActive && (
+              <div className="flex items-center gap-1.5 text-[10px] text-primary font-bold animate-in fade-in slide-in-from-top-1">
+                <Zap className="h-3 w-3" />
+                URL DETECTED FROM CLIPBOARD
+              </div>
+            )}
             <p className="text-xs text-muted-foreground">
               The URL should point to the addon's base URL (e.g., https://addon.example.com)
             </p>

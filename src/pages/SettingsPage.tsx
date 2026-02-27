@@ -21,9 +21,13 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Trash2, Download, Upload, EyeOff, Check, ShieldAlert, Copy, RefreshCw, Cloud, User, Bell } from 'lucide-react'
+import { Trash2, Download, Upload, EyeOff, Check, ShieldAlert, Copy, RefreshCw, User, Bell, Clock, Database, Palette, Shield, Link2, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react'
+import { getTimeAgo } from '@/lib/utils'
 import localforage from 'localforage'
 import { useSyncStore } from '@/store/syncStore'
+import { VaultSettings } from '@/components/settings/VaultSettings'
+import { SyncDiagnostics } from '@/components/settings/SyncDiagnostics'
+import { ExpiryDashboard } from '@/components/dashboard/ExpiryDashboard'
 
 function AccountSection() {
     const { auth, syncToRemote, syncFromRemote, isSyncing, lastSyncedAt, setDisplayName } = useSyncStore()
@@ -44,18 +48,10 @@ function AccountSection() {
 
     return (
         <section className="space-y-4">
-            <div>
-                <h2 className="text-xl font-semibold flex items-center gap-2">
-                    <Cloud className="h-5 w-5 text-primary" />
-                    Account & Sync
-                </h2>
-                <p className="text-sm text-muted-foreground">Manage your identity and cloud data.</p>
-            </div>
-
-            <div className="p-4 rounded-lg border bg-card space-y-6">
+            <div className="p-4 rounded-xl border bg-card/50 space-y-6">
                 {/* Display Name */}
                 <div className="space-y-2">
-                    <Label>Display Name</Label>
+                    <Label className="text-sm font-semibold">Display Name</Label>
                     <div className="relative">
                         <User className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
                         <Input
@@ -65,58 +61,54 @@ function AccountSection() {
                             onChange={(e) => setDisplayName(e.target.value)}
                         />
                     </div>
-                    <p className="text-[11px] text-muted-foreground">
-                        Used to identify this account in the header.
-                    </p>
                 </div>
 
                 {/* ID Display */}
                 <div className="space-y-2">
-                    <Label>Your UUID</Label>
+                    <Label className="text-sm font-semibold">Your UUID</Label>
                     <div className="flex gap-2">
-                        <Input value={auth.id} readOnly className="font-mono bg-muted text-sm" />
-                        <Button variant="outline" size="icon" onClick={copyId} title="Copy UUID">
+                        <Input value={auth.id} readOnly className="font-mono bg-muted/50 text-xs h-9" />
+                        <Button variant="outline" size="icon" className="h-9 w-9" onClick={copyId} title="Copy UUID">
                             {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
                         </Button>
                     </div>
-                    <p className="text-[11px] text-muted-foreground">
-                        Use this UUID (and your password) to log in on other devices.
-                    </p>
                 </div>
 
                 {/* Sync Status */}
-                <div className="flex items-center justify-between text-sm bg-muted/30 p-3 rounded-lg border">
+                <div className="flex items-center justify-between text-sm bg-blue-500/5 p-3 rounded-lg border border-blue-500/10">
                     <div className="flex items-center gap-2">
                         <Check className="h-4 w-4 text-green-500" />
                         <span className="font-medium">Authenticated</span>
                     </div>
                     <div className="flex flex-col items-end">
-                        <span className="text-xs text-muted-foreground">Last Sync:</span>
-                        <span className="font-mono text-xs">
-                            {lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'Never'}
+                        <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-tight flex items-center gap-1">
+                            <Clock className="h-3 w-3" />
+                            Last Sync
+                        </span>
+                        <span className="font-bold text-xs">
+                            {lastSyncedAt ? getTimeAgo(new Date(lastSyncedAt)) : 'Never'}
                         </span>
                     </div>
                 </div>
-            </div>
 
-            {/* Actions */}
-            <div className="space-y-3">
-                <div className="p-3 rounded-lg border bg-blue-500/10 border-blue-500/20">
-                    <p className="text-[11px] text-blue-600 dark:text-blue-400 font-medium">
-                        Cloud Sync is active. Every change you make is instantly saved to the server.
-                    </p>
+                {/* Actions */}
+                <div className="space-y-3 pt-2">
+                    <div className="p-3 rounded-lg border bg-blue-500/10 border-blue-500/20">
+                        <p className="text-[11px] text-blue-600 dark:text-blue-400 font-medium leading-relaxed">
+                            Cloud Sync is active. Every change you make is instantly saved to the server.
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                        <Button variant="default" className="shadow-lg shadow-primary/20" onClick={() => syncToRemote()} disabled={isSyncing}>
+                            {isSyncing ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                            Push to Cloud
+                        </Button>
+                        <Button variant="outline" onClick={() => syncFromRemote()} disabled={isSyncing}>
+                            {isSyncing ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                            Pull from Cloud
+                        </Button>
+                    </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                    <Button variant="default" onClick={() => syncToRemote()} disabled={isSyncing}>
-                        {isSyncing ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                        Push to Cloud
-                    </Button>
-                    <Button variant="outline" onClick={() => syncFromRemote()} disabled={isSyncing}>
-                        {isSyncing ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-                        Pull from Cloud
-                    </Button>
-                </div>
-
             </div>
         </section>
     )
@@ -191,6 +183,103 @@ function ThemeCard({ option, selected, onSelect }: { option: ThemeOption; select
     )
 }
 
+function SyncSummarySection() {
+    const { library, accountStates } = useAddonStore()
+    const [isExpanded, setIsExpanded] = useState(false)
+
+    // Find all addons in the library that have syncWithInstalled enabled
+    const syncedAddons = Object.values(library).filter(a => a.syncWithInstalled)
+
+    if (syncedAddons.length === 0) return null
+
+    const displayCount = isExpanded ? syncedAddons.length : 3
+    const hasMore = syncedAddons.length > 3
+
+    return (
+        <section className="space-y-4">
+            <div className="p-4 rounded-xl border bg-card/50 space-y-4">
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-primary/10">
+                            <Link2 className="h-4 w-4 text-primary" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <Label className="text-sm font-semibold">Active Sync Connections</Label>
+                            <span className="bg-primary/10 text-primary text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-tighter">
+                                {syncedAddons.length}
+                            </span>
+                        </div>
+                    </div>
+                    <a
+                        href="/saved-addons"
+                        className="text-[10px] font-bold text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 uppercase tracking-widest"
+                        onClick={(e) => {
+                            e.preventDefault()
+                            window.history.pushState({}, '', '/saved-addons')
+                            window.dispatchEvent(new PopStateEvent('popstate'))
+                        }}
+                    >
+                        Manage
+                        <ChevronRight className="h-3 w-3" />
+                    </a>
+                </div>
+
+                <div className="space-y-2">
+                    {syncedAddons.slice(0, displayCount).map((addon, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-background/30 border border-white/5">
+                            <div className="flex items-center gap-3 overflow-hidden">
+                                <div className="w-6 h-6 rounded bg-muted/50 flex-shrink-0 overflow-hidden border border-white/5">
+                                    {(addon.metadata?.customLogo || addon.manifest.logo) && (
+                                        <img
+                                            src={addon.metadata?.customLogo || addon.manifest.logo}
+                                            alt=""
+                                            className="w-full h-full object-contain"
+                                            onError={(e) => { e.currentTarget.style.display = 'none' }}
+                                        />
+                                    )}
+                                </div>
+                                <span className="text-xs font-bold truncate">{addon.name}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0 text-right">
+                                <span className="text-[10px] text-muted-foreground italic">
+                                    {(() => {
+                                        let count = 0
+                                        for (const accState of Object.values(accountStates)) {
+                                            if (accState.installedAddons.some(ia => ia.installUrl === addon.installUrl)) count++
+                                        }
+                                        return count > 0 ? `${count} account${count !== 1 ? 's' : ''}` : 'Not installed'
+                                    })()}
+                                </span>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {hasMore && (
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="w-full h-8 text-[11px] font-bold text-muted-foreground hover:text-primary"
+                        onClick={() => setIsExpanded(!isExpanded)}
+                    >
+                        {isExpanded ? (
+                            <>
+                                <ChevronUp className="mr-2 h-3 w-3" />
+                                SHOW LESS
+                            </>
+                        ) : (
+                            <>
+                                <ChevronDown className="mr-2 h-3 w-3" />
+                                SHOW ALL ({syncedAddons.length})
+                            </>
+                        )}
+                    </Button>
+                )}
+            </div>
+        </section>
+    )
+}
+
 function NotificationsSection() {
     const { webhook, setWebhook } = useFailoverStore()
     const [webhookUrl, setWebhookUrl] = useState(webhook.url)
@@ -202,16 +291,12 @@ function NotificationsSection() {
 
     return (
         <section className="space-y-4">
-            <div>
-                <h2 className="text-xl font-semibold flex items-center gap-2">
-                    <Bell className="h-5 w-5 text-primary" />
-                    Global Notifications
-                </h2>
-                <p className="text-sm text-muted-foreground">Configure global Discord health alerts.</p>
-            </div>
-            <div className="p-4 rounded-lg border bg-card space-y-4">
+            <div className="p-4 rounded-xl border bg-card/50 space-y-4">
                 <div className="space-y-2">
-                    <Label>Discord Webhook URL</Label>
+                    <Label className="text-sm font-semibold flex items-center gap-2">
+                        <Bell className="h-4 w-4 text-primary" />
+                        Discord Webhook URL
+                    </Label>
                     <div className="flex gap-2">
                         <Input
                             placeholder="https://discord.com/api/webhooks/..."
@@ -219,7 +304,7 @@ function NotificationsSection() {
                             onChange={(e) => setWebhookUrl(e.target.value)}
                             className="h-10 bg-background/50 border-muted focus:bg-background transition-colors"
                         />
-                        <Button onClick={handleSave}>Save</Button>
+                        <Button onClick={handleSave} className="shrink-0">Save</Button>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                         Used for system-wide health alerts and failover notifications.
@@ -473,190 +558,208 @@ export function SettingsPage() {
                 </p>
             </div>
 
-            {/* Account Management (Top Priority) */}
-            <AccountSection />
+            {/* 1. Account & Security Group */}
+            <div className="grid gap-8">
+                <div className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2 px-1">
+                        <Shield className="h-5 w-5 text-primary" />
+                        Account & Security
+                    </h2>
+                    <div className="grid gap-4">
+                        <AccountSection />
 
-            {/* Notifications */}
-            <NotificationsSection />
-
-            {/* Privacy */}
-            <section className="space-y-4">
-                <div>
-                    <h2 className="text-xl font-semibold">Privacy</h2>
-                    <p className="text-sm text-muted-foreground">Control how sensitive information is displayed.</p>
-                </div>
-
-                <div className="flex items-center justify-between p-4 rounded-lg border bg-card">
-                    <div className="flex items-center gap-3">
-                        <EyeOff className="h-5 w-5 text-muted-foreground" />
-                        <div>
-                            <Label htmlFor="privacy-mode" className="text-base font-medium">Privacy Mode</Label>
-                            <p className="text-sm text-muted-foreground">Mask auth keys and email addresses</p>
+                        <div className="p-4 rounded-xl border bg-card/50 flex items-center justify-between transition-all hover:bg-card/60">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-lg bg-primary/10">
+                                    <EyeOff className="h-4 w-4 text-primary" />
+                                </div>
+                                <div>
+                                    <Label htmlFor="privacy-mode" className="text-base font-medium cursor-pointer">Privacy Mode</Label>
+                                    <p className="text-sm text-muted-foreground">Mask secrets and sensitive data</p>
+                                </div>
+                            </div>
+                            <Switch
+                                id="privacy-mode"
+                                checked={isPrivacyModeEnabled}
+                                onCheckedChange={togglePrivacyMode}
+                            />
                         </div>
-                    </div>
-                    <Switch
-                        id="privacy-mode"
-                        checked={isPrivacyModeEnabled}
-                        onCheckedChange={togglePrivacyMode}
-                    />
-                </div>
-            </section>
 
-
-            {/* Data Management */}
-            <section className="space-y-4">
-                <div>
-                    <h2 className="text-xl font-semibold">Data Management</h2>
-                    <p className="text-sm text-muted-foreground">Manage your accounts and configuration.</p>
-                </div>
-
-                <div className="flex flex-wrap gap-4 p-4 rounded-lg border bg-card items-center">
-                    <div className="flex-1 space-y-1">
-                        <Label className="text-base">Full Backup & Restore</Label>
-                        <p className="text-sm text-muted-foreground">
-                            Save everything (Accounts, Profiles, Saved Addons, and Failover Rules) to a single file.
-                        </p>
-                    </div>
-
-                    <div className="flex gap-2">
-                        <Button variant="outline" onClick={handleExport} disabled={exporting || accounts.length === 0}>
-                            <Download className="mr-2 h-4 w-4" />
-                            {exporting ? 'Backing up...' : 'Full Backup'}
-                        </Button>
-                        <Button variant="outline" onClick={handleImportClick} disabled={importing}>
-                            <Upload className="mr-2 h-4 w-4" />
-                            {importing ? 'Restoring...' : 'Restore from File'}
-                        </Button>
+                        <VaultSettings />
                     </div>
                 </div>
 
-                <div className="flex justify-end">
-                    <Button variant="ghost" size="sm" onClick={handleClearActivity} className="text-muted-foreground hover:text-destructive">
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Clear Activity Cache
-                    </Button>
-                </div>
-
-                <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".json,application/json"
-                    onChange={handleFileChange}
-                    className="hidden"
-                />
-            </section>
-
-
-            {/* Appearance */}
-            <section className="space-y-6">
-                <div>
-                    <h2 className="text-xl font-semibold">Appearance</h2>
-                    <p className="text-sm text-muted-foreground">Customize your interface and show off your favorite community services.</p>
-                </div>
-
+                {/* 2. Monitoring & Alerts Group */}
                 <div className="space-y-4">
-                    <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Standard Themes</h3>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                        {THEME_OPTIONS.filter(opt => opt.category === 'standard').map(option => (
-                            <ThemeCard
-                                key={option.id}
-                                option={option}
-                                selected={theme === option.id}
-                                onSelect={setTheme}
-                            />
-                        ))}
+                    <h2 className="text-xl font-bold flex items-center gap-2 px-1">
+                        <Bell className="h-5 w-5 text-primary" />
+                        Monitoring & Alerts
+                    </h2>
+                    <div className="grid gap-4">
+                        <NotificationsSection />
+                        <ExpiryDashboard />
                     </div>
                 </div>
 
+                {/* 3. Appearance Group */}
                 <div className="space-y-4">
-                    <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Community Themes</h3>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                        {THEME_OPTIONS.filter(opt => opt.category === 'community').map(option => (
-                            <ThemeCard
-                                key={option.id}
-                                option={option}
-                                selected={theme === option.id}
-                                onSelect={setTheme}
-                            />
-                        ))}
-                    </div>
-                </div>
-            </section>
-
-            {/* Danger Zone */}
-            <section className="space-y-4">
-                <div>
-                    <h2 className="text-xl font-semibold text-destructive">Danger Zone</h2>
-                    <p className="text-sm text-muted-foreground">Irreversible actions. Proceed with caution.</p>
-                </div>
-
-                <div className="p-4 rounded-lg border border-destructive bg-destructive/20 space-y-4">
-                    {/* Unsafe Mode Toggle */}
-                    <div className="flex items-center justify-between p-3 rounded-lg border border-destructive/30 bg-background">
-                        <div className="flex items-center gap-3">
-                            <ShieldAlert className="h-5 w-5 text-destructive" />
-                            <div>
-                                <Label htmlFor="unsafe-mode" className="text-base font-medium text-destructive">Unsafe Mode</Label>
-                                <p className="text-sm text-muted-foreground">Enable to unlock destructive actions</p>
+                    <h2 className="text-xl font-bold flex items-center gap-2 px-1">
+                        <Palette className="h-5 w-5 text-primary" />
+                        Appearance
+                    </h2>
+                    <div className="p-6 rounded-xl border bg-card/50 space-y-6">
+                        <div className="space-y-4">
+                            <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Standard Themes</h3>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                                {THEME_OPTIONS.filter(opt => opt.category === 'standard').map(option => (
+                                    <ThemeCard
+                                        key={option.id}
+                                        option={option}
+                                        selected={theme === option.id}
+                                        onSelect={setTheme}
+                                    />
+                                ))}
                             </div>
                         </div>
-                        <Switch
-                            id="unsafe-mode"
-                            checked={unsafeMode}
-                            onCheckedChange={setUnsafeMode}
-                            className="data-[state=checked]:bg-destructive"
-                        />
-                    </div>
 
-                    <div className="flex flex-wrap gap-3">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
-                            onClick={handleDeleteAllAccounts}
-                            disabled={accounts.length === 0 || !unsafeMode}
-                        >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete All Accounts ({accounts.length})
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
-                            onClick={handleDeleteAllAddons}
-                            disabled={savedAddonsCount === 0 || !unsafeMode}
-                        >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete All Saved Addons ({savedAddonsCount})
-                        </Button>
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="border-destructive/50 text-destructive hover:bg-destructive hover:text-destructive-foreground disabled:opacity-50"
-                            onClick={handlePurgeAutopilot}
-                            disabled={failoverRulesCount === 0 || !unsafeMode}
-                        >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Purge All Autopilot Rules ({failoverRulesCount})
-                        </Button>
-                        <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={handleResetAll}
-                            disabled={!unsafeMode}
-                        >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete Cloud & Local Data
-                        </Button>
+                        <div className="space-y-4">
+                            <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-widest">Community Themes</h3>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                                {THEME_OPTIONS.filter(opt => opt.category === 'community').map(option => (
+                                    <ThemeCard
+                                        key={option.id}
+                                        option={option}
+                                        selected={theme === option.id}
+                                        onSelect={setTheme}
+                                    />
+                                ))}
+                            </div>
+                        </div>
                     </div>
-
-                    {!unsafeMode && (
-                        <p className="text-xs text-muted-foreground italic">
-                            Enable Unsafe Mode above to unlock these destructive actions.
-                        </p>
-                    )}
                 </div>
-            </section>
+
+                {/* 4. Management & Maintenance */}
+                <div className="space-y-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2 px-1">
+                        <Database className="h-5 w-5 text-primary" />
+                        Management & Maintenance
+                    </h2>
+                    <div className="grid gap-4">
+                        {/* Backup & Restore */}
+                        <div className="p-6 rounded-xl border bg-card/50 flex flex-col md:flex-row md:items-center justify-between gap-6 transition-all">
+                            <div className="space-y-1">
+                                <Label className="text-lg font-bold">Cloud Backup & Restore</Label>
+                                <p className="text-sm text-muted-foreground max-w-md">
+                                    Export your entire configuration (Accounts, Profiles, Addons, and Rules) to a portable JSON file.
+                                </p>
+                            </div>
+
+                            <div className="flex gap-2 shrink-0">
+                                <Button variant="outline" className="border-primary/20 hover:bg-primary/5" onClick={handleExport} disabled={exporting || accounts.length === 0}>
+                                    <Download className="mr-2 h-4 w-4" />
+                                    {exporting ? 'Exporting...' : 'Export'}
+                                </Button>
+                                <Button variant="outline" className="border-primary/20 hover:bg-primary/5" onClick={handleImportClick} disabled={importing}>
+                                    <Upload className="mr-2 h-4 w-4" />
+                                    {importing ? 'Importing...' : 'Import'}
+                                </Button>
+                            </div>
+                        </div>
+
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept=".json,application/json"
+                            onChange={handleFileChange}
+                            className="hidden"
+                        />
+
+                        {/* Active Sync Summary */}
+                        <SyncSummarySection />
+
+                        {/* Sync Diagnostics */}
+                        <SyncDiagnostics />
+
+                        {/* Danger Zone */}
+                        <div className="p-1 rounded-xl bg-destructive/5 border border-destructive/20 overflow-hidden">
+                            <div className="p-5 bg-background/40 space-y-6">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-destructive/10">
+                                            <ShieldAlert className="h-5 w-5 text-destructive" />
+                                        </div>
+                                        <div>
+                                            <h3 className="font-bold text-destructive uppercase tracking-widest text-xs">Irreversible Actions</h3>
+                                            <p className="text-sm text-muted-foreground">Actions below will permanently delete data.</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <Label htmlFor="unsafe-mode" className="text-xs font-bold text-destructive/70 uppercase">Unlock Actions</Label>
+                                        <Switch
+                                            id="unsafe-mode"
+                                            checked={unsafeMode}
+                                            onCheckedChange={setUnsafeMode}
+                                            className="data-[state=checked]:bg-destructive"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        onClick={handleClearActivity}
+                                    >
+                                        <Trash2 className="mr-2 h-4 w-4" />
+                                        Clear History Cache
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        onClick={handleDeleteAllAccounts}
+                                        disabled={accounts.length === 0 || !unsafeMode}
+                                    >
+                                        <Trash2 className="mr-2 h-4 w-4" />
+                                        Wipe Accounts ({accounts.length})
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        onClick={handleDeleteAllAddons}
+                                        disabled={savedAddonsCount === 0 || !unsafeMode}
+                                    >
+                                        <Trash2 className="mr-2 h-4 w-4" />
+                                        Wipe Library ({savedAddonsCount})
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        onClick={handlePurgeAutopilot}
+                                        disabled={failoverRulesCount === 0 || !unsafeMode}
+                                    >
+                                        <Trash2 className="mr-2 h-4 w-4" />
+                                        Purge Autopilot ({failoverRulesCount})
+                                    </Button>
+                                    <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        className="h-10 font-bold shadow-lg shadow-destructive/20"
+                                        onClick={handleResetAll}
+                                        disabled={!unsafeMode}
+                                    >
+                                        <ShieldAlert className="mr-2 h-4 w-4" />
+                                        Factory Reset
+                                    </Button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             {/* Confirmation Dialog */}
             <AlertDialog open={confirmDialog.open} onOpenChange={(open: boolean) => setConfirmDialog(prev => ({ ...prev, open }))}>

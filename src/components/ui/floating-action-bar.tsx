@@ -35,7 +35,7 @@ export function FloatingActionBar({
             "fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-full max-w-3xl px-4 pointer-events-none",
             className
         )}>
-            <div className="bg-background/80 backdrop-blur-xl border shadow-2xl rounded-2xl p-2 flex items-center justify-between gap-4 pointer-events-auto animate-in fade-in slide-in-from-bottom-10 duration-300">
+            <div className="bg-background border shadow-2xl rounded-2xl p-2 flex items-center justify-between gap-4 pointer-events-auto animate-in fade-in slide-in-from-bottom-10 duration-300">
 
                 {/* Selection Count */}
                 <div className="flex items-center gap-3 pl-2">

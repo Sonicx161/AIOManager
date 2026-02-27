@@ -2,7 +2,7 @@ name: Docker CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "v1.8.0-rc" ]
     tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ "main" ]

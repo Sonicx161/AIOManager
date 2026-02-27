@@ -23,5 +23,9 @@ export function AccountDetailPage() {
     return null
   }
 
-  return <AddonList accountId={accountId} />
+  return (
+    <div className="space-y-6">
+      <AddonList accountId={accountId} />
+    </div>
+  )
 }

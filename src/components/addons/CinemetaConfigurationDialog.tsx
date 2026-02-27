@@ -22,6 +22,7 @@ import {
   detectAllPatches,
   applyCinemetaConfiguration,
   fetchOriginalCinemetaManifest,
+  isCinemetaAddon,
 } from '@/lib/cinemeta-utils'
 import { AlertTriangle } from 'lucide-react'
 
@@ -108,8 +109,13 @@ export function CinemetaConfigurationDialog({
       // 3. Get current addon collection
       const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
 
-      // 4. Find Cinemeta index (match by ID is safest)
-      const cinemetaIndex = currentAddons.findIndex((a) => a.manifest.id === addon.manifest.id)
+      // 4. Find Cinemeta index (match by ID or transportUrl as fallback)
+      const cinemetaIndex = currentAddons.findIndex((a) =>
+        a.manifest.id === addon.manifest.id ||
+        isCinemetaAddon(a) ||
+        a.transportUrl === addon.transportUrl
+      )
+
       if (cinemetaIndex === -1) {
         throw new Error('Cinemeta addon not found in collection')
       }
@@ -171,7 +177,11 @@ export function CinemetaConfigurationDialog({
       // 2. Update addon collection with original manifest
       const authKey = await decrypt(accountAuthKey, encryptionKey)
       const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
-      const cinemetaIndex = currentAddons.findIndex((a) => a.manifest.id === addon.manifest.id)
+      const cinemetaIndex = currentAddons.findIndex((a) =>
+        a.manifest.id === addon.manifest.id ||
+        isCinemetaAddon(a) ||
+        a.transportUrl === addon.transportUrl
+      )
 
       if (cinemetaIndex === -1) {
         throw new Error('Cinemeta addon not found in collection')

@@ -15,7 +15,18 @@ export interface StremioAccount {
   addons: AddonDescriptor[]
   lastSync: Date
   status: AccountStatus
+  accentColor?: string
+  emoji?: string
+}
 
+export interface AddonChangelogEntry {
+  id: string
+  accountId: string
+  addonName: string
+  addonId: string
+  addonLogo?: string
+  action: 'installed' | 'updated' | 'removed'
+  timestamp: string
 }
 
 export interface AccountCredentials {

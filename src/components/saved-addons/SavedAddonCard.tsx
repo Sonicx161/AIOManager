@@ -1,5 +1,3 @@
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
@@ -10,15 +8,16 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useToast } from '@/hooks/use-toast'
-import { maskUrl, getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
+import { getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
 import { useAddonStore } from '@/store/addonStore'
-import { useUIStore } from '@/store/uiStore'
-import { SavedAddon } from '@/types/saved-addon'
-import { Copy, MoreVertical, Pencil, FileDown, Settings, Trash2 } from 'lucide-react'
+import { Copy, MoreVertical, Pencil } from 'lucide-react'
+import { AnimatedSettingsIcon, AnimatedTrashIcon, AnimatedUpdateIcon } from '../ui/AnimatedIcons'
 import { restorationManager } from '@/lib/autopilot/restorationManager'
+
 import { useState } from 'react'
+import { SavedAddon } from '@/types/saved-addon'
 import { SavedAddonDetails } from './SavedAddonDetails'
-import { AddonTag } from '../addons/AddonTag'
+import { getTagColor } from '@/lib/tag-utils'
 
 interface SavedAddonCardProps {
   savedAddon: SavedAddon
@@ -27,6 +26,7 @@ interface SavedAddonCardProps {
   isSelectionMode?: boolean
   isSelected?: boolean
   onToggleSelect?: (id: string) => void
+  profileName?: string
 }
 
 export function SavedAddonCard({
@@ -35,10 +35,10 @@ export function SavedAddonCard({
   onUpdate,
   isSelectionMode,
   isSelected,
-  onToggleSelect
+  onToggleSelect,
+  profileName
 }: SavedAddonCardProps) {
   const { deleteSavedAddon } = useAddonStore()
-  const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
   const { toast } = useToast()
   const [showDetails, setShowDetails] = useState(false)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -59,10 +59,6 @@ export function SavedAddonCard({
     }
   }
 
-  const formatDate = (date: Date) => {
-    return new Date(date).toLocaleDateString()
-  }
-
   const handleCopyUrl = (e: React.MouseEvent) => {
     e.stopPropagation()
     navigator.clipboard.writeText(savedAddon.installUrl)
@@ -76,13 +72,6 @@ export function SavedAddonCard({
     e.stopPropagation()
     const configUrl = getAddonConfigureUrl(savedAddon.installUrl)
     window.open(configUrl, '_blank', 'noopener,noreferrer')
-  }
-
-  const getHealthStatusColor = () => {
-    if (!savedAddon.health) {
-      return 'bg-gray-400' // Unchecked
-    }
-    return savedAddon.health.isOnline ? 'bg-green-500' : 'bg-red-500'
   }
 
   const getHealthTooltip = () => {
@@ -120,55 +109,143 @@ export function SavedAddonCard({
 
   return (
     <>
-      <Card
-        className={`flex flex-col h-full transition-all duration-300 ${isSelectionMode
-          ? 'cursor-pointer hover:border-primary/50'
-          : ''
-          } ${isSelected
-            ? 'ring-2 ring-primary border-primary bg-primary/5'
-            : ''
-          }`}
+      <div
+        className={`group flex flex-col h-full relative ${isSelectionMode ? 'cursor-pointer' : ''}`}
+        style={{
+          background: 'rgba(255,255,255,0.04)',
+          borderStyle: 'solid',
+          borderWidth: '1px',
+          borderColor: 'rgba(255,255,255,0.08)',
+          borderRadius: '20px',
+          padding: '20px',
+          transition: 'all 200ms ease',
+          ...(isSelected ? {
+            boxShadow: '0 0 15px hsla(var(--primary), 0.2)',
+            background: 'hsla(var(--primary), 0.1)',
+            borderColor: 'hsl(var(--primary))'
+          } : {})
+        }}
+        onMouseEnter={(e) => {
+          if (!isSelected) {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!isSelected) {
+            e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+          }
+        }}
         onClick={() => {
           if (isSelectionMode && onToggleSelect) {
             onToggleSelect(savedAddon.id)
           }
         }}
       >
-        <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-          <div className="flex items-center gap-3 min-w-0">
+        {isSelected && (
+          <div className="absolute -top-2 -right-2 z-10 w-6 h-6 rounded-full flex items-center justify-center border-2 border-background shadow-lg" style={{ background: 'hsl(var(--primary))' }}>
+            <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+        )}
+
+        <div className="flex items-start justify-between pb-4">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             {(savedAddon.metadata?.customLogo || savedAddon.manifest.logo) ? (
-              <div className="bg-muted p-1 rounded-md shrink-0">
+              <div
+                className="shrink-0 flex items-center justify-center overflow-hidden"
+                style={{
+                  width: '44px',
+                  height: '44px',
+                  borderRadius: '12px',
+                  background: 'rgba(255,255,255,0.06)'
+                }}
+              >
                 <img
                   src={savedAddon.metadata?.customLogo || savedAddon.manifest.logo}
                   alt={savedAddon.name}
-                  className="w-10 h-10 rounded object-contain"
+                  className="w-full h-full object-contain"
                   onError={(e) => {
                     e.currentTarget.style.display = 'none'
                   }}
                 />
               </div>
             ) : (
-              <div className="bg-muted p-1 rounded-md shrink-0 w-12 h-12 flex items-center justify-center">
-                <span className="text-lg">📦</span>
+              <div
+                className="shrink-0 flex items-center justify-center"
+                style={{
+                  width: '44px',
+                  height: '44px',
+                  borderRadius: '12px',
+                  background: 'linear-gradient(135deg, rgba(99,102,241,0.3), rgba(168,85,247,0.3))',
+                  color: 'white',
+                  fontFamily: '"DM Sans", sans-serif',
+                  fontWeight: 900,
+                  fontSize: '18px'
+                }}
+              >
+                {savedAddon.name.charAt(0).toUpperCase()}
               </div>
             )}
-            <div className="flex flex-col min-w-0">
-              <CardTitle className="text-base font-semibold truncate leading-tight">
+
+            <div className="flex flex-col min-w-0 pr-2">
+              <div
+                className="truncate leading-tight flex items-center gap-2"
+                style={{
+                  fontFamily: '"DM Sans", sans-serif',
+                  fontSize: '15px',
+                  fontWeight: 700,
+                  color: 'white'
+                }}
+              >
                 {savedAddon.name}
-              </CardTitle>
-              <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
-                <span className="text-xs truncate">v{savedAddon.manifest.version}</span>
-                <div
-                  className={`w-2 h-2 rounded-full shrink-0 ${getHealthStatusColor()}`}
-                  title={getHealthTooltip()}
-                />
-                {hasUpdate && latestVersion && (
-                  <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
-                    → v{latestVersion}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 mt-[2px] overflow-hidden">
+                <div className="flex items-center gap-1.5">
+                  <span
+                    style={{
+                      fontFamily: '"DM Mono", monospace',
+                      fontSize: '10px',
+                      color: 'rgba(255,255,255,0.35)'
+                    }}
+                    className="truncate"
+                  >
+                    v{savedAddon.manifest.version}
+                  </span>
+
+                  <span
+                    style={{
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '50%',
+                      backgroundColor: savedAddon.health ? (savedAddon.health.isOnline ? '#22c55e' : '#ef4444') : '#9ca3af',
+                      boxShadow: savedAddon.health?.isOnline ? '0 0 6px #22c55e' : 'none'
+                    }}
+                    className="shrink-0"
+                    title={getHealthTooltip()}
+                  />
+
+
+                  {savedAddon.manifest.behaviorHints?.configurable && (
+                    <button
+                      onClick={handleOpenConfiguration}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 text-white/40 hover:text-white"
+                      title="Configure"
+                    >
+                      <AnimatedSettingsIcon className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+
+                {savedAddon.syncWithInstalled && (
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-sky-500/10 text-sky-400 border border-sky-500/20" title="Automatically syncs between your library and installed accounts">
+                    Synced
                   </span>
                 )}
                 {savedAddon.sourceType === 'cloned-from-account' && (
-                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary border border-primary/20">
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-primary/10 text-primary border border-primary/20">
                     Cloned
                   </span>
                 )}
@@ -176,27 +253,32 @@ export function SavedAddonCard({
                   const status = restorationManager.getStatus(savedAddon.installUrl)
                   if (status.status === 'restoring') {
                     return (
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20 animate-pulse">
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-amber-500/10 text-amber-500 border border-amber-500/20 animate-pulse">
                         Restoring...
                       </span>
                     )
                   }
                   if (status.circuitState === 'open') {
                     return (
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-500 border border-red-500/20" title="Auto-restore disabled after repeated failures. 30m cooldown.">
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-red-500/10 text-red-500 border border-red-500/20" title="Auto-restore disabled after repeated failures. 30m cooldown.">
                         Failed
                       </span>
                     )
                   }
                   return null
                 })()}
-              </CardDescription>
+              </div>
             </div>
           </div>
 
           <DropdownMenu>
-            <DropdownMenuTrigger className="p-1 hover:bg-accent rounded transition-colors duration-150 shrink-0">
-              <MoreVertical className="h-5 w-5 text-muted-foreground" />
+            <DropdownMenuTrigger asChild>
+              <button
+                className="p-1.5 hover:bg-white/5 rounded-lg transition-colors duration-150 shrink-0 outline-none flex items-center justify-center -mr-2"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreVertical className="h-4 w-4 text-white/40 hover:text-white transition-colors" />
+              </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={handleCopyUrl}>
@@ -205,7 +287,7 @@ export function SavedAddonCard({
               </DropdownMenuItem>
               {savedAddon.manifest.behaviorHints?.configurable && (
                 <DropdownMenuItem onClick={handleOpenConfiguration}>
-                  <Settings className="h-4 w-4 mr-2" />
+                  <AnimatedSettingsIcon className="h-4 w-4 mr-2" />
                   Configure
                 </DropdownMenuItem>
               )}
@@ -215,67 +297,115 @@ export function SavedAddonCard({
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem destructive onClick={handleDelete}>
-                <Trash2 className="h-4 w-4 mr-2" />
+                <AnimatedTrashIcon className="h-4 w-4 mr-2" />
                 Delete
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </CardHeader>
+        </div>
 
-        <CardContent className="flex-grow py-2 min-w-0">
-          {/* Description */}
-          {savedAddon.manifest.description && (
-            <p className="text-sm text-muted-foreground line-clamp-2 mb-3">
-              {savedAddon.manifest.description}
-            </p>
-          )}
-
-          {/* URL Bar */}
-          <div className="flex items-center gap-2 w-full min-w-0 mb-3">
-            <div className="flex-1 bg-muted/40 rounded px-2 py-1 flex items-center justify-between border min-w-0 w-full overflow-hidden">
-              <span className="text-xs text-muted-foreground font-mono truncate mr-2 flex-grow min-w-0">
-                {isPrivacyModeEnabled ? maskUrl(savedAddon.installUrl) : savedAddon.installUrl}
-              </span>
-              <button
-                onClick={handleCopyUrl}
-                className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                title="Copy URL"
-              >
-                <Copy className="h-3 w-3" />
-              </button>
-            </div>
-          </div>
-
-          {/* Tags */}
-          {savedAddon.tags.length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-3">
-              {savedAddon.tags.map((tag) => (
-                <AddonTag key={tag} tag={tag} />
-              ))}
-            </div>
-          )}
-
-          {/* Dates */}
-          <div className="text-xs text-muted-foreground space-y-1">
-            <p>Created: {formatDate(savedAddon.createdAt)}</p>
-            {savedAddon.lastUsed && <p>Last used: {formatDate(savedAddon.lastUsed)}</p>}
-          </div>
-
-          {/* Update Button */}
-          {hasUpdate && onUpdate && (
-            <Button
-              variant="default"
-              size="sm"
-              onClick={handleUpdate}
-              disabled={updating}
-              className="w-full mt-3"
+        <div className="flex-grow flex flex-col min-w-0 pt-2">
+          {/* Condensed URL */}
+          <div className="flex items-center gap-1.5 mb-2 w-full min-w-0 group/url cursor-pointer" onClick={handleCopyUrl}>
+            <span
+              className="truncate flex-grow min-w-0"
+              style={{
+                fontFamily: '"DM Mono", monospace',
+                fontSize: '10px',
+                color: 'rgba(255,255,255,0.2)'
+              }}
             >
-              <FileDown className={`h-4 w-4 mr-2 ${updating ? 'animate-spin' : ''}`} />
-              {updating ? 'Updating...' : 'Update Addon'}
-            </Button>
+              {(() => {
+                try {
+                  const urlObj = new URL(savedAddon.installUrl)
+                  return `${urlObj.hostname}/••••••`
+                } catch {
+                  return savedAddon.installUrl
+                }
+              })()}
+            </span>
+            <Copy className="h-3 w-3 text-white/40 opacity-0 group-hover/url:opacity-100 transition-opacity shrink-0" />
+          </div>
+
+          {/* Description */}
+          {((savedAddon.metadata?.customDescription || (savedAddon.manifest.description && savedAddon.manifest.description !== `Addon generated by ${savedAddon.name}`))) && (
+            <div
+              className="line-clamp-1 mb-3"
+              style={{
+                fontFamily: '"DM Sans", sans-serif',
+                fontSize: '12px',
+                color: 'rgba(255,255,255,0.4)',
+                lineHeight: 1.5
+              }}
+            >
+              {savedAddon.metadata?.customDescription || savedAddon.manifest.description}
+            </div>
           )}
-        </CardContent>
-      </Card>
+
+          <div className="flex-grow"></div>
+
+          <div className="flex items-end justify-between mt-auto pt-2">
+            {/* Tags */}
+            <div className="flex flex-wrap gap-1 relative z-20" onClick={(e) => e.stopPropagation()}>
+              {hasUpdate && onUpdate && (
+                <button
+                  onClick={handleUpdate}
+                  disabled={updating}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '3px',
+                    padding: '2px 7px',
+                    borderRadius: '999px',
+                    background: 'rgba(245,158,11,0.12)',
+                    border: '1px solid rgba(245,158,11,0.3)',
+                    fontFamily: '"DM Mono", monospace',
+                    fontSize: '8px',
+                    fontWeight: 700,
+                    color: '#f59e0b',
+                    cursor: updating ? 'not-allowed' : 'pointer',
+                    opacity: updating ? 0.5 : 1,
+                    flexShrink: 0,
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {updating ? 'Updating...' : <><AnimatedUpdateIcon className="h-3 w-3 mr-1" isAnimating={updating} /> Update</>}
+                </button>
+              )}
+              {savedAddon.tags.map((tag) => {
+                const color = getTagColor(tag)
+                return (
+                  <span
+                    key={tag}
+                    className="font-mono text-[9px] pointer-events-none uppercase tracking-wider font-bold mb-0.5 px-1.5 py-0.5 rounded-md"
+                    style={{
+                      background: color.bg,
+                      color: color.text,
+                      border: `1px solid ${color.border}`
+                    }}
+                  >
+                    {tag}
+                  </span>
+                )
+              })}
+            </div>
+
+            {/* Consolidated Footer */}
+            <div
+              className="shrink-0 pl-2 text-right"
+              style={{
+                fontFamily: '"DM Mono", monospace',
+                fontSize: '9px',
+                color: 'rgba(255,255,255,0.25)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em'
+              }}
+            >
+              {profileName && <span>{profileName} &bull; </span>}SAVED {getTimeAgo(new Date(savedAddon.createdAt))}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Details Dialog */}
       <Dialog open={showDetails} onOpenChange={setShowDetails}>

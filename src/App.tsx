@@ -6,6 +6,7 @@ import { ImportDialog } from '@/components/ImportDialog'
 import { Layout } from '@/components/layout/Layout'
 import { ScrollToTop } from '@/components/ScrollToTop'
 import { Toaster } from '@/components/ui/toaster'
+import { WhatsNewModal } from '@/components/WhatsNewModal'
 import { AppRoutes } from '@/routes'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
@@ -15,11 +16,16 @@ import { useProfileStore } from '@/store/profileStore'
 import { useFailoverStore } from '@/store/failoverStore'
 import { useSyncStore } from '@/store/syncStore'
 import { LoginPage } from '@/pages/LoginPage'
+import { KeybindingsHelp } from '@/components/KeybindingsHelp'
+import { useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 
 
+import { LoadingScreen } from '@/components/common/LoadingScreen'
 
 function App() {
+  const navigate = useNavigate()
+  const [showShortcuts, setShowShortcuts] = useState(false)
   const initializeAccounts = useAccountStore((state) => state.initialize)
   const initializeAddons = useAddonStore((state) => state.initialize)
   const initializeAuth = useAuthStore((state) => state.initialize)
@@ -56,9 +62,9 @@ function App() {
   // Trigger sync when app unlocks to ensure parity
   useEffect(() => {
     if (!isLocked && auth.isAuthenticated && isInitialized) {
-      console.log('[App] Vault unlocked. Triggering fresh sync.')
+      console.log('[App] Vault unlocked. Triggering fresh cloud pull.')
       // 1. Sync Cloud -> App (Pull latest changes)
-      useSyncStore.getState().syncFromRemote().then(() => {
+      useSyncStore.getState().refreshFromCloud().then(() => {
         // 2. Sync Stremio -> App (Once local state is updated from cloud)
         useAccountStore.getState().syncAllAccounts()
       }).catch(console.error)
@@ -76,14 +82,51 @@ function App() {
     }
   }, [auth.isAuthenticated, auth.id, isInitialized])
 
+  // Keyboard Shortcuts
+  useEffect(() => {
+    let lastKey = ''
+    let lastKeyTime = 0
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+
+      const now = Date.now()
+      const key = e.key.toLowerCase()
+
+      // ? for help
+      if (key === '?' || key === '/') {
+        if (key === '?' || (key === '/' && e.shiftKey)) {
+          setShowShortcuts(true)
+          return
+        }
+      }
+
+      // g + key navigation
+      if (lastKey === 'g' && now - lastKeyTime < 500) {
+        switch (key) {
+          case 'a': navigate('/'); break;
+          case 's': navigate('/saved-addons'); break;
+          case 'h': navigate('/activity'); break;
+          case 'm': navigate('/metrics'); break;
+          case 'p': navigate('/settings'); break;
+          case 'f': navigate('/faq'); break;
+        }
+      }
+
+      lastKey = key
+      lastKeyTime = now
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [navigate])
+
   if (!isInitialized) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-center">
-          <h2 className="text-2xl font-bold mb-2">Loading...</h2>
-          <p className="text-muted-foreground">Initializing AIOManager</p>
-        </div>
-      </div>
+      <LoadingScreen />
     )
   }
 
@@ -120,7 +163,9 @@ function App() {
       <AddonInstaller />
       <ExportDialog />
       <ImportDialog />
+      <WhatsNewModal />
       <Toaster />
+      <KeybindingsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
     </Layout>
   )
 }

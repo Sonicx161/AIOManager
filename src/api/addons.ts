@@ -27,7 +27,7 @@ export async function updateAddons(authKey: string, addons: AddonDescriptor[], a
 
 export async function installAddon(authKey: string, addonUrl: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   // First, fetch the addon manifest
-  const newAddon = await stremioClient.fetchAddonManifest(addonUrl, accountContext)
+  const newAddon = await fetchAddonManifest(addonUrl, accountContext)
 
   // Get current addons
   const currentAddons = await getAddons(authKey, accountContext)
@@ -81,8 +81,14 @@ export async function removeAddon(authKey: string, transportUrl: string, account
   return updatedAddons
 }
 
-export async function fetchAddonManifest(url: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor> {
-  return stremioClient.fetchAddonManifest(url, accountContext)
+export async function fetchAddonManifest(url: string, accountContext: string = 'Unknown', force: boolean = false): Promise<AddonDescriptor> {
+  const origin = new URL(url).origin
+  await acquireDomainSlot(origin)
+  try {
+    return await stremioClient.fetchAddonManifest(url, accountContext, force)
+  } finally {
+    releaseDomainSlot(origin)
+  }
 }
 
 /**
@@ -104,7 +110,7 @@ export async function reinstallAddon(
   // isn't currently in Stremio (e.g. it's disabled).
   let newAddonDescriptor: AddonDescriptor
   try {
-    newAddonDescriptor = await stremioClient.fetchAddonManifest(transportUrl, accountContext)
+    newAddonDescriptor = await fetchAddonManifest(transportUrl, accountContext, true)
   } catch (error) {
     console.error(`[Reinstall Failsafe] Failed to reach addon at ${transportUrl}`, error)
     throw new Error(`Cannot reach addon: ${error instanceof Error ? error.message : 'Unknown error'}. Aborting reinstall.`)
@@ -161,6 +167,41 @@ export interface AddonUpdateInfo {
 const PENDING_CHECKS: Record<string, Promise<HealthStatus>> = {}
 const PENDING_MANIFESTS: Record<string, Promise<AddonDescriptor>> = {}
 
+// Track active manifest fetches per origin domain to avoid rate limiting
+const DOMAIN_ACTIVE_FETCHES: Record<string, number> = {}
+const DOMAIN_QUEUE: Record<string, (() => void)[]> = {}
+const MAX_CONCURRENT_PER_DOMAIN = 2
+
+function acquireDomainSlot(origin: string): Promise<void> {
+  return new Promise((resolve) => {
+    const active = DOMAIN_ACTIVE_FETCHES[origin] || 0
+    if (active < MAX_CONCURRENT_PER_DOMAIN) {
+      DOMAIN_ACTIVE_FETCHES[origin] = active + 1
+      // console.log(`[Domain Limiter] [${origin}] SLOT ACQUIRED (Active: ${DOMAIN_ACTIVE_FETCHES[origin]})`)
+      resolve()
+    } else {
+      if (!DOMAIN_QUEUE[origin]) DOMAIN_QUEUE[origin] = []
+      // console.log(`[Domain Limiter] [${origin}] QUEUEING (Active: ${active}, Queue: ${DOMAIN_QUEUE[origin].length + 1})`)
+      DOMAIN_QUEUE[origin].push(() => {
+        DOMAIN_ACTIVE_FETCHES[origin] = (DOMAIN_ACTIVE_FETCHES[origin] || 0) + 1
+        // console.log(`[Domain Limiter] [${origin}] QUEUE RELEASED (Active: ${DOMAIN_ACTIVE_FETCHES[origin]})`)
+        resolve()
+      })
+    }
+  })
+}
+
+function releaseDomainSlot(origin: string): void {
+  DOMAIN_ACTIVE_FETCHES[origin] = Math.max(0, (DOMAIN_ACTIVE_FETCHES[origin] || 1) - 1)
+  const next = DOMAIN_QUEUE[origin]?.shift()
+  if (next) {
+    // Stagger slightly to avoid burst 429s
+    setTimeout(next, 100)
+  } else {
+    // console.log(`[Domain Limiter] [${origin}] SLOT RELEASED (Active: ${active})`)
+  }
+}
+
 /**
  * Check which addons have updates available by comparing installed versions
  * with the latest versions from their transport URLs.
@@ -202,7 +243,12 @@ export async function checkAddonUpdates(addons: AddonDescriptor[], accountContex
             const healthVal = await healthPromise
             if (!healthVal.isOnline) throw new Error('Addon is offline')
 
-            return stremioClient.fetchAddonManifest(addon.transportUrl, accountContext)
+            await acquireDomainSlot(origin)
+            try {
+              return await stremioClient.fetchAddonManifest(addon.transportUrl, accountContext)
+            } finally {
+              releaseDomainSlot(origin)
+            }
           })().catch(err => {
             delete PENDING_MANIFESTS[manifestKey]
             throw err
@@ -285,7 +331,12 @@ export async function checkSavedAddonUpdates(
             const healthVal = await healthPromise
             if (!healthVal.isOnline) throw new Error('Addon is offline')
 
-            return stremioClient.fetchAddonManifest(addon.installUrl, accountContext)
+            await acquireDomainSlot(origin)
+            try {
+              return await stremioClient.fetchAddonManifest(addon.installUrl, accountContext)
+            } finally {
+              releaseDomainSlot(origin)
+            }
           })().catch(async (err) => {
             delete PENDING_MANIFESTS[manifestKey]
             throw err

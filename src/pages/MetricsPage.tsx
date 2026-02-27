@@ -1,6 +1,8 @@
-
+import { useNavigate } from 'react-router-dom'
+import { motion } from 'framer-motion'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { MetricsPageSkeleton } from '@/components/ui/skeleton'
 import { useActivityStore } from '@/store/activityStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useMetricsWorker } from '@/hooks/useMetricsWorker'
@@ -24,6 +26,9 @@ import {
     CheckCircle,
     Hammer,
     RefreshCw,
+    Sun,
+    Coffee,
+    LayoutGrid,
 } from 'lucide-react'
 import {
     AlertDialog,
@@ -36,18 +41,38 @@ import {
     AlertDialogTitle,
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '../components/ui/avatar'
-import { cn } from '@/lib/utils'
+import { cn, openStremioDetail } from '@/lib/utils'
+import { Poster } from '@/components/common/Poster'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select"
+
+const IconMap: Record<string, React.ElementType> = {
+    CheckCircle, Ghost, Moon, Flame, Zap, Clock, Sun, Coffee, Tv, LayoutGrid, Film
+}
 
 export function MetricsPage() {
+    const navigate = useNavigate()
     // const { history, initialize, fetchActivity } = useActivityStore() // Deprecated for display
     const { initialize } = useActivityStore()
     const { accounts } = useAccountStore()
-    const { items: history, loading: cacheLoading, ensureLoaded } = useLibraryCache()
-    const { results: stats, isComputing: workerLoading } = useMetricsWorker(history)
+    const { items: history, loading: cacheLoading, ensureLoaded, loadingProgress } = useLibraryCache()
+
+    const [selectedAccountId, setSelectedAccountId] = useState<string>('all')
+
+    const filteredHistory = selectedAccountId === 'all'
+        ? history
+        : history.filter(item => item.accountId === selectedAccountId)
+
+    const { results: stats, isComputing: workerLoading } = useMetricsWorker(filteredHistory)
 
     useEffect(() => {
         // We still init activityStore for background tasks/deletion logic availability
@@ -56,13 +81,17 @@ export function MetricsPage() {
                 ensureLoaded(accounts)
             }
         })
-    }, [initialize, accounts, ensureLoaded, history.length])
+    }, [initialize, accounts, ensureLoaded])
 
     if (!stats || workerLoading) {
         return (
-            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center p-8 opacity-50">
-                <Activity className="h-16 w-16 mb-4 animate-pulse text-indigo-500" />
-                <h2 className="text-2xl font-bold">Crunching the numbers...</h2>
+            <div>
+                <MetricsPageSkeleton />
+                <div className="mt-4 text-center text-sm text-muted-foreground font-mono animate-pulse">
+                    {cacheLoading
+                        ? (loadingProgress.current > 0 ? `Synced ${loadingProgress.current} of ${loadingProgress.total} accounts` : 'Connecting to Stremio...')
+                        : 'Crunching numbers...'}
+                </div>
             </div>
         )
     }
@@ -70,73 +99,145 @@ export function MetricsPage() {
     return (
         <div className="space-y-8 pb-32 animate-in fade-in duration-700">
             {/* HEADER */}
-            <div className="px-4 flex items-center justify-between">
-                <div>
-                    <h1 className="text-3xl font-bold tracking-tight">Metrics</h1>
-                    <p className="text-muted-foreground mt-1">
-                        Community Core insights and global statistics.
-                    </p>
-                </div>
-                {(cacheLoading) && (
-                    <div className="flex items-center gap-2 text-xs font-bold text-indigo-500 animate-pulse bg-indigo-500/10 px-3 py-1.5 rounded-full border border-indigo-500/20">
-                        <Activity className="h-3 w-3" />
-                        Syncing...
+            <div className="px-4 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                <div className="flex items-center justify-between md:block">
+                    <div>
+                        <h1 className="text-3xl font-bold tracking-tight">Metrics</h1>
+                        <p className="text-muted-foreground mt-1">
+                            Community Core insights and global statistics.
+                        </p>
                     </div>
-                )}
-                {!cacheLoading && (
-                    <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                            <Button
-                                className="h-8 bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-600/20 font-medium"
+                    {(cacheLoading) && (
+                        <div className="flex md:hidden items-center gap-2 text-xs font-bold text-primary animate-pulse bg-primary/10 px-3 py-1.5 rounded-full border border-primary/20">
+                            <Activity className="h-3 w-3" />
+                            Syncing...
+                        </div>
+                    )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 lg:gap-3">
+                    {(cacheLoading) && (
+                        <div className="hidden md:flex items-center gap-2 text-xs font-bold text-primary animate-pulse bg-primary/10 px-3 py-1.5 rounded-full border border-primary/20">
+                            <Activity className="h-3 w-3" />
+                            Syncing...
+                        </div>
+                    )}
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                        <Select value={selectedAccountId} onValueChange={setSelectedAccountId}>
+                            <SelectTrigger className="flex-1 sm:w-[180px] h-10 bg-white/5 border-white/10">
+                                <SelectValue placeholder="All Accounts" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All Accounts</SelectItem>
+                                {(() => {
+                                    const activeAccountIds = new Set(history.map(h => h.accountId))
+                                    return accounts
+                                        .filter(acc => activeAccountIds.has(acc.id))
+                                        .map(acc => (
+                                            <SelectItem key={acc.id} value={acc.id}>
+                                                <div className="flex items-center gap-2">
+                                                    {acc.emoji && <span>{acc.emoji}</span>}
+                                                    <span className="truncate">{acc.name || acc.email || 'Unknown Account'}</span>
+                                                </div>
+                                            </SelectItem>
+                                        ))
+                                })()}
+                            </SelectContent>
+                        </Select>
+                        <Button
+                            size="sm"
+                            onClick={() => navigate('/replay')}
+                            className="flex-1 sm:flex-none h-10 px-4 text-black border-none font-black shadow-lg shadow-primary/20 group overflow-hidden relative animate-shimmer-bg transition-transform active:scale-95 flex items-center justify-center gap-2"
+                            style={{
+                                background: 'linear-gradient(90deg, #818cf8 0%, #a78bfa 25%, #f472b6 50%, #a78bfa 75%, #818cf8 100%)',
+                                backgroundSize: '200% auto',
+                            }}
+                        >
+                            <motion.div
+                                initial="initial"
+                                animate="animate"
+                                className="flex items-center justify-center relative z-10"
                             >
-                                <Hammer className="mr-2 h-3.5 w-3.5" />
-                                Force Resync
-                            </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                            <AlertDialogHeader>
-                                <AlertDialogTitle>Resync Activity Data?</AlertDialogTitle>
-                                <AlertDialogDescription className="space-y-2">
-                                    <p>
-                                        This will <strong>discard the local cache</strong> and re-fetch fresh data from Stremio.
-                                    </p>
-                                    <div className="bg-indigo-500/10 p-3 rounded-md border border-indigo-500/20 text-xs text-indigo-500 font-medium">
-                                        <p>✨ <strong>Self-Healing</strong></p>
-                                        <p className="mt-1 font-normal opacity-90">
-                                            If numbers look wrong or "phantom" items appear, this will fix it by mirroring exactly what is on your Stremio account.
-                                        </p>
-                                    </div>
-                                </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                <AlertDialogAction
-                                    onClick={() => {
-                                        useLibraryCache.getState().invalidate()
-                                        useLibraryCache.getState().ensureLoaded(accounts)
-                                    }}
-                                    className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                                <motion.svg
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 24 24"
+                                    fill="currentColor"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
                                 >
-                                    <RefreshCw className="mr-2 h-4 w-4" />
-                                    Resync Now
-                                </AlertDialogAction>
-                            </AlertDialogFooter>
-                        </AlertDialogContent>
-                    </AlertDialog>
-                )}
+                                    <motion.path d="m11 19-9-7 9-7v14z" variants={{
+                                        initial: { opacity: 0.4 },
+                                        animate: { opacity: [0.4, 1, 0.4], transition: { repeat: Infinity, duration: 1.5, ease: "linear" } }
+                                    }} />
+                                    <motion.path d="m22 19-9-7 9-7v14z" variants={{
+                                        initial: { opacity: 1 },
+                                        animate: { opacity: [1, 0.4, 1], transition: { repeat: Infinity, duration: 1.5, ease: "linear" } }
+                                    }} />
+                                </motion.svg>
+                            </motion.div>
+                            <span className="relative z-10 uppercase tracking-tight text-xs">Replay</span>
+                        </Button>
+                    </div>
+                    {!cacheLoading && (
+                        <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                                <Button
+                                    size="sm"
+                                    className="w-full sm:w-auto h-10 px-4 bg-yellow-500 hover:bg-yellow-400 text-black border border-yellow-600/20 font-bold"
+                                >
+                                    <Hammer className="mr-2 h-3.5 w-3.5" />
+                                    Force Resync
+                                </Button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent className="w-[95vw] sm:w-full max-w-lg">
+                                <AlertDialogHeader>
+                                    <AlertDialogTitle>Resync Activity Data?</AlertDialogTitle>
+                                    <AlertDialogDescription asChild>
+                                        <div className="space-y-2">
+                                            <p>
+                                                This will <strong>discard the local cache</strong> and re-fetch fresh data from Stremio.
+                                            </p>
+                                            <div className="bg-primary/10 p-3 rounded-md border border-primary/20 text-xs text-primary font-medium">
+                                                <p>✨ <strong>Self-Healing</strong></p>
+                                                <p className="mt-1 font-normal opacity-90">
+                                                    If numbers look wrong or "phantom" items appear, this will fix it by mirroring exactly what is on your Stremio account.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter className="flex-col-reverse sm:flex-row gap-2">
+                                    <AlertDialogCancel className="mt-0">Cancel</AlertDialogCancel>
+                                    <AlertDialogAction
+                                        onClick={() => {
+                                            useLibraryCache.getState().invalidate()
+                                            useLibraryCache.getState().ensureLoaded(accounts)
+                                        }}
+                                        className="bg-primary hover:bg-primary/90 text-white"
+                                    >
+                                        <RefreshCw className="mr-2 h-4 w-4" />
+                                        Resync Now
+                                    </AlertDialogAction>
+                                </AlertDialogFooter>
+                            </AlertDialogContent>
+                        </AlertDialog>
+                    )}
+                </div>
             </div>
 
             <Tabs defaultValue="pulse" className="w-full">
-                <div className="flex items-center justify-between mb-8 px-4 gap-4">
-                    <div className="overflow-x-auto scrollbar-hide">
-                        <TabsList className="flex whitespace-nowrap">
-                            <TabsTrigger value="pulse" className="shrink-0">Pulse</TabsTrigger>
-                            <TabsTrigger value="community" className="shrink-0">Community ({stats.leaderboard.length})</TabsTrigger>
-                            <TabsTrigger value="personality" className="shrink-0">Personality</TabsTrigger>
-                            <TabsTrigger value="vault" className="shrink-0">Vault ({stats.topAllTime.length})</TabsTrigger>
-                            <TabsTrigger value="deep-dive" className="shrink-0">Deep Dive</TabsTrigger>
-                        </TabsList>
-                    </div>
+                <div className="mb-8 px-4">
+                    <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full">
+                        <TabsTrigger value="pulse" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30">Pulse</TabsTrigger>
+                        <TabsTrigger value="community" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30">Community</TabsTrigger>
+                        <TabsTrigger value="personality" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30">Personality</TabsTrigger>
+                        <TabsTrigger value="vault" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30">Vault</TabsTrigger>
+                        <TabsTrigger value="deep-dive" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30">Deep Dive</TabsTrigger>
+                    </TabsList>
                 </div>
 
                 {/* TAB 1: PULSE (Overview) */}
@@ -146,11 +247,11 @@ export function MetricsPage() {
 
                     {/* KEY METRICS GRID */}
                     <div className="px-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                        <Card className="bg-indigo-500/5 border-indigo-500/10">
+                        <Card className="bg-primary/5 border-primary/10">
                             <CardContent className="p-6">
                                 <div className="flex items-center gap-4">
-                                    <div className="p-3 bg-indigo-500/10 rounded-xl">
-                                        <Activity className="h-6 w-6 text-indigo-500" />
+                                    <div className="p-3 bg-primary/10 rounded-xl">
+                                        <Activity className="h-6 w-6 text-primary" />
                                     </div>
                                     <div>
                                         <div className="text-2xl font-black">{stats.totalItems}</div>
@@ -228,15 +329,26 @@ export function MetricsPage() {
                             {stats.topTrending.length > 0 ? (
                                 <div className="flex gap-4">
                                     {stats.topTrending.map((item: any, i: number) => (
-                                        <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative w-32 h-48 md:w-40 md:h-60 shrink-0 rounded-xl overflow-hidden shadow-xl group cursor-pointer transition-transform hover:-translate-y-2">
+                                        <div
+                                            key={item.id}
+                                            onClick={() => {
+                                                openStremioDetail(item.type, item.itemId || item.id)
+                                            }}
+                                            className="relative w-32 h-48 md:w-40 md:h-60 shrink-0 rounded-xl overflow-hidden shadow-xl group cursor-pointer transition-transform hover:-translate-y-2"
+                                        >
                                             <div className="absolute top-2 left-2 z-10 bg-orange-500/90 text-white font-black text-xs px-2 py-1 rounded shadow-lg">#{i + 1}</div>
-                                            <img src={item.poster} className="w-full h-full object-cover" />
+                                            <Poster
+                                                src={item.poster}
+                                                itemId={item.itemId || item.id}
+                                                itemType={item.type}
+                                                className="w-full h-full object-cover"
+                                            />
                                             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-3">
                                                 <div className="text-white text-sm font-bold truncate">{item.name}</div>
                                             </div>
-                                        </a >
+                                        </div>
                                     ))}
-                                </div >
+                                </div>
                             ) : (
                                 <div className="flex items-center justify-center py-12 text-center">
                                     <div className="opacity-50">
@@ -246,8 +358,8 @@ export function MetricsPage() {
                                     </div>
                                 </div>
                             )}
-                        </div >
-                    </div >
+                        </div>
+                    </div>
 
                     {/* BINGE MASTERY HIGHLIGHT */}
                     < div className="px-4" >
@@ -267,9 +379,21 @@ export function MetricsPage() {
                                 </div>
                                 <div className="flex -space-x-4">
                                     {stats.bingeMasters[0]?.bingeItems.slice(0, 5).map((item: any, i: number) => (
-                                        <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative w-16 h-24 rounded-lg border-2 border-background overflow-hidden shadow-lg transition-transform hover:-translate-y-2" style={{ zIndex: 5 - i }}>
-                                            <img src={item.poster} className="w-full h-full object-cover" />
-                                        </a>
+                                        <div
+                                            key={item.id}
+                                            onClick={() => {
+                                                openStremioDetail(item.type, item.itemId || item.id)
+                                            }}
+                                            className="relative w-16 h-24 rounded-lg border-2 border-background overflow-hidden shadow-lg transition-transform hover:-translate-y-2 cursor-pointer"
+                                            style={{ zIndex: 5 - i }}
+                                        >
+                                            <Poster
+                                                src={item.poster}
+                                                itemId={item.itemId || item.id}
+                                                itemType={item.type}
+                                                className="w-full h-full object-cover"
+                                            />
+                                        </div>
                                     ))}
                                 </div>
                             </CardContent>
@@ -284,9 +408,9 @@ export function MetricsPage() {
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                             {/* Midnight Snackers */}
-                            <Card className="bg-indigo-500/5 border-indigo-500/20 group hover:border-indigo-500/40 transition-colors">
+                            <Card className="bg-primary/5 border-primary/20 group hover:border-primary/40 transition-colors">
                                 <CardHeader className="pb-2">
-                                    <CardTitle className="flex items-center gap-2 text-indigo-400">
+                                    <CardTitle className="flex items-center gap-2 text-primary/80">
                                         <Moon className="h-4 w-4" /> Midnight Snackers
                                     </CardTitle>
                                 </CardHeader>
@@ -294,10 +418,10 @@ export function MetricsPage() {
                                     {stats.awards.midnightSnackers.map((u: any, i: number) => (
                                         <div key={u.id} className="flex items-center justify-between">
                                             <div className="flex items-center gap-2">
-                                                <span className="text-xs font-black text-indigo-500/50">#{i + 1}</span>
+                                                <span className="text-xs font-black text-primary/50">#{i + 1}</span>
                                                 <span className="font-bold text-sm truncate max-w-[120px]">{u.name}</span>
                                             </div>
-                                            <Badge variant="outline" className="text-[10px] bg-indigo-500/10 text-indigo-400 border-indigo-500/20">
+                                            <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
                                                 {u.count} Late Night Plays
                                             </Badge>
                                         </div>
@@ -392,7 +516,7 @@ export function MetricsPage() {
                         <Card className="bg-muted/10 border-border/60">
                             <CardHeader>
                                 <CardTitle className="flex items-center gap-2">
-                                    <PieChart className="h-5 w-5 text-indigo-400" /> Content Mix
+                                    <PieChart className="h-5 w-5 text-primary/80" /> Content Mix
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
@@ -450,48 +574,48 @@ export function MetricsPage() {
                                         user.rank === 1 ? "border-yellow-500/50 bg-yellow-500/5 shadow-[0_0_30px_rgba(234,179,8,0.1)]" : ""
                                     )}
                                 >
-                                    <CardContent className="p-8">
-                                        <div className="flex flex-col gap-6">
-                                            <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                                                <div className="flex items-center gap-6">
+                                    <CardContent className="p-4 sm:p-8">
+                                        <div className="flex flex-col gap-4 sm:gap-6">
+                                            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 sm:gap-6">
+                                                <div className="flex items-center gap-4 sm:gap-6 w-full sm:w-auto">
                                                     <div className={cn(
-                                                        "text-5xl font-black transition-colors duration-500",
+                                                        "text-3xl sm:text-5xl font-black transition-colors duration-500 shrink-0",
                                                         user.rank === 1 ? "text-yellow-500" : "text-muted-foreground/30"
                                                     )}>#{user.rank}</div>
                                                     <Avatar className={cn(
-                                                        "h-20 w-20 border-4 border-background shadow-2xl transition-transform group-hover:scale-110 duration-500",
+                                                        "h-12 w-12 sm:h-20 sm:w-20 border-2 sm:border-4 border-background shadow-2xl transition-transform group-hover:scale-110 duration-500 shrink-0",
                                                         user.rank === 1 ? "border-yellow-500" : ""
                                                     )}>
                                                         <AvatarFallback className={cn(
-                                                            "font-black text-3xl",
+                                                            "font-black text-xl sm:text-3xl",
                                                             user.rank === 1 ? "bg-yellow-500 text-black" : ""
                                                         )}>{user.avatarChar}</AvatarFallback>
                                                     </Avatar>
-                                                    <div>
-                                                        <div className="flex items-center gap-3">
-                                                            <div className="font-black text-3xl tracking-tight">{user.name}</div>
-                                                            {user.rank === 1 && <Crown className="h-6 w-6 text-yellow-500 animate-bounce" />}
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="flex items-center gap-2 sm:gap-3">
+                                                            <div className="font-black text-xl sm:text-3xl tracking-tight truncate">{user.name}</div>
+                                                            {user.rank === 1 && <Crown className="h-4 w-4 sm:h-6 sm:w-6 text-yellow-500 animate-bounce shrink-0" />}
                                                         </div>
-                                                        <div className="text-xs font-bold text-muted-foreground uppercase flex flex-wrap gap-4 mt-1">
-                                                            <span className="flex items-center gap-1.5"><PlayCircle className="h-3.5 w-3.5 text-primary" /> {user.count} Plays</span>
-                                                            <span className="flex items-center gap-1.5"><Clock className="h-3.5 w-3.5 text-indigo-400" /> {Math.round(user.duration / 60)} Hours</span>
+                                                        <div className="text-[10px] sm:text-xs font-bold text-muted-foreground uppercase flex flex-wrap gap-x-3 gap-y-1 mt-1">
+                                                            <span className="flex items-center gap-1"><PlayCircle className="h-3 w-3 text-primary" /> {user.count}</span>
+                                                            <span className="flex items-center gap-1"><Clock className="h-3 w-3 text-primary/80" /> {Math.round(user.duration / 60)}h</span>
                                                             {user.bestStreak > 3 && (
-                                                                <span className="flex items-center gap-1.5 text-orange-500">
-                                                                    <Flame className="h-3.5 w-3.5" /> {user.bestStreak} Day Streak
+                                                                <span className="flex items-center gap-1 text-orange-500">
+                                                                    <Flame className="h-3 w-3" /> {user.bestStreak}d
                                                                 </span>
                                                             )}
                                                         </div>
                                                     </div>
                                                 </div>
 
-                                                <div className="flex items-center gap-3">
+                                                <div className="flex items-center gap-2 self-end sm:self-center">
                                                     {stats.bingeMasters[0]?.id === user.id && (
-                                                        <Badge variant="outline" className="bg-orange-500/10 text-orange-500 border-orange-500/20 px-3 py-1 font-black italic">
+                                                        <Badge variant="outline" className="bg-orange-500/10 text-orange-500 border-orange-500/20 px-2 py-0.5 text-[9px] sm:text-[10px] font-black italic">
                                                             BINGE KING
                                                         </Badge>
                                                     )}
                                                     {user.currentStreak > 0 && (
-                                                        <Badge className="bg-emerald-500 text-white hover:bg-emerald-600 font-bold px-3 py-1 animate-pulse">
+                                                        <Badge className="bg-emerald-500 text-white hover:bg-emerald-600 font-bold px-2 py-0.5 text-[9px] sm:text-[10px] animate-pulse">
                                                             ON FIRE
                                                         </Badge>
                                                     )}
@@ -502,10 +626,21 @@ export function MetricsPage() {
                                             <div className="w-full overflow-x-auto pb-2 scrollbar-hide">
                                                 <div className="flex items-center gap-4">
                                                     {user.recentHistory.map((h: any) => (
-                                                        <a key={h.id} href={`stremio:///detail/${h.type}/${h.itemId}`} className="flex-none w-24 aspect-[2/3] relative group/poster transition-transform hover:-translate-y-2 cursor-pointer">
-                                                            <img src={h.poster} className="w-full h-full object-cover rounded-md shadow-md" />
+                                                        <div
+                                                            key={h.id}
+                                                            onClick={() => {
+                                                                openStremioDetail(h.type, h.itemId)
+                                                            }}
+                                                            className="flex-none w-24 aspect-[2/3] relative group/poster transition-transform hover:-translate-y-2 cursor-pointer"
+                                                        >
+                                                            <Poster
+                                                                src={h.poster}
+                                                                itemId={h.itemId || h._id}
+                                                                itemType={h.type}
+                                                                className="w-full h-full object-cover rounded-md shadow-md"
+                                                            />
                                                             <div className="absolute inset-0 bg-black/20 group-hover/poster:bg-transparent transition-colors rounded-md" />
-                                                        </a>
+                                                        </div>
                                                     ))}
                                                 </div>
                                             </div>
@@ -555,25 +690,35 @@ export function MetricsPage() {
                         {/* THE LOOP (Most Rewatched) */}
                         <Card className="bg-muted/10 border-border/60 overflow-hidden">
                             <CardHeader>
-                                <CardTitle className="flex items-center gap-2 text-indigo-500">
+                                <CardTitle className="flex items-center gap-2 text-primary">
                                     <Activity className="h-5 w-5" /> The Loop
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
                                 {stats.theLoop ? (
                                     <div className="flex gap-6">
-                                        <a href={`stremio:///detail/${stats.theLoop.item.type}/${stats.theLoop.item.itemId}`} className="shrink-0 group">
-                                            <img src={stats.theLoop.item.poster} className="h-40 w-28 object-cover rounded-xl shadow-2xl transition-transform group-hover:scale-105" />
-                                        </a>
+                                        <div
+                                            onClick={() => {
+                                                openStremioDetail(stats.theLoop.item.type, stats.theLoop.item.itemId)
+                                            }}
+                                            className="shrink-0 group cursor-pointer"
+                                        >
+                                            <Poster
+                                                src={stats.theLoop.item.poster}
+                                                itemId={stats.theLoop.item.itemId || stats.theLoop.item._id}
+                                                itemType={stats.theLoop.item.type}
+                                                className="h-40 w-28 object-cover rounded-xl shadow-2xl transition-transform group-hover:scale-105"
+                                            />
+                                        </div>
                                         <div className="flex-1 py-2">
                                             <div className="text-xl font-black line-clamp-2">{stats.theLoop.item.name}</div>
                                             <div className="mt-4 space-y-3">
                                                 <div className="flex items-center justify-between text-xs font-bold uppercase tracking-widest text-muted-foreground">
                                                     <span>Replays</span>
-                                                    <span className="text-indigo-400">{stats.theLoop.count} Hits</span>
+                                                    <span className="text-primary/80">{stats.theLoop.count} Hits</span>
                                                 </div>
                                                 <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                                                    <div className="h-full bg-indigo-500" style={{ width: '100%' }} />
+                                                    <div className="h-full bg-primary" style={{ width: '100%' }} />
                                                 </div>
                                                 <p className="text-[10px] text-muted-foreground font-medium leading-relaxed italic">
                                                     The content you just can't quit.
@@ -602,7 +747,7 @@ export function MetricsPage() {
                                         return (
                                             <div
                                                 key={i}
-                                                className="flex-1 rounded-sm bg-orange-500 transition-all cursor-help"
+                                                className="flex-1 min-w-[4px] rounded-sm bg-orange-500 transition-all cursor-help"
                                                 style={{
                                                     height: `${20 + (count / max) * 80}%`,
                                                     opacity
@@ -678,7 +823,13 @@ export function MetricsPage() {
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                             {stats.contentVelocity.map((v: any, i: number) => (
-                                <a key={i} href={`stremio:///detail/${v.item.type}/${v.item.itemId}`} className="block group">
+                                <div
+                                    key={i}
+                                    onClick={() => {
+                                        openStremioDetail(v.item.type, v.item.itemId)
+                                    }}
+                                    className="block group cursor-pointer"
+                                >
                                     <Card className="bg-orange-500/5 border-orange-500/10 group-hover:border-orange-500/30 transition-colors">
                                         <CardContent className="p-4 flex items-center gap-4">
                                             <img src={v.item.poster} className="h-20 w-14 object-cover rounded shadow" />
@@ -700,7 +851,7 @@ export function MetricsPage() {
                                             </div>
                                         </CardContent>
                                     </Card>
-                                </a>
+                                </div>
                             ))}
                         </div>
                     </div>
@@ -717,12 +868,12 @@ export function MetricsPage() {
                                 <h3 className="text-lg font-bold text-muted-foreground">Abandoned Shows</h3>
                                 <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-4">
                                     {stats.abandonedSeries.map((item: any) => (
-                                        <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
+                                        <div key={item.id} onClick={() => openStremioDetail(item.type, item.itemId)} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
                                             <img src={item.poster} className="w-full h-full object-cover" />
                                             <div className="absolute top-1 right-1 bg-red-500 text-[10px] text-white px-1.5 rounded font-bold">
                                                 {Math.round(item.progress)}%
                                             </div>
-                                        </a>
+                                        </div>
                                     ))}
                                     {stats.abandonedSeries.length === 0 && <div className="text-xs italic text-muted-foreground col-span-3">No abandoned shows. Good job!</div>}
                                 </div>
@@ -733,12 +884,12 @@ export function MetricsPage() {
                                 <h3 className="text-lg font-bold text-muted-foreground">Walked Out Movies</h3>
                                 <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-4">
                                     {stats.abandonedMovies.map((item: any) => (
-                                        <a key={item.id} href={`stremio:///detail/${item.type}/${item.itemId}`} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
+                                        <div key={item.id} onClick={() => openStremioDetail(item.type, item.itemId)} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
                                             <img src={item.poster} className="w-full h-full object-cover" />
                                             <div className="absolute top-1 right-1 bg-red-500 text-[10px] text-white px-1.5 rounded font-bold">
                                                 {Math.round(item.progress)}%
                                             </div>
-                                        </a>
+                                        </div>
                                     ))}
                                     {stats.abandonedMovies.length === 0 && <div className="text-xs italic text-muted-foreground col-span-3">No unfinished movies. Cinema lover!</div>}
                                 </div>
@@ -783,15 +934,15 @@ export function MetricsPage() {
                         </Card>
 
                         {/* TOTAL WATCH TIME */}
-                        <Card className="bg-gradient-to-br from-indigo-900/20 to-purple-900/20 border-border/60">
+                        <Card className="bg-gradient-to-br from-primary/20 to-purple-900/20 border-border/60">
                             <CardHeader>
                                 <CardTitle className="flex items-center gap-2">
-                                    <Clock className="h-5 w-5 text-indigo-400" /> Time Dilation
+                                    <Clock className="h-5 w-5 text-primary/80" /> Time Dilation
                                 </CardTitle>
                             </CardHeader>
                             <CardContent className="flex flex-col items-center justify-center h-[200px] gap-4">
                                 <div className="text-center space-y-2">
-                                    <div className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-purple-400">
+                                    <div className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-primary to-purple-400">
                                         {Math.floor(stats.totalHours / 24)}
                                     </div>
                                     <div className="text-xs font-black uppercase tracking-[0.3em] text-muted-foreground">Days of Life</div>
@@ -812,9 +963,9 @@ export function MetricsPage() {
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
                             {stats.sharedUniverse.map((c: any, i: number) => (
-                                <a
+                                <div
                                     key={i}
-                                    href={`stremio:///detail/${c.item.type}/${c.item.itemId}`}
+                                    onClick={() => openStremioDetail(c.item.type, c.item.itemId)}
                                     className="relative aspect-[2/3] group cursor-pointer overflow-hidden rounded-xl"
                                 >
                                     <div className="absolute top-2 left-2 z-20 bg-pink-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded shadow-lg uppercase tracking-widest">
@@ -825,7 +976,7 @@ export function MetricsPage() {
                                         <div className="text-[10px] font-black text-pink-400 uppercase">{c.accounts.size} Accounts</div>
                                         <div className="text-xs font-bold text-white truncate">{c.item.name}</div>
                                     </div>
-                                </a>
+                                </div>
                             ))}
                         </div>
                     </div>
@@ -837,13 +988,13 @@ export function MetricsPage() {
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
                             {stats.topAllTime.map((stat: any, i: number) => (
-                                <a key={stat.item.id} href={`stremio:///detail/${stat.item.type}/${stat.item.itemId}`} className="group relative aspect-[2/3] rounded-xl overflow-hidden bg-muted shadow-lg cursor-pointer transition-transform hover:-translate-y-2">
+                                <div key={stat.item.id} onClick={() => openStremioDetail(stat.item.type, stat.item.itemId)} className="group relative aspect-[2/3] rounded-xl overflow-hidden bg-muted shadow-lg cursor-pointer transition-transform hover:-translate-y-2">
                                     <img src={stat.item.poster} className="w-full h-full object-cover" />
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent flex flex-col justify-end p-4 opacity-0 group-hover:opacity-100 transition-opacity">
                                         <div className="text-4xl font-black text-white mb-1">#{i + 1}</div>
                                         <div className="text-xs font-bold text-white/80 uppercase tracking-widest">{stat.count} Plays</div>
                                     </div>
-                                </a>
+                                </div>
                             ))}
                         </div>
                     </div>
@@ -865,17 +1016,21 @@ export function MetricsPage() {
                                 <Card key={u.id} className="bg-muted/5 border-border/40">
                                     <CardContent className="p-4 flex items-center justify-between">
                                         <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-full bg-indigo-500/10 flex items-center justify-center font-black text-indigo-500">
+                                            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center font-black text-primary">
                                                 {u.name[0]}
                                             </div>
                                             <div>
                                                 <div className="font-bold text-sm">{u.name}</div>
                                                 <div className="flex gap-1 mt-1">
-                                                    {u.badges.map((b: any, bi: number) => (
-                                                        <Badge key={bi} variant="outline" className={`text-[8px] uppercase font-black bg-${b.color}-500/10 text-${b.color}-500 border-${b.color}-500/20 py-0`}>
-                                                            {b.type}
-                                                        </Badge>
-                                                    ))}
+                                                    {u.badges.map((b: any, bi: number) => {
+                                                        const BadgeIcon = IconMap[b.icon] || Flame
+                                                        return (
+                                                            <Badge key={bi} variant="outline" className={`text-[8px] uppercase font-black bg-${b.color}-500/10 text-${b.color}-500 border-${b.color}-500/20 py-0 flex items-center gap-1`}>
+                                                                <BadgeIcon className="h-2 w-2" />
+                                                                {b.type}
+                                                            </Badge>
+                                                        )
+                                                    })}
                                                     {u.badges.length === 0 && <span className="text-[10px] text-muted-foreground italic">Finding persona...</span>}
                                                 </div>
                                             </div>
@@ -910,7 +1065,10 @@ export function MetricsPage() {
                                         <div className="flex items-center justify-between p-3 bg-background/50 rounded-lg">
                                             <div className="flex items-center gap-3">
                                                 <div className={`p-2 rounded-full bg-${u.chronotype.color}-500/10`}>
-                                                    <u.chronotype.icon className={`h-4 w-4 text-${u.chronotype.color}-500`} />
+                                                    {(() => {
+                                                        const ChronoIcon = IconMap[u.chronotype.icon] || Clock
+                                                        return <ChronoIcon className={`h-4 w-4 text-${u.chronotype.color}-500`} />
+                                                    })()}
                                                 </div>
                                                 <div>
                                                     <div className="text-xs font-bold text-muted-foreground uppercase">Chronotype</div>
@@ -923,7 +1081,10 @@ export function MetricsPage() {
                                         <div className="flex items-center justify-between p-3 bg-background/50 rounded-lg">
                                             <div className="flex items-center gap-3">
                                                 <div className={`p-2 rounded-full bg-${u.formatLoyalty.color}-500/10`}>
-                                                    <u.formatLoyalty.icon className={`h-4 w-4 text-${u.formatLoyalty.color}-500`} />
+                                                    {(() => {
+                                                        const FormatIcon = IconMap[u.formatLoyalty.icon] || LayoutGrid
+                                                        return <FormatIcon className={`h-4 w-4 text-${u.formatLoyalty.color}-500`} />
+                                                    })()}
                                                 </div>
                                                 <div>
                                                     <div className="text-xs font-bold text-muted-foreground uppercase">Format</div>
@@ -939,7 +1100,7 @@ export function MetricsPage() {
                         {/* Franchise Spotlight */}
                         <div className="space-y-4 mt-12">
                             <div className="flex items-center gap-3">
-                                <PieChart className="h-6 w-6 text-indigo-500" />
+                                <PieChart className="h-6 w-6 text-primary" />
                                 <h2 className="text-2xl font-black">Franchise Focus</h2>
                             </div>
                             <div className="space-y-3">
@@ -947,11 +1108,11 @@ export function MetricsPage() {
                                     <div key={i} className="space-y-1">
                                         <div className="flex justify-between text-[10px] font-black uppercase tracking-widest px-1">
                                             <span className="text-muted-foreground">{f.name}</span>
-                                            <span className="text-indigo-400">{f.count} Plays</span>
+                                            <span className="text-primary/80">{f.count} Plays</span>
                                         </div>
                                         <div className="h-1.5 bg-muted rounded-full overflow-hidden">
                                             <div
-                                                className="h-full bg-indigo-500 transition-all duration-1000"
+                                                className="h-full bg-primary transition-all duration-1000"
                                                 style={{ width: `${Math.min(100, (f.count / stats.totalItems) * 500)}%` }}
                                             />
                                         </div>
@@ -968,24 +1129,24 @@ export function MetricsPage() {
                         {/* RARE FINDS */}
                         <div className="space-y-6 md:col-span-2 mt-8">
                             <div className="flex items-center gap-3">
-                                <Crown className="h-6 w-6 text-indigo-400" />
+                                <Crown className="h-6 w-6 text-primary/80" />
                                 <h2 className="text-2xl font-black">Hidden Gems (Rare Finds)</h2>
                             </div>
                             <div className="flex flex-wrap gap-4">
                                 {stats.rareFinds.map((item: any) => (
-                                    <a
+                                    <div
                                         key={item.itemId}
-                                        href={`stremio:///detail/${item.type}/${item.itemId}`}
-                                        className="group relative w-32 aspect-[2/3] rounded-xl overflow-hidden shadow-xl transition-transform hover:-translate-y-2"
+                                        onClick={() => openStremioDetail(item.type, item.itemId)}
+                                        className="group relative w-32 aspect-[2/3] rounded-xl overflow-hidden shadow-xl transition-transform hover:-translate-y-2 cursor-pointer"
                                     >
                                         <img src={item.poster} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500" />
                                         <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                                             <div className="text-[8px] font-black text-white uppercase">{item.accountName}'s Choice</div>
                                         </div>
-                                        <div className="absolute top-2 right-2 bg-indigo-500 text-[8px] font-black text-white px-2 py-0.5 rounded-full shadow-lg border border-white/20">
+                                        <div className="absolute top-2 right-2 bg-primary text-[8px] font-black text-primary-foreground px-2 py-0.5 rounded-full shadow-lg border border-white/20">
                                             Rare
                                         </div>
-                                    </a>
+                                    </div>
                                 ))}
                                 {stats.rareFinds.length === 0 && (
                                     <div className="text-sm italic text-muted-foreground p-8 bg-muted/10 rounded-xl w-full text-center border-2 border-dashed border-border">

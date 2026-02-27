@@ -2,7 +2,7 @@
 import { ActivityItem } from '@/types/activity'
 import { isToday, isYesterday, format } from 'date-fns'
 import { PlayCircle, Activity, ArrowUp } from 'lucide-react'
-import { useMemo, useState, useEffect } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ActivityItemCard, isCluster, HistoryCluster } from './ActivityItemCard'
@@ -25,12 +25,12 @@ export function ActivityFeed({
     isBulkMode = false,
 }: ActivityFeedProps) {
     const [activeTab, setActiveTab] = useState("all")
-    const [visibleCount, setVisibleCount] = useState(500)
+    const [visibleCount, setVisibleCount] = useState(100)
     const [showScrollTop, setShowScrollTop] = useState(false)
 
     // Reset visible count when tab changes
     useEffect(() => {
-        setVisibleCount(500)
+        setVisibleCount(100)
     }, [activeTab])
 
     // Scroll to Top Logic
@@ -148,16 +148,32 @@ export function ActivityFeed({
         }
     }, [groupedHistory, visibleCount])
 
+    const sentinelRef = useRef<HTMLDivElement | null>(null)
+
+    // Proper IntersectionObserver with cleanup
+    useEffect(() => {
+        if (!hasMore || !sentinelRef.current) return
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries[0].isIntersecting) {
+                    setVisibleCount(c => c + 50)
+                }
+            },
+            { threshold: 0.1 }
+        )
+        observer.observe(sentinelRef.current)
+        return () => observer.disconnect()
+    }, [hasMore, visibleGroups.length])
 
     // --- RENDER HELPERS ---
     const renderEmptyState = () => (
         <div className="text-center py-20 border-2 border-dashed rounded-xl opacity-50">
-            <div className=" bg-muted/30 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
-                {activeTab === 'now' ? <Activity className="h-8 w-8 opacity-50" /> : <PlayCircle className="h-8 w-8 opacity-50" />}
+            <div className={`bg-muted/30 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 ${activeTab === 'now' ? 'bg-green-500/10' : ''}`}>
+                {activeTab === 'now' ? <Activity className="h-8 w-8 text-green-500 opacity-60" /> : <PlayCircle className="h-8 w-8 opacity-50" />}
             </div>
-            <p className="text-sm font-medium">No activity found</p>
+            <p className="text-sm font-medium">{activeTab === 'now' ? 'No active streams' : 'No activity found'}</p>
             <p className="text-xs text-muted-foreground mt-1">
-                {activeTab === 'now' ? "Nobody is watching right now." : "Time to start watching something!"}
+                {activeTab === 'now' ? "Nobody is watching anything right now." : "Time to start watching something!"}
             </p>
         </div>
     )
@@ -169,7 +185,7 @@ export function ActivityFeed({
             <div className="space-y-8 animate-in fade-in duration-500 pb-20">
                 {visibleGroups.map(({ date, items }) => (
                     <div key={date} className="space-y-4">
-                        <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-md py-2 flex items-center gap-4 border-b border-border/50">
+                        <div className="sticky top-0 z-10 bg-background py-2 flex items-center gap-4 border-b border-border/50">
                             <h3 className="text-xs font-black uppercase tracking-[0.2em] text-muted-foreground">
                                 {formatDateHeader(date)}
                             </h3>
@@ -200,16 +216,13 @@ export function ActivityFeed({
                     </div>
                 ))}
 
+                {/* IntersectionObserver Sentinel */}
                 {hasMore && (
-                    <div className="flex justify-center pt-8">
-                        <Button
-                            variant="outline"
-                            size="lg"
-                            className="min-w-[200px]"
-                            onClick={() => setVisibleCount(c => c + 500)}
-                        >
-                            Load More
-                        </Button>
+                    <div ref={sentinelRef} className="py-12 flex justify-center w-full">
+                        <div className="flex items-center gap-2 text-muted-foreground animate-pulse">
+                            <Activity className="h-4 w-4" />
+                            <span className="text-sm font-medium">Loading history...</span>
+                        </div>
                     </div>
                 )}
             </div>
@@ -221,11 +234,11 @@ export function ActivityFeed({
             <Tabs defaultValue="all" onValueChange={setActiveTab} className="w-full">
                 <div className="flex items-center justify-between mb-2 gap-4">
                     <div className="overflow-x-auto scrollbar-hide">
-                        <TabsList className="flex whitespace-nowrap">
-                            <TabsTrigger value="all" className="shrink-0">All Activity</TabsTrigger>
-                            <TabsTrigger value="movies" className="shrink-0">Movies</TabsTrigger>
-                            <TabsTrigger value="series" className="shrink-0">Series</TabsTrigger>
-                            <TabsTrigger value="now" className="data-[state=active]:text-green-400 data-[state=active]:bg-green-400/10 shrink-0">
+                        <TabsList className="flex h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap">
+                            <TabsTrigger value="all" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">All Activity</TabsTrigger>
+                            <TabsTrigger value="movies" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Movies</TabsTrigger>
+                            <TabsTrigger value="series" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Series</TabsTrigger>
+                            <TabsTrigger value="now" className="data-[state=active]:text-green-400 data-[state=active]:bg-green-400/10 rounded-full px-4 border border-border/50 data-[state=active]:border-green-400/20 bg-muted/30 shrink-0 flex items-center shadow-sm">
                                 <Activity className="h-3 w-3 mr-1.5" /> Now
                             </TabsTrigger>
                         </TabsList>
@@ -243,13 +256,13 @@ export function ActivityFeed({
             </Tabs>
 
             {/* Scroll to Top Button */}
-            <div className={`fixed bottom-8 right-8 transition-all duration-300 ${showScrollTop ? 'translate-y-0 opacity-100' : 'translate-y-12 opacity-0'}`}>
+            <div className={`fixed bottom-24 right-5 md:bottom-8 md:right-8 z-40 transition-all duration-300 ${showScrollTop ? 'translate-y-0 opacity-100' : 'translate-y-12 opacity-0'}`}>
                 <Button
                     size="icon"
-                    className="h-12 w-12 rounded-full shadow-xl bg-primary hover:bg-primary/90"
+                    className="h-10 w-10 md:h-12 md:w-12 rounded-full shadow-xl bg-primary hover:bg-primary/90"
                     onClick={scrollToTop}
                 >
-                    <ArrowUp className="h-6 w-6" />
+                    <ArrowUp className="h-5 w-5 md:h-6 md:w-6" />
                 </Button>
             </div>
         </div>
