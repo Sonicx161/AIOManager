@@ -33,31 +33,33 @@ export function ReplayShareCard({ data, userName }: ReplayShareCardProps) {
                 </motion.div>
 
 
-                {/* The Card wrapper */}
-                <div className="relative inline-block group group-hover:scale-[1.01] transition-transform duration-700" style={{ margin: '0 auto' }}>
-                    {/* Hover glow behind card */}
-                    <div className="absolute inset-[-40px] rounded-[100px] opacity-40 group-hover:opacity-100 transition-opacity duration-700 ease-in-out pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.2) 0%, transparent 70%)', filter: 'blur(40px)' }} />
+                {/* The Card wrapper enclosed in a scrollable mobile context */}
+                <div className="w-full overflow-x-auto pb-6 pt-10 -mt-10 flex justify-center scrollbar-hide" style={{ maxWidth: '100vw' }}>
+                    <div className="relative inline-block group group-hover:scale-[1.01] transition-transform duration-700" style={{ margin: '0 auto', flexShrink: 0 }}>
+                        {/* Hover glow behind card */}
+                        <div className="absolute inset-[-40px] rounded-[100px] opacity-40 group-hover:opacity-100 transition-opacity duration-700 ease-in-out pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.2) 0%, transparent 70%)', filter: 'blur(40px)' }} />
 
-                    {/* The Card UI Display */}
-                    <div
-                        id="replay-share-card-ui"
-                        className="w-full h-full p-4 overflow-hidden relative z-20"
-                        style={{
-                            width: '380px',
-                            height: '675px',
-                            overflow: 'hidden',
-                            borderRadius: '32px',
-                            background: '#0d0d18',
-                            boxShadow: '0 20px 80px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.1)',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            position: 'relative',
-                            zIndex: 10,
-                            transition: 'all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)'
-                        }}
-                    >
-                        <CardContent data={data} userName={userName} />
+                        {/* The Card UI Display */}
+                        <div
+                            id="replay-share-card-ui"
+                            className="w-full h-full p-4 overflow-hidden relative z-20"
+                            style={{
+                                width: '380px',
+                                height: '675px',
+                                overflow: 'hidden',
+                                borderRadius: '32px',
+                                background: '#0d0d18',
+                                boxShadow: '0 20px 80px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.1)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                position: 'relative',
+                                zIndex: 10,
+                                transition: 'all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)'
+                            }}
+                        >
+                            <CardContent data={data} userName={userName} />
+                        </div>
                     </div>
                 </div>
 

@@ -94,13 +94,14 @@ export function ActivityPage() {
 
     // Get unique accounts from history and sort by account store order
     const accountOptions = useMemo(() => {
-        const accountMap = new Map<string, { id: string; name: string; colorIndex: number }>()
+        const accountMap = new Map<string, { id: string; name: string; colorIndex: number; emoji?: string }>()
         history.forEach(item => {
             if (!accountMap.has(item.accountId)) {
                 accountMap.set(item.accountId, {
                     id: item.accountId,
                     name: item.accountName,
-                    colorIndex: item.accountColorIndex
+                    colorIndex: item.accountColorIndex,
+                    emoji: accounts.find(a => a.id === item.accountId)?.emoji
                 })
             }
         })
@@ -350,7 +351,10 @@ export function ActivityPage() {
                                     <SelectItem value="all">All Users</SelectItem>
                                     {accountOptions.map(account => (
                                         <SelectItem key={account.id} value={account.id}>
-                                            {account.name}
+                                            <div className="flex items-center gap-2">
+                                                {account.emoji && <span className="text-base shrink-0">{account.emoji}</span>}
+                                                <span>{account.name}</span>
+                                            </div>
                                         </SelectItem>
                                     ))}
                                 </SelectContent>

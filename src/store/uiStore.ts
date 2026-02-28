@@ -8,6 +8,7 @@ interface UIStore {
   isImportDialogOpen: boolean
   isPrivacyModeEnabled: boolean
   isWhatsNewOpen: boolean
+  libraryViewMode: 'grid' | 'list'
 
   openAddAccountDialog: (account?: StremioAccount) => void
   closeAddAccountDialog: () => void
@@ -19,12 +20,14 @@ interface UIStore {
   closeImportDialog: () => void
   setWhatsNewOpen: (open: boolean) => void
   togglePrivacyMode: () => void
+  setLibraryViewMode: (mode: 'grid' | 'list') => void
   initialize: () => void
   editingAccount: StremioAccount | null
   selectedAccountId: string | null
 }
 
 const PRIVACY_MODE_KEY = 'stremio-manager:privacy-mode'
+const VIEW_MODE_KEY = 'stremio-manager:library-view-mode'
 
 export const useUIStore = create<UIStore>((set, get) => ({
   isAddAccountDialogOpen: false,
@@ -33,6 +36,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   isImportDialogOpen: false,
   isPrivacyModeEnabled: false,
   isWhatsNewOpen: false,
+  libraryViewMode: 'grid',
 
   editingAccount: null,
   selectedAccountId: null,
@@ -53,6 +57,10 @@ export const useUIStore = create<UIStore>((set, get) => ({
     set({ isPrivacyModeEnabled: newValue })
     localStorage.setItem(PRIVACY_MODE_KEY, JSON.stringify(newValue))
   },
+  setLibraryViewMode: (mode) => {
+    set({ libraryViewMode: mode })
+    localStorage.setItem(VIEW_MODE_KEY, mode)
+  },
   initialize: () => {
     const storedPrivacy = localStorage.getItem(PRIVACY_MODE_KEY)
     if (storedPrivacy !== null) {
@@ -62,6 +70,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
         console.warn('Failed to parse privacy mode setting:', e)
         localStorage.removeItem(PRIVACY_MODE_KEY)
       }
+    }
+
+    const storedViewMode = localStorage.getItem(VIEW_MODE_KEY)
+    if (storedViewMode === 'grid' || storedViewMode === 'list') {
+      set({ libraryViewMode: storedViewMode })
     }
   },
 }))

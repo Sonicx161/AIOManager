@@ -382,6 +382,23 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           addon.manifest.resources.length === 0
 
                                     if (!forceRefresh && addon.manifest && addon.manifest.id && !isBroken) {
+                                          // Cinemeta: auto-populate cinemetaConfig if absent so cloud/incognito stay consistent
+                                          if (isCinemetaAddon(addon) && !addon.metadata?.cinemetaConfig) {
+                                                const detected = detectAllPatches(addon.manifest as CinemetaManifest)
+                                                if (detected.searchArtifactsPatched || detected.standardCatalogsPatched || detected.metaResourcePatched) {
+                                                      return {
+                                                            ...addon,
+                                                            metadata: {
+                                                                  ...(addon.metadata || {}),
+                                                                  cinemetaConfig: {
+                                                                        removeSearchArtifacts: detected.searchArtifactsPatched,
+                                                                        removeStandardCatalogs: detected.standardCatalogsPatched,
+                                                                        removeMetaResource: detected.metaResourcePatched,
+                                                                  }
+                                                            }
+                                                      }
+                                                }
+                                          }
                                           return addon
                                     }
 
@@ -403,20 +420,30 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           MANIFEST_CACHE[addon.transportUrl] = { manifest: manifestRaw, timestamp: now }
                                     }
 
-                                    let repairedManifest = sanitizeAddonManifest(manifestRaw, addon.transportUrl)
-
-                                    if (cinemetaPatches) {
-                                          repairedManifest = applyCinemetaConfiguration(repairedManifest as CinemetaManifest, {
-                                                removeSearchArtifacts: cinemetaPatches.searchArtifactsPatched,
-                                                removeStandardCatalogs: cinemetaPatches.standardCatalogsPatched,
-                                                removeMetaResource: cinemetaPatches.metaResourcePatched,
-                                          }) as AddonDescriptor['manifest']
-                                    }
-
                                     // EXTRACT METADATA OVERRIDES FROM STREMIO
                                     // If the manifest from Stremio collection differs from the technical manifest,
                                     // treat those differences as custom metadata.
                                     const metadata = { ...(addon.metadata || {}) }
+
+                                    let repairedManifest = sanitizeAddonManifest(manifestRaw, addon.transportUrl)
+
+                                    if (metadata.cinemetaConfig) {
+                                          repairedManifest = applyCinemetaConfiguration(repairedManifest as CinemetaManifest, metadata.cinemetaConfig) as AddonDescriptor['manifest']
+                                    } else if (cinemetaPatches && (
+                                          cinemetaPatches.searchArtifactsPatched ||
+                                          cinemetaPatches.standardCatalogsPatched ||
+                                          cinemetaPatches.metaResourcePatched
+                                    )) {
+                                          const config = {
+                                                removeSearchArtifacts: cinemetaPatches.searchArtifactsPatched,
+                                                removeStandardCatalogs: cinemetaPatches.standardCatalogsPatched,
+                                                removeMetaResource: cinemetaPatches.metaResourcePatched,
+                                          }
+                                          repairedManifest = applyCinemetaConfiguration(repairedManifest as CinemetaManifest, config) as AddonDescriptor['manifest']
+
+                                          // Auto-migrate to metadata
+                                          metadata.cinemetaConfig = config
+                                    }
                                     const stremioManifest = addon.manifest
                                     if (stremioManifest && repairedManifest) {
                                           const { getHostnameIdentifier } = await import('@/lib/addon-identifier')
@@ -529,10 +556,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     status: 'active' as const,
                               }
 
-                              const updatedAccounts = get().accounts.map((acc) =>
-                                    acc.id === account.id ? updatedAccount : acc
-                              )
-                              set({ accounts: updatedAccounts })
+                              set(state => ({
+                                    accounts: state.accounts.map(acc => acc.id === account.id ? updatedAccount : acc)
+                              }))
 
                               const { useAddonStore } = await import('./addonStore')
                               await useAddonStore.getState().syncAccountState(account.id, account.authKey, finalAddons).catch(console.error)
@@ -545,15 +571,18 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   })
             )
 
-            if (hasAnyChange) {
-                  await localforage.setItem(STORAGE_KEY, structuredClone(get().accounts))
-            }
+            try {
+                  if (hasAnyChange) {
+                        await localforage.setItem(STORAGE_KEY, structuredClone(get().accounts))
+                  }
 
-            if (!silent && hasAnyChange) {
-                  const { useSyncStore } = await import('./syncStore')
-                  useSyncStore.getState().syncToRemote(true).catch(console.error)
+                  if (!silent && hasAnyChange) {
+                        const { useSyncStore } = await import('./syncStore')
+                        useSyncStore.getState().syncToRemote(true).catch(console.error)
+                  }
+            } finally {
+                  set({ loading: false })
             }
-            set({ loading: false })
       },
 
       repairAccount: async (id: string) => {
@@ -1103,11 +1132,10 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   }
             }
 
-            const accounts = get().accounts.map((acc) =>
-                  acc.id === accountId ? { ...acc, addons: updatedAddons } : acc
-            )
-            set({ accounts })
-            await localforage.setItem(STORAGE_KEY, accounts)
+            set(state => ({
+                  accounts: state.accounts.map(acc => acc.id === accountId ? { ...acc, addons: updatedAddons } : acc)
+            }))
+            await localforage.setItem(STORAGE_KEY, get().accounts)
             const { useSyncStore } = await import('./syncStore')
             useSyncStore.getState().syncToRemote(true).catch(console.error)
 

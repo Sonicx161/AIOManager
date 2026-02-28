@@ -121,8 +121,17 @@ function AccountSwitcher({ accounts, selectedAccountId, onSelect }: AccountSwitc
                     color: 'rgba(255,255,255,0.85)',
                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     maxWidth: 160,
+                    display: 'flex', alignItems: 'center', gap: '6px'
                 }}>
-                    {triggerLabel}
+                    {(() => {
+                        const acc = accounts.find(a => a.id === selectedAccountId);
+                        return (
+                            <>
+                                {acc?.emoji && <span style={{ flexShrink: 0 }}>{acc.emoji}</span>}
+                                <span>{triggerLabel}</span>
+                            </>
+                        )
+                    })()}
                 </span>
 
                 {/* Account count badge — only in "all" mode */}
@@ -295,7 +304,11 @@ function AccountSwitcher({ accounts, selectedAccountId, onSelect }: AccountSwitc
                                                 fontFamily: '"DM Sans", sans-serif', fontSize: 13, fontWeight: 700,
                                                 color: isSelected ? 'white' : 'rgba(255,255,255,0.8)',
                                                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                                            }}>{acc.name}</div>
+                                                display: 'flex', alignItems: 'center', gap: '6px'
+                                            }}>
+                                                {acc.emoji && <span style={{ flexShrink: 0 }}>{acc.emoji}</span>}
+                                                <span>{acc.name}</span>
+                                            </div>
                                             {(acc as any).email && (
                                                 <div style={{
                                                     fontFamily: '"DM Mono", monospace', fontSize: 9, fontWeight: 500,

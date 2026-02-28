@@ -417,7 +417,10 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         <DropdownMenuContent align="start">
                                             {otherAccountsWithRules.map(a => (
                                                 <DropdownMenuItem key={a.id} onClick={() => handleCopyRulesFrom(a.id)}>
-                                                    {a.name} ({a.ruleCount} rule{a.ruleCount !== 1 ? 's' : ''})
+                                                    <div className="flex items-center gap-2">
+                                                        {a.emoji && <span className="shrink-0">{a.emoji}</span>}
+                                                        <span>{a.name} ({a.ruleCount} rule{a.ruleCount !== 1 ? 's' : ''})</span>
+                                                    </div>
                                                 </DropdownMenuItem>
                                             ))}
                                         </DropdownMenuContent>

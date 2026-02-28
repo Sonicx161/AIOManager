@@ -7,7 +7,7 @@ export function Toaster() {
   const { toasts, dismiss } = useToast()
 
   return (
-    <div className="fixed bottom-0 right-0 z-50 flex flex-col gap-2 p-4 pb-20 md:pb-4 w-full sm:max-w-md pointer-events-none">
+    <div className="fixed bottom-0 right-0 z-50 flex flex-col gap-2 p-4 pb-[calc(76px+env(safe-area-inset-bottom,16px)+8px)] md:pb-4 w-full sm:max-w-md pointer-events-none">
       {toasts.map((toast) => {
         const isDestructive = toast.variant === 'destructive'
         const Icon = isDestructive ? AlertCircle : CheckCircle

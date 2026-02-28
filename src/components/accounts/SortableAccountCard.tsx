@@ -7,6 +7,7 @@ interface SortableAccountCardProps {
     account: StremioAccount
     isSelected?: boolean
     onToggleSelect?: (accountId: string) => void
+    onLongPress?: (accountId: string) => void
     onDelete?: () => void
     isSelectionMode?: boolean
     isPrivacyMode?: boolean
@@ -16,6 +17,7 @@ export function SortableAccountCard({
     account,
     isSelected,
     onToggleSelect,
+    onLongPress,
     onDelete,
     isSelectionMode,
     isPrivacyMode,
@@ -44,6 +46,7 @@ export function SortableAccountCard({
                 account={account}
                 isSelected={isSelected}
                 onToggleSelect={onToggleSelect}
+                onLongPress={onLongPress}
                 onDelete={onDelete}
                 // Pass drag handle props to AccountCard to render the grip
                 dragHandleProps={dragHandleProps}

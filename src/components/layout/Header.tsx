@@ -3,10 +3,11 @@ import { motion } from 'framer-motion'
 import { useTheme } from '@/contexts/ThemeContext'
 import { useSyncStore } from '@/store/syncStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { LogOut, LayoutDashboard, Package, Activity, BarChart3, Settings, HelpCircle, Zap, ZapOff, ShieldCheck } from 'lucide-react'
+import { LogOut, LayoutDashboard, Package, Activity, BarChart3, Settings, HelpCircle, Zap, ZapOff, ShieldCheck, ExternalLink } from 'lucide-react'
 import { SyncStatus } from '@/components/SyncStatus'
 import { useVaultStore } from '@/store/vaultStore'
 import { useProviderStore } from '@/store/providerStore'
+import { PROVIDERS } from '@/lib/constants'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -118,7 +119,7 @@ export function Header() {
                           <div className="flex items-center gap-2 mb-1">
                             <ShieldCheck className="h-4 w-4 text-primary" />
                             <span className="font-bold text-sm">
-                              {key.provider === 'torbox' ? 'My Main TB Account' : key.name}
+                              {key.name}
                             </span>
                           </div>
                           <div className="space-y-1">
@@ -133,16 +134,47 @@ export function Header() {
                                 {h.error}
                               </p>
                             )}
-                            {h?.daysRemaining !== null && h?.daysRemaining !== undefined && (
-                              <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-                                <span>Remains</span>
-                                <span className="font-medium text-foreground">{h.daysRemaining} days</span>
-                              </div>
-                            )}
+                            {h?.daysRemaining !== null && h?.daysRemaining !== undefined && (() => {
+                              const total = h.daysRemaining
+                              const years = Math.floor(total / 365)
+                              const months = Math.floor((total % 365) / 30)
+                              const days = total % 30
+                              const parts = []
+                              if (years > 0) parts.push(`${years}y`)
+                              if (months > 0) parts.push(`${months}mo`)
+                              if (days > 0 || parts.length === 0) parts.push(`${days}d`)
+                              return (
+                                <>
+                                  <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                                    <span>Remaining</span>
+                                    <span className="font-medium text-foreground">{parts.join(' ')}</span>
+                                  </div>
+                                  {h?.expiresAt && (
+                                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                                      <span>Expires</span>
+                                      <span className="font-medium text-foreground">
+                                        {new Date(h.expiresAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                                      </span>
+                                    </div>
+                                  )}
+                                </>
+                              )
+                            })()}
                             <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-white/5">
                               <span>Last Checked</span>
                               <span>{h?.lastChecked ? new Date(h.lastChecked).toLocaleTimeString() : 'Never'}</span>
                             </div>
+                            {PROVIDERS.find(p => p.value === key.provider)?.url && (
+                              <a
+                                href={PROVIDERS.find(p => p.value === key.provider)!.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center justify-between text-[10px] text-primary hover:underline pt-1 border-t border-white/5"
+                              >
+                                <span>API Dashboard</span>
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            )}
                           </div>
                         </DropdownMenuContent>
                       </DropdownMenu>

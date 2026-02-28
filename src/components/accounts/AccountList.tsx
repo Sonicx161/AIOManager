@@ -277,6 +277,10 @@ export function AccountList() {
                   account={account}
                   isSelected={selectedAccountIds.has(account.id)}
                   onToggleSelect={toggleAccountSelection}
+                  onLongPress={(id) => {
+                    setIsSelectionMode(true)
+                    toggleAccountSelection(id)
+                  }}
                   onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
                   isSelectionMode={isSelectionMode}
                   isPrivacyMode={isPrivacyModeEnabled}
@@ -306,6 +310,10 @@ export function AccountList() {
                   account={account}
                   isSelected={selectedAccountIds.has(account.id)}
                   onToggleSelect={toggleAccountSelection}
+                  onLongPress={(id) => {
+                    setIsSelectionMode(true)
+                    toggleAccountSelection(id)
+                  }}
                   onDelete={() => setDeleteConfirmation({ open: true, accountIds: [account.id] })}
                   isSelectionMode={isSelectionMode}
                   isPrivacyMode={isPrivacyModeEnabled}

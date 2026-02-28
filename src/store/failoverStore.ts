@@ -224,6 +224,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                             true
                                         )
                                     }
+                                    // Force UI refresh after local state is updated
+                                    useAccountStore.getState().syncAllAccounts(true).catch(console.error)
                                 }
                             }
                         } catch (e) {

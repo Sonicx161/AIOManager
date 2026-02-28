@@ -10,12 +10,13 @@ import { useAddonStore } from '@/store/addonStore'
 import { useAuthStore } from '@/store/authStore'
 import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
-import { ArrowLeft, GripVertical, Library, Save, Plus, Search, X, Layers, Trash2, ChevronDown, ChevronLeft, ChevronRight, Zap, Check } from 'lucide-react'
+import { ArrowLeft, GripVertical, Library, Save, Plus, Search, X, Layers, Trash2, ChevronDown, ChevronLeft, ChevronRight, Zap, Check, Shield, Copy, Download } from 'lucide-react'
 import { AnimatedRefreshIcon, AnimatedUpdateIcon, AnimatedShieldIcon } from '../ui/AnimatedIcons'
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { Input } from '@/components/ui/input'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AddonCard } from './AddonCard'
+import { AccountPickerDialog } from '../accounts/AccountPickerDialog'
 import { AddonReorderDialog } from './AddonReorderDialog'
 import { InstallSavedAddonDialog } from './InstallSavedAddonDialog'
 import { BulkSaveDialog } from './BulkSaveDialog'
@@ -140,6 +141,8 @@ export function AddonList({ accountId }: AddonListProps) {
   const latestVersions = useAddonStore((state) => state.latestVersions)
   const updateLatestVersions = useAccountStore((state) => state.updateLatestVersions)
   const [updatingAll, setUpdatingAll] = useState(false)
+  const [showBulkAccountPicker, setShowBulkAccountPicker] = useState(false)
+  const [isBulkActionLoading, setIsBulkActionLoading] = useState(false)
   const { toast } = useToast()
 
 
@@ -496,27 +499,60 @@ export function AddonList({ accountId }: AddonListProps) {
     }
   }, [account, accountId, selectedAddonUrls, toast, syncAccount])
 
-  const handleReinstallAll = useCallback(async () => {
-    if (!account || !encryptionKey) return
+  const handleBulkCloneToAccounts = useCallback(async (targetAccountIds: string[]) => {
+    if (targetAccountIds.length === 0 || selectedAddonUrls.size === 0) return
 
-    setUpdatingAll(true)
-    try {
-      await useAddonStore.getState().bulkReinstallAllOnAccount(accountId, account.authKey)
+    setIsBulkActionLoading(true)
+    let successCount = 0
+    let failCount = 0
 
-      toast({
-        title: 'Collection Reinstalled',
-        description: `All addons have been refreshed from their source URLs.`,
-      })
-    } catch (error) {
-      toast({
-        title: 'Reinstall Failed',
-        description: error instanceof Error ? error.message : 'Failed to reinstall addons',
-        variant: 'destructive',
-      })
-    } finally {
-      setUpdatingAll(false)
+    const accountStore = useAccountStore.getState()
+    const selectedAddonsList = addons.filter((_, index) => selectedAddonUrls.has(`${addons[index].transportUrl}::${index}`))
+
+    for (const targetId of targetAccountIds) {
+      for (const addon of selectedAddonsList) {
+        try {
+          await accountStore.installAddonToAccount(targetId, addon.transportUrl)
+          successCount++
+        } catch (err) {
+          console.error(`Failed to deploy ${addon.manifest.name} to ${targetId}:`, err)
+          failCount++
+        }
+      }
     }
-  }, [account, encryptionKey, accountId, toast])
+
+    toast({
+      title: 'Bulk Clone Complete',
+      description: `Successfully processed ${successCount} installations. ${failCount > 0 ? `Failed: ${failCount}` : ''}`,
+    })
+    setIsBulkActionLoading(false)
+    setShowBulkAccountPicker(false)
+    setIsSelectionMode(false)
+    setSelectedAddonUrls(new Set())
+  }, [selectedAddonUrls, addons, toast])
+
+  const handleBulkDeployToAll = useCallback(async () => {
+    const targetAccountIds = accounts
+      .filter(acc => acc.id !== accountId)
+      .map(acc => acc.id)
+
+    if (targetAccountIds.length === 0) {
+      toast({
+        title: 'No other accounts',
+        description: 'You need at least one other account to deploy to.'
+      })
+      return
+    }
+
+    if (selectedAddonUrls.size === 0) return
+
+    setIsBulkActionLoading(true)
+    try {
+      await handleBulkCloneToAccounts(targetAccountIds)
+    } finally {
+      setIsBulkActionLoading(false)
+    }
+  }, [accounts, accountId, selectedAddonUrls, handleBulkCloneToAccounts, toast])
 
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
   const selectedAddons = useMemo(() => {
@@ -705,14 +741,14 @@ export function AddonList({ accountId }: AddonListProps) {
                       <ChevronDown className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuContent align="start" className="w-56">
                     {updatesAvailable.length > 0 && (
                       <DropdownMenuItem onClick={handleUpdateAll} disabled={updatingAll}>
                         <AnimatedUpdateIcon className="h-4 w-4 mr-2" isAnimating={updatingAll} />
                         Update All ({updatesAvailable.length})
                       </DropdownMenuItem>
                     )}
-                    <DropdownMenuItem onClick={handleReinstallAll} disabled={updatingAll}>
+                    <DropdownMenuItem onClick={handleReinstallSelected} disabled={updatingAll}>
                       <Zap className="h-4 w-4 mr-2 text-emerald-500" />
                       Force Reinstall All
                     </DropdownMenuItem>
@@ -800,21 +836,34 @@ export function AddonList({ accountId }: AddonListProps) {
                           className={cn(
                             "flex-1",
                             allProtected
-                              ? ""
-                              : "border-blue-200 hover:bg-blue-50 dark:border-blue-900/30 dark:hover:bg-blue-900/20"
+                              ? "border-blue-200 hover:bg-blue-50 dark:border-blue-900/30 dark:hover:bg-blue-900/20 text-blue-600"
+                              : ""
                           )}
                         >
-                          {allProtected ? (
-                            <>
-                              <AnimatedShieldIcon className="h-4 w-4 mr-1.5" />
-                              Unprotect
-                            </>
-                          ) : (
-                            <>
-                              <AnimatedShieldIcon className="h-4 w-4 mr-1.5" />
-                              Protect
-                            </>
-                          )}
+                          <Shield className={cn("h-4 w-4 mr-1.5", allProtected ? "fill-blue-500/20" : "")} />
+                          {allProtected ? "Unprotect" : "Protect"}
+                        </Button>
+
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => { setShowBulkAccountPicker(true); }}
+                          disabled={isBulkActionLoading}
+                          className="flex-1"
+                        >
+                          <Copy className="h-4 w-4 mr-1.5" />
+                          Clone
+                        </Button>
+
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleBulkDeployToAll}
+                          disabled={isBulkActionLoading}
+                          className="flex-1"
+                        >
+                          <Download className="h-4 w-4 mr-1.5" />
+                          Deploy to All
                         </Button>
                       </div>
 
@@ -916,6 +965,10 @@ export function AddonList({ accountId }: AddonListProps) {
                     healthError={healthStatus[addon.manifest.id]?.error}
                     isSelectionMode={isSelectionMode}
                     onToggleSelect={toggleAddonSelection}
+                    onLongPress={(id) => {
+                      setIsSelectionMode(true)
+                      toggleAddonSelection(id)
+                    }}
                     selectionId={`${addon.transportUrl}::${originalIndex}`}
                     isSelected={selectedAddonUrls.has(`${addon.transportUrl}::${originalIndex}`)}
                   />
@@ -963,6 +1016,14 @@ export function AddonList({ accountId }: AddonListProps) {
           : addons}
         accountId={accountId}
         title={isSelectionMode && selectedAddonUrls.size > 0 ? `Save ${selectedAddonUrls.size} Selected` : 'Save Addons to Library'}
+      />
+
+      <AccountPickerDialog
+        open={showBulkAccountPicker}
+        onOpenChange={setShowBulkAccountPicker}
+        title="Clone Addons"
+        description="Select accounts to clone the selected addons to."
+        onConfirm={handleBulkCloneToAccounts}
       />
 
       <ConfirmationDialog

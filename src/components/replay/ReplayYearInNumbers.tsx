@@ -79,7 +79,7 @@ export function ReplayYearInNumbers({ data }: ReplayYearInNumbersProps) {
                             whileInView={{ opacity: 1, y: 0 }}
                             viewport={{ once: true }}
                             transition={{ delay: i * 0.08, duration: 0.6, ease: [0.23, 1, 0.32, 1] }}
-                            className="flex flex-col items-center gap-1 px-4 md:px-6 py-4 md:py-5 flex-1 min-w-[80px] max-w-[160px]"
+                            className="flex flex-col items-center gap-1 px-3 md:px-5 py-4 md:py-5 flex-1 min-w-[100px] sm:min-w-[120px] max-w-[180px]"
                             style={{
                                 borderRadius: '20px',
                                 background: 'rgba(255,255,255,0.03)',
@@ -90,11 +90,16 @@ export function ReplayYearInNumbers({ data }: ReplayYearInNumbersProps) {
                             <span
                                 style={{
                                     fontFamily: '"DM Sans", sans-serif',
-                                    fontSize: 'clamp(20px, 3vw, 28px)',
+                                    fontSize: item.text && item.text.length > 6 ? 'clamp(12px, 2.2vw, 18px)' : 'clamp(18px, 3vw, 26px)',
                                     fontWeight: 900,
                                     color: 'white',
                                     letterSpacing: '-0.03em',
                                     lineHeight: 1.1,
+                                    whiteSpace: 'nowrap',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    maxWidth: '100%',
+                                    textAlign: 'center'
                                 }}
                             >
                                 {item.text ? item.text : <MiniCounter value={item.value} suffix={item.suffix} />}

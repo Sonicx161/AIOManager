@@ -41,24 +41,13 @@ import {
     DropdownMenuContent,
     DropdownMenuItem,
     DropdownMenuTrigger,
+    DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import { VaultProvider, VaultKey } from '@/types/vault'
 import { toast } from '@/hooks/use-toast'
 import { getTimeAgo } from '@/lib/utils'
 
-const PROVIDERS: { value: VaultProvider; label: string; url?: string }[] = [
-    { value: 'torbox', label: 'TorBox', url: 'https://torbox.app/settings' },
-    { value: 'real-debrid', label: 'Real-Debrid', url: 'https://real-debrid.com/apitoken' },
-    { value: 'premiumize', label: 'Premiumize', url: 'https://www.premiumize.me/account' },
-    { value: 'alldebrid', label: 'AllDebrid', url: 'https://alldebrid.com/apikeys' },
-    { value: 'debrid-link', label: 'Debrid-Link', url: 'https://debrid-link.com/webapp/apikey' },
-    { value: 'offcloud', label: 'Offcloud', url: 'https://offcloud.com/#/account' },
-    { value: 'put-io', label: 'put.io', url: 'https://app.put.io/settings/account/oauth/apps' },
-    { value: 'easynews', label: 'Easynews' },
-    { value: 'pikpak', label: 'PikPak', url: 'https://mypikpak.com' },
-    { value: 'trakt', label: 'Trakt (Client ID)', url: 'https://trakt.tv/oauth/applications' },
-    { value: 'other', label: 'Other/Custom' },
-]
+import { PROVIDERS } from '@/lib/constants'
 
 export function VaultSettings() {
     const { keys, addKey, removeKey, updateKey, moveKey, loading } = useVaultStore()
@@ -168,69 +157,74 @@ export function VaultSettings() {
                     </div>
                 ) : (
                     keys.map((key, index) => (
-                        <div key={key.id} className="p-4 rounded-xl border bg-card hover:border-primary/50 transition-all group relative overflow-hidden">
-                            <div className="flex items-start justify-between relative z-10">
-                                <div className="flex items-center gap-3">
-                                    <div className="p-2 rounded-lg bg-primary/10 text-primary">
-                                        <ShieldCheck className="h-5 w-5" />
-                                    </div>
-                                    <div>
-                                        <h3 className="font-bold text-sm tracking-tight">{key.name}</h3>
-                                        <div className="flex items-center gap-2 mt-0.5">
-                                            <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                                                {key.provider}
-                                            </span>
-                                            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                                                <Clock className="h-2.5 w-2.5" />
-                                                {getTimeAgo(new Date(key.updatedAt))}
-                                            </span>
+                        <div key={key.id} className="p-4 rounded-xl border bg-card hover:border-primary/50 transition-all group relative">
+                            <div className="flex flex-col gap-1.5 relative z-10 w-full mb-1">
+                                <div className="flex items-center justify-between w-full h-8">
+                                    <div className="flex items-center gap-3 min-w-0 h-full">
+                                        <div className="h-8 w-8 rounded-lg bg-primary/10 text-primary shrink-0 flex items-center justify-center">
+                                            <ShieldCheck className="h-5 w-5" />
                                         </div>
+                                        <h3 className="font-bold text-sm tracking-tight truncate leading-none">{key.name}</h3>
+                                    </div>
+
+                                    <div className="flex items-center gap-1 shrink-0 h-full">
+                                        <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity h-full">
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8 rounded-full text-muted-foreground hover:text-primary hover:bg-primary/10"
+                                                disabled={index === 0}
+                                                onClick={() => moveKey(key.id, 'up')}
+                                                title="Move Up"
+                                            >
+                                                <ChevronUp className="h-4 w-4" />
+                                            </Button>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8 rounded-full text-muted-foreground hover:text-primary hover:bg-primary/10"
+                                                disabled={index === keys.length - 1}
+                                                onClick={() => moveKey(key.id, 'down')}
+                                                title="Move Down"
+                                            >
+                                                <ChevronDown className="h-4 w-4" />
+                                            </Button>
+                                        </div>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full">
+                                                    <MoreVertical className="h-4 w-4" />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent align="end">
+                                                <div className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground opacity-70">
+                                                    MANAGE KEY
+                                                </div>
+                                                <DropdownMenuSeparator />
+                                                <DropdownMenuItem onClick={() => handleOpenEdit(key)}>
+                                                    <Edit2 className="h-4 w-4 mr-2" />
+                                                    Edit
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem
+                                                    className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                                                    onClick={() => handleDelete(key.id, key.name)}
+                                                >
+                                                    <Trash2 className="h-4 w-4 mr-2" />
+                                                    Delete
+                                                </DropdownMenuItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
                                     </div>
                                 </div>
 
-                                <div className="flex items-center gap-1">
-                                    <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="h-7 w-7 rounded-full text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                            disabled={index === 0}
-                                            onClick={() => moveKey(key.id, 'up')}
-                                            title="Move Up"
-                                        >
-                                            <ChevronUp className="h-4 w-4" />
-                                        </Button>
-                                        <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="h-7 w-7 rounded-full text-muted-foreground hover:text-primary hover:bg-primary/10"
-                                            disabled={index === keys.length - 1}
-                                            onClick={() => moveKey(key.id, 'down')}
-                                            title="Move Down"
-                                        >
-                                            <ChevronDown className="h-4 w-4" />
-                                        </Button>
-                                    </div>
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full">
-                                                <MoreVertical className="h-4 w-4" />
-                                            </Button>
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent align="end">
-                                            <DropdownMenuItem onClick={() => handleOpenEdit(key)}>
-                                                <Edit2 className="h-4 w-4 mr-2" />
-                                                Edit
-                                            </DropdownMenuItem>
-                                            <DropdownMenuItem
-                                                className="text-destructive focus:bg-destructive/10 focus:text-destructive"
-                                                onClick={() => handleDelete(key.id, key.name)}
-                                            >
-                                                <Trash2 className="h-4 w-4 mr-2" />
-                                                Delete
-                                            </DropdownMenuItem>
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
+                                <div className="flex items-center gap-2 pl-[44px]">
+                                    <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                                        {key.provider}
+                                    </span>
+                                    <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                                        <Clock className="h-2.5 w-2.5" />
+                                        {getTimeAgo(new Date(key.updatedAt))}
+                                    </span>
                                 </div>
                             </div>
 
@@ -283,7 +277,7 @@ export function VaultSettings() {
                             <Label htmlFor="v-name">Display Name</Label>
                             <Input
                                 id="v-name"
-                                placeholder={provider === 'torbox' ? "e.g. My Main TB Account" : "e.g. My Main RD Account"}
+                                placeholder={`e.g. My ${PROVIDERS.find(p => p.value === provider)?.label || 'Main'} Account`}
                                 value={name}
                                 onChange={(e) => setName(e.target.value)}
                                 required

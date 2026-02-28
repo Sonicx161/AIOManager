@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useState, useEffect } from 'react'
 
 export interface Toast {
   id: string
@@ -37,13 +37,13 @@ export function useToast() {
   const [, setLocalToasts] = useState<Toast[]>([])
 
   // Subscribe to global toast state
-  useState(() => {
+  useEffect(() => {
     const listener = (newToasts: Toast[]) => setLocalToasts(newToasts)
     toastListeners.push(listener)
     return () => {
       toastListeners = toastListeners.filter((l) => l !== listener)
     }
-  })
+  }, [])
 
   const dismiss = useCallback((toastId: string) => {
     toasts = toasts.filter((t) => t.id !== toastId)

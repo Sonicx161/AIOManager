@@ -313,15 +313,15 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
             : (item.duration && item.progress) ? item.duration * (item.progress / 100) : item.duration || 3600000
         dayHours[day] += timeWatchedMs / 3600000
     })
-    const maxDayCount = Math.max(...dayCounts, 1)
+    const maxDayHour = Math.max(...dayHours, 1)
     const dailyDistribution: DailyDistribution[] = dayCounts.map((count, day) => ({
         day,
         dayName: dayNames[day],
         count,
         hours: Math.round(dayHours[day] * 10) / 10,
-        percentage: Math.round((count / maxDayCount) * 100)
+        percentage: Math.round((dayHours[day] / maxDayHour) * 100)
     }))
-    const peakDayIndex = dayCounts.indexOf(Math.max(...dayCounts))
+    const peakDayIndex = dayHours.indexOf(Math.max(...dayHours))
     const peakDay = dayNames[peakDayIndex]
 
     // ── Year-over-Year Comparisons ──

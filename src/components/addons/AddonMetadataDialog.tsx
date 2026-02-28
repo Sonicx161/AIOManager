@@ -183,7 +183,7 @@ export function AddonMetadataDialog({
                                     title="Reset Description"
                                     onClick={() => setCustomDescription('')}
                                     disabled={!customDescription}
-                                    className="mt-1"
+                                    className="mt-1 shrink-0"
                                 >
                                     <RotateCcw className="h-4 w-4 text-muted-foreground" />
                                 </Button>
@@ -196,30 +196,30 @@ export function AddonMetadataDialog({
                         {error && <p className="text-sm text-destructive font-medium">{error}</p>}
                     </div>
 
-                    <div className="space-y-4">
+                    <div className="space-y-4 pt-4 md:pt-0">
                         {/* Preview Section */}
-                        <div className="border rounded-md p-4 bg-muted/20 flex flex-col items-center justify-start gap-4 h-full min-h-[300px]">
+                        <div className="border rounded-md p-4 bg-muted/20 flex flex-col items-center justify-start gap-4 h-full min-h-[250px] overflow-hidden">
                             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Dashboard Preview</span>
 
                             <div className="flex flex-col items-center gap-3 w-full">
-                                <div className="bg-background p-2 rounded-xl shadow-sm border">
+                                <div className="bg-background p-2 rounded-xl shadow-sm border shrink-0">
                                     <img
                                         key={customLogo || addon.manifest.logo}
                                         src={customLogo || addon.manifest.logo || "https://placehold.co/80x80?text=?"}
-                                        className="w-20 h-20 object-contain rounded-lg"
+                                        className="w-16 h-16 sm:w-20 sm:h-20 object-contain rounded-lg"
                                         alt="Logo Preview"
                                         onError={(e) => { e.currentTarget.style.display = 'none' }}
                                     />
                                 </div>
-                                <span className="font-bold text-lg text-center truncate w-full px-2">
+                                <span className="font-bold text-base sm:text-lg text-center break-words w-full px-2 line-clamp-2">
                                     {customName || addon.manifest.name}
                                 </span>
-                                <div className="w-full text-center px-4">
-                                    <p className="text-xs text-muted-foreground line-clamp-4 leading-relaxed italic">
+                                <div className="w-full text-center px-2 sm:px-4">
+                                    <p className="text-xs text-muted-foreground line-clamp-4 sm:line-clamp-6 leading-relaxed italic break-words">
                                         {customDescription || addon.manifest.description}
                                     </p>
                                 </div>
-                                <span className="text-xs text-muted-foreground px-2 py-1 bg-muted rounded-full mt-2">
+                                <span className="text-[10px] sm:text-xs text-muted-foreground px-2 py-1 bg-muted rounded-full mt-2 shrink-0">
                                     v{addon.manifest.version}
                                 </span>
                             </div>
@@ -228,15 +228,15 @@ export function AddonMetadataDialog({
                 </div>
 
                 {/* Info Footer */}
-                <div className="bg-muted/50 -mx-6 px-6 py-4 mt-2 border-t text-xs text-muted-foreground grid grid-cols-2 gap-4">
+                <div className="bg-muted/50 -mx-6 px-6 py-4 mt-2 border-t text-xs text-muted-foreground grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                         <span className="font-semibold block mb-1">Developer Info</span>
-                        <p className="truncate">ID: {addon.manifest.id}</p>
-                        <p className="truncate">Name: {addon.manifest.name}</p>
+                        <p className="break-all line-clamp-2">ID: {addon.manifest.id}</p>
+                        <p className="break-words line-clamp-2">Name: {addon.manifest.name}</p>
                     </div>
                     <div>
                         <span className="font-semibold block mb-1">Technical Details</span>
-                        <p className="truncate" title={addon.transportUrl}>URL: {addon.transportUrl}</p>
+                        <p className="break-all line-clamp-2" title={addon.transportUrl}>URL: {addon.transportUrl}</p>
                         <p>Status: {addon.flags?.protected ? 'Protected' : 'Standard'}</p>
                     </div>
                 </div>
@@ -282,16 +282,18 @@ export function AddonMetadataDialog({
                     </div>
                 )}
 
-                <DialogFooter className="gap-2 sm:gap-0 mt-6 pb-2">
-                    <Button type="button" variant="secondary" onClick={handleReset} className="mr-auto" disabled={saving}>
-                        Reset to Default
+                <DialogFooter className="gap-2 sm:gap-0 mt-4 pb-4 flex-col-reverse sm:flex-row">
+                    <Button type="button" variant="secondary" onClick={handleReset} className="w-full sm:w-auto sm:mr-auto" disabled={saving}>
+                        Reset Details
                     </Button>
-                    <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-                        Cancel
-                    </Button>
-                    <Button onClick={handleSave} disabled={saving}>
-                        {saving ? 'Syncing...' : 'Save & Sync'}
-                    </Button>
+                    <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                        <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving} className="w-full sm:w-auto">
+                            Cancel
+                        </Button>
+                        <Button onClick={handleSave} disabled={saving} className="w-full sm:w-auto">
+                            {saving ? 'Syncing...' : 'Save & Sync'}
+                        </Button>
+                    </div>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

@@ -12,16 +12,19 @@ import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { StremioAccount } from '@/types/account'
-import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ShieldCheck, AlertTriangle, ChevronRight } from 'lucide-react'
+import { AlertCircle, AlertTriangle, ShieldCheck, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ChevronRight } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { maskEmail, getTimeAgo } from '@/lib/utils'
 import { useMemo, useRef, useEffect, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
+import { useLongPress } from '@/hooks/useLongPress'
+import { useToast } from '@/hooks/use-toast'
 
 interface AccountCardProps {
   account: StremioAccount
   isSelected?: boolean
   onToggleSelect?: (accountId: string) => void
+  onLongPress?: (accountId: string) => void
   onDelete?: () => void
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement>
   isSelectionMode?: boolean
@@ -33,6 +36,7 @@ export function AccountCard({
   account,
   isSelected = false,
   onToggleSelect,
+  onLongPress,
   onDelete,
   isSelectionMode = false,
   disableTransition = false,
@@ -42,6 +46,7 @@ export function AccountCard({
   const navigate = useNavigate()
   const preventNavRef = useRef(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const { toast } = useToast()
   const { syncAccount, repairAccount, loading } = useAccounts()
   const { openAddAccountDialog, isAddAccountDialogOpen } = useUIStore(
     useShallow((state) => ({
@@ -85,21 +90,9 @@ export function AccountCard({
     return latest
   }, [items, libraryLoading, account.id])
 
-  const handleSync = async () => {
-    try {
-      await syncAccount(account.id)
-    } catch (error) {
-      // Error is already stored in the store
-      console.error('Sync failed:', error)
-    }
-  }
-
   const handleEdit = () => {
     openAddAccountDialog(account)
   }
-
-  const statusColor = account.status === 'active' ? 'bg-green-500' : 'bg-red-500'
-  const timeStr = getTimeAgo(new Date(account.lastSync))
 
   const isNameCustomized = account.name !== account.email && account.name !== 'Stremio Account'
   const displayName =
@@ -107,20 +100,30 @@ export function AccountCard({
       ? account.name.includes('@')
         ? maskEmail(account.name)
         : '********'
-      : account.name
+      : (account.name || account.email || 'Unnamed Account')
+
+  const statusColor = account.status === 'active' ? 'bg-emerald-500' : 'bg-destructive'
+  const timeStr = getTimeAgo(new Date(account.lastSync))
 
   const hasAccentColor = account.accentColor && account.accentColor !== 'none'
   const cardBorderColor = hasAccentColor ? account.accentColor : 'transparent'
 
+  const { isLongPressTriggered, ...longPressProps } = useLongPress(() => {
+    if (!isSelectionMode && onLongPress) {
+      onLongPress(account.id)
+    }
+  })
+
   return (
     <Card
+      {...longPressProps}
       className={`group flex flex-col cursor-pointer relative ${!disableTransition ? 'transition-all duration-200' : ''} ${isSelectionMode ? 'hover:border-primary/50' : 'hover:bg-accent/30'} ${isSelected ? 'ring-2 ring-primary border-primary bg-primary/5' : ''
         } ${isMenuOpen ? 'z-40' : ''}`}
       style={{
         borderLeft: hasAccentColor ? `3px solid ${cardBorderColor}` : undefined
       }}
       onClick={(e) => {
-        if (preventNavRef.current) return
+        if (preventNavRef.current || isLongPressTriggered) return
         if (e.detail === 0) return // Ignore programmatic clicks (focus return from dialog)
         if (isSelectionMode && onToggleSelect) {
           onToggleSelect(account.id)
@@ -139,12 +142,13 @@ export function AccountCard({
           </svg>
         </div>
       )}
-      <CardHeader className="relative pb-3">
-        {/* Drag Handle Overlay - Increased Touch Target */}
-        {restProps.dragHandleProps && (
-          <div
-            {...restProps.dragHandleProps}
-            className="
+      <div className={isSelectionMode ? 'pointer-events-none' : ''}>
+        <CardHeader className="relative pb-3">
+          {/* Drag Handle Overlay - Increased Touch Target */}
+          {restProps.dragHandleProps && (
+            <div
+              {...restProps.dragHandleProps}
+              className="
               absolute left-0 top-0 bottom-0 px-4 
               flex items-center justify-center 
               cursor-grab active:cursor-grabbing 
@@ -152,143 +156,173 @@ export function AccountCard({
               hover:bg-accent/50 transition-colors 
               z-10
             "
-            style={{ touchAction: 'none' }}
-            title="Drag to reorder"
-          >
-            <GripVertical className="h-5 w-5" />
-          </div>
-        )}
-
-        <div className={`flex items-center justify-between ${restProps.dragHandleProps ? 'pl-8' : ''}`}>
-          <div className="flex items-center gap-4 flex-1 min-w-0">
-
-            <div className="flex-1 min-w-0">
-              <CardTitle className="flex items-center gap-2 text-lg font-semibold truncate tracking-tight">
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} title={account.status === 'active' ? 'Active' : 'Error'} />
-                {account.emoji && <span className="text-xl mr-0.5">{account.emoji}</span>}
-                <span className="truncate flex-1">{displayName}</span>
-              </CardTitle>
-
-              {account.email && account.email !== account.name && (
-                <p className="text-sm text-muted-foreground mt-1 truncate">
-                  {isPrivacyMode ? maskEmail(account.email) : account.email}
-                </p>
-              )}
-            </div>
-
-            {!isSelectionMode && (
-              <ChevronRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity -ml-2" />
-            )}
-
-            <DropdownMenu onOpenChange={(open) => {
-              setIsMenuOpen(open)
-              if (!open) {
-                preventNavRef.current = true
-                setTimeout(() => { preventNavRef.current = false }, 400)
-              }
-            }}>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="h-8 w-8 p-0" onClick={(e) => e.stopPropagation()}>
-                  <span className="sr-only">Open menu</span>
-                  <MoreVertical className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="z-50">
-                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleEdit(); }}>
-                  <Pencil className="mr-2 h-4 w-4" />
-                  Edit
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleSync(); }} disabled={loading}>
-                  <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                  Sync
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); repairAccount(account.id); }} disabled={loading} className="cursor-pointer whitespace-nowrap">
-                  <RefreshCw className={`mr-2 h-4 w-4 text-amber-500 shrink-0 ${loading ? 'animate-spin' : ''}`} />
-                  Repair Account (Deep Refresh)
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); onDelete?.(); }}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash className="mr-2 h-4 w-4" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-      </CardHeader>
-
-      <CardContent className="flex-grow">
-        <div className="space-y-2">
-          <div className="flex items-center gap-1.5 text-sm">
-            <span className="text-muted-foreground">Addons:</span>
-            <span className="font-medium">{account.addons.length}</span>
-          </div>
-          {activeRules.length > 0 && (
-            <div className="flex items-center gap-1.5 text-sm">
-              {failedOverRules.length > 0 ? (
-                <>
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                  <span className="text-amber-600 dark:text-amber-400 font-medium truncate">
-                    {failedOverRules.length} rule{failedOverRules.length !== 1 ? 's' : ''} failed over
-                  </span>
-                </>
-              ) : (
-                <>
-                  <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
-                  <span className="text-green-600 dark:text-green-400 font-medium truncate">
-                    {activeRules.length} rule{activeRules.length !== 1 ? 's' : ''} healthy
-                  </span>
-                </>
-              )}
+              style={{ touchAction: 'none' }}
+              title="Drag to reorder"
+            >
+              <GripVertical className="h-5 w-5" />
             </div>
           )}
-          {lastWatched && (
-            <div className="flex items-center gap-1.5 text-sm mt-1">
-              <span className="text-muted-foreground">Last watched:</span>
-              <span className="font-medium truncate max-w-[160px]">{lastWatched.name}</span>
-              <span className="text-muted-foreground text-xs shrink-0">&middot; {getTimeAgo(new Date(lastWatched.timestamp))}</span>
-            </div>
-          )}
-          <div className="flex items-center gap-1.5 text-sm">
-            <span className={`text-muted-foreground ${(Date.now() - new Date(account.lastSync).getTime()) > 24 * 60 * 60 * 1000 ? 'flex items-center gap-1' : ''}`}>
-              {(Date.now() - new Date(account.lastSync).getTime()) > 24 * 60 * 60 * 1000 && (
-                <span title="Sync recommended (Last sync > 24h ago)">
-                  <AlertTriangle className="w-3 h-3 text-amber-500" />
-                </span>
-              )}
-              Synced {timeStr}
-            </span>
-          </div>
-          {account.status === 'error' && (
-            <div className="bg-destructive/10 border border-destructive/50 rounded-md p-3 mt-3">
-              <div className="flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-destructive">Authentication Failed</p>
-                  <p className="text-xs text-destructive/80 mt-0.5">
-                    Your credentials are invalid or expired
+          <div className="flex items-start justify-between relative z-10">
+            <div className={`flex items-center gap-4 flex-1 min-w-0 ${restProps.dragHandleProps ? 'pl-8' : ''}`}>
+
+              <div className="flex-1 min-w-0">
+                <CardTitle className="flex items-center gap-2 text-lg font-semibold truncate tracking-tight">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} title={account.status === 'active' ? 'Active' : 'Error'} />
+                  {account.emoji && <span className="text-xl mr-0.5">{account.emoji}</span>}
+                  <span className="truncate flex-1">{displayName}</span>
+                </CardTitle>
+
+                {account.email && account.email !== account.name && (
+                  <p className="text-sm text-muted-foreground mt-1 truncate">
+                    {isPrivacyMode ? maskEmail(account.email) : account.email}
                   </p>
-                </div>
+                )}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleEdit()
-                }}
-                className="w-full mt-2 border-destructive/30 text-destructive hover:bg-destructive/20"
-              >
-                <Pencil className="h-3 w-3 mr-2" />
-                Update Credentials
-              </Button>
+
+              {!isSelectionMode && (
+                <ChevronRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity -ml-2" />
+              )}
+
+              {!isSelectionMode && (
+                <DropdownMenu onOpenChange={(open) => {
+                  setIsMenuOpen(open)
+                  if (!open) {
+                    preventNavRef.current = true
+                    setTimeout(() => { preventNavRef.current = false }, 400)
+                  }
+                }}>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" className="h-8 w-8 p-0" onClick={(e) => e.stopPropagation()}>
+                      <span className="sr-only">Open menu</span>
+                      <MoreVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="z-50 w-56">
+                    <div className="px-2 py-1.5 text-xs font-bold uppercase tracking-wider text-muted-foreground opacity-70">MANAGE ACCOUNT</div>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleEdit(); }}>
+                      <Pencil className="mr-2 h-4 w-4" />
+                      Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          toast({ title: 'Syncing...', description: `Refreshing ${displayName}` });
+                          await syncAccount(account.id);
+                          toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}` });
+                        } catch (err) {
+                          toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}` });
+                        }
+                      }}
+                      disabled={loading}
+                    >
+                      <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                      Sync
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          toast({ title: 'Repairing...', description: `Deep refreshing ${displayName}` });
+                          await repairAccount(account.id);
+                          toast({ title: 'Repair Complete', description: `Account ${displayName} is now healthy` });
+                        } catch (err) {
+                          toast({ variant: 'destructive', title: 'Repair Failed', description: `Failed to repair ${displayName}` });
+                        }
+                      }}
+                      disabled={loading}
+                      className="cursor-pointer"
+                    >
+                      <RefreshCw className={`mr-2 h-4 w-4 text-amber-500 ${loading ? 'animate-spin' : ''}`} />
+                      Repair Account
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={(e) => { e.stopPropagation(); onDelete?.(); }}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash className="mr-2 h-4 w-4" />
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
             </div>
-          )}
-        </div>
-      </CardContent>
+          </div>
+        </CardHeader>
+
+        <CardContent className="flex-grow">
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 text-sm">
+              <span className="text-muted-foreground">Addons:</span>
+              <span className="font-medium">{account.addons.length}</span>
+            </div>
+            {activeRules.length > 0 && (
+              <div className="flex items-center gap-1.5 text-sm">
+                {failedOverRules.length > 0 ? (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                    <span className="text-amber-600 dark:text-amber-400 font-medium truncate">
+                      {failedOverRules.length} rule{failedOverRules.length !== 1 ? 's' : ''} failed over
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
+                    <span className="text-green-600 dark:text-green-400 font-medium truncate">
+                      {activeRules.length} rule{activeRules.length !== 1 ? 's' : ''} healthy
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+            {lastWatched && (
+              <div className="flex items-center gap-1.5 text-sm mt-1">
+                <span className="text-muted-foreground">Last watched:</span>
+                <span className="font-medium truncate max-w-[160px]">{lastWatched.name}</span>
+                <span className="text-muted-foreground text-xs shrink-0">&middot; {getTimeAgo(new Date(lastWatched.timestamp))}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 text-sm">
+              <span className={`text-muted-foreground ${(Date.now() - new Date(account.lastSync).getTime()) > 24 * 60 * 60 * 1000 ? 'flex items-center gap-1' : ''}`}>
+                {(Date.now() - new Date(account.lastSync).getTime()) > 24 * 60 * 60 * 1000 && (
+                  <span title="Sync recommended (Last sync > 24h ago)">
+                    <AlertTriangle className="w-3 h-3 text-amber-500" />
+                  </span>
+                )}
+                Synced {timeStr}
+              </span>
+            </div>
+            {account.status === 'error' && (
+              <div className="bg-destructive/10 border border-destructive/50 rounded-md p-3 mt-3">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-destructive">Authentication Failed</p>
+                    <p className="text-xs text-destructive/80 mt-0.5">
+                      Your credentials are invalid or expired
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleEdit()
+                  }}
+                  className="w-full mt-2 border-destructive/30 text-destructive hover:bg-destructive/20"
+                >
+                  <Pencil className="h-3 w-3 mr-2" />
+                  Update Credentials
+                </Button>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </div>
+
     </Card>
   )
 }

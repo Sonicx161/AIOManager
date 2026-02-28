@@ -223,7 +223,7 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
         flags: {
           ...remoteAddon.flags,
           protected: localAddon.flags?.protected,
-          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : true,
+          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : (remoteAddon.flags?.enabled !== false),
         },
         metadata: mergedMetadata,
         catalogOverrides: localAddon.catalogOverrides,
@@ -231,18 +231,26 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
 
       processedRemoteNormUrls.add(normalizeAddonUrl(remoteAddon.transportUrl))
       processedRemoteNormUrls.add(normLocal)
-    } else if (isRecentLocalChange) {
-      // Missing from remote but was RECENTLY changed locally (e.g. just installed or enabled)
-      // We keep it so it can be pushed to remote in the next sync cycle.
-      finalAddons.push({
-        ...localAddon,
-        flags: {
-          ...(localAddon.flags || {}),
-          enabled: localAddon.flags?.enabled !== false
-        },
-      })
+    } else {
+      // 1. Missing from remote but was RECENTLY changed locally (e.g. just installed or enabled)
+      // 2. OR it is currently DISABLED.
+      // 3. OR it has PROTECTED status or CUSTOM METADATA that we want to keep.
+      // Rationale: AIOManager intentionally hides disabled addons from Stremio.
+      // We MUST keep them locally to avoid a sync-deletion loop.
+      const hasCustomizations = localAddon.metadata?.customName || localAddon.metadata?.customLogo || localAddon.metadata?.customDescription;
+      const isProtected = localAddon.flags?.protected;
+
+      if (isRecentLocalChange || localAddon.flags?.enabled === false || hasCustomizations || isProtected) {
+        finalAddons.push({
+          ...localAddon,
+          flags: {
+            ...(localAddon.flags || {}),
+            enabled: localAddon.flags?.enabled !== false
+          },
+        })
+      }
     }
-    // If not in remote AND not recently changed -> DROP (1:1 Mirroring)
+    // If not in remote AND none of the above -> DROP (1:1 Mirroring)
   })
 
   // 3. Append any NEW remote addons that weren't accounted for

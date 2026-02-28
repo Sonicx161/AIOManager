@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/select"
 import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore } from '@/store/accountStore'
+import { useUIStore } from '@/store/uiStore'
 import { useProfileStore } from '@/store/profileStore'
 import { AddonDescriptor } from '@/types/addon'
 import { useState, useMemo } from 'react'
@@ -49,7 +50,7 @@ export function InstallSavedAddonDialog({
   const [success, setSuccess] = useState(false)
 
   // View State
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const { libraryViewMode: viewMode, setLibraryViewMode: setViewMode } = useUIStore()
 
   // Filter states
   const [searchTerm, setSearchTerm] = useState('')

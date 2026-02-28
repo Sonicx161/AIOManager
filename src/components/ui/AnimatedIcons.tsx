@@ -45,10 +45,12 @@ export const AnimatedRefreshIcon = ({ className, isAnimating = false }: Animated
             animate={{
                 rotate: isAnimating ? 360 : 0
             }}
-            transition={{
+            transition={isAnimating ? {
                 duration: 1,
                 repeat: Infinity,
                 ease: "linear",
+            } : {
+                duration: 0.3
             }}
             className={cn("flex items-center justify-center", className)}
         >

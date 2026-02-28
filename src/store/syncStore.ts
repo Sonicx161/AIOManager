@@ -46,7 +46,7 @@ interface SyncState {
     register: (password: string, name?: string) => Promise<void>
     login: (id: string, password: string, isSilent?: boolean, bypassGuard?: boolean) => Promise<void>
     logout: () => void
-    syncToRemote: (isAuto?: boolean) => Promise<void>
+    syncToRemote: (isAuto?: boolean, isDebounced?: boolean) => Promise<void>
     syncFromRemote: (isSilent?: boolean) => Promise<void>
     refreshFromCloud: () => Promise<void>
     forcePushState: () => Promise<void>
@@ -455,7 +455,7 @@ export const useSyncStore = create<SyncState>()(
                 toast({ title: "Logged Out", description: "See you next time." })
             },
 
-            syncToRemote: async (isAuto: boolean = false) => {
+            syncToRemote: async (isAuto: boolean = false, isDebounced: boolean = false) => {
                 const { auth, serverUrl, isSyncing, isInitialSyncCompleted } = get()
                 const { isLocked } = useAuthStore.getState()
                 if (!auth.isAuthenticated || isSyncing || isLocked) return
@@ -476,7 +476,7 @@ export const useSyncStore = create<SyncState>()(
                     if (get()._syncDebounceTimer) clearTimeout(get()._syncDebounceTimer)
                     const timer = setTimeout(() => {
                         set({ _syncDebounceTimer: null })
-                        get().syncToRemote(false) // Fire actual real sync
+                        get().syncToRemote(false, true) // Fire actual real sync, marked as debounced
                     }, 1500)
                     set({ _syncDebounceTimer: timer, isSyncing: false })
                     return
@@ -577,8 +577,9 @@ export const useSyncStore = create<SyncState>()(
                         isAuto
                     })
 
-                    if (!isAuto && _appReady) {
-                        toast({ title: "Saved", description: "Changes saved to cloud." })
+                    if (!isAuto && !isDebounced && _appReady) {
+                        // Removed repetitive "Saved" toast notification as requested by users.
+                        // The top-right Cloud Sync header icon already provides this feedback natively.
                     }
                 } catch (e) {
                     const message = (e as Error).message
@@ -589,7 +590,7 @@ export const useSyncStore = create<SyncState>()(
                             message: `Push Failed: ${message}`,
                             isAuto
                         })
-                    if (!isAuto && _appReady) {
+                    if (!isAuto && !isDebounced && _appReady) {
                         toast({ variant: "destructive", title: "Save Failed", description: message })
                     }
                 } finally {

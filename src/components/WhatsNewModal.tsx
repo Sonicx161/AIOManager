@@ -18,129 +18,71 @@ interface Release {
 
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/sonicx161/AIOManager/releases'
 
-const INTERNAL_RELEASE: Release = {
-    tag_name: 'v1.8.0',
-    name: 'AIOManager v1.8.0: The Big One',
+const FALLBACK_RELEASE: Release = {
+    tag_name: 'v1.8.1',
+    name: 'AIOManager v1.8.1: Sync & Mobile Refinements',
     published_at: new Date().toISOString(),
-    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.0',
-    body: `# AIOManager v1.8.0: The Big One
+    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.1',
+    body: `# AIOManager v1.8.1: Sync & Mobile Refinements
 
-> This is the biggest update since launch. Nearly every feature listed below is brand new. Note that some features are left out because I simply forgot about them. There's so many changes here that I lost track over time. So please explore!! 
+> A massive follow-up to The Big One, focused heavily on bulletproofing our sync engine, crushing a significant backlog of Discord-reported bugs, and drastically improving the mobile experience across the entire application.
+
+> [!NOTE]
+> **Known Visual Behavior**
+> There may be minor visual glitches where Autopilot failover backups do not immediately show up as "disabled" (greyed out) in the UI. A quick page refresh will automatically flip them off on the frontend as intended.
 
 ---
 
 ## 🆕 New Features
 
-### 🎬 Replay Page
-A brand new page inspired by Apple Music Replay: your personal viewing history, visualized.
-- Monthly timeline and category breakdown
-- Watch statistics with streaks, top titles, and genres
-- Dynamic hero cards for each month
-- Animated rewind icon in the navigation bar (desktop + mobile)
+### 📦 Enhanced Addon Management & Selection
+- **Bulk Operations:** Added "Clone" and "Deploy to All" bulk actions directly in the AddonList.
+- **Long Press Support:** Formally introduced a \`useLongPress\` hook to easily trigger selection mode on mobile devices (and desktop).
+- **View Mode Persistence:** 'Grid' and 'List' view preferences are now remembered via localStorage across Saved, Discover, and Library interfaces.
 
-### ⌨️ Command Palette
-Press Ctrl+K to instantly search and navigate to any account, addon, page, or action. Power-user speed at your fingertips.
-
-### 🔐 Zero-Knowledge Key Vault
-A fully encrypted key storage system built from scratch:
-- AES-256-GCM encryption: keys never leave your device in plain text
-- Support for 12 providers: TorBox, Real-Debrid, Premiumize, AllDebrid, Debrid-Link, Offcloud, put.io, Easynews, EasyDebrid, PikPak, Trakt, and custom keys
-- One-click "Get Token" links for each provider
-
-### 📊 Provider Health Monitoring
-Live subscription status monitoring for your debrid services:
-- Real-time premium status, expiry dates, and days remaining
-- Header badges with color-coded health indicators (desktop)
-- Support for TorBox, Real-Debrid, Premiumize, AllDebrid, and Debrid-Link APIs
-
-### ⚙️ Autopilot Enhancements
-- **Rule Naming**: Give your failover chains custom names (e.g., "Primary Movies", "Backup Series") for better organization.
-- **Per-Rule Cooldowns**: Set custom webhook notification cooldowns for each specific rule.
-- **Simulation Mode**: Preview exactly what Autopilot would do before it fires — no more "surprise" failovers.
-
-### 📋 Addon Changelog
-Track every change to your addons with a dedicated changelog — installs, removals, updates, and version changes.
-
-### 🔍 Sync Diagnostics
-A new diagnostic panel in Settings showing detailed sync logs, push/pull history, and error states.
-
-### 📦 Saved Addon Library Redesign
-- New card, list, and detail views built from scratch
-- Metadata editing (custom names, logos, descriptions)
-- **Batch URL Paste**: Add dozens of addons at once by pasting a list of manifest URLs.
-- Bulk operations and bulk URL replace
-
-### 🎨 Emoji Picker & Account Personalization
-- 170+ emojis across 7 categories with keyword search
-- Theme color picker for account cards
-- Personalize how each account appears in the dashboard and with a live preview! 
-
-### 📱 What's New Modal
-Users see a summary of what changed when they open the app after an update.
-
-### 🎹 Keyboard Shortcuts Help
-Press Shift+? to see all available keyboard shortcuts at a glance.
+### 🎛️ Headers, Popovers & UI
+- **Debrid Provider Enhancements:** Improved formatting of Debrid expiration dates and embedded API Dashboard links directly into the dropdowns.
+- **Project Documentation:** Shipped a full \`CONTRIBUTING.md\` manifesto to outline the tech stack and project expectations for external contributors.
 
 ---
 
-## ✨ Improvements
+## ✨ UI Polish & Mobile Refinements
 
-### Performance
-- **Heavy Sync Protection**: Implemented backend proxy queue capping (MAX_QUEUE_SIZE) to prevent memory leaks during massive library refreshes.
-- Metrics computation offloaded to a Web Worker
-- **Fast Startup**: Optimized database maintenance by moving VACUUM to a background task, ensuring the app boots instantly.
-- Activity feed IntersectionObserver memory leak fixed
-- Toast startup guard prevents React warnings during init
-- Skeleton loading states throughout the app
+### 📱 Perfecting the Mobile Experience
+- **Replay Dashboard Responsive Overhaul:** 
+  - live counter tiles now gracefully stack (using \`flex-wrap\`) instead of clipping off-screen on narrow viewports.
+  - The massive 380px posteris now encapsulated in a horizontal scrolling envelope allowing for native swiping.
+  - Ribbon dynamically scales down font sizes for long strings (e.g., "Wednesday") and cleanly wraps onto multiple rows without aggressively slicing words in half.
+- **Global Dialog Constraints:** All \`DialogContent\` and \`AlertDialogContent\` elements globally now have strict mobile viewport constraints (\`95vh\`, \`95vw\`, \`overflow-y-auto\`). Nothing will overflow your screen again.
+- **Context Menu Flow:** Addon dropdowns in the AddonList align smartly on mobile to prevent clipping, and context menus are completely hidden while in "Select Mode" to prevent blocking clicks.
+- **Toast Clearances:** Logically offset bottom toasts on mobile devices so they no longer overlap with the bottom navigation bar.
 
-### Reliability & System Stability
-- **Robust Link Protocol**: Unified stremio:/// link handling across Replay, Metrics, and Activity pages with a new robust opening mechanism and silent fallbacks for all browsers.
-- **Sync Race-Condition Fix**: Added a cancellation flag for addon synchronization verification to prevent detached promise collisions.
-- **Autopilot Sync Hardening**: Fixed missing fields (name, cooldown_ms) in global state synchronization.
-- **Database Resilience**: Fixed SQLite migration edge cases and improved history pruning logic.
+### 🎨 General UI Cleanup
+- Trimmed the fat on the Addon Card hamburger menu by removing redundant 'Configure Metadata' and 'Refresh Addon' items.
+- Added headers into the hamburger menu's (a small but really nice visual change in my opinion) 
 
-### UI Polish
-- **Banding Elimination**: Rebranded noise textures and improved dithering algorithms to remove "visual banding" artifacts on OLED and high-contrast displays.
-- **Stat Sanitization**: Removed unreliable genre data from Replay and Metrics to ensure visualizations are always clean and accurate.
-- **Stale Sync Warning**: Account cards now show a yellow alert if they haven't been synced in over 24 hours.
-- Mobile toast positioning clears the bottom navigation bar
-- Replay animation slowed to 1.5s for a relaxed ambient feel
-- **Unified Selection UI**: Cleaned up selection mode project-wide by removing empty circle placeholders and unifying grid cards to use a premium overlapping corner indicator with consistent SVG checkmarks.
-- **Account Dialog Polish**: Redesigned tabs in the account editor to use a symmetrical "pill" style and added a pixel-perfect card preview that mimics the actual dashboard cards.
-- **Failover Logic**: Copied rules now correctly resolve addon names across all accounts.
-- **Account Filters**: Metrics account filter now hides accounts with no history for a cleaner view.
-- Removed redundant profile count badges
-- Provider badges hidden on tablets (desktop only)
-
-### Security & Privacy
-- **Encryption Hardening**: Secure library import hardening and encrypted webhook storage for failover notifications.
-- Zero-Knowledge key storage for all debrid providers.
 
 ---
-### A Note From Me
 
-I wanted to take the time to say a massive thank you. When I first pushed this project public, I genuinely expected maybe a handful of people to find it. AIOManager started as something I built strictly for myself out of curiosity and personal use. I just wanted to put it out there to show what I could do and help whoever bumped into it. I appreciate all of you who are using this and the kind words you always share.
+## 🐛 Bug Fixes & Reliability
 
-I would like to note that I am still following through with the following from the README: 
+### 🔄 Bulletproof Addon Synchronization
+- **Cinemeta Patch Persistence:** Added optimistic local state isolation. "Patched" configs no longer mysteriously reset or revert back to the official state during background sync cycles.
+- **Incognito Sync Consistency:** The engine auto-populates \`cinemetaConfig\` if it detects heavily customized \`stremio-cinemeta\` manifests to guarantee alignment for users utilizing Incognito mode or multi-device setups without triggering false config dialogues.
+- **Complex Object Parsing:** Upgraded \`detectMetaResourcePatched\` to properly inspect object-based resource nodes (like hiding standard catalogs), fixing a major detection failure.
+- **Disabled Addon Purging Fix:** Resolved a critical bug where disabled addons (like Autopilot fallbacks) were being mistakenly purged from local state due to 'missing from remote' API checks.
+- **Fast Reinstall Protection:** Implemented an optimistic update when using the Fast Reinstall button to prevent background sync loops from reverting uninstallation.
 
-> [!NOTE]
-> Maintenance Status
-> AIOManager is now in maintenance mode. Active feature development has wrapped up with v1.7.0. Bug reports via GitHub Issues are welcome and PRs from the community are always open. Maintenance is done on a best-effort basis.
-
-I wanted to release this update after noting all of that because I want this to be as close to perfect as possible before I slow down full stop. I had a random burst of wanting to make everything better and include the replay stuff. You can really thank "replay" for this specific update. 
-
-I know some of you have seen firsthand the sacrifice I have taken to keep working on this project. I have truthfully sacrificed a month of time that could have been used in my personal life (I've been teetering a dangerous line in terms of things that need more urgent attention), but I do not resent it and would do it over again. I love knowing that I am helping at least one person out there. I really need to focus on life priorities now, and I wish I were in a better place to pour more love into this than I already have, but I will still be fixing bugs from time to time when I can.
-
-You are all amazing people and I hope you enjoy all the work I put into this big update. 
-
-Love you all <3 
----
-
-## 💝 Support
-
-If AIOManager has saved you time or helped your workflow, consider supporting the project:
-
-Ko-fi: https://ko-fi.com/sonicx161
+### 🛠️ App Stability & Logic
+- **CORS Image Blocking Resolved:** Stripped strict \`crossOrigin\` attributes from the base Poster component to completely resolve blocking CORS proxy issues from remote endpoints like TMDB and Metahub.
+- **URL Configuration Whitespace:** Resolved an anomaly where auto-generated \`/configure\` URLs for internally routed addons were injecting a rogue \`%20\` space and breaking autofill routing.
+- **Metrics Navigation Freeze:** Fixed infinite freezing when navigating away from the Metrics page caused by React 18 Strict Mode by properly resetting Web Worker fingerprint references on unmount.
+- **Infinite Spinner Catch:** Wrapped the \`syncAllAccounts\` routine in a generic \`try/finally\` block to prevent the app from freezing up during cloned API failures.
+- **Sync Order Standardization:** Forced an immediate data sync at the end of \`bulkSyncOrder\` to prevent layout order inconsistencies and trailing state loops.
+- **Autopilot UI Refresh:** Added an immediate UI refresh sweep when Autopilot forcibly swaps a server state to reflect the exact scenario in real-time.
+- **React Warnings Crushed:** Solved the notorious "Can't perform a React state update on a component that hasn't mounted yet" error within the toast system, and optimized \`accountStore\` to utilize functional state updates to mitigate parallel sync race conditions.
+- **Dynamic Vault Names:** Replaced hardcoded 'TB Account' names with your dynamically parsed, custom vault key names (Sorry it was left over from the initial implementation test lol. But we love TB. Shoutout to Mike & Wamy and the Torbox Team <3) 
+- **Infinite Spinning:** Fixed the infinite spinning 'Reinstall' button animation by applying proper transition timeouts.
 `
 }
 
@@ -167,14 +109,14 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             if (res.ok) {
                 const data: Release[] = await res.json()
                 // Merge with internal release if not already fetched from GitHub
-                const hasCurrent = data.some(r => r.tag_name === 'v1.8.0' || r.tag_name === '1.8.0')
-                setReleases(hasCurrent ? data : [INTERNAL_RELEASE, ...data])
+                const hasCurrent = data.some(r => r.tag_name === 'v1.8.1' || r.tag_name === '1.8.1')
+                setReleases(hasCurrent ? data : [FALLBACK_RELEASE, ...data])
             } else {
-                setReleases([INTERNAL_RELEASE])
+                setReleases([FALLBACK_RELEASE])
             }
         } catch {
             // Fallback to internal release if fetch completely fails (e.g., adblock, offline)
-            setReleases([INTERNAL_RELEASE])
+            setReleases([FALLBACK_RELEASE])
         } finally {
             setLoading(false)
         }

@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label'
 import { useToast } from '@/hooks/use-toast'
 import { getHealthSummary } from '@/lib/addon-health'
 import { useAddonStore } from '@/store/addonStore'
+import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
 import { SavedAddon } from '@/types/saved-addon'
 import { ProfileReorderDialog } from '../profiles/ProfileReorderDialog'
@@ -81,7 +82,7 @@ export function SavedAddonLibrary() {
   const [isProfilesExpanded, setIsProfilesExpanded] = useState(true)
   const [deleteProfileId, setDeleteProfileId] = useState<string | null>(null)
 
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const { libraryViewMode: viewMode, setLibraryViewMode: setViewMode } = useUIStore()
   const isMounted = useRef(true)
   useEffect(() => {
     return () => { isMounted.current = false }
@@ -792,8 +793,8 @@ export function SavedAddonLibrary() {
 
           {/* Selection Toolbar */}
           {isSelectionMode && (
-            <div className="sticky top-4 z-50 bg-card border rounded-lg p-3 shadow-md flex items-center justify-between animate-in fade-in slide-in-from-top-2 w-full">
-              <div className="flex items-center gap-3">
+            <div className="sticky top-4 z-50 bg-card border rounded-lg p-3 shadow-md flex flex-col md:flex-row items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2 w-full">
+              <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-3">
                 <span className="font-medium text-sm ml-1">
                   {selectedIds.size} Selected
                 </span>
@@ -801,7 +802,7 @@ export function SavedAddonLibrary() {
                   {selectedIds.size === filteredAddons.length && filteredAddons.length > 0 ? 'Deselect All' : 'Select All'}
                 </Button>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center justify-end gap-2 w-full md:w-auto">
                 <Button
                   size="sm"
                   variant="outline"
@@ -818,7 +819,7 @@ export function SavedAddonLibrary() {
                   variant="outline"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowAccountPicker(true)}
-                  className="border-primary/20 hover:bg-primary/5 dark:border-primary/10 dark:hover:bg-primary/5"
+                  className="w-full sm:w-auto border-primary/20 hover:bg-primary/5 dark:border-primary/10 dark:hover:bg-primary/5"
                 >
                   <Upload className="h-4 w-4 mr-2" />
                   Deploy
@@ -828,7 +829,7 @@ export function SavedAddonLibrary() {
                   variant="outline"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowRemoveAccountPicker(true)}
-                  className="border-red-200 hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
+                  className="w-full sm:w-auto border-red-200 hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
                 >
                   <UserMinus className="h-4 w-4 mr-2" />
                   Remove from Accts
@@ -838,6 +839,7 @@ export function SavedAddonLibrary() {
                   variant="outline"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowBulkEditDialog(true)}
+                  className="w-full sm:w-auto"
                 >
                   <Pencil className="h-4 w-4 mr-2" />
                   Edit
@@ -847,6 +849,7 @@ export function SavedAddonLibrary() {
                   variant="destructive"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowBulkDeleteConfirmation(true)}
+                  className="w-full sm:w-auto"
                 >
                   <AnimatedTrashIcon className="h-4 w-4 mr-2" />
                   Delete
@@ -914,30 +917,30 @@ export function SavedAddonLibrary() {
                     )}
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1 bg-background/50 p-1 rounded-lg border mr-2">
+                  <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full lg:w-auto">
+                    <div className="flex items-center justify-center gap-1 bg-background/50 p-1 rounded-lg border col-span-1 h-10 w-full sm:w-auto sm:mr-1">
                       <Button
                         variant="ghost"
                         size="sm"
-                        className={cn("h-7 w-7 p-0", viewMode === 'grid' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                        className={cn("h-full w-full sm:w-9 p-0", viewMode === 'grid' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
                         onClick={() => { setViewMode('grid'); setCollapsedProfiles(new Set()); }}
                       >
-                        <Grid className="h-3.5 w-3.5" />
+                        <Grid className="h-4 w-4" />
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className={cn("h-7 w-7 p-0", viewMode === 'list' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+                        className={cn("h-full w-full sm:w-9 p-0", viewMode === 'list' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
                         onClick={() => { setViewMode('list'); setCollapsedProfiles(new Set()); }}
                       >
-                        <List className="h-3.5 w-3.5" />
+                        <List className="h-4 w-4" />
                       </Button>
                     </div>
 
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-10"
+                      className="h-10 col-span-1 w-full sm:w-auto"
                       onClick={handleRefresh}
                       disabled={checkingUpdates || checkingHealth || updatingAll || savedAddons.length === 0}
                     >
@@ -948,7 +951,7 @@ export function SavedAddonLibrary() {
                       <Button
                         variant="default"
                         size="sm"
-                        className="h-8 bg-blue-600 hover:bg-blue-700 text-white"
+                        className="h-10 bg-blue-600 hover:bg-blue-700 text-white col-span-2 sm:col-span-1 w-full sm:w-auto"
                         onClick={handleUpdateAll}
                         disabled={updatingAll}
                       >
@@ -959,24 +962,28 @@ export function SavedAddonLibrary() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-10"
+                      className="h-10 col-span-1 w-full sm:w-auto px-2"
                       onClick={() => setShowBulkUrlReplaceDialog(true)}
                       title="Bulk URL Fragment Replace"
                     >
-                      <Wand2 className="h-3.5 w-3.5 mr-2" />
-                      Bulk URL Replace
+                      <Wand2 className="h-3.5 w-3.5 mr-2 shrink-0" />
+                      <span className="truncate">Bulk Replace</span>
                     </Button>
                     <Button
                       variant={isSelectionMode ? "secondary" : "outline"}
                       size="sm"
-                      className="h-10 px-4"
+                      className="h-10 col-span-1 w-full sm:w-auto px-2"
                       onClick={toggleSelectionMode}
                     >
-                      <Check className="mr-2 h-4 w-4" />
-                      {isSelectionMode ? 'Cancel' : 'Select'}
+                      <Check className="mr-2 h-4 w-4 shrink-0" />
+                      <span className="truncate">{isSelectionMode ? 'Cancel' : 'Select'}</span>
                     </Button>
-                    <Button size="sm" className="h-10 px-4 shadow-sm" onClick={handleOpenAddDialog}>
-                      <Plus className="mr-2 h-3.5 w-3.5" />
+                    <Button
+                      size="sm"
+                      className="h-10 col-span-2 sm:col-span-1 w-full sm:w-auto shadow-sm"
+                      onClick={handleOpenAddDialog}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
                       Add Addon
                     </Button>
                   </div>
@@ -1110,6 +1117,10 @@ export function SavedAddonLibrary() {
                           isSelectionMode={isSelectionMode}
                           isSelected={selectedIds.has(addon.id)}
                           onToggleSelect={handleToggleSelect}
+                          onLongPress={(id) => {
+                            setIsSelectionMode(true)
+                            handleToggleSelect(id)
+                          }}
                           profileName={profile?.name}
                         />
                       )
@@ -1123,6 +1134,10 @@ export function SavedAddonLibrary() {
                         isSelectionMode={isSelectionMode}
                         isSelected={selectedIds.has(addon.id)}
                         onToggleSelect={handleToggleSelect}
+                        onLongPress={(id) => {
+                          setIsSelectionMode(true)
+                          handleToggleSelect(id)
+                        }}
                         profileName={profile ? profile.name : undefined}
                       />
                     )
@@ -1167,6 +1182,10 @@ export function SavedAddonLibrary() {
                                     isSelectionMode={isSelectionMode}
                                     isSelected={selectedIds.has(addon.id)}
                                     onToggleSelect={handleToggleSelect}
+                                    onLongPress={(id) => {
+                                      setIsSelectionMode(true)
+                                      handleToggleSelect(id)
+                                    }}
                                     profileName={profile.name}
                                   />
                                 )
@@ -1180,6 +1199,10 @@ export function SavedAddonLibrary() {
                                   isSelectionMode={isSelectionMode}
                                   isSelected={selectedIds.has(addon.id)}
                                   onToggleSelect={handleToggleSelect}
+                                  onLongPress={(id) => {
+                                    setIsSelectionMode(true)
+                                    handleToggleSelect(id)
+                                  }}
                                   profileName={profile.name}
                                 />
                               )
@@ -1229,6 +1252,10 @@ export function SavedAddonLibrary() {
                                     isSelectionMode={isSelectionMode}
                                     isSelected={selectedIds.has(addon.id)}
                                     onToggleSelect={handleToggleSelect}
+                                    onLongPress={(id) => {
+                                      setIsSelectionMode(true)
+                                      handleToggleSelect(id)
+                                    }}
                                   />
                                 )
                               }
@@ -1241,6 +1268,10 @@ export function SavedAddonLibrary() {
                                   isSelectionMode={isSelectionMode}
                                   isSelected={selectedIds.has(addon.id)}
                                   onToggleSelect={handleToggleSelect}
+                                  onLongPress={(id) => {
+                                    setIsSelectionMode(true)
+                                    handleToggleSelect(id)
+                                  }}
                                 />
                               )
                             })}

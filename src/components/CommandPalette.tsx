@@ -26,6 +26,7 @@ interface CommandItem {
     icon: React.ReactNode
     action: () => void
     category: 'Navigation' | 'Accounts' | 'Quick Actions'
+    emoji?: string
 }
 
 /**
@@ -126,6 +127,7 @@ export function CommandPalette() {
             items.push({
                 id: `acc-${acc.id}`,
                 label: acc.name || acc.email || 'Unnamed Account',
+                emoji: acc.emoji,
                 sublabel: acc.email && acc.name ? acc.email : undefined,
                 icon: <User className="h-4 w-4" />,
                 action: () => go(`/account/${acc.id}`),
@@ -285,7 +287,10 @@ export function CommandPalette() {
                                                 {item.icon}
                                             </span>
                                             <div className="flex-1 min-w-0">
-                                                <div className="text-sm font-medium truncate">{item.label}</div>
+                                                <div className="text-sm font-medium truncate">
+                                                    {item.emoji && <span className="mr-2">{item.emoji}</span>}
+                                                    {item.label}
+                                                </div>
                                                 {item.sublabel && (
                                                     <div className="text-xs text-muted-foreground truncate">
                                                         {item.sublabel}

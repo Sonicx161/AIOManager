@@ -42,6 +42,7 @@ export interface AddonDescriptor {
     customLogo?: string
     customDescription?: string
     lastUpdated?: number
+    cinemetaConfig?: import('./cinemeta').CinemetaConfigState
   }
   catalogOverrides?: {
     removed: string[]

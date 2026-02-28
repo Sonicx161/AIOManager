@@ -230,7 +230,7 @@ export class StremioClient {
    * Domains that should be fetched directly without using the proxy
    * Add domains here that have proper CORS headers or are official Stremio services
    */
-  private readonly DIRECT_FETCH_DOMAINS = ['v3-cinemeta.strem.io', 'cinemeta.strem.io', 'strem.io']
+  private readonly DIRECT_FETCH_DOMAINS = ['v3-cinemeta.strem.io', 'cinemeta.strem.io', 'strem.io', '127.0.0.1', 'localhost']
 
   /**
    * Fetch addon manifest from URL

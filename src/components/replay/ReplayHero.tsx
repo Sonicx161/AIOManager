@@ -254,8 +254,9 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
 
                 {/* Live Counter Tiles */}
                 <div
-                    className="flex mt-16 transition-all duration-700 "
+                    className="flex flex-wrap justify-center mt-16 transition-all duration-700"
                     style={{
+                        gap: '2px',
                         opacity: statsVisible ? 1 : 0,
                         transform: statsVisible ? 'scale(1)' : 'scale(0.94)',
                         transitionTimingFunction: 'cubic-bezier(0.34, 1.56, 0.64, 1)',
@@ -266,8 +267,8 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                         className="flex flex-col justify-center items-center"
                         style={{
                             borderRadius: '24px 4px 4px 24px',
-                            padding: '24px 36px',
-                            minWidth: '140px',
+                            padding: '16px 20px',
+                            minWidth: '120px',
                             background: 'rgba(255,255,255,0.12)',
                             border: '1px solid rgba(255,255,255,0.15)',
                             borderRightWidth: '0px',
@@ -286,8 +287,8 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                         className="flex flex-col justify-center items-center"
                         style={{
                             borderRadius: '4px 24px 24px 4px',
-                            padding: '24px 36px',
-                            minWidth: '140px',
+                            padding: '16px 20px',
+                            minWidth: '120px',
                             background: 'rgba(255,255,255,0.12)',
                             border: '1px solid rgba(255,255,255,0.15)',
                             boxShadow: '0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.12)'

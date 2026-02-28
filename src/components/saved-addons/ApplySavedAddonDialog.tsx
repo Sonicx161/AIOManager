@@ -126,7 +126,8 @@ export function ApplySavedAddonDialog({ savedAddon, onClose }: ApplySavedAddonDi
                     onChange={() => toggleAccount(account.id)}
                   />
                   <div className="flex-1">
-                    <p className="text-sm font-medium">
+                    <p className="text-sm font-medium flex items-center gap-1.5">
+                      {account.emoji && <span className="text-base shrink-0">{account.emoji}</span>}
                       {(() => {
                         const isNameCustomized =
                           account.name !== account.email && account.name !== 'Stremio Account'

@@ -94,9 +94,10 @@ export function detectStandardCatalogsPatched(manifest: CinemetaManifest): boole
  */
 export function detectMetaResourcePatched(manifest: CinemetaManifest): boolean {
   const resources = Array.isArray(manifest.resources) ? manifest.resources : []
-
-  // Patch is applied if 'meta' is not in resources
-  return !resources.includes('meta')
+  return !resources.some(r =>
+    r === 'meta' ||
+    (typeof r === 'object' && r !== null && ((r as any).name === 'meta' || (r as any).value === 'meta'))
+  )
 }
 
 // ============================================================================
@@ -170,7 +171,10 @@ export function removeCinemetaStandardCatalogs(
 export function removeMeta(manifest: CinemetaManifest): CinemetaManifest {
   return {
     ...manifest,
-    resources: manifest.resources.filter((resource) => resource !== 'meta'),
+    resources: manifest.resources.filter(r =>
+      r !== 'meta' &&
+      !(typeof r === 'object' && r !== null && ((r as any).name === 'meta' || (r as any).value === 'meta'))
+    ),
   }
 }
 
@@ -217,7 +221,7 @@ export async function fetchOriginalCinemetaManifest(
   accountId: string = 'Unknown'
 ): Promise<CinemetaManifest> {
   const { fetchAddonManifest } = await import('@/api/addons')
-  const descriptor = await fetchAddonManifest(transportUrl, accountId)
+  const descriptor = await fetchAddonManifest(transportUrl, accountId, true)
   return descriptor.manifest as CinemetaManifest
 }
 

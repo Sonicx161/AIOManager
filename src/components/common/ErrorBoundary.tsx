@@ -83,9 +83,9 @@ export class ErrorBoundary extends Component<Props, State> {
                             </Button>
                         </div>
 
-                        <p className="text-[9px] uppercase tracking-[0.2em] text-muted-foreground opacity-30 italic">
-                            AIOManager v1.8.0 Recovery System
-                        </p>
+                        <span className="text-secondary tracking-widest uppercase">
+                            AIOManager v1.8.1 Recovery System
+                        </span>
                     </div>
                 </div>
             )

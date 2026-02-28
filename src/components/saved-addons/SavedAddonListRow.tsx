@@ -1,6 +1,7 @@
 import { SavedAddon } from '@/types/saved-addon'
 import { isNewerVersion, getAddonConfigureUrl } from '@/lib/utils'
-import { Copy, MoreVertical, Pencil } from 'lucide-react'
+import { useLongPress } from '@/hooks/useLongPress'
+import { Copy, MoreVertical, Pencil, Check } from 'lucide-react'
 import { AnimatedSettingsIcon, AnimatedTrashIcon, AnimatedUpdateIcon } from '../ui/AnimatedIcons'
 import {
     DropdownMenu,
@@ -27,6 +28,7 @@ interface SavedAddonListRowProps {
     isSelectionMode?: boolean
     isSelected?: boolean
     onToggleSelect?: (id: string) => void
+    onLongPress?: (id: string) => void
     profileName?: string
 }
 
@@ -37,6 +39,7 @@ export function SavedAddonListRow({
     isSelectionMode,
     isSelected,
     onToggleSelect,
+    onLongPress,
     profileName
 }: SavedAddonListRowProps) {
     const { deleteSavedAddon } = useAddonStore()
@@ -100,9 +103,16 @@ export function SavedAddonListRow({
         return `${days}d ago`
     }
 
+    const { isLongPressTriggered, ...longPressProps } = useLongPress(() => {
+        if (!isSelectionMode && onLongPress) {
+            onLongPress(savedAddon.id)
+        }
+    })
+
     return (
         <>
             <div
+                {...longPressProps}
                 className={`group flex items-center h-[64px] relative w-full ${isSelectionMode ? 'cursor-pointer' : ''}`}
                 style={{
                     background: 'rgba(255,255,255,0.02)',
@@ -125,6 +135,7 @@ export function SavedAddonListRow({
                     }
                 }}
                 onClick={() => {
+                    if (isLongPressTriggered) return
                     if (isSelectionMode && onToggleSelect) {
                         onToggleSelect(savedAddon.id)
                     }
@@ -290,7 +301,9 @@ export function SavedAddonListRow({
                                 <MoreVertical className="h-4 w-4 text-white/40 hover:text-white" />
                             </button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
+                        <DropdownMenuContent align="end" className="w-56">
+                            <div className="px-2 py-1.5 text-xs font-bold uppercase tracking-wider text-muted-foreground opacity-70">MANAGE SAVED ADDON</div>
+                            <DropdownMenuSeparator />
                             <DropdownMenuItem onClick={handleCopyUrl}>
                                 <Copy className="h-4 w-4 mr-2" />
                                 Copy URL
@@ -334,10 +347,3 @@ export function SavedAddonListRow({
     )
 }
 
-function Check({ className }: { className?: string }) {
-    return (
-        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-        </svg>
-    )
-}

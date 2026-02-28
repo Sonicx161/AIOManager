@@ -24,6 +24,7 @@ import {
   fetchOriginalCinemetaManifest,
   isCinemetaAddon,
 } from '@/lib/cinemeta-utils'
+import { normalizeAddonUrl } from '@/lib/utils'
 import { AlertTriangle } from 'lucide-react'
 
 interface CinemetaConfigurationDialogProps {
@@ -59,15 +60,16 @@ export function CinemetaConfigurationDialog({
   // Detect patches on open
   useEffect(() => {
     if (open && addon) {
+      const savedConfig = addon.metadata?.cinemetaConfig
       const manifest = addon.manifest as CinemetaManifest
       const status = detectAllPatches(manifest)
       setPatchStatus(status)
 
-      // Initialize toggles to match current state
+      // Initialize toggles to match saved state first, then current manifest state
       setConfig({
-        removeSearchArtifacts: status.searchArtifactsPatched,
-        removeStandardCatalogs: status.standardCatalogsPatched,
-        removeMetaResource: status.metaResourcePatched,
+        removeSearchArtifacts: savedConfig ? savedConfig.removeSearchArtifacts : status.searchArtifactsPatched,
+        removeStandardCatalogs: savedConfig ? savedConfig.removeStandardCatalogs : status.standardCatalogsPatched,
+        removeMetaResource: savedConfig ? savedConfig.removeMetaResource : status.metaResourcePatched,
       })
     }
   }, [open, addon])
@@ -131,11 +133,32 @@ export function CinemetaConfigurationDialog({
       updatedAddons[cinemetaIndex] = {
         ...currentAddons[cinemetaIndex],
         manifest: modifiedManifest,
-        metadata: addon.metadata, // Preserve custom name/logo
+        metadata: {
+          ...addon.metadata,
+          cinemetaConfig: config,
+          lastUpdated: Date.now()
+        },
       }
 
       // 7. Sync to Stremio API (using wrapper to preserve metadata)
       await updateAddons(authKey, updatedAddons, accountId)
+
+      // Optimistically sync local store before syncAccount runs mergeAddons,
+      // otherwise isRecentLocalChange causes mergeAddons to prefer the stale local state
+      // and throw away the cinemetaConfig + patched manifest we just wrote to Stremio.
+      const storeAccounts = useAccountStore.getState().accounts
+      useAccountStore.setState({
+        accounts: storeAccounts.map(acc =>
+          acc.id !== accountId ? acc : {
+            ...acc,
+            addons: acc.addons.map(a =>
+              normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addon.transportUrl)
+                ? updatedAddons[cinemetaIndex]
+                : a
+            )
+          }
+        )
+      })
 
       // 8. Sync account state (refresh local data)
       await syncAccount(accountId)
@@ -177,25 +200,54 @@ export function CinemetaConfigurationDialog({
       // 2. Update addon collection with original manifest
       const authKey = await decrypt(accountAuthKey, encryptionKey)
       const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
+
+      // Use more robust matching: look for CINEMETA explicitly by typical IDs or transport URL
       const cinemetaIndex = currentAddons.findIndex((a) =>
+        a.manifest.id === 'stremio-cinemeta' ||
         a.manifest.id === addon.manifest.id ||
-        isCinemetaAddon(a) ||
+        a.transportUrl.includes('v3-cinemeta.strem.io') ||
         a.transportUrl === addon.transportUrl
       )
 
       if (cinemetaIndex === -1) {
-        throw new Error('Cinemeta addon not found in collection')
+        throw new Error('Cinemeta addon not found in your Stremio collection. Try refreshing accounts first.')
       }
 
       const updatedAddons = [...currentAddons]
       updatedAddons[cinemetaIndex] = {
         ...currentAddons[cinemetaIndex],
         manifest: originalManifest,
-        metadata: addon.metadata, // Preserve custom name/logo on reset too
+        transportUrl: OFFICIAL_CINEMETA_URL, // Reset URL to official if it was modified
+        metadata: {
+          ...currentAddons[cinemetaIndex].metadata,
+          cinemetaConfig: undefined,
+          lastUpdated: Date.now() // Force local change preference
+        }
       }
 
       await updateAddons(authKey, updatedAddons, accountId)
+
+      // Optimistically sync local store before syncAccount runs mergeAddons,
+      // otherwise isRecentLocalChange causes mergeAddons to prefer the stale local state
+      // and throw away the cinemetaConfig + patched manifest we just wrote to Stremio.
+      const storeAccounts = useAccountStore.getState().accounts
+      useAccountStore.setState({
+        accounts: storeAccounts.map(acc =>
+          acc.id !== accountId ? acc : {
+            ...acc,
+            addons: acc.addons.map(a =>
+              normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addon.transportUrl)
+                ? updatedAddons[cinemetaIndex]
+                : a
+            )
+          }
+        )
+      })
+
       await syncAccount(accountId)
+
+      const status = detectAllPatches(originalManifest)
+      setPatchStatus(status)
 
       // 4. Reset toggles
       setConfig({

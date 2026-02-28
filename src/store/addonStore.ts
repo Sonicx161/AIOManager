@@ -1559,6 +1559,12 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         }
       }
 
+      // Single forced sync after all reorders complete (avoids race conditions)
+      if (result.success > 0) {
+        const { useSyncStore } = await import('./syncStore')
+        useSyncStore.getState().syncToRemote(false).catch(console.error) // forced, not debounced
+      }
+
       return result
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to sync addon order'

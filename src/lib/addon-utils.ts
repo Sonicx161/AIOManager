@@ -1,5 +1,4 @@
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
-import { isCinemetaAddon, detectAllPatches, applyCinemetaConfiguration } from '@/lib/cinemeta-utils'
 
 /**
  * Returns a manifest for the addon with active overrides applied.
@@ -35,19 +34,7 @@ export function getEffectiveManifest(addon: {
         manifest.catalogs = manifest.catalogs.filter(cat => !removedIds.has(cat.id))
     }
 
-    // 3. CINEMETA REPAIR: If this is Cinemeta, re-apply any detected patches to the manifest.
-    // This is the fallback that ensures "Patched" UI status matches actual manifest behavior
-    // even if the raw manifest was just pulled from Stremio.
-    if (isCinemetaAddon({ ...addon, manifest } as any)) {
-        const patches = detectAllPatches(manifest as any);
-        if (patches.searchArtifactsPatched || patches.standardCatalogsPatched || patches.metaResourcePatched) {
-            return applyCinemetaConfiguration(manifest as any, {
-                removeSearchArtifacts: patches.searchArtifactsPatched,
-                removeStandardCatalogs: patches.standardCatalogsPatched,
-                removeMetaResource: patches.metaResourcePatched
-            }) as any;
-        }
-    }
+
 
     return manifest
 }

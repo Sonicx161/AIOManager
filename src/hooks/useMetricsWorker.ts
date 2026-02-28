@@ -26,6 +26,7 @@ export function useMetricsWorker(items: ActivityItem[]) {
                 console.log('[useMetricsWorker] Terminating worker...')
                 workerRef.current.terminate()
                 workerRef.current = null
+                lastFingerprintRef.current = '' // Fix React 18 Strict Mode restart bug
             }
         }
     }, [])

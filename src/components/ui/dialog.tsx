@@ -35,7 +35,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTML
       <div
         ref={ref}
         className={cn(
-          'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-md animate-pop-in duration-200 sm:rounded-lg overflow-y-auto max-h-[95vh]',
+          'fixed left-[50%] top-[50%] z-50 grid w-[95vw] sm:w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-card p-6 shadow-md animate-pop-in duration-200 sm:rounded-lg overflow-y-auto max-h-[95vh]',
           className
         )}
         {...props}

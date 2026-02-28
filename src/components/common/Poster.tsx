@@ -62,7 +62,6 @@ export function Poster({
             src={currentSrc}
             className={cn("w-full h-full object-cover", className)}
             onError={handleError}
-            crossOrigin="anonymous"
             {...props}
         />
     )

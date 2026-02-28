@@ -752,7 +752,10 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                         .filter(acc => !selectedAccounts.some(s => s.id === acc.id))
                         .map((acc) => (
                           <SelectItem key={acc.id} value={acc.id}>
-                            {acc.name !== acc.email ? acc.name : acc.email}
+                            <div className="flex items-center gap-2">
+                              {acc.emoji && <span className="text-base shrink-0">{acc.emoji}</span>}
+                              <span>{acc.name !== acc.email ? acc.name : acc.email}</span>
+                            </div>
                           </SelectItem>
                         ))}
                       {allAccounts.filter(acc => !selectedAccounts.some(s => s.id === acc.id)).length === 0 && (

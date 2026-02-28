@@ -125,6 +125,7 @@ export function AccountPickerDialog({
                                         </div>
                                         <div className="min-w-0">
                                             <div className="flex items-center gap-2">
+                                                {account.emoji && <span className="text-base shrink-0">{account.emoji}</span>}
                                                 <p className="text-sm font-medium truncate">{account.name}</p>
                                             </div>
                                             <p className="text-xs text-muted-foreground truncate">{account.email}</p>
