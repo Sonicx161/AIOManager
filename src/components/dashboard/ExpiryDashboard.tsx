@@ -11,7 +11,7 @@ export function ExpiryDashboard() {
     const { health, refreshAll, isRefreshing } = useProviderStore()
 
     const providerKeys = useMemo(() => keys.filter(k =>
-        ['real-debrid', 'torbox', 'premiumize', 'alldebrid'].includes(k.provider)
+        ['real-debrid', 'torbox', 'premiumize', 'alldebrid', 'debrid-link'].includes(k.provider)
     ), [keys])
 
     useEffect(() => {
@@ -99,6 +99,7 @@ function getProviderUrl(provider: string) {
         case 'torbox': return 'https://torbox.app/settings'
         case 'premiumize': return 'https://www.premiumize.me/account'
         case 'alldebrid': return 'https://alldebrid.com/apikeys'
+        case 'debrid-link': return 'https://debrid-link.com/webapp/apikey'
         default: return '#'
     }
 }

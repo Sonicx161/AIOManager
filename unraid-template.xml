@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/sonicx161/AIOManager/issues</Support>
   <Project>https://github.com/sonicx161/AIOManager</Project>
-  <Overview>AIOManager is the ultimate account management toolkit for Stremio. Built for power users who demand full functional and granular control, it allows you to sync multiple identities, backup complex addon configurations, and track your watch history with absolute privacy.</Overview>
+  <Overview>AIOManager is the ultimate account management toolkit for Stremio. Built for power users who demand full functional and granular control, it allows you to sync multiple identities, backup complex addon configurations, track your watch history with absolute privacy, and share your streaming Replays instantly.</Overview>
   <Category>Tools: MediaApp:Video Management:Web Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:Web Port]</WebUI>
   <TemplateURL/>

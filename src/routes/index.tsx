@@ -11,6 +11,7 @@ import { SettingsPage } from '@/pages/SettingsPage'
 import { lazy, Suspense } from 'react'
 
 const ReplayPage = lazy(() => import('@/pages/ReplayPage').then(m => ({ default: m.ReplayPage })))
+const ReplaySharePage = lazy(() => import('@/pages/ReplaySharePage').then(m => ({ default: m.ReplaySharePage })))
 
 export function AppRoutes() {
   return (
@@ -23,6 +24,11 @@ export function AppRoutes() {
       <Route path="/replay" element={
         <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Replay...</div>}>
           <ReplayPage />
+        </Suspense>
+      } />
+      <Route path="/replay/share/:token" element={
+        <Suspense fallback={<div style={{ minHeight: '100vh', background: '#08080f' }} />}>
+          <ReplaySharePage />
         </Suspense>
       } />
       <Route path="/settings" element={<SettingsPage />} />

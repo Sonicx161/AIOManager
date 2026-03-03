@@ -8,15 +8,15 @@ import { Poster } from '@/components/common/Poster'
 
 interface ReplayTopTitlesProps {
     data: ReplayData
-    allTimeData: ReplayData
+    allTimeData?: ReplayData
 }
 
 export function ReplayTopTitles({ data, allTimeData }: ReplayTopTitlesProps) {
     const [view, setView] = useState<'year' | 'all-time'>('year')
-    const currentData = view === 'year' ? data : allTimeData
-    const top10 = currentData.topTitles.slice(0, 10)
-    const hero = top10[0]
-    const rest = top10.slice(1)
+    const currentData = view === 'year' || !allTimeData ? data : allTimeData
+    const topData = currentData.topTitles.slice(0, 10)
+    const hero = topData[0]
+    const rest = topData.slice(1)
 
     const handleTitleClick = (item: { type: string, itemId: string }) => {
         openStremioDetail(item.type, item.itemId)
@@ -38,7 +38,7 @@ export function ReplayTopTitles({ data, allTimeData }: ReplayTopTitlesProps) {
                         <p className="text-white/70 font-bold mt-2 uppercase tracking-[0.2em] text-[12px]">The content that defined your journey</p>
                     </div>
 
-                    {data.year !== 'all-time' && (
+                    {data.year !== 'all-time' && allTimeData && (
                         <div className="flex p-1.5 border border-white/10 rounded-full bg-white/5 shadow-xl">
                             {['year', 'all-time'].map((v) => (
                                 <button

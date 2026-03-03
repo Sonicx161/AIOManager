@@ -73,15 +73,17 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         const hours = timeWatchedMs / 3600000;
 
         // Title aggregation
-        const uniqueId = item.itemId; // Restore uniqueId extraction
+        const uniqueId = item.itemId;
         const current = titleMap.get(uniqueId) || {
             item,
             count: 0,
             totalHours: 0,
             years: new Set()
         }
+
         current.count++
         current.totalHours += hours
+
         current.years.add(new Date(item.timestamp).getFullYear())
         titleMap.set(uniqueId, current)
 
@@ -111,7 +113,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
             totalHours: data.totalHours,
             rank: 0 // Will set after sorting
         }))
-        .sort((a, b) => b.watchCount - a.watchCount || b.totalHours - a.totalHours)
+        .sort((a, b) => b.totalHours - a.totalHours || b.watchCount - a.watchCount)
         .map((t, i) => ({ ...t, rank: i + 1 }))
 
     // Top Genres
@@ -185,29 +187,29 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         .sort((a, b) => b.totalHours - a.totalHours)
         .slice(0, 10)
 
-    // Binge Streaks (Consecutive Days)
-    const activeDates = Array.from(new Set(filteredHistory.map(item => format(new Date(item.timestamp), 'yyyy-MM-dd')))).sort()
+    // Binge Streaks (Consecutive Days - UTC Consistent)
+    const activeDates = Array.from(new Set(filteredHistory.map(item => new Date(item.timestamp).toISOString().split('T')[0]))).sort()
     let longestStreak = 0
     let currentStreak = 0
-    let lastDateObj: Date | null = null
+    let lastTimestampMs: number | null = null
 
     activeDates.forEach(dateStr => {
-        const currentDate = new Date(dateStr)
-        if (!lastDateObj) {
+        const [y, m, d] = dateStr.split('-').map(Number)
+        const currentTimestampMs = Date.UTC(y, m - 1, d)
+
+        if (lastTimestampMs === null) {
             currentStreak = 1
         } else {
-            // Calculate absolute difference in days
-            const diffTime = Math.abs(currentDate.getTime() - lastDateObj.getTime())
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
+            const diffDays = Math.round((currentTimestampMs - lastTimestampMs) / (1000 * 60 * 60 * 24))
 
             if (diffDays === 1) {
                 currentStreak++
-            } else if (diffDays > 1) {
+            } else {
                 currentStreak = 1
             }
         }
         longestStreak = Math.max(longestStreak, currentStreak)
-        lastDateObj = currentDate
+        lastTimestampMs = currentTimestampMs
     })
 
     // Hero Mosaic
@@ -344,8 +346,8 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
             const currentSeriesCount = Array.from(titleMap.values()).filter(t => t.item.type === 'series').length
             const currentLoyalty = titleMap.size > 0 ? Math.round((currentSeriesCount / titleMap.size) * 100) : 0
 
-            // Previous year streak
-            const prevDates = Array.from(new Set(prevYearHistory.map(i => format(new Date(i.timestamp), 'yyyy-MM-dd')))).sort()
+            // Previous year streak (UTC based for consistency)
+            const prevDates = Array.from(new Set(prevYearHistory.map(i => new Date(i.timestamp).toISOString().split('T')[0]))).sort()
             let prevStreak = 0, prevCurrentStreak = 0
             let prevLast: Date | null = null
             prevDates.forEach(ds => {

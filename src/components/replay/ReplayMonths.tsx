@@ -18,7 +18,7 @@ interface ReplayMonthsProps {
 export function ReplayMonths({ data }: ReplayMonthsProps) {
     const [selectedMonth, setSelectedMonth] = useState<MonthStat | null>(null)
 
-    if (data.year === 'all-time') return null
+    if (!data.monthlyBreakdown || data.monthlyBreakdown.length === 0) return null
 
     const handleTitleClick = (item: { type: string, itemId: string }) => {
         openStremioDetail(item.type, item.itemId)

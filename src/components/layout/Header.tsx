@@ -38,7 +38,7 @@ export function Header() {
         'text-muted-foreground opacity-60 border-muted-foreground/10 bg-muted/30'
 
   const providerKeys = keys
-    .filter(k => ['real-debrid', 'torbox', 'premiumize', 'alldebrid'].includes(k.provider))
+    .filter(k => ['real-debrid', 'torbox', 'premiumize', 'alldebrid', 'debrid-link'].includes(k.provider))
 
   const getProviderAbbr = (provider: string) => {
     switch (provider) {
@@ -46,6 +46,7 @@ export function Header() {
       case 'torbox': return 'TB'
       case 'premiumize': return 'PM'
       case 'alldebrid': return 'AD'
+      case 'debrid-link': return 'DL'
       default: return provider.substring(0, 2).toUpperCase()
     }
   }

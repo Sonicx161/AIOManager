@@ -33,7 +33,7 @@ function AnimatedNumber({ target, duration, delay = 0 }: { target: number, durat
 export function ReplayHero({ data, userName }: ReplayHeroProps) {
     const { displayYear, displayMonth, isCurrentYear } = useReplayDisplayMeta(data.year)
 
-    const posters = (data.heroPosterArt || []).filter(Boolean).slice(0, 48); // Cap to 48 posters to prevent DOM bloat
+    const posters = (data.heroPosterArt || []).filter(Boolean).slice(0, 40); // Cap to 40 posters for optimal link size / visual balance
 
     const statPills = [
         { icon: Film, label: `${data.totalTitles} Titles` },
@@ -71,20 +71,27 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
             style={{ fontFamily: '"DM Sans", sans-serif' }}
         >
 
-            {/* Background Mosaic */}
+            {/* Background Mosaic - Responsive grid and fixed mobile run-off */}
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ contain: 'layout style paint', willChange: 'transform', transform: 'translateZ(0)', isolation: 'isolate' }}>
                 <div
                     style={{
                         display: 'grid',
-                        gridTemplateColumns: 'repeat(8, 1fr)',
+                        gridTemplateColumns: 'repeat(var(--mosaic-cols, 8), 1fr)',
                         gap: '6px',
                         padding: '6px',
-                        transform: 'translateZ(0) scale(1.08) rotate(-1deg)',
+                        transform: 'translateZ(0) scale(var(--mosaic-scale, 1.08)) rotate(-1deg)',
                         willChange: 'transform',
-                        opacity: 0.25, // Lowered opacity replaces expensive expensive blur(2px)
+                        opacity: 0.2, // Slightly lower opacity for better content contrast on mobile
                         height: '100%'
                     }}
                 >
+                    <style dangerouslySetInnerHTML={{
+                        __html: `
+                        :root { --mosaic-cols: 8; --mosaic-scale: 1.08; }
+                        @media (max-width: 768px) {
+                            :root { --mosaic-cols: 4; --mosaic-scale: 1.15; }
+                        }
+                    `}} />
                     {posters.map((poster, i) => (
                         <div
                             key={i}
@@ -151,11 +158,11 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                     transition={{ duration: 1, ease: [0.23, 1, 0.32, 1], delay: 0.1 }}
                     className="flex flex-col items-center relative z-10"
                 >
-                    {/* Line 1 - The Year */}
+                    {/* Line 1 - The Year/Month */}
                     <div
                         className="animate-shimmer-bg"
                         style={{
-                            fontSize: 'clamp(80px, 16vw, 160px)',
+                            fontSize: displayMonth ? 'clamp(48px, 10vw, 100px)' : 'clamp(80px, 16vw, 160px)',
                             fontWeight: 800,
                             lineHeight: 0.85,
                             letterSpacing: '-0.02em',
@@ -166,14 +173,14 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                             WebkitTextFillColor: 'transparent',
                         }}
                     >
-                        {displayYear}
+                        {displayMonth ? `${displayMonth} ${displayYear}` : displayYear}
                     </div>
 
                     {/* Line 2 - Replay */}
                     <div className="flex flex-col items-center mt-2 relative">
                         <div
                             style={{
-                                fontSize: 'clamp(80px, 16vw, 160px)',
+                                fontSize: displayMonth ? 'clamp(60px, 12vw, 120px)' : 'clamp(80px, 16vw, 160px)',
                                 fontWeight: 800,
                                 lineHeight: 0.85,
                                 letterSpacing: '-0.02em',
@@ -217,21 +224,6 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                                 </motion.div>
                             )}
                         </div>
-
-                        {displayMonth && (
-                            <div
-                                style={{
-                                    fontSize: 'clamp(32px, 5vw, 56px)',
-                                    letterSpacing: '0.15em',
-                                    fontWeight: 800,
-                                    color: 'rgba(255,255,255,0.6)',
-                                    textTransform: 'uppercase',
-                                    marginTop: '8px'
-                                }}
-                            >
-                                {displayMonth}
-                            </div>
-                        )}
                     </div>
                 </motion.div>
 

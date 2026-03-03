@@ -99,7 +99,7 @@ export function ReplayInsights({ data }: ReplayInsightsProps) {
                                         <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-black/90 backdrop-blur rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10"
                                             style={{ fontFamily: '"DM Mono", monospace', fontSize: '11px', fontWeight: 700, color: 'white' }}
                                         >
-                                            {formatHour(h.hour)}: {h.count}
+                                            {formatHour(h.hour)}{h.count > 0 ? `: ${h.count}` : ''}
                                         </div>
                                     </motion.div>
                                 ))}
@@ -206,7 +206,7 @@ export function ReplayInsights({ data }: ReplayInsightsProps) {
                                                 color: isPeak ? 'white' : 'rgba(255,255,255,0.7)',
                                                 width: '48px',
                                                 textAlign: 'right',
-                                            }}>{d.hours}h</div>
+                                            }}>{d.hours > 0 ? `${d.hours}h` : '0h'}</div>
                                         </motion.div>
                                     )
                                 })}

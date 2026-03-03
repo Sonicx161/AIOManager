@@ -17,11 +17,13 @@ import { useFailoverStore } from '@/store/failoverStore'
 import { useSyncStore } from '@/store/syncStore'
 import { LoginPage } from '@/pages/LoginPage'
 import { KeybindingsHelp } from '@/components/KeybindingsHelp'
-import { useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useNavigate, Routes, Route } from 'react-router-dom'
+import { useEffect, useState, lazy, Suspense } from 'react'
 
 
 import { LoadingScreen } from '@/components/common/LoadingScreen'
+
+const ReplaySharePage = lazy(() => import('@/pages/ReplaySharePage').then(m => ({ default: m.ReplaySharePage })))
 
 function App() {
   const navigate = useNavigate()
@@ -124,6 +126,19 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [navigate])
 
+  // Auth bypass for Share Links - Must run before isInitialized check
+  if (/^\/replay\/share\/[^/]+$/.test(window.location.pathname)) {
+    return (
+      <Routes>
+        <Route path="/replay/share/:token" element={
+          <Suspense fallback={<div style={{ minHeight: '100vh', background: '#08080f' }} />}>
+            <ReplaySharePage />
+          </Suspense>
+        } />
+      </Routes>
+    )
+  }
+
   if (!isInitialized) {
     return (
       <LoadingScreen />
@@ -131,7 +146,10 @@ function App() {
   }
 
   // Auth Guard: Force login if not authenticated OR if the local vault is locked
-  if (!auth.isAuthenticated || isLocked) {
+  // Bypass if visiting a Replay share link (stateless)
+  const isShareLink = /^\/replay\/share\//.test(window.location.pathname)
+
+  if ((!auth.isAuthenticated || isLocked) && !isShareLink) {
     // Check for Deep Link (Parity with AIOStreams)
     // If user visits /account/<UUID> directly, we want to pre-fill that UUID
     const path = window.location.pathname

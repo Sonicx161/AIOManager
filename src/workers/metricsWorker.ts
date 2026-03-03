@@ -76,8 +76,12 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[] }>) => {
     franchises.forEach(f => franchiseCounts[f.name] = 0)
 
     items.forEach((h: ActivityItem) => {
-        const hTime = h.timestamp.getTime()
-        const hDate = new Date(hTime)
+        // Revival: Ensure timestamp is a Date object (handles common IndexedDB stringification)
+        const timestamp = h.timestamp instanceof Date ? h.timestamp : new Date(h.timestamp)
+        if (isNaN(timestamp.getTime())) return // Skip invalid dates
+
+        const hTime = timestamp.getTime()
+        const hDate = timestamp
         const hour = hDate.getHours()
         const day = hDate.getDay()
 

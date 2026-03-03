@@ -19,70 +19,80 @@ interface Release {
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/sonicx161/AIOManager/releases'
 
 const FALLBACK_RELEASE: Release = {
-    tag_name: 'v1.8.1',
-    name: 'AIOManager v1.8.1: Sync & Mobile Refinements',
+    tag_name: 'v1.8.2',
+    name: 'v1.8.2 - Share, Fix & Polish',
     published_at: new Date().toISOString(),
-    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.1',
-    body: `# AIOManager v1.8.1: Sync & Mobile Refinements
-
-> A massive follow-up to The Big One, focused heavily on bulletproofing our sync engine, crushing a significant backlog of Discord-reported bugs, and drastically improving the mobile experience across the entire application.
-
-> [!NOTE]
-> **Known Visual Behavior**
-> There may be minor visual glitches where Autopilot failover backups do not immediately show up as "disabled" (greyed out) in the UI. A quick page refresh will automatically flip them off on the frontend as intended.
-
----
+    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.2',
+    body: `# v1.8.2 - Share, Fix & Polish
 
 ## 🆕 New Features
 
-### 📦 Enhanced Addon Management & Selection
-- **Bulk Operations:** Added "Clone" and "Deploy to All" bulk actions directly in the AddonList.
-- **Long Press Support:** Formally introduced a \`useLongPress\` hook to easily trigger selection mode on mobile devices (and desktop).
-- **View Mode Persistence:** 'Grid' and 'List' view preferences are now remembered via localStorage across Saved, Discover, and Library interfaces.
+### 🎬 Replay Share Links
 
-### 🎛️ Headers, Popovers & UI
-- **Debrid Provider Enhancements:** Improved formatting of Debrid expiration dates and embedded API Dashboard links directly into the dropdowns.
-- **Project Documentation:** Shipped a full \`CONTRIBUTING.md\` manifesto to outline the tech stack and project expectations for external contributors.
+**Your Replay is now shareable and no account is required to view it.**
 
----
+Hit the **"Copy Share Link"** button at the bottom of your Replay page to generate a link you can send to anyone. When someone opens it they get the full experience: your hero stats, top titles, monthly breakdown, milestones and insights all rendered directly from the link itself.
 
-## ✨ UI Polish & Mobile Refinements
+What's included in a shared Replay:
+- Your full poster mosaic (24 titles), the same rich visual display you see in the app
+- Hourly and daily watch distribution charts with exact counts and hours
+- Milestone progress and achievements
+- Your Discoveries, Marathons and Hidden Gems lists
+- Top titles with watch counts and year-over-year comparisons
 
-### 📱 Perfecting the Mobile Experience
-- **Replay Dashboard Responsive Overhaul:** 
-  - live counter tiles now gracefully stack (using \`flex-wrap\`) instead of clipping off-screen on narrow viewports.
-  - The massive 380px posteris now encapsulated in a horizontal scrolling envelope allowing for native swiping.
-  - Ribbon dynamically scales down font sizes for long strings (e.g., "Wednesday") and cleanly wraps onto multiple rows without aggressively slicing words in half.
-- **Global Dialog Constraints:** All \`DialogContent\` and \`AlertDialogContent\` elements globally now have strict mobile viewport constraints (\`95vh\`, \`95vw\`, \`overflow-y-auto\`). Nothing will overflow your screen again.
-- **Context Menu Flow:** Addon dropdowns in the AddonList align smartly on mobile to prevent clipping, and context menus are completely hidden while in "Select Mode" to prevent blocking clicks.
-- **Toast Clearances:** Logically offset bottom toasts on mobile devices so they no longer overlap with the bottom navigation bar.
-
-### 🎨 General UI Cleanup
-- Trimmed the fat on the Addon Card hamburger menu by removing redundant 'Configure Metadata' and 'Refresh Addon' items.
-- Added headers into the hamburger menu's (a small but really nice visual change in my opinion) 
-
+**How sharing works in plain English:** Your watch data gets compressed and packed directly into the URL itself. Think of it like a very efficient digital summary tucked inside the link. There's no database involved, no server storing anything and no account needed to open it. The link loads instantly and works forever. It only contains your display name and what you've watched, nothing about your account, email or login. You're in full control of what gets shared. Links stay under 2KB so they work cleanly anywhere you'd paste a link, including Discord.
 
 ---
 
 ## 🐛 Bug Fixes & Reliability
 
-### 🔄 Bulletproof Addon Synchronization
-- **Cinemeta Patch Persistence:** Added optimistic local state isolation. "Patched" configs no longer mysteriously reset or revert back to the official state during background sync cycles.
-- **Incognito Sync Consistency:** The engine auto-populates \`cinemetaConfig\` if it detects heavily customized \`stremio-cinemeta\` manifests to guarantee alignment for users utilizing Incognito mode or multi-device setups without triggering false config dialogues.
-- **Complex Object Parsing:** Upgraded \`detectMetaResourcePatched\` to properly inspect object-based resource nodes (like hiding standard catalogs), fixing a major detection failure.
-- **Disabled Addon Purging Fix:** Resolved a critical bug where disabled addons (like Autopilot fallbacks) were being mistakenly purged from local state due to 'missing from remote' API checks.
-- **Fast Reinstall Protection:** Implemented an optimistic update when using the Fast Reinstall button to prevent background sync loops from reverting uninstallation.
+### 🔑 AllDebrid Health Checks Now Work Again
 
-### 🛠️ App Stability & Logic
-- **CORS Image Blocking Resolved:** Stripped strict \`crossOrigin\` attributes from the base Poster component to completely resolve blocking CORS proxy issues from remote endpoints like TMDB and Metahub.
-- **URL Configuration Whitespace:** Resolved an anomaly where auto-generated \`/configure\` URLs for internally routed addons were injecting a rogue \`%20\` space and breaking autofill routing.
-- **Metrics Navigation Freeze:** Fixed infinite freezing when navigating away from the Metrics page caused by React 18 Strict Mode by properly resetting Web Worker fingerprint references on unmount.
-- **Infinite Spinner Catch:** Wrapped the \`syncAllAccounts\` routine in a generic \`try/finally\` block to prevent the app from freezing up during cloned API failures.
-- **Sync Order Standardization:** Forced an immediate data sync at the end of \`bulkSyncOrder\` to prevent layout order inconsistencies and trailing state loops.
-- **Autopilot UI Refresh:** Added an immediate UI refresh sweep when Autopilot forcibly swaps a server state to reflect the exact scenario in real-time.
-- **React Warnings Crushed:** Solved the notorious "Can't perform a React state update on a component that hasn't mounted yet" error within the toast system, and optimized \`accountStore\` to utilize functional state updates to mitigate parallel sync race conditions.
-- **Dynamic Vault Names:** Replaced hardcoded 'TB Account' names with your dynamically parsed, custom vault key names (Sorry it was left over from the initial implementation test lol. But we love TB. Shoutout to Mike & Wamy and the Torbox Team <3) 
-- **Infinite Spinning:** Fixed the infinite spinning 'Reinstall' button animation by applying proper transition timeouts.
+AllDebrid updated their API behind the scenes and it quietly broke the subscription status check in AIOManager's header badges and Settings panel. Three things got fixed at once:
+
+- Updated to AllDebrid's new API path since the old one got discontinued
+- Your API key is now sent safely in the request header instead of being exposed in the URL
+- Fixed a small formatting issue that was causing AIOManager's identifier to arrive garbled at AllDebrid's servers
+
+If your AllDebrid badge was showing as unknown or throwing an error it will now correctly show your subscription status and expiry date again.
+
+---
+
+### 🩺 Debrid-Link Added to Provider Health
+
+Debrid-Link was missing from the header health badges and the Settings vault panel even though it's a fully supported provider. It's now included alongside Real-Debrid, TorBox, Premiumize and AllDebrid with the same color-coded status indicators and expiry countdown you're used to seeing.
+
+---
+
+### 📋 Addon Changelog No Longer Cuts Off
+
+The addon changelog was squeezed into a tiny box that only showed about 3 lines at a time so you had to scroll inside a scroll just to read anything. It now expands to use the full available height so you can actually read your update history without the hassle.
+
+---
+
+### 🎬 Replay Stats Animations Fixed
+
+Two stat tiles on the Replay page, Titles Watched and Longest Binge, were silently failing to animate or show their numbers when the page loaded. The cause was an overly aggressive detection system that was wrongly treating the tiles as off screen even when they were fully visible. Both tiles now correctly animate in and display their values on load.
+
+---
+
+### 📅 Longest Binge Streak Calculation Fixed
+
+The binge streak had a subtle timezone bug where it was using your local time to compare dates. That could cause your streak to show one day shorter than it actually was or occasionally break entirely depending on where you live. All date comparisons now use UTC so your streak is accurate no matter what timezone you're in.
+
+---
+
+### 🔭 Titles Watched Now Shows Your Discovery Count
+
+The small subtext underneath the Titles Watched stat tile used to be a generic placeholder. It now dynamically shows your **Total Discoveries**, the number of titles you watched for the first time during that period, so the stat actually means something personal at a glance.
+
+---
+
+## 💝 Support
+
+If AIOManager has saved you time, consider supporting the project:
+
+**Ko-fi:** https://ko-fi.com/sonicx161
 `
 }
 
@@ -173,7 +183,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             // ## Header
             if (line.startsWith('## ')) {
                 elements.push(
-                    <h3 key={i} className="text-sm font-semibold text-foreground mt-3 mb-1">
+                    <h3 key={i} className="text-sm font-semibold text-foreground mt-3 mb-1 break-words leading-tight">
                         {line.replace('## ', '')}
                     </h3>
                 )
@@ -183,9 +193,24 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             // ### Subheader
             if (line.startsWith('### ')) {
                 elements.push(
-                    <h4 key={i} className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mt-2 mb-1">
+                    <h4 key={i} className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mt-2 mb-1 break-words leading-tight">
                         {line.replace('### ', '')}
                     </h4>
+                )
+                continue
+            }
+
+            // Blockquotes (> )
+            if (line.startsWith('> ')) {
+                const text = line.replace('> ', '').replace('[!NOTE]', '<strong>NOTE</strong>')
+                elements.push(
+                    <blockquote key={i} className="border-l-2 border-primary/30 pl-3 py-1.5 my-2 text-sm text-muted-foreground italic break-all bg-muted/30 rounded-r min-w-0">
+                        <span dangerouslySetInnerHTML={{
+                            __html: text
+                                .replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground font-medium">$1</strong>')
+                                .replace(/`(.*?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded break-all">$1</code>')
+                        }} />
+                    </blockquote>
                 )
                 continue
             }
@@ -194,12 +219,12 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             if (line.match(/^\s*[-*] /)) {
                 const text = line.replace(/^\s*[-*] /, '')
                 elements.push(
-                    <div key={i} className="flex gap-2 text-sm text-muted-foreground pl-2">
+                    <div key={i} className="flex gap-2 text-sm text-muted-foreground pl-2 min-w-0">
                         <span className="text-primary mt-0.5 flex-shrink-0">•</span>
-                        <span dangerouslySetInnerHTML={{
+                        <span className="break-all min-w-0 flex-1" dangerouslySetInnerHTML={{
                             __html: text
                                 .replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground font-medium">$1</strong>')
-                                .replace(/`(.*?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded">$1</code>')
+                                .replace(/`(.*?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded break-all">$1</code>')
                         }} />
                     </div>
                 )
@@ -208,10 +233,10 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
 
             // Regular text
             elements.push(
-                <p key={i} className="text-sm text-muted-foreground" dangerouslySetInnerHTML={{
+                <p key={i} className="text-sm text-muted-foreground break-all" dangerouslySetInnerHTML={{
                     __html: line
                         .replace(/\*\*(.*?)\*\*/g, '<strong class="text-foreground font-medium">$1</strong>')
-                        .replace(/`(.*?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded">$1</code>')
+                        .replace(/`(.*?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded break-all">$1</code>')
                 }} />
             )
         }
@@ -221,7 +246,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
 
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
-            <DialogContent className="max-w-lg max-h-[85vh] flex flex-col p-0 gap-0 overflow-hidden">
+            <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-lg max-h-[85vh] flex flex-col p-0 gap-0 overflow-hidden">
                 {/* Header */}
                 <DialogHeader className="px-6 pt-6 pb-4 border-b bg-gradient-to-b from-primary/5 to-transparent flex-shrink-0">
                     <DialogTitle className="flex items-center gap-2 text-lg">

@@ -19,6 +19,12 @@ export function useMetricsWorker(items: ActivityItem[]) {
                 setResults(e.data)
                 setIsComputing(false)
             }
+
+            workerRef.current.onerror = (e) => {
+                console.error('[useMetricsWorker] Worker error:', e)
+                setIsComputing(false)
+                setResults({ _error: true }) // Fallback result to unblock UI
+            }
         }
 
         return () => {

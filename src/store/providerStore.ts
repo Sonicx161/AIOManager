@@ -96,9 +96,12 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                     daysRemaining = 0
                 }
             } else if (key.provider === 'alldebrid') {
-                const url = `${proxyUrl}${encodeURIComponent('https://api.alldebrid.com/v4/user/me')}?agent=AIOManager&apikey=${key.value}`
+                const url = `${proxyUrl}${encodeURIComponent('https://api.alldebrid.com/v4/user?agent=AIOManager')}`
                 const res = await axios.get(url, {
-                    headers: { 'x-account-context': 'System Check' }
+                    headers: {
+                        Authorization: `Bearer ${key.value}`,
+                        'x-account-context': 'System Check'
+                    }
                 })
                 const data = res.data
                 if (data.status === 'success' && data.data.user.isPremium) {
