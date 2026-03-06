@@ -125,18 +125,38 @@ export function isNewerVersion(current?: string, latest?: string): boolean {
   if (!latest || !current) return false
   if (latest === current) return false
 
-  const clean = (v: string) => v.toLowerCase().replace(/^v/, '').split('-')[0]
-  const cParts = clean(current).split('.').map(Number)
-  const lParts = clean(latest).split('.').map(Number)
+  // Helper to extract base version and build number
+  const parseVersion = (v: string) => {
+    const lower = v.toLowerCase().replace(/^v/, '')
+    const [base, buildPart] = lower.split('+')
 
-  const maxLength = Math.max(cParts.length, lParts.length)
+    // Clean base version (remove pre-release tags like -beta for core comparison)
+    const cleanBase = base.split('-')[0]
+    const parts = cleanBase.split('.').map(Number)
+
+    // Extract build metadata if present (e.g. "build.2" -> 2)
+    let buildNum = 0
+    if (buildPart && buildPart.startsWith('build.')) {
+      buildNum = parseInt(buildPart.split('.')[1]) || 0
+    }
+
+    return { parts, buildNum }
+  }
+
+  const c = parseVersion(current)
+  const l = parseVersion(latest)
+
+  const maxLength = Math.max(c.parts.length, l.parts.length)
 
   for (let i = 0; i < maxLength; i++) {
-    const c = cParts[i] || 0
-    const l = lParts[i] || 0
-    if (l > c) return true
-    if (l < c) return false
+    const cPart = c.parts[i] || 0
+    const lPart = l.parts[i] || 0
+    if (lPart > cPart) return true
+    if (lPart < cPart) return false
   }
+
+  // Base versions are identical, compare build numbers
+  if (l.buildNum > c.buildNum) return true
 
   return false
 }

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import React from 'react'
 import pkg from '../../../package.json'
 import { useUIStore } from '@/store/uiStore'
+import { isNewerVersion } from '@/lib/utils'
 
 export function Footer() {
   const isDev = import.meta.env?.DEV
@@ -18,12 +19,11 @@ export function Footer() {
         const res = await fetch('https://api.github.com/repos/sonicx161/AIOManager/releases/latest')
         if (res.ok) {
           const data = await res.json()
-          const latestStr = data.tag_name.replace('v', '')
-          const currentStr = `${version}${build ? `+build.${build}` : ''}`
+          const latestStr = data.tag_name
 
-          // Only prompt update if the release tag is different from our current string
-          if (latestStr !== currentStr && version !== 'Dev') {
-            setUpdateAvailable(latestStr)
+          // Use the strict semver utility to prevent +build tags from triggering downgradable updates
+          if (isNewerVersion(version, latestStr) && version !== 'Dev') {
+            setUpdateAvailable(latestStr.replace('v', ''))
           }
         }
       } catch (e) {

@@ -1,6 +1,7 @@
 import { Component, ErrorInfo, ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { AlertTriangle, RefreshCw, Home } from 'lucide-react'
+import pkg from '../../../package.json'
 
 interface Props {
     children: ReactNode
@@ -84,7 +85,7 @@ export class ErrorBoundary extends Component<Props, State> {
                         </div>
 
                         <span className="text-secondary tracking-widest uppercase">
-                            AIOManager v1.8.3 (Build 2) Recovery System
+                            AIOManager v{pkg.version}{pkg.build ? ` (Build ${pkg.build})` : ''} Recovery System
                         </span>
                     </div>
                 </div>

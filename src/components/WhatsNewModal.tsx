@@ -19,11 +19,11 @@ interface Release {
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/sonicx161/AIOManager/releases'
 
 const FALLBACK_RELEASE: Release = {
-    tag_name: 'v1.8.3',
-    name: 'v1.8.3 - Theme Compatibility',
+    tag_name: `v${pkg.version}`,
+    name: `v${pkg.version} - Theme Compatibility`,
     published_at: new Date().toISOString(),
-    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.3',
-    body: `# v1.8.3 - Theme Compatibility
+    html_url: `https://github.com/sonicx161/AIOManager/releases/tag/v${pkg.version}`,
+    body: `# v${pkg.version} - Theme Compatibility
 
 ## 🎨 Full Theme Compatibility
 
@@ -100,7 +100,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             if (res.ok) {
                 const data: Release[] = await res.json()
                 // Merge with internal release if not already fetched from GitHub
-                const hasCurrent = data.some(r => r.tag_name.startsWith('v1.8.3') || r.tag_name.startsWith('1.8.3'))
+                const hasCurrent = data.some(r => r.tag_name.startsWith(`v${pkg.version}`) || r.tag_name.startsWith(pkg.version))
                 setReleases(hasCurrent ? data : [FALLBACK_RELEASE, ...data])
             } else {
                 setReleases([FALLBACK_RELEASE])
@@ -256,11 +256,13 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
                         )}
 
                         {!loading && releases.map((release, idx) => {
-                            const isCurrentVersion = release.tag_name.replace('v', '') === currentVersion
+                            const build = (pkg as any).build as number | undefined
+                            const currentVersionStr = `${pkg.version}${build ? `+build.${build}` : ''}`
+                            const isCurrentVersion = release.tag_name.replace('v', '') === currentVersionStr
                             const date = new Date(release.published_at).toLocaleDateString('en-US', {
                                 year: 'numeric',
                                 month: 'short',
-                                day: 'numeric'
+                                day: 'numeric',
                             })
 
                             return (
