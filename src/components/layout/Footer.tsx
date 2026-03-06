@@ -20,9 +20,10 @@ export function Footer() {
         if (res.ok) {
           const data = await res.json()
           const latestStr = data.tag_name
+          const currentStr = `${version}${build ? `+build.${build}` : ''}`
 
           // Use the strict semver utility to prevent +build tags from triggering downgradable updates
-          if (isNewerVersion(version, latestStr) && version !== 'Dev') {
+          if (isNewerVersion(currentStr, latestStr) && version !== 'Dev') {
             setUpdateAvailable(latestStr.replace('v', ''))
           }
         }
