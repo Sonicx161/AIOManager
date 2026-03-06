@@ -313,7 +313,7 @@ export function AddonCard({
   const canUpdate = !!onUpdate
 
   const openSaveModal = () => {
-    setSaveName(addon.manifest.name)
+    setSaveName(addon.manifest.name || '')
     setSaveTags('')
 
     const currentAccount = accounts.find(a => a.id === accountId)
@@ -897,7 +897,7 @@ export function AddonCard({
         open={showRemoveDialog}
         onOpenChange={setShowRemoveDialog}
         title="Remove Addon?"
-        description={`Remove "${addon.manifest.name}"?`}
+        description={`Remove "${addon.metadata?.customName || addon.manifest.name || getHostnameIdentifier(addon.transportUrl)}"?`}
         confirmText={removing ? "Removing..." : "Remove"}
         isDestructive={true}
         onConfirm={handleConfirmRemove}

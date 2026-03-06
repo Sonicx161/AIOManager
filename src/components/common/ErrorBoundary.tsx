@@ -84,7 +84,7 @@ export class ErrorBoundary extends Component<Props, State> {
                         </div>
 
                         <span className="text-secondary tracking-widest uppercase">
-                            AIOManager v1.8.3 Recovery System
+                            AIOManager v1.8.3 (Build 2) Recovery System
                         </span>
                     </div>
                 </div>

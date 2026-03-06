@@ -454,7 +454,7 @@ export function LoginPage() {
                 </Dialog>
 
                 <p className="text-center text-xs text-muted-foreground">
-                    AIOManager v{pkg.version}
+                    AIOManager v{pkg.version}{(pkg as any).build ? ` (Build ${(pkg as any).build})` : ''}
                 </p>
             </div>
         </div>

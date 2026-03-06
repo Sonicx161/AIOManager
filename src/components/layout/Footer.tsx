@@ -7,6 +7,7 @@ import { useUIStore } from '@/store/uiStore'
 export function Footer() {
   const isDev = import.meta.env?.DEV
   const version = pkg.version
+  const build = (pkg as any).build as number | undefined
 
   const [updateAvailable, setUpdateAvailable] = React.useState<string | null>(null)
 
@@ -17,12 +18,12 @@ export function Footer() {
         const res = await fetch('https://api.github.com/repos/sonicx161/AIOManager/releases/latest')
         if (res.ok) {
           const data = await res.json()
-          // Assuming tag_name is like 'v1.0.0' or '1.0.0'
-          const latest = data.tag_name.replace('v', '')
-          const current = version.replace('v', '')
+          const latestStr = data.tag_name.replace('v', '')
+          const currentStr = `${version}${build ? `+build.${build}` : ''}`
 
-          if (latest !== current && current !== 'Dev') {
-            setUpdateAvailable(latest)
+          // Only prompt update if the release tag is different from our current string
+          if (latestStr !== currentStr && version !== 'Dev') {
+            setUpdateAvailable(latestStr)
           }
         }
       } catch (e) {
@@ -115,7 +116,7 @@ export function Footer() {
                       className="text-[10px] sm:text-xs font-mono text-muted-foreground/40 hover:text-primary select-none uppercase tracking-widest transition-colors"
                       title="View release notes"
                     >
-                      v{version}
+                      v{version}{build ? ` (Build ${build})` : ''}
                     </button>
                     {updateAvailable && (
                       <a

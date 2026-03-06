@@ -145,14 +145,14 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
 
   // Convert to array and sort
   const allAddonsRaw = Array.from(allAddonsMap.values())
-    .sort((a, b) => a.addon.manifest.name.localeCompare(b.addon.manifest.name))
+    .sort((a, b) => (a.addon.manifest.name || '').localeCompare(b.addon.manifest.name || ''))
 
   const allAddons = (showProtected
     ? allAddonsRaw
     : allAddonsRaw.filter(item => !item.addon.flags?.protected)
   ).filter(item => {
     if (!filterQuery) return true
-    return item.addon.manifest.name.toLowerCase().includes(filterQuery.toLowerCase())
+    return (item.addon.manifest.name || '').toLowerCase().includes(filterQuery.toLowerCase())
   })
 
   const toggleSavedAddon = (savedAddonId: string) => {

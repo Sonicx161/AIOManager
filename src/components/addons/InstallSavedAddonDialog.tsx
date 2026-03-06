@@ -86,7 +86,7 @@ export function InstallSavedAddonDialog({
   const filteredAddons = useMemo(() => {
     return savedAddons.filter(addon => {
       const matchesSearch = addon.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        addon.manifest.name.toLowerCase().includes(searchTerm.toLowerCase())
+        (addon.manifest.name || '').toLowerCase().includes(searchTerm.toLowerCase())
       const matchesTag = tagFilter === 'all' || addon.tags.includes(tagFilter)
       const matchesProfile = profileFilter === 'all' || addon.profileId === profileFilter
       return matchesSearch && matchesTag && matchesProfile

@@ -100,7 +100,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             if (res.ok) {
                 const data: Release[] = await res.json()
                 // Merge with internal release if not already fetched from GitHub
-                const hasCurrent = data.some(r => r.tag_name === 'v1.8.3' || r.tag_name === '1.8.3')
+                const hasCurrent = data.some(r => r.tag_name.startsWith('v1.8.3') || r.tag_name.startsWith('1.8.3'))
                 setReleases(hasCurrent ? data : [FALLBACK_RELEASE, ...data])
             } else {
                 setReleases([FALLBACK_RELEASE])
