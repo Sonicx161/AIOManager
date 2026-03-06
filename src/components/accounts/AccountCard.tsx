@@ -263,14 +263,14 @@ export function AccountCard({
                 {failedOverRules.length > 0 ? (
                   <>
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                    <span className="text-amber-600 dark:text-amber-400 font-medium truncate">
+                    <span className="text-amber-500 font-medium truncate">
                       {failedOverRules.length} rule{failedOverRules.length !== 1 ? 's' : ''} failed over
                     </span>
                   </>
                 ) : (
                   <>
                     <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
-                    <span className="text-green-600 dark:text-green-400 font-medium truncate">
+                    <span className="text-emerald-500 font-medium truncate">
                       {activeRules.length} rule{activeRules.length !== 1 ? 's' : ''} healthy
                     </span>
                   </>

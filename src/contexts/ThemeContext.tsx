@@ -94,8 +94,8 @@ export const THEME_OPTIONS: ThemeOption[] = [
             accentForeground: '222 47% 11%',
             destructive: '0 84% 60%',
             destructiveForeground: '0 0% 100%',
-            border: '220 13% 91%',
-            input: '220 13% 91%',
+            border: '220 13% 82%',
+            input: '220 13% 82%',
             ring: '221 83% 53%',
         },
         preview: { background: '#ffffff', surface: '#f8fafc', accent: '#3b82f6', text: '#0f172a', textMuted: '#64748b' },
@@ -122,8 +122,8 @@ export const THEME_OPTIONS: ThemeOption[] = [
             accentForeground: '222 47% 11%',
             destructive: '0 84% 60%',
             destructiveForeground: '0 0% 100%',
-            border: '214 32% 91%',
-            input: '214 32% 91%',
+            border: '214 32% 82%',
+            input: '214 32% 82%',
             ring: '199 89% 48%',
         },
         preview: { background: '#f8fafc', surface: '#ffffff', accent: '#0ea5e9', text: '#0f172a', textMuted: '#64748b' },
@@ -883,6 +883,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         if (themeOption) {
             applyTheme(themeOption.palette)
             document.documentElement.setAttribute('data-theme', theme)
+
+            // Update theme-color meta tag for PWA/mobile status bar
+            const metaThemeColor = document.querySelector('meta[name="theme-color"]')
+            if (metaThemeColor) {
+                metaThemeColor.setAttribute('content', themeOption.preview.background)
+            }
         }
     }, [theme])
 

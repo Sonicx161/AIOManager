@@ -229,7 +229,7 @@ export function VaultSettings() {
                             </div>
 
                             <div className="mt-4 flex items-center gap-2">
-                                <div className="flex-1 bg-muted/50 rounded-lg px-3 py-1.5 flex items-center justify-between border border-white/5">
+                                <div className="flex-1 bg-muted/50 rounded-lg px-3 py-1.5 flex items-center justify-between border border-border/50">
                                     <span className="font-mono text-xs text-muted-foreground truncate max-w-[150px]">
                                         ••••••••••••••••
                                     </span>
@@ -308,7 +308,7 @@ export function VaultSettings() {
                                 className="bg-background/50 font-mono text-sm"
                             />
                         </div>
-                        <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg flex gap-3 text-amber-600 dark:text-amber-400">
+                        <div className="bg-amber-500/10 border border-amber-500/20 p-3 rounded-lg flex gap-3 text-amber-500">
                             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                             <p className="text-[10px] leading-relaxed">
                                 Once saved, this key is only viewable after unlocking with your Master Password.

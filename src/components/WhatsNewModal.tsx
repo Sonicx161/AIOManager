@@ -19,72 +19,53 @@ interface Release {
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/sonicx161/AIOManager/releases'
 
 const FALLBACK_RELEASE: Release = {
-    tag_name: 'v1.8.2',
-    name: 'v1.8.2 - Share, Fix & Polish',
+    tag_name: 'v1.8.3',
+    name: 'v1.8.3 - Theme Compatibility',
     published_at: new Date().toISOString(),
-    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.2',
-    body: `# v1.8.2 - Share, Fix & Polish
+    html_url: 'https://github.com/sonicx161/AIOManager/releases/tag/v1.8.3',
+    body: `# v1.8.3 - Theme Compatibility
 
-## 🆕 New Features
+## 🎨 Full Theme Compatibility
 
-### 🎬 Replay Share Links
+Every UI component now renders correctly across all 27 themes. Previously, hardcoded white/dark color values made text invisible or elements unreadable on light and custom themes like Sonic, Sakura, and others.
 
-**Your Replay is now shareable and no account is required to view it.**
+### Components updated:
+- **Saved Addon cards and list rows** — all inline rgba(255,255,255,...) and color: 'white' replaced with CSS variable equivalents. Text, borders, backgrounds, and hover states now adapt to every theme
+- **Failover Manager** — card backgrounds, borders, dividers, status text, chain displays, and log entries
+- **Header** — navigation pill, provider health badges, user identity section, dropdown dividers
+- **Addon Changelog** — empty state backgrounds, timestamp colors, and action badges (installed/removed/updated)
+- **Saved Addon Library** — list view borders, empty state cards, Update All button
+- **Addon Cards & Lists** — update/protected badges, toggle/protect/reinstall/save buttons, Autopilot button
+- **Batch Operations** — warning and info banners, result status badges, checkboxes
+- **Account Card & Form** — failover status text, health indicators, code blocks, color picker borders
+- **Login Page** — auth key display, warning boxes
+- **Settings & Vault** — synced addon rows, masked key container, provider health badges
+- **FAQ Page** — code block backgrounds
+- **Cinemeta Configuration** — "Patched" badges
+- **Install dialogs** — success messages
+- **Dropdown menus** — destructive variant colors
+- **Error Boundary** — reload button text contrast
+- **CSS (index.css)** — mesh-gradient, vignette overlay, scrollbar colors
+- **Suspense fallbacks** — hardcoded #08080f replaced with theme background variable
 
-Hit the **"Copy Share Link"** button at the bottom of your Replay page to generate a link you can send to anyone. When someone opens it they get the full experience: your hero stats, top titles, monthly breakdown, milestones and insights all rendered directly from the link itself.
+### Mobile PWA Experience
+The mobile status bar (notch area) now dynamically updates its \`theme-color\` to seamlessly match your active theme's background, instead of being permanently stuck on midnight black.
 
-What's included in a shared Replay:
-- Your full poster mosaic (24 titles), the same rich visual display you see in the app
-- Hourly and daily watch distribution charts with exact counts and hours
-- Milestone progress and achievements
-- Your Discoveries, Marathons and Hidden Gems lists
-- Top titles with watch counts and year-over-year comparisons
-
-**How sharing works in plain English:** Your watch data gets compressed and packed directly into the URL itself. Think of it like a very efficient digital summary tucked inside the link. There's no database involved, no server storing anything and no account needed to open it. The link loads instantly and works forever. It only contains your display name and what you've watched, nothing about your account, email or login. You're in full control of what gets shared. Links stay under 2KB so they work cleanly anywhere you'd paste a link, including Discord.
-
----
-
-## 🐛 Bug Fixes & Reliability
-
-### 🔑 AllDebrid Health Checks Now Work Again
-
-AllDebrid updated their API behind the scenes and it quietly broke the subscription status check in AIOManager's header badges and Settings panel. Three things got fixed at once:
-
-- Updated to AllDebrid's new API path since the old one got discontinued
-- Your API key is now sent safely in the request header instead of being exposed in the URL
-- Fixed a small formatting issue that was causing AIOManager's identifier to arrive garbled at AllDebrid's servers
-
-If your AllDebrid badge was showing as unknown or throwing an error it will now correctly show your subscription status and expiry date again.
+### Replay Dark Canvas
+Replay pages now render on a forced dark background regardless of active theme since they were designed for the midnight canvas.
 
 ---
 
-### 🩺 Debrid-Link Added to Provider Health
+## 🐛 Bug Fixes
 
-Debrid-Link was missing from the header health badges and the Settings vault panel even though it's a fully supported provider. It's now included alongside Real-Debrid, TorBox, Premiumize and AllDebrid with the same color-coded status indicators and expiry countdown you're used to seeing.
+### Replay Share Loading Flash
+The Replay Share page was briefly flashing the error screen before the data loaded because the initial state was set to 'error'. Changed to 'loading' with a clean dark background while the share token decodes.
 
----
+### Autopilot Database Fix
+Fixed a crash on existing databases where the autopilot_rules table was missing the is_active column. A migration now adds the column automatically so Autopilot works on first launch without manual database changes.
 
-### 📋 Addon Changelog No Longer Cuts Off
-
-The addon changelog was squeezed into a tiny box that only showed about 3 lines at a time so you had to scroll inside a scroll just to read anything. It now expands to use the full available height so you can actually read your update history without the hassle.
-
----
-
-### 🎬 Replay Stats Animations Fixed
-
-Two stat tiles on the Replay page, Titles Watched and Longest Binge, were silently failing to animate or show their numbers when the page loaded. The cause was an overly aggressive detection system that was wrongly treating the tiles as off screen even when they were fully visible. Both tiles now correctly animate in and display their values on load.
-
----
-
-### 📅 Longest Binge Streak Calculation Fixed
-
-The binge streak had a subtle timezone bug where it was using your local time to compare dates. That could cause your streak to show one day shorter than it actually was or occasionally break entirely depending on where you live. All date comparisons now use UTC so your streak is accurate no matter what timezone you're in.
-
----
-
-### 🔭 Titles Watched Now Shows Your Discovery Count
-
-The small subtext underneath the Titles Watched stat tile used to be a generic placeholder. It now dynamically shows your **Total Discoveries**, the number of titles you watched for the first time during that period, so the stat actually means something personal at a glance.
+### Deprecated Flows Removed
+Removed the master password setup and forgot password flows which were deprecated from the original project.
 
 ---
 
@@ -119,7 +100,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
             if (res.ok) {
                 const data: Release[] = await res.json()
                 // Merge with internal release if not already fetched from GitHub
-                const hasCurrent = data.some(r => r.tag_name === 'v1.8.1' || r.tag_name === '1.8.1')
+                const hasCurrent = data.some(r => r.tag_name === 'v1.8.3' || r.tag_name === '1.8.3')
                 setReleases(hasCurrent ? data : [FALLBACK_RELEASE, ...data])
             } else {
                 setReleases([FALLBACK_RELEASE])

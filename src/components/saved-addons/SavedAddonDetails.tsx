@@ -84,8 +84,8 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
   return (
     <div className="space-y-6">
       {(formError || error) && (
-        <div className="p-3 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-          <p className="text-sm text-red-600 dark:text-red-400">{formError || error}</p>
+        <div className="p-3 rounded-md bg-destructive/10 border border-destructive/20">
+          <p className="text-sm text-destructive">{formError || error}</p>
         </div>
       )}
 
@@ -169,8 +169,8 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
                 }}
               />
             ) : (
-              <div className="w-12 h-12 rounded bg-gray-200 dark:bg-gray-700 flex items-center justify-center flex-shrink-0">
-                <span className="text-lg text-gray-500 dark:text-gray-400">📦</span>
+              <div className="w-12 h-12 rounded bg-muted flex items-center justify-center flex-shrink-0">
+                <span className="text-lg text-muted-foreground">📦</span>
               </div>
             )}
             <div className="text-sm space-y-1">

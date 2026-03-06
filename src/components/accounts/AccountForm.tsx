@@ -161,7 +161,7 @@ export function AccountForm() {
 
         <form onSubmit={handleSubmit} className="mt-4">
           <Tabs defaultValue="account" className="w-full">
-            <TabsList className="grid w-full grid-cols-2 mb-6 bg-muted/20 p-1 h-11 rounded-full border border-white/5">
+            <TabsList className="grid w-full grid-cols-2 mb-6 bg-muted/20 p-1 h-11 rounded-full border border-border/10">
               <TabsTrigger value="account" className="rounded-full data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all h-9 font-bold">
                 Account
               </TabsTrigger>
@@ -172,7 +172,7 @@ export function AccountForm() {
 
             <TabsContent value="account" className="space-y-4 animate-in fade-in slide-in-from-left-2 duration-300">
               {!isEditing && (
-                <div className="flex gap-2 border-b border-white/5 pb-3">
+                <div className="flex gap-2 border-b border-border/10 pb-3">
                   <Button
                     type="button"
                     variant={mode === 'credentials' ? 'default' : 'ghost'}
@@ -302,16 +302,16 @@ export function AccountForm() {
                         exit={{ opacity: 0, height: 0 }}
                         className="overflow-hidden"
                       >
-                        <div className="p-3 bg-muted/50 rounded-xl border border-white/5 space-y-3 mt-1">
+                        <div className="p-3 bg-muted/50 rounded-xl border border-border/10 space-y-3 mt-1">
                           <div className="space-y-2">
                             <p className="text-[11px] leading-relaxed text-muted-foreground">
                               1. Log into <a href="https://web.stremio.com/" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline italic">web.stremio.com</a>
                             </p>
                             <p className="text-[11px] leading-relaxed text-muted-foreground">
-                              2. Run in Console (<kbd className="px-1 py-0.5 rounded bg-black/40 border border-white/10 text-[9px]">F12</kbd>):
+                              2. Run in Console (<kbd className="px-1 py-0.5 rounded bg-muted border border-border text-[9px]">F12</kbd>):
                             </p>
                             <pre
-                              className="text-[10px] bg-black/40 p-2 rounded border border-white/10 font-mono text-zinc-300 select-all cursor-pointer hover:bg-black/60 transition-colors"
+                              className="text-[10px] bg-muted p-2 rounded border border-border font-mono text-muted-foreground select-all cursor-pointer hover:bg-muted/80 transition-colors"
                               onClick={(e) => {
                                 const target = e.currentTarget
                                 const selection = window.getSelection()
@@ -368,7 +368,7 @@ export function AccountForm() {
               <div className="space-y-2">
                 <p className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground opacity-60">Card Preview</p>
                 <Card
-                  className="transition-all duration-300 shadow-sm pointer-events-none border-white/5"
+                  className="transition-all duration-300 shadow-sm pointer-events-none border-border/10"
                   style={{ borderLeft: (accentColor && accentColor !== 'none') ? `3px solid ${accentColor}` : undefined }}
                 >
                   <CardHeader className="relative pb-3">
@@ -403,7 +403,7 @@ export function AccountForm() {
                       </div>
                       <div className="flex items-center gap-1.5 text-sm">
                         <ShieldCheck className="w-3.5 h-3.5 text-green-500" />
-                        <span className="text-green-600 dark:text-green-400 font-medium truncate">
+                        <span className="text-emerald-500 font-medium truncate">
                           Healthy
                         </span>
                       </div>
@@ -436,9 +436,9 @@ export function AccountForm() {
                           <Smile className="h-6 w-6 opacity-60" />
                         </Button>
                       </PopoverTrigger>
-                      <PopoverContent className="w-[320px] p-0 border-white/5 shadow-2xl overflow-hidden rounded-2xl" align="start">
+                      <PopoverContent className="w-[320px] p-0 border-border/10 shadow-2xl overflow-hidden rounded-2xl" align="start">
                         <div className="flex flex-col h-[380px] bg-popover/95 backdrop-blur-xl">
-                          <div className="p-3 border-b border-white/5 bg-muted/20">
+                          <div className="p-3 border-b border-border/10 bg-muted/20">
                             <div className="relative">
                               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                               <Input
@@ -498,13 +498,13 @@ export function AccountForm() {
                 <div className="space-y-4">
                   <Label className="text-xs font-bold uppercase tracking-widest opacity-60">Theme Color</Label>
 
-                  <div className="bg-muted/10 p-4 rounded-2xl border border-white/5 space-y-5">
+                  <div className="bg-muted/10 p-4 rounded-2xl border border-border/10 space-y-5">
                     <div className="flex flex-wrap items-center gap-3">
                       <button
                         key="none"
                         type="button"
                         onClick={() => setAccentColor('none')}
-                        className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all hover:scale-110 relative overflow-hidden group ${accentColor === 'none' ? 'ring-2 ring-white ring-offset-2 ring-offset-background' : 'border border-white/20'}`}
+                        className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all hover:scale-110 relative overflow-hidden group ${accentColor === 'none' ? 'ring-2 ring-foreground ring-offset-2 ring-offset-background' : 'border border-foreground/20'}`}
                         title="No accent color"
                       >
                         <div className="absolute inset-x-0 h-0.5 bg-red-500/50 rotate-45" />
@@ -540,7 +540,7 @@ export function AccountForm() {
 
                     <div className="flex items-center gap-3">
                       <div
-                        className="w-10 h-10 rounded-xl shadow-inner border border-white/10 shrink-0 transition-colors duration-500"
+                        className="w-10 h-10 rounded-xl shadow-inner border border-foreground/10 shrink-0 transition-colors duration-500"
                         style={{ background: (accentColor && accentColor !== 'none') ? accentColor : 'transparent' }}
                       />
                       <div className="relative flex-1">
@@ -574,7 +574,7 @@ export function AccountForm() {
             </div>
           )}
 
-          <DialogFooter className="mt-8 border-t border-white/5 pt-6">
+          <DialogFooter className="mt-8 border-t border-border/10 pt-6">
             <Button type="button" variant="ghost" onClick={handleClose} className="rounded-xl font-bold uppercase tracking-wider text-xs">
               Cancel
             </Button>

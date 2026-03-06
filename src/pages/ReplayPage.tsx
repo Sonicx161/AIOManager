@@ -356,6 +356,20 @@ export function ReplayPage() {
     const [activeSection, setActiveSection] = useState('hero')
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
 
+    // Force mobile PWA status bar to midnight
+    useEffect(() => {
+        const metaThemeColor = document.querySelector('meta[name="theme-color"]')
+        const originalColor = metaThemeColor?.getAttribute('content')
+        if (metaThemeColor) {
+            metaThemeColor.setAttribute('content', '#08080f')
+        }
+        return () => {
+            if (metaThemeColor && originalColor) {
+                metaThemeColor.setAttribute('content', originalColor)
+            }
+        }
+    }, [])
+
     // Only show accounts that have watch history (matches Metrics & Activity behavior)
     const activeAccounts = useMemo(() => {
         const activeIds = new Set(items.map(item => item.accountId))
@@ -486,303 +500,309 @@ export function ReplayPage() {
 
     if ((loading && items.length === 0) || !replayData || !allTimeData) {
         return (
-            <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
-                <motion.div
-                    animate={{ rotate: 360, scale: [1, 1.1, 1] }}
-                    transition={{ duration: 2, repeat: Infinity }}
-                    className="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center border border-white/20 mb-8"
-                >
-                    <Sparkles className="text-white w-8 h-8" />
-                </motion.div>
-                <h1 className="text-3xl font-black text-white tracking-tighter uppercase">Curating Your Reel</h1>
-                <p className="text-white/40 mt-2 font-bold max-w-xs">{loading ? "We're indexing your watch history..." : "Computing powerful analytics..."}</p>
+            <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white', minHeight: '100vh' } as React.CSSProperties}>
+                <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
+                    <motion.div
+                        animate={{ rotate: 360, scale: [1, 1.1, 1] }}
+                        transition={{ duration: 2, repeat: Infinity }}
+                        className="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center border border-white/20 mb-8"
+                    >
+                        <Sparkles className="text-white w-8 h-8" />
+                    </motion.div>
+                    <h1 className="text-3xl font-black text-white tracking-tighter uppercase">Curating Your Reel</h1>
+                    <p className="text-white/40 mt-2 font-bold max-w-xs">{loading ? "We're indexing your watch history..." : "Computing powerful analytics..."}</p>
+                </div>
             </div>
         )
     }
 
     if (items.length === 0) {
         return (
-            <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
-                <div className="p-4 bg-red-500/10 rounded-2xl border border-red-500/20 mb-8">
-                    <AlertCircle className="text-red-500 w-8 h-8" />
+            <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white', minHeight: '100vh' } as React.CSSProperties}>
+                <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
+                    <div className="p-4 bg-red-500/10 rounded-2xl border border-red-500/20 mb-8">
+                        <AlertCircle className="text-red-500 w-8 h-8" />
+                    </div>
+                    <h1 className="text-3xl font-black text-white tracking-tighter uppercase">No History Found</h1>
+                    <p className="text-white/40 mt-2 font-bold max-w-sm mb-12">
+                        We couldn't find any watch history for your accounts. Start watching something on Stremio to see your Replay!
+                    </p>
+                    <button
+                        onClick={() => navigate('/metrics')}
+                        className="bg-[#151520] shadow-xl border border-white/10 px-8 py-4 rounded-full text-white font-black uppercase tracking-widest flex items-center gap-3 hover:bg-white/10 transition-all"
+                    >
+                        <ArrowLeft className="w-5 h-5" />
+                        Back to Metrics
+                    </button>
                 </div>
-                <h1 className="text-3xl font-black text-white tracking-tighter uppercase">No History Found</h1>
-                <p className="text-white/40 mt-2 font-bold max-w-sm mb-12">
-                    We couldn't find any watch history for your accounts. Start watching something on Stremio to see your Replay!
-                </p>
-                <button
-                    onClick={() => navigate('/metrics')}
-                    className="bg-[#151520] shadow-xl border border-white/10 px-8 py-4 rounded-full text-white font-black uppercase tracking-widest flex items-center gap-3 hover:bg-white/10 transition-all"
-                >
-                    <ArrowLeft className="w-5 h-5" />
-                    Back to Metrics
-                </button>
             </div>
         )
     }
 
     return (
-        <div className="relative h-screen w-full bg-[#08080f] text-white selection:bg-primary/30 overflow-hidden fixed inset-0 z-[50]">
+        <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white' } as React.CSSProperties}>
+            <div className="relative h-screen w-full bg-[#08080f] text-white selection:bg-primary/30 overflow-hidden fixed inset-0 z-[50]">
 
-            {/* FIXED PERFORMANCE BACKGROUND */}
-            <div className="absolute inset-0 z-0 mesh-gradient opacity-60 pointer-events-none" />
-            <div className="noise-overlay" />
-            <div className="vignette-overlay" />
+                {/* FIXED PERFORMANCE BACKGROUND */}
+                <div className="absolute inset-0 z-0 mesh-gradient opacity-60 pointer-events-none" />
+                <div className="noise-overlay" />
+                <div className="vignette-overlay" />
 
-            {/* TOP NAVIGATION OVERLAY / ACCOUNT SELECTOR */}
-            <div className="fixed top-0 inset-x-0 h-20 md:h-24 z-[100] flex items-center justify-between px-4 md:px-8 bg-gradient-to-b from-[#08080f]/95 to-transparent pointer-events-none pt-2 md:pt-0">
-                <div className="w-1/4 md:w-1/3 flex justify-start pointer-events-auto">
-                    <button
-                        onClick={() => navigate('/metrics')}
-                        className="bg-white/5 md:bg-[#151520] backdrop-blur-md shadow-xl border border-white/10 p-2.5 md:p-3 rounded-full md:rounded-2xl text-white/40 hover:text-white transition-all flex items-center gap-3 group"
-                    >
-                        <ArrowLeft className="w-5 h-5 md:w-5 md:h-5 group-hover:-translate-x-1 transition-transform" />
-                        <span className="font-bold text-[10px] uppercase tracking-widest hidden lg:block">Exit Replay</span>
-                    </button>
-                </div>
-
-                <div className="flex-1 md:w-1/3 flex justify-center pointer-events-auto">
-                    <AccountSwitcher
-                        accounts={activeAccounts}
-                        selectedAccountId={selectedAccountId}
-                        onSelect={(id) => {
-                            setSelectedAccountId(id)
-                            setUserSelectedYear(null)
-                            if (containerRef.current) containerRef.current.scrollTo({ top: 0, behavior: 'auto' })
-                        }}
-                    />
-                </div>
-
-                <div className="w-1/4 md:w-1/3 flex justify-end pointer-events-none" />
-            </div>
-
-            {/* MAIN SCROLL CONTAINER - FREE SCROLL ENABLED */}
-            <div
-                ref={containerRef}
-                className="relative z-10 h-screen overflow-y-auto no-scrollbar scroll-smooth"
-            >
-
-                {/* YEAR SELECTOR - FLOATING PILL */}
-                <div
-                    className="fixed right-3 md:right-6 md:-translate-y-1/2 z-50 flex flex-col gap-1 items-center pointer-events-auto shadow-2xl transition-all duration-300 bottom-8 md:top-1/2 md:bottom-auto"
-                    style={{
-                        background: 'rgba(255,255,255,0.05)',
-                        backdropFilter: 'blur(20px)',
-                        border: '1px solid rgba(255,255,255,0.1)',
-                        boxShadow: '0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.08)',
-                        borderRadius: '999px',
-                        padding: '8px 6px',
-                        willChange: 'transform',
-                        contain: 'layout',
-                        transform: 'md:translateY(-50%) translateZ(0)'
-                    }}
-                >
-                    <div className={cn("flex-col items-center gap-1", isMobileMenuOpen ? "flex" : "hidden md:flex")}>
-                        {replayData.availableYears.map((year: number) => {
-                            const isSelectedYear = activeSelectedYear === year || (typeof activeSelectedYear === 'string' && activeSelectedYear.startsWith(String(year)));
-
-                            return (
-                                <div key={year} className="flex flex-col items-center">
-                                    <button
-                                        onClick={() => handleYearChange(year)}
-                                        className="w-9 h-9 flex flex-shrink-0 items-center justify-center transition-all duration-200"
-                                        style={{
-                                            fontFamily: '"DM Mono", monospace',
-                                            fontSize: '10px',
-                                            fontWeight: 900,
-                                            borderRadius: '999px',
-                                            background: isSelectedYear ? 'white' : 'transparent',
-                                            color: isSelectedYear ? 'black' : 'rgba(255,255,255,0.35)',
-                                            boxShadow: isSelectedYear ? '0 0 12px rgba(255,255,255,0.3)' : 'none',
-                                        }}
-                                        onMouseEnter={(e) => {
-                                            if (!isSelectedYear) {
-                                                e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
-                                                e.currentTarget.style.color = 'white';
-                                            }
-                                        }}
-                                        onMouseLeave={(e) => {
-                                            if (!isSelectedYear) {
-                                                e.currentTarget.style.background = 'transparent';
-                                                e.currentTarget.style.color = 'rgba(255,255,255,0.35)';
-                                            }
-                                        }}
-                                    >
-                                        {year.toString().slice(-2)}
-                                    </button>
-
-                                    <AnimatePresence mode="popLayout">
-                                        {isSelectedYear && (
-                                            <div className="flex flex-col items-center gap-1 mt-1">
-                                                <div style={{ width: '1px', height: '6px', background: 'rgba(255,255,255,0.1)' }} />
-
-                                                {replayData.availableMonths
-                                                    .filter((m: string) => m.startsWith(String(year)))
-                                                    .filter((m: string) => {
-                                                        const [y, mo] = m.split('-').map(Number);
-                                                        const now = new Date();
-                                                        if (y > now.getFullYear()) return false;
-                                                        if (y === now.getFullYear() && mo > now.getMonth() + 1) return false;
-                                                        return true;
-                                                    })
-                                                    .sort((a: string, b: string) => a.localeCompare(b))
-                                                    .map((monthStr: string, index: number, arr: string[]) => {
-                                                        const [yn, mn] = monthStr.split('-').map(Number);
-                                                        const label = new Date(yn, mn - 1, 1).toLocaleString('default', { month: 'short' }).toUpperCase();
-                                                        const isSelectedMonth = activeSelectedYear === monthStr;
-
-                                                        return (
-                                                            <div key={monthStr} className="flex flex-col items-center gap-1 text-center">
-                                                                <motion.button
-                                                                    initial={{ opacity: 0, scale: 0.8 }}
-                                                                    animate={{ opacity: 1, scale: 1 }}
-                                                                    exit={{ opacity: 0, scale: 0.8 }}
-                                                                    transition={{ delay: index * 0.04 }}
-                                                                    onClick={() => handleYearChange(monthStr)}
-                                                                    className="w-9 h-9 flex flex-shrink-0 items-center justify-center transition-all duration-200"
-                                                                    style={{
-                                                                        fontFamily: '"DM Mono", monospace',
-                                                                        fontSize: '8px',
-                                                                        fontWeight: 900,
-                                                                        borderRadius: '999px',
-                                                                        background: isSelectedMonth ? 'hsl(var(--primary))' : 'rgba(255,255,255,0.05)',
-                                                                        color: isSelectedMonth ? 'white' : 'rgba(255,255,255,0.3)',
-                                                                        boxShadow: isSelectedMonth ? '0 0 12px rgba(99,102,241,0.5)' : 'none',
-                                                                        border: isSelectedMonth ? '2px solid rgba(129,140,248,0.6)' : '2px solid transparent',
-                                                                    }}
-                                                                    onMouseEnter={(e) => {
-                                                                        if (!isSelectedMonth) {
-                                                                            e.currentTarget.style.background = 'rgba(255,255,255,0.1)';
-                                                                            e.currentTarget.style.color = 'white';
-                                                                        }
-                                                                    }}
-                                                                    onMouseLeave={(e) => {
-                                                                        if (!isSelectedMonth) {
-                                                                            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-                                                                            e.currentTarget.style.color = 'rgba(255,255,255,0.3)';
-                                                                        }
-                                                                    }}
-                                                                >
-                                                                    {label}
-                                                                </motion.button>
-                                                                {index < arr.length - 1 && (
-                                                                    <div style={{ width: '1px', height: '4px', background: 'rgba(255,255,255,0.1)' }} />
-                                                                )}
-                                                            </div>
-                                                        );
-                                                    })}
-                                                <div style={{ width: '1px', height: '6px', background: 'rgba(255,255,255,0.1)' }} />
-                                            </div>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
-                            )
-                        })}
-
-                        <div style={{ width: '1px', height: '8px', background: 'rgba(255,255,255,0.08)', margin: '4px 0' }} />
-
+                {/* TOP NAVIGATION OVERLAY / ACCOUNT SELECTOR */}
+                <div className="fixed top-0 inset-x-0 h-20 md:h-24 z-[100] flex items-center justify-between px-4 md:px-8 bg-gradient-to-b from-[#08080f]/95 to-transparent pointer-events-none pt-2 md:pt-0">
+                    <div className="w-1/4 md:w-1/3 flex justify-start pointer-events-auto">
                         <button
-                            onClick={() => handleYearChange('all-time')}
-                            className="w-9 h-9 flex flex-col flex-shrink-0 items-center justify-center gap-0 leading-[0.9] transition-all duration-200"
-                            style={{
-                                fontFamily: '"DM Mono", monospace',
-                                fontSize: '7px',
-                                fontWeight: 900,
-                                borderRadius: '999px',
-                                background: activeSelectedYear === 'all-time' ? 'white' : 'transparent',
-                                color: activeSelectedYear === 'all-time' ? 'black' : 'rgba(255,255,255,0.35)',
-                                boxShadow: activeSelectedYear === 'all-time' ? '0 0 12px rgba(255,255,255,0.3)' : 'none',
-                            }}
-                            onMouseEnter={(e) => {
-                                if (activeSelectedYear !== 'all-time') {
-                                    e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
-                                    e.currentTarget.style.color = 'white';
-                                }
-                            }}
-                            onMouseLeave={(e) => {
-                                if (activeSelectedYear !== 'all-time') {
-                                    e.currentTarget.style.background = 'transparent';
-                                    e.currentTarget.style.color = 'rgba(255,255,255,0.35)';
-                                }
-                            }}
+                            onClick={() => navigate('/metrics')}
+                            className="bg-white/5 md:bg-[#151520] backdrop-blur-md shadow-xl border border-white/10 p-2.5 md:p-3 rounded-full md:rounded-2xl text-white/40 hover:text-white transition-all flex items-center gap-3 group"
                         >
-                            <span>ALL</span>
-                            <span>TIME</span>
+                            <ArrowLeft className="w-5 h-5 md:w-5 md:h-5 group-hover:-translate-x-1 transition-transform" />
+                            <span className="font-bold text-[10px] uppercase tracking-widest hidden lg:block">Exit Replay</span>
                         </button>
                     </div>
 
-                    {/* Mobile Toggle Button */}
-                    <button
-                        className={`md:hidden w-10 h-10 flex items-center justify-center rounded-full transition-all ${isMobileMenuOpen ? 'mt-1 bg-white/5 text-rose-400 border border-rose-400/30' : 'bg-white/10 text-white hover:bg-white/20'}`}
-                        onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                    >
-                        {isMobileMenuOpen ? <X className="w-5 h-5" /> : <CalendarDays className="w-5 h-5" />}
-                    </button>
+                    <div className="flex-1 md:w-1/3 flex justify-center pointer-events-auto">
+                        <AccountSwitcher
+                            accounts={activeAccounts}
+                            selectedAccountId={selectedAccountId}
+                            onSelect={(id) => {
+                                setSelectedAccountId(id)
+                                setUserSelectedYear(null)
+                                if (containerRef.current) containerRef.current.scrollTo({ top: 0, behavior: 'auto' })
+                            }}
+                        />
+                    </div>
+
+                    <div className="w-1/4 md:w-1/3 flex justify-end pointer-events-none" />
                 </div>
 
-                {/* SECTION NAVIGATION - FLOATING LEFT PILL */}
-                <div className="fixed top-1/2 left-6 -translate-y-1/2 z-50 flex flex-col gap-3 p-2 bg-white/5 border border-white/10 shadow-2xl rounded-full hidden md:flex backdrop-blur-md items-center">
-                    <button
-                        onClick={() => handleScrollDirection('up')}
-                        disabled={activeSection === sections[0].id}
-                        className="text-white/40 hover:text-white disabled:opacity-20 disabled:hover:text-white/40 transition-colors p-1 mt-1"
+                {/* MAIN SCROLL CONTAINER - FREE SCROLL ENABLED */}
+                <div
+                    ref={containerRef}
+                    className="relative z-10 h-screen overflow-y-auto no-scrollbar scroll-smooth"
+                >
+
+                    {/* YEAR SELECTOR - FLOATING PILL */}
+                    <div
+                        className="fixed right-3 md:right-6 md:-translate-y-1/2 z-50 flex flex-col gap-1 items-center pointer-events-auto shadow-2xl transition-all duration-300 bottom-8 md:top-1/2 md:bottom-auto"
+                        style={{
+                            background: 'rgba(255,255,255,0.05)',
+                            backdropFilter: 'blur(20px)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.08)',
+                            borderRadius: '999px',
+                            padding: '8px 6px',
+                            willChange: 'transform',
+                            contain: 'layout',
+                            transform: 'md:translateY(-50%) translateZ(0)'
+                        }}
                     >
-                        <ChevronUp className="w-5 h-5" />
-                    </button>
+                        <div className={cn("flex-col items-center gap-1", isMobileMenuOpen ? "flex" : "hidden md:flex")}>
+                            {replayData.availableYears.map((year: number) => {
+                                const isSelectedYear = activeSelectedYear === year || (typeof activeSelectedYear === 'string' && activeSelectedYear.startsWith(String(year)));
 
-                    <div className="w-px h-2 bg-white/10" />
+                                return (
+                                    <div key={year} className="flex flex-col items-center">
+                                        <button
+                                            onClick={() => handleYearChange(year)}
+                                            className="w-9 h-9 flex flex-shrink-0 items-center justify-center transition-all duration-200"
+                                            style={{
+                                                fontFamily: '"DM Mono", monospace',
+                                                fontSize: '10px',
+                                                fontWeight: 900,
+                                                borderRadius: '999px',
+                                                background: isSelectedYear ? 'white' : 'transparent',
+                                                color: isSelectedYear ? 'black' : 'rgba(255,255,255,0.35)',
+                                                boxShadow: isSelectedYear ? '0 0 12px rgba(255,255,255,0.3)' : 'none',
+                                            }}
+                                            onMouseEnter={(e) => {
+                                                if (!isSelectedYear) {
+                                                    e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
+                                                    e.currentTarget.style.color = 'white';
+                                                }
+                                            }}
+                                            onMouseLeave={(e) => {
+                                                if (!isSelectedYear) {
+                                                    e.currentTarget.style.background = 'transparent';
+                                                    e.currentTarget.style.color = 'rgba(255,255,255,0.35)';
+                                                }
+                                            }}
+                                        >
+                                            {year.toString().slice(-2)}
+                                        </button>
 
-                    {sections.map(section => (
-                        <div key={section.id} className="relative group flex items-center justify-center">
+                                        <AnimatePresence mode="popLayout">
+                                            {isSelectedYear && (
+                                                <div className="flex flex-col items-center gap-1 mt-1">
+                                                    <div style={{ width: '1px', height: '6px', background: 'rgba(255,255,255,0.1)' }} />
+
+                                                    {replayData.availableMonths
+                                                        .filter((m: string) => m.startsWith(String(year)))
+                                                        .filter((m: string) => {
+                                                            const [y, mo] = m.split('-').map(Number);
+                                                            const now = new Date();
+                                                            if (y > now.getFullYear()) return false;
+                                                            if (y === now.getFullYear() && mo > now.getMonth() + 1) return false;
+                                                            return true;
+                                                        })
+                                                        .sort((a: string, b: string) => a.localeCompare(b))
+                                                        .map((monthStr: string, index: number, arr: string[]) => {
+                                                            const [yn, mn] = monthStr.split('-').map(Number);
+                                                            const label = new Date(yn, mn - 1, 1).toLocaleString('default', { month: 'short' }).toUpperCase();
+                                                            const isSelectedMonth = activeSelectedYear === monthStr;
+
+                                                            return (
+                                                                <div key={monthStr} className="flex flex-col items-center gap-1 text-center">
+                                                                    <motion.button
+                                                                        initial={{ opacity: 0, scale: 0.8 }}
+                                                                        animate={{ opacity: 1, scale: 1 }}
+                                                                        exit={{ opacity: 0, scale: 0.8 }}
+                                                                        transition={{ delay: index * 0.04 }}
+                                                                        onClick={() => handleYearChange(monthStr)}
+                                                                        className="w-9 h-9 flex flex-shrink-0 items-center justify-center transition-all duration-200"
+                                                                        style={{
+                                                                            fontFamily: '"DM Mono", monospace',
+                                                                            fontSize: '8px',
+                                                                            fontWeight: 900,
+                                                                            borderRadius: '999px',
+                                                                            background: isSelectedMonth ? 'hsl(var(--primary))' : 'rgba(255,255,255,0.05)',
+                                                                            color: isSelectedMonth ? 'white' : 'rgba(255,255,255,0.3)',
+                                                                            boxShadow: isSelectedMonth ? '0 0 12px rgba(99,102,241,0.5)' : 'none',
+                                                                            border: isSelectedMonth ? '2px solid rgba(129,140,248,0.6)' : '2px solid transparent',
+                                                                        }}
+                                                                        onMouseEnter={(e) => {
+                                                                            if (!isSelectedMonth) {
+                                                                                e.currentTarget.style.background = 'rgba(255,255,255,0.1)';
+                                                                                e.currentTarget.style.color = 'white';
+                                                                            }
+                                                                        }}
+                                                                        onMouseLeave={(e) => {
+                                                                            if (!isSelectedMonth) {
+                                                                                e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                                                                                e.currentTarget.style.color = 'rgba(255,255,255,0.3)';
+                                                                            }
+                                                                        }}
+                                                                    >
+                                                                        {label}
+                                                                    </motion.button>
+                                                                    {index < arr.length - 1 && (
+                                                                        <div style={{ width: '1px', height: '4px', background: 'rgba(255,255,255,0.1)' }} />
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    <div style={{ width: '1px', height: '6px', background: 'rgba(255,255,255,0.1)' }} />
+                                                </div>
+                                            )}
+                                        </AnimatePresence>
+                                    </div>
+                                )
+                            })}
+
+                            <div style={{ width: '1px', height: '8px', background: 'rgba(255,255,255,0.08)', margin: '4px 0' }} />
+
                             <button
-                                onClick={() => scrollToSection(section.id)}
-                                className={`w-3 h-3 rounded-full transition-all duration-300 ${activeSection === section.id
-                                    ? 'bg-white scale-125 shadow-[0_0_10px_rgba(255,255,255,0.5)]'
-                                    : 'bg-white/20 hover:bg-white/60 hover:scale-110'
-                                    }`}
-                            />
-                            {/* Tooltip */}
-                            <div className="absolute left-6 px-3 py-1.5 bg-black/80 backdrop-blur border border-white/10 text-white text-[10px] font-black uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
-                                {section.label}
-                            </div>
+                                onClick={() => handleYearChange('all-time')}
+                                className="w-9 h-9 flex flex-col flex-shrink-0 items-center justify-center gap-0 leading-[0.9] transition-all duration-200"
+                                style={{
+                                    fontFamily: '"DM Mono", monospace',
+                                    fontSize: '7px',
+                                    fontWeight: 900,
+                                    borderRadius: '999px',
+                                    background: activeSelectedYear === 'all-time' ? 'white' : 'transparent',
+                                    color: activeSelectedYear === 'all-time' ? 'black' : 'rgba(255,255,255,0.35)',
+                                    boxShadow: activeSelectedYear === 'all-time' ? '0 0 12px rgba(255,255,255,0.3)' : 'none',
+                                }}
+                                onMouseEnter={(e) => {
+                                    if (activeSelectedYear !== 'all-time') {
+                                        e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
+                                        e.currentTarget.style.color = 'white';
+                                    }
+                                }}
+                                onMouseLeave={(e) => {
+                                    if (activeSelectedYear !== 'all-time') {
+                                        e.currentTarget.style.background = 'transparent';
+                                        e.currentTarget.style.color = 'rgba(255,255,255,0.35)';
+                                    }
+                                }}
+                            >
+                                <span>ALL</span>
+                                <span>TIME</span>
+                            </button>
                         </div>
-                    ))}
 
-                    <div className="w-px h-2 bg-white/10" />
+                        {/* Mobile Toggle Button */}
+                        <button
+                            className={`md:hidden w-10 h-10 flex items-center justify-center rounded-full transition-all ${isMobileMenuOpen ? 'mt-1 bg-white/5 text-rose-400 border border-rose-400/30' : 'bg-white/10 text-white hover:bg-white/20'}`}
+                            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+                        >
+                            {isMobileMenuOpen ? <X className="w-5 h-5" /> : <CalendarDays className="w-5 h-5" />}
+                        </button>
+                    </div>
 
-                    <button
-                        onClick={() => handleScrollDirection('down')}
-                        disabled={activeSection === sections[sections.length - 1].id}
-                        className="text-white/40 hover:text-white disabled:opacity-20 disabled:hover:text-white/40 transition-colors p-1 mb-1"
-                    >
-                        <ChevronDown className="w-5 h-5" />
-                    </button>
+                    {/* SECTION NAVIGATION - FLOATING LEFT PILL */}
+                    <div className="fixed top-1/2 left-6 -translate-y-1/2 z-50 flex flex-col gap-3 p-2 bg-white/5 border border-white/10 shadow-2xl rounded-full hidden md:flex backdrop-blur-md items-center">
+                        <button
+                            onClick={() => handleScrollDirection('up')}
+                            disabled={activeSection === sections[0].id}
+                            className="text-white/40 hover:text-white disabled:opacity-20 disabled:hover:text-white/40 transition-colors p-1 mt-1"
+                        >
+                            <ChevronUp className="w-5 h-5" />
+                        </button>
+
+                        <div className="w-px h-2 bg-white/10" />
+
+                        {sections.map(section => (
+                            <div key={section.id} className="relative group flex items-center justify-center">
+                                <button
+                                    onClick={() => scrollToSection(section.id)}
+                                    className={`w-3 h-3 rounded-full transition-all duration-300 ${activeSection === section.id
+                                        ? 'bg-white scale-125 shadow-[0_0_10px_rgba(255,255,255,0.5)]'
+                                        : 'bg-white/20 hover:bg-white/60 hover:scale-110'
+                                        }`}
+                                />
+                                {/* Tooltip */}
+                                <div className="absolute left-6 px-3 py-1.5 bg-black/80 backdrop-blur border border-white/10 text-white text-[10px] font-black uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+                                    {section.label}
+                                </div>
+                            </div>
+                        ))}
+
+                        <div className="w-px h-2 bg-white/10" />
+
+                        <button
+                            onClick={() => handleScrollDirection('down')}
+                            disabled={activeSection === sections[sections.length - 1].id}
+                            className="text-white/40 hover:text-white disabled:opacity-20 disabled:hover:text-white/40 transition-colors p-1 mb-1"
+                        >
+                            <ChevronDown className="w-5 h-5" />
+                        </button>
+                    </div>
+
+                    <AnimatePresence mode="wait">
+                        <motion.div
+                            key={activeSelectedYear}
+                            initial={{ opacity: 0, scale: 0.98 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 1.02 }}
+                            transition={{ duration: 0.4, ease: "circOut" }}
+                            className="pb-64"
+                        >
+                            <div id="section-hero"><ReplayHero data={replayData} userName={userName} /></div>
+                            <div id="section-glance"><ReplayYearInNumbers data={replayData} /></div>
+                            <div id="section-stats"><ReplayStats data={replayData} /></div>
+                            <div id="section-titles"><ReplayTopTitles data={replayData} allTimeData={allTimeData} /></div>
+                            {!isSpecificMonth && <div id="section-months"><ReplayMonths data={replayData} /></div>}
+                            <div id="section-milestones"><ReplayMilestones data={replayData} /></div>
+                            <div id="section-insights"><ReplayInsights data={replayData} /></div>
+                            <div id="section-share" className="py-32">
+                                <ReplayShareCard data={replayData} userName={userName} />
+                            </div>
+                        </motion.div>
+                    </AnimatePresence>
                 </div>
 
-                <AnimatePresence mode="wait">
-                    <motion.div
-                        key={activeSelectedYear}
-                        initial={{ opacity: 0, scale: 0.98 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 1.02 }}
-                        transition={{ duration: 0.4, ease: "circOut" }}
-                        className="pb-64"
-                    >
-                        <div id="section-hero"><ReplayHero data={replayData} userName={userName} /></div>
-                        <div id="section-glance"><ReplayYearInNumbers data={replayData} /></div>
-                        <div id="section-stats"><ReplayStats data={replayData} /></div>
-                        <div id="section-titles"><ReplayTopTitles data={replayData} allTimeData={allTimeData} /></div>
-                        {!isSpecificMonth && <div id="section-months"><ReplayMonths data={replayData} /></div>}
-                        <div id="section-milestones"><ReplayMilestones data={replayData} /></div>
-                        <div id="section-insights"><ReplayInsights data={replayData} /></div>
-                        <div id="section-share" className="py-32">
-                            <ReplayShareCard data={replayData} userName={userName} />
-                        </div>
-                    </motion.div>
-                </AnimatePresence>
+                {/* Bottom weird bar removed */}
             </div>
-
-            {/* Bottom weird bar removed */}
         </div>
     )
 }

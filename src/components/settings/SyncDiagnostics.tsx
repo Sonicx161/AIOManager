@@ -57,7 +57,7 @@ export function SyncDiagnostics() {
     }
 
     return (
-        <Card className="border-muted/40 shadow-sm overflow-hidden">
+        <Card className="border shadow-sm overflow-hidden">
             <CardHeader
                 className="py-3 px-4 cursor-pointer hover:bg-accent/30 transition-colors flex flex-row items-center justify-between"
                 onClick={() => setIsExpanded(!isExpanded)}

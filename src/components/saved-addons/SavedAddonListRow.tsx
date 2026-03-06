@@ -115,8 +115,8 @@ export function SavedAddonListRow({
                 {...longPressProps}
                 className={`group flex items-center h-[64px] relative w-full ${isSelectionMode ? 'cursor-pointer' : ''}`}
                 style={{
-                    background: 'rgba(255,255,255,0.02)',
-                    borderBottom: '1px solid rgba(255,255,255,0.05)',
+                    background: 'hsl(var(--muted) / 0.3)',
+                    borderBottom: '1px solid hsl(var(--border))',
                     padding: '0 16px',
                     transition: 'all 150ms ease',
                     ...(isSelected ? {
@@ -126,12 +126,12 @@ export function SavedAddonListRow({
                 }}
                 onMouseEnter={(e) => {
                     if (!isSelected) {
-                        e.currentTarget.style.background = 'rgba(255,255,255,0.05)'
+                        e.currentTarget.style.background = 'hsl(var(--muted) / 0.5)'
                     }
                 }}
                 onMouseLeave={(e) => {
                     if (!isSelected) {
-                        e.currentTarget.style.background = 'rgba(255,255,255,0.02)'
+                        e.currentTarget.style.background = 'hsl(var(--muted) / 0.3)'
                     }
                 }}
                 onClick={() => {
@@ -153,8 +153,8 @@ export function SavedAddonListRow({
                         width: '28px',
                         height: '28px',
                         borderRadius: '6px',
-                        background: 'rgba(255,255,255,0.06)',
-                        color: 'white',
+                        background: 'hsl(var(--muted))',
+                        color: 'hsl(var(--foreground))',
                         fontFamily: '"DM Sans", sans-serif',
                         fontWeight: 900,
                         fontSize: '12px'
@@ -175,11 +175,11 @@ export function SavedAddonListRow({
 
                 {/* Name & URL */}
                 <div className="flex flex-col justify-center shrink-0 min-w-[160px] w-[22%] pr-4">
-                    <div className="truncate font-bold text-sm tracking-tight text-white mb-0.5 flex items-center gap-2">
+                    <div className="truncate font-bold text-sm tracking-tight text-foreground mb-0.5 flex items-center gap-2">
                         {savedAddon.name}
                     </div>
                     <div className="flex items-center gap-1 group/url cursor-pointer" onClick={handleCopyUrl}>
-                        <span className="truncate" style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'rgba(255,255,255,0.25)' }}>
+                        <span className="truncate" style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'hsl(var(--muted-foreground) / 0.6)' }}>
                             {(() => {
                                 try {
                                     const urlObj = new URL(savedAddon.installUrl)
@@ -189,11 +189,11 @@ export function SavedAddonListRow({
                                 }
                             })()}
                         </span>
-                        <Copy className="h-3 w-3 text-white/40 opacity-0 group-hover/url:opacity-100 transition-opacity shrink-0" />
+                        <Copy className="h-3 w-3 text-muted-foreground opacity-0 group-hover/url:opacity-100 transition-opacity shrink-0" />
                         {savedAddon.manifest.behaviorHints?.configurable && (
                             <button
                                 onClick={handleOpenConfiguration}
-                                className="opacity-0 group-hover/url:opacity-100 transition-opacity ml-1.5 text-white/40 hover:text-white"
+                                className="opacity-0 group-hover/url:opacity-100 transition-opacity ml-1.5 text-muted-foreground hover:text-foreground"
                                 title="Configure"
                             >
                                 <AnimatedSettingsIcon className="h-3 w-3" />
@@ -205,7 +205,7 @@ export function SavedAddonListRow({
                 {/* Version & Update */}
                 <div className="shrink-0 w-[8%] min-w-[72px]" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
+                        <span style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'hsl(var(--muted-foreground))' }}>
                             v{savedAddon.manifest.version}
                         </span>
                         <span
@@ -272,7 +272,7 @@ export function SavedAddonListRow({
                         )
                     })}
                     {savedAddon.tags.length > 3 && (
-                        <span style={{ fontFamily: '"DM Mono", monospace', fontSize: '9px', color: 'rgba(255,255,255,0.3)' }}>
+                        <span style={{ fontFamily: '"DM Mono", monospace', fontSize: '9px', color: 'hsl(var(--muted-foreground) / 0.6)' }}>
                             +{savedAddon.tags.length - 3}
                         </span>
                     )}
@@ -283,7 +283,7 @@ export function SavedAddonListRow({
                     style={{
                         fontFamily: '"DM Mono", monospace',
                         fontSize: '9px',
-                        color: 'rgba(255,255,255,0.25)',
+                        color: 'hsl(var(--muted-foreground) / 0.6)',
                         textTransform: 'uppercase',
                         letterSpacing: '0.05em'
                     }}>
@@ -295,10 +295,10 @@ export function SavedAddonListRow({
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                             <button
-                                className="p-1 hover:bg-white/10 rounded-md transition-colors duration-150 outline-none flex items-center justify-center"
+                                className="p-1 hover:bg-muted rounded-md transition-colors duration-150 outline-none flex items-center justify-center"
                                 onClick={(e) => e.stopPropagation()}
                             >
-                                <MoreVertical className="h-4 w-4 text-white/40 hover:text-white" />
+                                <MoreVertical className="h-4 w-4 text-muted-foreground hover:text-foreground" />
                             </button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-56">

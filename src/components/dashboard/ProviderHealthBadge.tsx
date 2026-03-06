@@ -40,17 +40,17 @@ export function ProviderHealthBadge({ health }: { health: ProviderHealth }) {
 
     const days = health.daysRemaining ?? 0
 
-    let colorClass = 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20'
+    let colorClass = 'bg-green-500/10 text-emerald-500 border-green-500/20'
     let Icon = CheckCircle2
 
     if (days <= 7) {
-        colorClass = 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/50 font-bold animate-pulse'
+        colorClass = 'bg-red-500/10 text-red-500 border-red-500/50 font-bold animate-pulse'
         Icon = AlertCircle
     } else if (days <= 15) {
-        colorClass = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30 font-semibold'
+        colorClass = 'bg-amber-500/10 text-amber-500 border-amber-500/30 font-semibold'
         Icon = Clock
     } else if (days <= 30) {
-        colorClass = 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+        colorClass = 'bg-blue-500/10 text-blue-500 border-blue-500/20'
         Icon = Clock
     }
 

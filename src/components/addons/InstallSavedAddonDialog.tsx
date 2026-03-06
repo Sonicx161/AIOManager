@@ -363,7 +363,7 @@ export function InstallSavedAddonDialog({
           )}
 
           {success && (
-            <div className="mb-4 p-3 rounded-md bg-green-500/10 text-green-600 dark:text-green-400 text-sm flex items-center gap-2">
+            <div className="mb-4 p-3 rounded-md bg-green-500/10 text-emerald-500 text-sm flex items-center gap-2">
               <Check className="h-4 w-4" />
               Installation successful!
             </div>

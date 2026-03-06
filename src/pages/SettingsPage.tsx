@@ -75,7 +75,7 @@ function AccountSection() {
                 </div>
 
                 {/* Sync Status */}
-                <div className="flex items-center justify-between text-sm bg-blue-500/5 p-3 rounded-lg border border-blue-500/10">
+                <div className="flex items-center justify-between text-sm bg-primary/5 p-3 rounded-lg border border-primary/10">
                     <div className="flex items-center gap-2">
                         <Check className="h-4 w-4 text-green-500" />
                         <span className="font-medium">Authenticated</span>
@@ -93,8 +93,8 @@ function AccountSection() {
 
                 {/* Actions */}
                 <div className="space-y-3 pt-2">
-                    <div className="p-3 rounded-lg border bg-blue-500/10 border-blue-500/20">
-                        <p className="text-[11px] text-blue-600 dark:text-blue-400 font-medium leading-relaxed">
+                    <div className="p-3 rounded-lg border bg-primary/10 border-primary/20">
+                        <p className="text-[11px] text-primary font-medium leading-relaxed">
                             Cloud Sync is active. Every change you make is instantly saved to the server.
                         </p>
                     </div>
@@ -226,9 +226,9 @@ function SyncSummarySection() {
 
                 <div className="space-y-2">
                     {syncedAddons.slice(0, displayCount).map((addon, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-background/30 border border-white/5">
+                        <div key={idx} className="flex items-center justify-between p-2 rounded-lg bg-background/30 border border-border/30">
                             <div className="flex items-center gap-3 overflow-hidden">
-                                <div className="w-6 h-6 rounded bg-muted/50 flex-shrink-0 overflow-hidden border border-white/5">
+                                <div className="w-6 h-6 rounded bg-muted/50 flex-shrink-0 overflow-hidden border border-border/30">
                                     {(addon.metadata?.customLogo || addon.manifest.logo) && (
                                         <img
                                             src={addon.metadata?.customLogo || addon.manifest.logo}
@@ -681,8 +681,8 @@ export function SettingsPage() {
                         <SyncDiagnostics />
 
                         {/* Danger Zone */}
-                        <div className="p-1 rounded-xl bg-destructive/5 border border-destructive/20 overflow-hidden">
-                            <div className="p-5 bg-background/40 space-y-6">
+                        <div className="p-1 rounded-xl bg-destructive/10 border border-destructive/30 overflow-hidden">
+                            <div className="p-5 bg-card rounded-lg space-y-6">
                                 <div className="flex items-center justify-between">
                                     <div className="flex items-center gap-3">
                                         <div className="p-2 rounded-lg bg-destructive/10">
@@ -708,7 +708,7 @@ export function SettingsPage() {
                                     <Button
                                         variant="outline"
                                         size="sm"
-                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        className="h-10 border-destructive/50 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
                                         onClick={handleClearActivity}
                                     >
                                         <Trash2 className="mr-2 h-4 w-4" />
@@ -717,7 +717,7 @@ export function SettingsPage() {
                                     <Button
                                         variant="outline"
                                         size="sm"
-                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        className="h-10 border-destructive/50 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
                                         onClick={handleDeleteAllAccounts}
                                         disabled={accounts.length === 0 || !unsafeMode}
                                     >
@@ -727,7 +727,7 @@ export function SettingsPage() {
                                     <Button
                                         variant="outline"
                                         size="sm"
-                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        className="h-10 border-destructive/50 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
                                         onClick={handleDeleteAllAddons}
                                         disabled={savedAddonsCount === 0 || !unsafeMode}
                                     >
@@ -737,7 +737,7 @@ export function SettingsPage() {
                                     <Button
                                         variant="outline"
                                         size="sm"
-                                        className="h-10 border-destructive/30 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
+                                        className="h-10 border-destructive/50 text-destructive hover:bg-destructive hover:text-white transition-all disabled:opacity-40"
                                         onClick={handlePurgeAutopilot}
                                         disabled={failoverRulesCount === 0 || !unsafeMode}
                                     >

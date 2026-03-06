@@ -294,7 +294,7 @@ export function CinemetaConfigurationDialog({
                     Remove Search Artifacts
                   </Label>
                   {patchStatus?.searchArtifactsPatched && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-500">
                       Patched
                     </span>
                   )}
@@ -320,7 +320,7 @@ export function CinemetaConfigurationDialog({
                     Remove Standard Catalogs
                   </Label>
                   {patchStatus?.standardCatalogsPatched && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-500">
                       Patched
                     </span>
                   )}
@@ -347,7 +347,7 @@ export function CinemetaConfigurationDialog({
                     Remove Metadata Resource
                   </Label>
                   {patchStatus?.metaResourcePatched && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-500">
                       Patched
                     </span>
                   )}

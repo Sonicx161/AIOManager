@@ -190,7 +190,7 @@ export function InstallFromLibraryProfileDialog({
                     )}
 
                     {success && (
-                        <div className="p-3 rounded-lg bg-green-500/10 text-green-600 text-sm flex items-center gap-2">
+                        <div className="p-3 rounded-lg bg-green-500/10 text-emerald-500 text-sm flex items-center gap-2">
                             <Check className="h-4 w-4" />
                             Installation successful!
                         </div>

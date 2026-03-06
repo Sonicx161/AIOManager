@@ -223,7 +223,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                 </TabsList>
 
                 <TabsContent value="rules" className="space-y-6">
-                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-4">
+                    <div className="bg-muted/30 border border-border rounded-2xl p-5 mb-6 space-y-4">
                         <div className="flex items-start justify-between">
                             <div>
                                 <h3 className="flex items-center gap-2 text-lg font-bold">
@@ -238,8 +238,8 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         </>
                                     ) : (
                                         <>
-                                            <span className="w-2 h-2 rounded-full bg-white/20"></span>
-                                            <span className="text-xs font-mono font-bold text-white/30 uppercase tracking-widest">NOT CONFIGURED</span>
+                                            <span className="w-2 h-2 rounded-full bg-muted-foreground/20"></span>
+                                            <span className="text-xs font-mono font-bold text-foreground/30 uppercase tracking-widest">NOT CONFIGURED</span>
                                         </>
                                     )}
                                 </div>
@@ -250,7 +250,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                 placeholder="https://discord.com/api/webhooks/..."
                                 value={webhookUrl}
                                 onChange={(e) => setWebhookUrl(e.target.value)}
-                                className="bg-white/5 border-white/10 rounded-[10px]"
+                                className="bg-muted/30 border-border rounded-[10px]"
                             />
                             <div className="flex gap-2">
                                 <Button size="sm" onClick={handleSaveWebhook}>Set Webhook</Button>
@@ -282,44 +282,44 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                         </div>
                     </div>
 
-                    <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-5">
+                    <div className="bg-muted/30 border border-border rounded-2xl p-5 mb-6 space-y-5">
                         <div className="pb-1 text-left">
                             <h3 className="text-lg font-bold flex items-center gap-2 mb-1.5">
                                 {editingRuleId ? <Pencil className="w-5 h-5 text-primary" /> : <Plus className="w-5 h-5 text-primary" />}
                                 {editingRuleId ? "Edit Priority Chain" : "Create New Autopilot Rule"}
                             </h3>
-                            <p className="text-sm text-white/50">
+                            <p className="text-sm text-foreground/50">
                                 Define an ordered list of fallbacks. Autopilot will always try to keep the highest priority addon active.
                             </p>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="space-y-1.5">
-                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/30 ml-1">Rule Name (Optional)</label>
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Rule Name (Optional)</label>
                                 <Input
                                     placeholder="e.g. My Primary Movies"
                                     value={ruleName}
                                     onChange={(e) => setRuleName(e.target.value)}
-                                    className="bg-white/5 border-white/10 rounded-xl"
+                                    className="bg-muted/30 border-border rounded-xl"
                                 />
                             </div>
                             <div className="space-y-1.5">
-                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/30 ml-1">Notifications Cooldown (Mins)</label>
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Notifications Cooldown (Mins)</label>
                                 <Input
                                     type="number"
                                     placeholder="10"
                                     value={cooldownMinutes}
                                     onChange={(e) => setCooldownMinutes(e.target.value)}
-                                    className="bg-white/5 border-white/10 rounded-xl"
+                                    className="bg-muted/30 border-border rounded-xl"
                                 />
                             </div>
                         </div>
                         <div className="space-y-3">
                             {chain.map((url, index) => (
-                                <div key={index} className="bg-white/5 border border-white/10 rounded-xl px-4 py-3 flex flex-col gap-1.5">
+                                <div key={index} className="bg-muted/30 border border-border rounded-xl px-4 py-3 flex flex-col gap-1.5">
                                     <div className="flex items-center justify-between">
-                                        <span className="font-mono text-[10px] font-bold tracking-wider text-white/25">TIER {index + 1}</span>
+                                        <span className="font-mono text-[10px] font-bold tracking-wider text-foreground/25">TIER {index + 1}</span>
                                         <button
-                                            className="text-white/20 hover:text-red-400 transition-colors disabled:opacity-30 disabled:hover:text-white/20"
+                                            className="text-foreground/20 hover:text-red-400 transition-colors disabled:opacity-30 disabled:hover:text-foreground/20"
                                             onClick={() => removeFromChain(index)}
                                             disabled={chain.length <= 2}
                                         >
@@ -358,7 +358,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                             <img
                                                                 src={addon.metadata?.customLogo || addon.manifest.logo}
                                                                 alt=""
-                                                                className="w-5 h-5 rounded object-contain bg-white/5 p-0.5"
+                                                                className="w-5 h-5 rounded object-contain bg-muted/30 p-0.5"
                                                                 onError={(e) => {
                                                                     e.currentTarget.style.display = 'none'
                                                                 }}
@@ -376,13 +376,13 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                 variant="ghost"
                                 size="sm"
                                 onClick={addToChain}
-                                className="w-full bg-white/5 border border-dashed border-white/10 hover:bg-white/10 text-white/50 hover:text-white h-12 rounded-xl border-opacity-50"
+                                className="w-full bg-muted/30 border border-dashed border-border/50 hover:bg-muted/50 text-foreground/50 hover:text-foreground h-12 rounded-xl"
                             >
                                 <Plus className="w-4 h-4 mr-2" /> Add Fallback Tier
                             </Button>
                         </div>
 
-                        <div className="flex gap-2 pt-4 border-t border-white/10">
+                        <div className="flex gap-2 pt-4 border-t border-border">
                             <Button
                                 size="sm"
                                 className="flex-1 md:w-auto bg-[#eab308] hover:bg-[#fbbf24] text-black font-[900]"
@@ -431,7 +431,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         <Button
                                             variant="outline"
                                             size="sm"
-                                            className="h-7 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                            className="h-7 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 border-emerald-500/20"
                                             onClick={() => toggleAllRulesForAccount(accountId, true)}
                                         >
                                             <Check className="w-3 h-3 mr-1" /> Resume All
@@ -439,7 +439,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         <Button
                                             variant="outline"
                                             size="sm"
-                                            className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                                            className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border-amber-500/20"
                                             onClick={() => toggleAllRulesForAccount(accountId, false)}
                                         >
                                             <AlertTriangle className="w-3 h-3 mr-1" /> Pause All
@@ -483,10 +483,10 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                 const isValidDate = lastCheckDate && !isNaN(lastCheckDate.getTime())
 
                                 return (
-                                    <div key={rule.id} className="bg-white/5 border border-white/10 rounded-2xl p-5 flex flex-col gap-6">
+                                    <div key={rule.id} className="bg-muted/30 border border-border rounded-2xl p-5 flex flex-col gap-6">
                                         <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-3">
-                                                <div className="font-mono text-[10px] font-bold tracking-wider text-white/30 uppercase bg-white/5 px-2 py-0.5 rounded">
+                                                <div className="font-mono text-[10px] font-bold tracking-wider text-foreground/30 uppercase bg-foreground/5 px-2 py-0.5 rounded">
                                                     {rule.name || `RULE ${rule.id.slice(0, 8)}`}
                                                 </div>
                                                 {rule.cooldown_ms && (
@@ -498,7 +498,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                             </div>
                                             <div className="flex items-center gap-2">
                                                 <div className="flex items-center gap-2 mr-2">
-                                                    <span className={`text-[10px] uppercase font-bold ${rule.isActive ? 'text-primary' : 'text-white/30'}`}>
+                                                    <span className={`text-[10px] uppercase font-bold ${rule.isActive ? 'text-primary' : 'text-foreground/30'}`}>
                                                         {rule.isActive ? 'Enabled' : 'Disabled'}
                                                     </span>
                                                     <Switch
@@ -512,16 +512,16 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                 <Button
                                                     variant="ghost"
                                                     size="icon"
-                                                    className={`h-8 w-8 hover:bg-white/10 ${simulatingRuleId === rule.id ? 'text-primary anima-pulse' : 'text-white/50'}`}
+                                                    className={`h-8 w-8 hover:bg-foreground/10 ${simulatingRuleId === rule.id ? 'text-primary anima-pulse' : 'text-foreground/50'}`}
                                                     onClick={() => handleSimulateRule(rule.id, rule.priorityChain)}
                                                     title="Simulate Autopilot Health Check"
                                                 >
                                                     <FlaskConical className="w-4 h-4" />
                                                 </Button>
-                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-white/10 hover:text-white text-white/50" onClick={() => handleDuplicateRule(rule)} title="Duplicate this chain">
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-foreground/10 hover:text-foreground text-foreground/50" onClick={() => handleDuplicateRule(rule)} title="Duplicate this chain">
                                                     <Copy className="w-4 h-4" />
                                                 </Button>
-                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-red-500/20 hover:text-red-400 text-white/50" onClick={() => removeRule(rule.id)}>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-red-500/20 hover:text-red-400 text-foreground/50" onClick={() => removeRule(rule.id)}>
                                                     <Trash2 className="w-4 h-4" />
                                                 </Button>
                                             </div>
@@ -566,7 +566,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                         </div>
                                                         {idx < rule.priorityChain.length - 1 && (
                                                             <div className="w-full flex justify-center py-1">
-                                                                <div className="w-px h-4 bg-white/10 relative">
+                                                                <div className="w-px h-4 bg-border relative">
                                                                     <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 border-l-4 border-r-4 border-t-[4px] border-l-transparent border-r-transparent border-t-white/10" />
                                                                 </div>
                                                             </div>
@@ -587,7 +587,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                     <Button
                                                         variant="ghost"
                                                         size="sm"
-                                                        className="h-6 px-2 text-[10px] font-bold text-white/30 hover:text-white"
+                                                        className="h-6 px-2 text-[10px] font-bold text-foreground/30 hover:text-foreground"
                                                         onClick={() => setSimulatingRuleId(null)}
                                                     >
                                                         CLOSE
@@ -600,7 +600,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                         const addon = addons.find(a => a.transportUrl === url)
                                                         return (
                                                             <div key={idx} className="flex items-center justify-between text-xs">
-                                                                <div className="flex items-center gap-2 text-white/70">
+                                                                <div className="flex items-center gap-2 text-foreground/70">
                                                                     <span className="font-mono text-[10px] opacity-30">T{idx + 1}</span>
                                                                     <span className="truncate max-w-[150px]">{addon?.metadata?.customName || identifyAddon(url, addon?.manifest).name}</span>
                                                                 </div>
@@ -615,7 +615,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                                             <XCircle className="w-3 h-3 text-red-500" />
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="w-3 h-3 rounded-full border border-white/10" />
+                                                                        <div className="w-3 h-3 rounded-full border border-border" />
                                                                     )}
                                                                 </div>
                                                             </div>
@@ -626,7 +626,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                 {/* Conclusion */}
                                                 {!rule.priorityChain.some(url => simulationResults[url]?.checking) && Object.keys(simulationResults).length > 0 && (
                                                     <div className="pt-2 border-t border-primary/10">
-                                                        <p className="text-[11px] text-white/90 leading-relaxed">
+                                                        <p className="text-[11px] text-foreground/90 leading-relaxed">
                                                             <span className="font-bold text-primary mr-1">CONCLUSION:</span>
                                                             {(() => {
                                                                 const primaryUrl = rule.priorityChain[0]
@@ -652,7 +652,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         )}
 
                                         {/* Status Footer */}
-                                        <div className="flex items-center justify-between border-t border-white/10 pt-4 px-2">
+                                        <div className="flex items-center justify-between border-t border-border pt-4 px-2">
                                             <div className="flex items-center gap-2">
                                                 <span
                                                     className="w-2.5 h-2.5 rounded-full"
@@ -663,13 +663,13 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                 <span className="font-bold text-sm tracking-tight">{isPrimary ? 'Healthy' : 'Degraded'}</span>
                                             </div>
                                             <div className="flex items-center gap-4">
-                                                <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest">
+                                                <span className="font-mono text-[10px] text-foreground/40 uppercase tracking-widest">
                                                     {isValidDate && lastCheckDate ? formatDistanceToNow(lastCheckDate, { addSuffix: true }) : 'Pending'}
                                                 </span>
                                                 <Button
                                                     variant="ghost"
                                                     size="sm"
-                                                    className="h-6 p-0 text-white/40 hover:text-white"
+                                                    className="h-6 p-0 text-foreground/40 hover:text-foreground"
                                                     onClick={() => {
                                                         setChain(rule.priorityChain)
                                                         setRuleName(rule.name || "")
@@ -740,17 +740,17 @@ function FailoverHistory({ addons }: { addons: any[] }) {
     }
 
     return (
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-5 mb-6 space-y-4">
+        <div className="bg-muted/30 border border-border rounded-2xl p-5 mb-6 space-y-4">
             <div className="flex items-center justify-between mb-4">
                 <div>
                     <h3 className="text-lg font-bold">Event Log</h3>
-                    <p className="text-sm text-white/50">Recent failover and recovery actions.</p>
+                    <p className="text-sm text-foreground/50">Recent failover and recovery actions.</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={clearLogs} className="bg-white/5 border-white/10 hover:bg-white/10 text-white/50 hover:text-white">
+                <Button variant="outline" size="sm" onClick={clearLogs} className="bg-foreground/5 border-foreground/10 hover:bg-foreground/10 text-foreground/50 hover:text-foreground">
                     Clear Log
                 </Button>
             </div>
-            <div className="relative pl-6 space-y-6 before:absolute before:inset-y-0 before:left-[11px] before:border-l-[2px] before:border-white/5 py-2">
+            <div className="relative pl-6 space-y-6 before:absolute before:inset-y-0 before:left-[11px] before:border-l-[2px] before:border-border/50 py-2">
                 {logs.map((log) => {
                     const logDate = log.timestamp ? new Date(log.timestamp) : null;
                     const isValidLogDate = logDate && !isNaN(logDate.getTime());
@@ -783,19 +783,19 @@ function FailoverHistory({ addons }: { addons: any[] }) {
                             <div className="flex flex-col gap-1">
                                 <div className="flex items-center justify-between">
                                     <span style={{ color }} className="text-xs font-bold uppercase tracking-wider">{log.type}</span>
-                                    <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest">
+                                    <span className="font-mono text-[10px] text-foreground/40 uppercase tracking-widest">
                                         {isValidLogDate && logDate ? formatDistanceToNow(logDate, { addSuffix: true }) : 'Unknown time'}
                                     </span>
                                 </div>
                                 <div className="text-sm font-medium">
                                     {log.metadata?.chain ? (
                                         <div className="flex items-center gap-1.5 opacity-90 text-xs">
-                                            <span className="text-white/50">Chain:</span>
+                                            <span className="text-foreground/50">Chain:</span>
                                             <div className="flex gap-1 overflow-hidden" style={{ maxWidth: '300px' }}>
                                                 {(log.metadata.chain as string[]).map((url, i, arr) => (
                                                     <span key={i} className="flex items-center">
                                                         <span className="truncate max-w-[120px]" title={url}>{resolveUrlToName(url)}</span>
-                                                        {i < arr.length - 1 && <ArrowRight className="w-3 h-3 text-white/30 mx-1 shrink-0" />}
+                                                        {i < arr.length - 1 && <ArrowRight className="w-3 h-3 text-foreground/30 mx-1 shrink-0" />}
                                                     </span>
                                                 ))}
                                             </div>
@@ -806,7 +806,7 @@ function FailoverHistory({ addons }: { addons: any[] }) {
                                         </div>
                                     )}
                                 </div>
-                                <div className="text-xs text-white/50 leading-relaxed mt-0.5">
+                                <div className="text-xs text-foreground/50 leading-relaxed mt-0.5">
                                     {log.message.split(' ').map(word => word.startsWith('http') ? resolveUrlToName(word) : word).join(' ')}
                                 </div>
                             </div>

@@ -26,13 +26,13 @@ export function AddonChangelog({ accountId }: AddonChangelogProps) {
                     <div className="flex flex-col items-center justify-center py-16 text-center gap-3 h-full">
                         <div style={{
                             width: '48px', height: '48px', borderRadius: '50%',
-                            background: 'rgba(255,255,255,0.04)',
+                            background: 'hsl(var(--muted) / 0.4)',
                             display: 'flex', alignItems: 'center', justifyContent: 'center'
                         }}>
                             <Clock className="h-5 w-5 text-muted-foreground opacity-40" />
                         </div>
                         <p className="text-sm text-muted-foreground">No changes recorded yet</p>
-                        <p style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'rgba(255,255,255,0.2)', letterSpacing: '0.05em' }}>
+                        <p style={{ fontFamily: '"DM Mono", monospace', fontSize: '10px', color: 'hsl(var(--muted-foreground) / 0.6)', letterSpacing: '0.05em' }}>
                             Updates, installs and removals will appear here
                         </p>
                     </div>
@@ -63,9 +63,9 @@ export function AddonChangelog({ accountId }: AddonChangelogProps) {
                                             <p className="font-semibold truncate leading-none">
                                                 {entry.addonName}
                                             </p>
-                                            <span className={`text-[9px] font-bold px-1 py-0.5 rounded uppercase tracking-wider ${entry.action === 'installed' ? 'bg-green-500/10 text-green-600 dark:text-green-400' :
-                                                entry.action === 'removed' ? 'bg-red-500/10 text-red-600 dark:text-red-400' :
-                                                    'bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                                            <span className={`text-[9px] font-bold px-1 py-0.5 rounded uppercase tracking-wider ${entry.action === 'installed' ? 'bg-green-500/10 text-emerald-500' :
+                                                entry.action === 'removed' ? 'bg-red-500/10 text-destructive' :
+                                                    'bg-blue-500/10 text-primary'
                                                 }`}>
                                                 {entry.action}
                                             </span>

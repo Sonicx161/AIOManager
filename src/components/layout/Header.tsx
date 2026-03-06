@@ -102,13 +102,13 @@ export function Header() {
             {providerKeys.length > 0 && (
               <>
                 {/* Desktop: Full Badges */}
-                <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-full border bg-card/30 shadow-sm border-white/5">
+                <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-full border bg-card/30 shadow-sm border-border/50">
                   {providerKeys.map((key) => {
                     const h = health[key.id]
                     return (
                       <DropdownMenu key={key.id}>
                         <DropdownMenuTrigger asChild>
-                          <div className="flex items-center justify-center p-0.5 rounded-full hover:bg-white/5 transition-colors cursor-pointer">
+                          <div className="flex items-center justify-center p-0.5 rounded-full hover:bg-muted/50 transition-colors cursor-pointer">
                             <button className={`relative flex items-center justify-center w-8 h-8 rounded-full bg-background/50 border-2 transition-all group overflow-hidden ${getStatusRingColor(h)} hover:scale-110 active:scale-90`}>
                               <span className="text-[10px] font-black tracking-tight text-muted-foreground group-hover:text-foreground">
                                 {getProviderAbbr(key.provider)}
@@ -161,7 +161,7 @@ export function Header() {
                                 </>
                               )
                             })()}
-                            <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-white/5">
+                            <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/50">
                               <span>Last Checked</span>
                               <span>{h?.lastChecked ? new Date(h.lastChecked).toLocaleTimeString() : 'Never'}</span>
                             </div>
@@ -170,7 +170,7 @@ export function Header() {
                                 href={PROVIDERS.find(p => p.value === key.provider)!.url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="flex items-center justify-between text-[10px] text-primary hover:underline pt-1 border-t border-white/5"
+                                className="flex items-center justify-between text-[10px] text-primary hover:underline pt-1 border-t border-border/50"
                               >
                                 <span>API Dashboard</span>
                                 <ExternalLink className="h-2.5 w-2.5" />
@@ -216,7 +216,7 @@ export function Header() {
 
             {/* Desktop User Identity & Logout */}
             {auth.isAuthenticated && (
-              <div className="hidden md:flex items-center gap-2 border border-white/10 pl-1.5 pr-3 py-1 rounded-full bg-white/[0.04] hover:bg-white/[0.07] hover:border-white/[0.13] transition-all cursor-pointer">
+              <div className="hidden md:flex items-center gap-2 border border-border pl-1.5 pr-3 py-1 rounded-full bg-muted/30 hover:bg-muted/50 hover:border-border transition-all cursor-pointer">
                 {/* Avatar initial */}
                 <div className="w-6 h-6 rounded-full bg-amber-500/20 border border-amber-500/25 flex items-center justify-center text-[11px] font-bold text-amber-400 shadow-[0_0_8px_rgba(245,200,66,0.08)] flex-shrink-0">
                   {(auth.name || auth.id).charAt(0).toUpperCase()}
@@ -229,7 +229,7 @@ export function Header() {
                   </span>
                 </div>
                 {/* Divider + logout */}
-                <div className="h-4 w-px bg-white/10 mx-0.5" />
+                <div className="h-4 w-px bg-border mx-0.5" />
                 <button
                   type="button"
                   onClick={(e) => { e.preventDefault(); logout(); }}

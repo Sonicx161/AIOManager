@@ -770,7 +770,7 @@ export function SavedAddonLibrary() {
                           if (selectedProfileId === 'unassigned') return null;
                           const p = profiles.find(p => p.id === selectedProfileId);
                           if (p?.description && p.description.trim() !== '' && p.description.trim() !== p.name.trim()) {
-                            return <p className="break-words mt-1.5 max-w-2xl" style={{ color: 'rgba(255,255,255,0.35)', fontSize: '12px', fontFamily: '"DM Sans", sans-serif' }}>{p.description}</p>
+                            return <p className="break-words mt-1.5 max-w-2xl text-muted-foreground/50" style={{ fontSize: '12px', fontFamily: '"DM Sans", sans-serif' }}>{p.description}</p>
                           }
                           return null;
                         })()}
@@ -819,7 +819,7 @@ export function SavedAddonLibrary() {
                   variant="outline"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowAccountPicker(true)}
-                  className="w-full sm:w-auto border-primary/20 hover:bg-primary/5 dark:border-primary/10 dark:hover:bg-primary/5"
+                  className="w-full sm:w-auto border-primary/20 hover:bg-primary/5"
                 >
                   <Upload className="h-4 w-4 mr-2" />
                   Deploy
@@ -829,7 +829,7 @@ export function SavedAddonLibrary() {
                   variant="outline"
                   disabled={selectedIds.size === 0}
                   onClick={() => setShowRemoveAccountPicker(true)}
-                  className="w-full sm:w-auto border-red-200 hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400"
+                  className="w-full sm:w-auto border-destructive/30 hover:bg-destructive/10 text-destructive"
                 >
                   <UserMinus className="h-4 w-4 mr-2" />
                   Remove from Accts
@@ -863,7 +863,7 @@ export function SavedAddonLibrary() {
         {error && (
           <Card className="border-red-500">
             <CardContent className="pt-6">
-              <p className="text-red-600 dark:text-red-400">{error}</p>
+              <p className="text-destructive">{error}</p>
             </CardContent>
           </Card>
         )}
@@ -951,7 +951,7 @@ export function SavedAddonLibrary() {
                       <Button
                         variant="default"
                         size="sm"
-                        className="h-10 bg-blue-600 hover:bg-blue-700 text-white col-span-2 sm:col-span-1 w-full sm:w-auto"
+                        className="h-10 bg-primary hover:bg-primary/90 text-primary-foreground col-span-2 sm:col-span-1 w-full sm:w-auto"
                         onClick={handleUpdateAll}
                         disabled={updatingAll}
                       >
@@ -1103,7 +1103,7 @@ export function SavedAddonLibrary() {
                 // specific profile selected - show flat flat
                 <div className={cn(
                   "animate-in fade-in slide-in-from-bottom-4 duration-500",
-                  viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-white/5"
+                  viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
                 )}>
                   {filteredAddons.map((addon) => {
                     const profile = profiles.find(p => p.id === addon.profileId)
@@ -1155,7 +1155,7 @@ export function SavedAddonLibrary() {
                       <div key={profile.id} className="space-y-4">
                         <button
                           onClick={() => toggleProfile(profile.id)}
-                          className="w-full group flex items-center justify-between hover:bg-white/5 p-2 rounded-lg transition-colors border border-transparent hover:border-white/10"
+                          className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
                         >
                           <h3 className="text-xl font-semibold flex items-center gap-2">
                             <User className="h-5 w-5" />
@@ -1169,7 +1169,7 @@ export function SavedAddonLibrary() {
                         {isExpanded && (
                           <div className={cn(
                             "animate-in fade-in slide-in-from-top-2 duration-300",
-                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-white/5"
+                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
                           )}>
                             {profileAddons.map((addon) => {
                               if (viewMode === 'list') {
@@ -1222,7 +1222,7 @@ export function SavedAddonLibrary() {
                       <div className="space-y-4">
                         <button
                           onClick={() => toggleProfile('unassigned')}
-                          className="w-full group flex items-center justify-between hover:bg-white/5 p-2 rounded-lg transition-colors border border-transparent hover:border-white/10"
+                          className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
                         >
                           <h3 className="text-xl font-semibold flex items-center gap-2">
                             <Package className="h-5 w-5" />
@@ -1239,7 +1239,7 @@ export function SavedAddonLibrary() {
                         {isExpanded && (
                           <div className={cn(
                             "animate-in fade-in slide-in-from-top-2 duration-300",
-                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md overflow-hidden border border-white/5"
+                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md overflow-hidden border border-border"
                           )}>
                             {unassigned.map((addon) => {
                               if (viewMode === 'list') {
@@ -1368,7 +1368,7 @@ export function SavedAddonLibrary() {
                   value={addUrl}
                   onChange={(e) => setAddUrl(e.target.value)}
                   placeholder="Paste one or more manifest URLs (one per line or comma-separated)"
-                  className="min-h-[120px] bg-white/5 border-white/10"
+                  className="min-h-[120px] bg-muted/30 border-border"
                 />
               </div>
 
@@ -1393,7 +1393,7 @@ export function SavedAddonLibrary() {
               </div>
 
               {addError && (
-                <p className="text-sm text-red-600 dark:text-red-400">{addError}</p>
+                <p className="text-sm text-destructive">{addError}</p>
               )}
             </div>
 

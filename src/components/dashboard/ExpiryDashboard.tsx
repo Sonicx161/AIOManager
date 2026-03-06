@@ -54,7 +54,7 @@ export function ExpiryDashboard() {
                 {providerKeys.map((key) => {
                     const status = health[key.id]
                     return (
-                        <Card key={key.id} className="overflow-hidden border-muted/40 bg-card/50 backdrop-blur-sm hover:shadow-md transition-all group">
+                        <Card key={key.id} className="overflow-hidden border bg-card/50 shadow-sm backdrop-blur-sm hover:shadow-md transition-all group">
                             <CardHeader className="p-4 pb-2 space-y-0">
                                 <div className="flex items-start justify-between">
                                     <div className="space-y-1">

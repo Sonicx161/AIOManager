@@ -122,10 +122,10 @@ export function SavedAddonCard({
         {...longPressProps}
         className={`group flex flex-col h-full relative ${isSelectionMode ? 'cursor-pointer' : ''}`}
         style={{
-          background: 'rgba(255,255,255,0.04)',
+          background: 'hsl(var(--muted) / 0.4)',
           borderStyle: 'solid',
           borderWidth: '1px',
-          borderColor: 'rgba(255,255,255,0.08)',
+          borderColor: 'hsl(var(--border))',
           borderRadius: '20px',
           padding: '20px',
           transition: 'all 200ms ease',
@@ -137,14 +137,14 @@ export function SavedAddonCard({
         }}
         onMouseEnter={(e) => {
           if (!isSelected) {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
-            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)';
+            e.currentTarget.style.background = 'hsl(var(--muted) / 0.7)';
+            e.currentTarget.style.borderColor = 'hsl(var(--border))';
           }
         }}
         onMouseLeave={(e) => {
           if (!isSelected) {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
-            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+            e.currentTarget.style.background = 'hsl(var(--muted) / 0.4)';
+            e.currentTarget.style.borderColor = 'hsl(var(--border))';
           }
         }}
         onClick={() => {
@@ -172,7 +172,7 @@ export function SavedAddonCard({
                     width: '44px',
                     height: '44px',
                     borderRadius: '12px',
-                    background: 'rgba(255,255,255,0.06)'
+                    background: 'hsl(var(--muted))'
                   }}
                 >
                   <img
@@ -192,7 +192,7 @@ export function SavedAddonCard({
                     height: '44px',
                     borderRadius: '12px',
                     background: 'linear-gradient(135deg, rgba(99,102,241,0.3), rgba(168,85,247,0.3))',
-                    color: 'white',
+                    color: 'hsl(var(--foreground))',
                     fontFamily: '"DM Sans", sans-serif',
                     fontWeight: 900,
                     fontSize: '18px'
@@ -209,7 +209,7 @@ export function SavedAddonCard({
                     fontFamily: '"DM Sans", sans-serif',
                     fontSize: '15px',
                     fontWeight: 700,
-                    color: 'white'
+                    color: 'hsl(var(--foreground))'
                   }}
                 >
                   {savedAddon.name}
@@ -220,7 +220,7 @@ export function SavedAddonCard({
                       style={{
                         fontFamily: '"DM Mono", monospace',
                         fontSize: '10px',
-                        color: 'rgba(255,255,255,0.35)'
+                        color: 'hsl(var(--muted-foreground))'
                       }}
                       className="truncate"
                     >
@@ -243,7 +243,7 @@ export function SavedAddonCard({
                     {savedAddon.manifest.behaviorHints?.configurable && (
                       <button
                         onClick={handleOpenConfiguration}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 text-white/40 hover:text-white"
+                        className="opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 text-muted-foreground hover:text-foreground"
                         title="Configure"
                       >
                         <AnimatedSettingsIcon className="h-3 w-3" />
@@ -286,10 +286,10 @@ export function SavedAddonCard({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
-                  className="p-1.5 hover:bg-white/5 rounded-lg transition-colors duration-150 shrink-0 outline-none flex items-center justify-center -mr-2"
+                  className="p-1.5 hover:bg-muted rounded-lg transition-colors duration-150 shrink-0 outline-none flex items-center justify-center -mr-2"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <MoreVertical className="h-4 w-4 text-white/40 hover:text-white transition-colors" />
+                  <MoreVertical className="h-4 w-4 text-muted-foreground hover:text-foreground transition-colors" />
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-56">
@@ -326,7 +326,7 @@ export function SavedAddonCard({
                 style={{
                   fontFamily: '"DM Mono", monospace',
                   fontSize: '10px',
-                  color: 'rgba(255,255,255,0.2)'
+                  color: 'hsl(var(--muted-foreground) / 0.6)'
                 }}
               >
                 {(() => {
@@ -338,7 +338,7 @@ export function SavedAddonCard({
                   }
                 })()}
               </span>
-              <Copy className="h-3 w-3 text-white/40 opacity-0 group-hover/url:opacity-100 transition-opacity shrink-0" />
+              <Copy className="h-3 w-3 text-muted-foreground opacity-0 group-hover/url:opacity-100 transition-opacity shrink-0" />
             </div>
 
             {/* Description */}
@@ -348,7 +348,7 @@ export function SavedAddonCard({
                 style={{
                   fontFamily: '"DM Sans", sans-serif',
                   fontSize: '12px',
-                  color: 'rgba(255,255,255,0.4)',
+                  color: 'hsl(var(--muted-foreground))',
                   lineHeight: 1.5
                 }}
               >
@@ -410,7 +410,7 @@ export function SavedAddonCard({
                 style={{
                   fontFamily: '"DM Mono", monospace',
                   fontSize: '9px',
-                  color: 'rgba(255,255,255,0.25)',
+                  color: 'hsl(var(--muted-foreground) / 0.6)',
                   textTransform: 'uppercase',
                   letterSpacing: '0.05em'
                 }}

@@ -68,7 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
                         <div className="flex flex-col gap-3">
                             <Button
                                 onClick={this.handleReload}
-                                className="w-full bg-primary hover:bg-primary/90 text-white font-black uppercase italic tracking-widest h-12 rounded-xl group group/btn shadow-lg shadow-primary/20"
+                                className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-black uppercase italic tracking-widest h-12 rounded-xl group group/btn shadow-lg shadow-primary/20"
                             >
                                 <RefreshCw className="mr-2 h-4 w-4 transition-transform group-active:rotate-180" />
                                 Reload Application
@@ -84,7 +84,7 @@ export class ErrorBoundary extends Component<Props, State> {
                         </div>
 
                         <span className="text-secondary tracking-widest uppercase">
-                            AIOManager v1.8.1 Recovery System
+                            AIOManager v1.8.3 Recovery System
                         </span>
                     </div>
                 </div>

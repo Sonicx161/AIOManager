@@ -259,6 +259,7 @@ const schema = `
     active_url TEXT,
     webhook_url TEXT,
     stabilization TEXT,
+    is_active INTEGER DEFAULT 1,
     is_automatic INTEGER DEFAULT 1,
     last_check BIGINT,
     last_notification BIGINT,
@@ -291,6 +292,7 @@ await db.exec(schema)
 try {
     if (db.type === 'postgres') {
         // Migration: Add missing columns if they don't exist
+        try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS addon_list TEXT`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS webhook_url TEXT`) } catch (e) { }
         try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`) } catch (e) { }

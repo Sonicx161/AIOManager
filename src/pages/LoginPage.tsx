@@ -410,7 +410,7 @@ export function LoginPage() {
                                 <Label className="text-xs text-muted-foreground uppercase tracking-widest">Your Account UUID</Label>
                                 <div className="relative group">
                                     <div className="p-4 bg-muted/50 rounded-lg border-2 border-dashed border-green-500/30 flex items-center justify-between gap-3 group-hover:border-green-500/50 transition-colors">
-                                        <code className="text-sm font-mono font-bold break-all text-green-600 dark:text-green-400">
+                                        <code className="text-sm font-mono font-bold break-all text-emerald-500">
                                             {registeredId}
                                         </code>
                                         <Button
@@ -430,7 +430,7 @@ export function LoginPage() {
                             </div>
 
                             <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 space-y-2">
-                                <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500 font-semibold text-xs text uppercase tracking-tight">
+                                <div className="flex items-center gap-2 text-amber-500 font-semibold text-xs text uppercase tracking-tight">
                                     <ShieldAlert className="h-4 w-4" />
                                     Zero-Knowledge Warning
                                 </div>

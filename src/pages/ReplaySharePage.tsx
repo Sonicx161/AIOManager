@@ -148,7 +148,7 @@ function decodeShareToken(token: string): { data: ReplayData; userName?: string 
 
 export function ReplaySharePage() {
     const { token } = useParams<{ token: string }>()
-    const [decoded, setDecoded] = useState<{ data: ReplayData; userName?: string } | null | 'error'>('error')
+    const [decoded, setDecoded] = useState<{ data: ReplayData; userName?: string } | null | 'error' | 'loading'>('loading')
     const [activeSection, setActiveSection] = useState('hero')
     const scrollContainerRef = useRef<HTMLDivElement>(null)
 
@@ -206,6 +206,12 @@ export function ReplaySharePage() {
         const result = decodeShareToken(token)
         setDecoded(result ?? 'error')
     }, [token])
+
+    if (decoded === 'loading') {
+        return (
+            <div style={{ minHeight: '100vh', background: '#08080f' }} />
+        )
+    }
 
     if (!decoded || decoded === 'error') {
         return (

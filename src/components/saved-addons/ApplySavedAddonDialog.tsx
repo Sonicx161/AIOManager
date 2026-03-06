@@ -75,8 +75,8 @@ export function ApplySavedAddonDialog({ savedAddon, onClose }: ApplySavedAddonDi
     <div className="space-y-4">
       {/* Success Message */}
       {success && result && (
-        <div className="p-3 rounded-md bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
-          <p className="text-sm text-green-600 dark:text-green-400 font-medium">
+        <div className="p-3 rounded-md bg-emerald-500/10 border border-emerald-500/20">
+          <p className="text-sm text-emerald-500 font-medium">
             Applied saved addon to {result.success} account{result.success !== 1 ? 's' : ''}
             {result.failed > 0 && ` (${result.failed} failed)`}
           </p>
@@ -85,13 +85,13 @@ export function ApplySavedAddonDialog({ savedAddon, onClose }: ApplySavedAddonDi
 
       {/* Error Display */}
       {error && (
-        <div className="p-3 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-          <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+        <div className="p-3 rounded-md bg-destructive/10 border border-destructive/20">
+          <p className="text-sm text-destructive">{error}</p>
         </div>
       )}
 
       {/* Saved Addon Info */}
-      <div className="p-3 rounded-md bg-gray-50 dark:bg-gray-900">
+      <div className="p-3 rounded-md bg-muted">
         <p className="font-medium">{savedAddon.name}</p>
         <p className="text-sm text-muted-foreground">{savedAddon.manifest.name}</p>
       </div>
@@ -118,7 +118,7 @@ export function ApplySavedAddonDialog({ savedAddon, onClose }: ApplySavedAddonDi
               {accounts.map((account) => (
                 <label
                   key={account.id}
-                  className="flex items-center gap-3 p-3 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer"
+                  className="flex items-center gap-3 p-3 hover:bg-muted cursor-pointer"
                 >
                   <input
                     type="checkbox"

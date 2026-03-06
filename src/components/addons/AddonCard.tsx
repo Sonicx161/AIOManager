@@ -590,12 +590,12 @@ export function AddonCard({
                     </span>
                   )}
                   {hasUpdate && latestVersion && (
-                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
+                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-primary/10 text-primary">
                       → {latestVersion}
                     </span>
                   )}
                   {addon.flags?.protected && (
-                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
+                    <span className="inline-flex items-center px-1 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-500">
                       Protected
                     </span>
                   )}

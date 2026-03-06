@@ -27,7 +27,7 @@ export function AppRoutes() {
         </Suspense>
       } />
       <Route path="/replay/share/:token" element={
-        <Suspense fallback={<div style={{ minHeight: '100vh', background: '#08080f' }} />}>
+        <Suspense fallback={<div style={{ minHeight: '100vh', background: 'hsl(var(--background))' }} />}>
           <ReplaySharePage />
         </Suspense>
       } />

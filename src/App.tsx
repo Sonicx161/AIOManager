@@ -1,6 +1,5 @@
 import { AccountForm } from '@/components/accounts/AccountForm'
 import { AddonInstaller } from '@/components/addons/AddonInstaller'
-import { MasterPasswordSetup } from '@/components/auth/MasterPasswordSetup'
 import { ExportDialog } from '@/components/ExportDialog'
 import { ImportDialog } from '@/components/ImportDialog'
 import { Layout } from '@/components/layout/Layout'
@@ -36,7 +35,6 @@ function App() {
   const initializeFailover = useFailoverStore((state) => state.initialize)
   const startFailoverAutomation = useFailoverStore((state) => state.startAutomation)
   const isLocked = useAuthStore((state) => state.isLocked)
-  const isPasswordSet = useAuthStore((state) => state.isPasswordSet())
   const [isInitialized, setIsInitialized] = useState(false)
 
   const { auth } = useSyncStore()
@@ -131,7 +129,7 @@ function App() {
     return (
       <Routes>
         <Route path="/replay/share/:token" element={
-          <Suspense fallback={<div style={{ minHeight: '100vh', background: '#08080f' }} />}>
+          <Suspense fallback={<div style={{ minHeight: '100vh', background: 'hsl(var(--background))' }} />}>
             <ReplaySharePage />
           </Suspense>
         } />
@@ -166,10 +164,6 @@ function App() {
     }
 
     return <LoginPage />
-  }
-
-  if (!isPasswordSet) {
-    return <MasterPasswordSetup />
   }
 
   return (

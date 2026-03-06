@@ -334,13 +334,13 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
       {/* Success Message */}
       {success && result && (
         <div className={`p-3 rounded-md border animate-in fade-in slide-in-from-top-2 ${result.details.some(d => (d.result as any).skipped?.length > 0) || result.failed > 0
-          ? "bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800"
-          : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
+          ? "bg-amber-500/10 border-amber-500/20"
+          : "bg-emerald-500/10 border-emerald-500/20"
           }`}>
           <div className="flex flex-col gap-1">
             <p className={`text-sm font-medium flex items-center gap-2 ${result.failed > 0
-              ? "text-amber-600 dark:text-amber-400"
-              : "text-green-600 dark:text-green-400"
+              ? "text-amber-500"
+              : "text-emerald-500"
               }`}>
               <CheckCircle2 className="h-4 w-4" />
               Done, applied to {result.success} account{result.success !== 1 ? 's' : ''}
@@ -596,7 +596,7 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                         >
                           <input
                             type="checkbox"
-                            className="rounded border-gray-300 text-primary focus:ring-primary"
+                            className="rounded border-border text-primary focus:ring-primary"
                             checked={selectedSavedAddonIds.has(savedAddon.id)}
                             onChange={() => toggleSavedAddon(savedAddon.id)}
                           />
@@ -899,7 +899,7 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                         >
                           <input
                             type="checkbox"
-                            className="rounded border-gray-300 text-destructive focus:ring-destructive"
+                            className="rounded border-border text-destructive focus:ring-destructive"
                             checked={selectedAddonIds.has(item.addon.transportUrl)}
                             onChange={() => toggleAddon(item.addon.transportUrl)}
                           />
@@ -927,8 +927,8 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                               </p>
                               {(item.addon.flags?.protected || item.addon.flags?.official) && (
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${item.addon.flags?.protected
-                                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
-                                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                                  ? 'bg-amber-500/10 text-amber-500'
+                                  : 'bg-primary/10 text-primary'
                                   }`}>
                                   {item.addon.flags?.protected ? 'Protected' : 'Official'}
                                 </span>
@@ -1011,7 +1011,7 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                         >
                           <input
                             type="checkbox"
-                            className="rounded border-gray-300 text-primary focus:ring-primary"
+                            className="rounded border-border text-primary focus:ring-primary"
                             checked={selectedUpdateAddonIds.has(item.addon.transportUrl)}
                             onChange={() => {
                               setSelectedUpdateAddonIds((prev) => {
@@ -1049,8 +1049,8 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                               </p>
                               {(item.addon.flags?.protected || item.addon.flags?.official) && (
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${item.addon.flags?.protected
-                                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
-                                  : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                                  ? 'bg-amber-500/10 text-amber-500'
+                                  : 'bg-primary/10 text-primary'
                                   }`}>
                                   {item.addon.flags?.protected ? 'Protected' : 'Official'}
                                 </span>

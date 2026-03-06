@@ -601,7 +601,7 @@ export function AddonList({ accountId }: AddonListProps) {
             <h2 className="text-xl md:text-2xl font-bold truncate">{displayName}</h2>
             <p className="text-xs md:text-sm text-muted-foreground">
               {updatesAvailable.length > 0 && (
-                <span className="text-blue-600 dark:text-blue-400">
+                <span className="text-primary">
                   {updatesAvailable.length} update{updatesAvailable.length !== 1 ? 's' : ''}{' '}
                   available
                 </span>
@@ -734,7 +734,7 @@ export function AddonList({ accountId }: AddonListProps) {
                       <Layers className="h-4 w-4" />
                       Bulk Actions
                       {updatesAvailable.length > 0 && (
-                        <span className="ml-1 w-5 h-5 flex items-center justify-center text-[10px] font-bold bg-blue-500 text-white rounded-full shrink-0">
+                        <span className="ml-1 w-5 h-5 flex items-center justify-center text-[10px] font-bold bg-blue-500 text-primary-foreground rounded-full shrink-0">
                           {updatesAvailable.length}
                         </span>
                       )}
@@ -812,8 +812,8 @@ export function AddonList({ accountId }: AddonListProps) {
                           className={cn(
                             "flex-1",
                             allEnabled
-                              ? "border-red-200 hover:bg-red-50 dark:border-red-900/30 dark:hover:bg-red-900/20"
-                              : "border-emerald-200 hover:bg-emerald-50 dark:border-emerald-900/30 dark:hover:bg-emerald-900/20"
+                              ? "border-destructive/30 hover:bg-destructive/10"
+                              : "border-emerald-500/30 hover:bg-emerald-500/10"
                           )}
                         >
                           {allEnabled ? (
@@ -836,7 +836,7 @@ export function AddonList({ accountId }: AddonListProps) {
                           className={cn(
                             "flex-1",
                             allProtected
-                              ? "border-blue-200 hover:bg-blue-50 dark:border-blue-900/30 dark:hover:bg-blue-900/20 text-blue-600"
+                              ? "border-primary/30 hover:bg-primary/10 text-primary"
                               : ""
                           )}
                         >
@@ -872,7 +872,7 @@ export function AddonList({ accountId }: AddonListProps) {
                         size="sm"
                         onClick={handleReinstallSelected}
                         disabled={updatingAll}
-                        className="flex-1 sm:flex-none border-emerald-200 hover:bg-emerald-50 dark:border-emerald-900/30 dark:hover:bg-emerald-900/20"
+                        className="flex-1 sm:flex-none border-emerald-500/30 hover:bg-emerald-500/10"
                       >
                         <AnimatedUpdateIcon className="h-4 w-4 mr-1.5" isAnimating={updatingAll} />
                         Reinstall ({selectedAddonUrls.size})
@@ -882,7 +882,7 @@ export function AddonList({ accountId }: AddonListProps) {
                         variant="outline"
                         size="sm"
                         onClick={() => setBulkSaveOpen(true)}
-                        className="flex-1 sm:flex-none border-amber-200 hover:bg-amber-50 dark:border-amber-900/30 dark:hover:bg-amber-900/20"
+                        className="flex-1 sm:flex-none border-amber-500/30 hover:bg-amber-500/10"
                       >
                         <Save className="h-4 w-4 mr-1.5" />
                         Save
@@ -904,7 +904,7 @@ export function AddonList({ accountId }: AddonListProps) {
                           variant="default"
                           size="sm"
                           onClick={handleCreateRule}
-                          className="flex-1 sm:flex-none bg-gradient-to-r from-primary to-violet-600 hover:from-primary/90 hover:to-violet-700 text-white shadow-primary/20 dark:shadow-none"
+                          className="flex-1 sm:flex-none bg-gradient-to-r from-primary to-violet-600 hover:from-primary/90 hover:to-violet-700 text-primary-foreground shadow-primary/20"
                         >
                           <Zap className="h-4 w-4 mr-1.5 text-yellow-300" />
                           Autopilot
