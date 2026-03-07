@@ -66,15 +66,13 @@ export function Footer() {
                 <FileText className="h-4 w-4" />
                 Credits
               </Link>
-              <a
-                href="https://ko-fi.com/sonicx161"
-                target="_blank"
-                rel="noopener noreferrer"
+              <Link
+                to="/faq#support"
                 className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors duration-150 border md:border-transparent"
               >
                 <Heart className="h-4 w-4" />
-                Donate
-              </a>
+                Support
+              </Link>
             </div>
 
             <div className="flex flex-col items-center justify-center gap-2 text-center">

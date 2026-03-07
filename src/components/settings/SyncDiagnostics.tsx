@@ -1,7 +1,6 @@
 import * as React from "react"
 import { useSyncStore } from "@/store/syncStore"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
@@ -57,23 +56,23 @@ export function SyncDiagnostics() {
     }
 
     return (
-        <Card className="border shadow-sm overflow-hidden">
-            <CardHeader
-                className="py-3 px-4 cursor-pointer hover:bg-accent/30 transition-colors flex flex-row items-center justify-between"
+        <div className="rounded-xl border bg-card/50 overflow-hidden">
+            <div
+                className="p-4 cursor-pointer hover:bg-muted/30 transition-colors flex items-center justify-between"
                 onClick={() => setIsExpanded(!isExpanded)}
             >
                 <div className="flex items-center gap-2">
                     <History className="h-4 w-4 text-primary" />
                     <div>
-                        <CardTitle className="text-sm font-semibold">Advanced Sync Diagnostics</CardTitle>
-                        <CardDescription className="text-xs">History logs and manual overrides</CardDescription>
+                        <h3 className="text-sm font-semibold">Advanced Sync Diagnostics</h3>
+                        <p className="text-xs text-muted-foreground">History logs and manual overrides</p>
                     </div>
                 </div>
                 {isExpanded ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
-            </CardHeader>
+            </div>
 
             {isExpanded && (
-                <CardContent className="p-4 pt-0 space-y-6 animate-in slide-in-from-top-2 duration-200">
+                <div className="p-4 pt-0 space-y-6 border-t border-border/50 animate-in slide-in-from-top-2 duration-200">
                     {/* Action Buttons */}
                     <div className="grid grid-cols-2 gap-3 pt-2">
                         <div className="space-y-2">
@@ -153,7 +152,7 @@ export function SyncDiagnostics() {
                             </div>
                         </ScrollArea>
                     </div>
-                </CardContent>
+                </div>
             )}
 
             {/* Confirmation Dialogs */}
@@ -188,6 +187,6 @@ export function SyncDiagnostics() {
                 isLoading={isActionLoading}
                 onConfirm={handleForceMirror}
             />
-        </Card>
+        </div>
     )
 }

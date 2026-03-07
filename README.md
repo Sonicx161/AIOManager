@@ -9,13 +9,12 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/version-1.8.3-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
+  [![Version](https://img.shields.io/badge/version-1.8.4-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
   [![Docker Pulls](https://img.shields.io/docker/pulls/sonicx161/aiomanager?style=flat&logo=docker&logoColor=white)](https://hub.docker.com/r/sonicx161/aiomanager)
   [![GitHub Stars](https://img.shields.io/github/stars/sonicx161/aiomanager?style=social)](https://github.com/sonicx161/aiomanager)
-  [![Support on Ko-fi](https://img.shields.io/badge/Support%20on%20Ko--fi-F16061?style=flat&logo=ko-fi&logoColor=white)](https://ko-fi.com/sonicx161)
 
   <br />
 
@@ -177,7 +176,30 @@ With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `serve
 
 ---
 
+## 💝 A Note on Support
 
+AIOManager is a passion project built entirely for free. I honestly feel bad even including a support section because I don't do any of this for money at all, I just wanted to build something useful. However, because so many of you keep generously reaching out and asking for ways to help, I have included these options below so I don't have to keep sharing links individually. You absolutely do not have to contribute, just using the app and being part of the community is more than enough for me. But for those who genuinely want to support the project, here are a few ways you can do so:
+
+### 🌟 Free Ways to Support
+* **Star the Repository** on GitHub to help others find the project.
+* **Contribute**: Report issues, suggest features, or submit pull requests.
+
+### 📦 Debrid Referrals
+If you are signing up for a new Debrid provider, using these referral links helps both of us:
+* **[TorBox](https://torbox.app/subscription?referral=a7aecfd0-57c8-48fa-9e49-2904f09d57d2)**: On your **first purchase**, we *both* get 7 bonus days for each month you buy!
+  * 1 Month = **7 Extra Days**
+  * 3 Months = **21 Extra Days** 
+  * 6 Months = **42 Extra Days**
+  * 12 Months = **84 Extra Days**
+* **[Real-Debrid](http://real-debrid.com/?id=3782026)**
+
+### ☕ Direct Donations
+
+* **[GitHub Sponsors](https://github.com/sponsors/sonicx161)**
+* **[Ko-fi](https://ko-fi.com/sonicx161)**
+* **[Buy Me a Coffee](https://buymeacoffee.com/sonicx161)**
+
+---
 
 ## ⚖️ Disclaimer
 

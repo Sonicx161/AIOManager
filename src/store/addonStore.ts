@@ -61,6 +61,7 @@ interface AddonStore {
   latestVersions: Record<string, string>
   accountStates: Record<string, AccountAddonState>
   loading: boolean
+  isUpdatingAddon: boolean
   error: string | null
   checkingHealth: boolean
 
@@ -198,6 +199,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   latestVersions: {},
   accountStates: {},
   loading: false,
+  isUpdatingAddon: false,
   error: null,
   checkingHealth: false,
   lastHealthCheck: undefined,
@@ -396,7 +398,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   },
 
   updateSavedAddon: async (id, updates) => {
-    set({ loading: true, error: null })
+    set({ isUpdatingAddon: true, error: null })
     try {
       const savedAddon = get().library[id]
       if (!savedAddon) {
@@ -478,13 +480,13 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       set({ error: message })
       throw error
     } finally {
-      set({ loading: false })
+      set({ isUpdatingAddon: false })
     }
   },
 
   updateSavedAddonMetadata: async (id, metadata, skipOutbound = false) => {
     try {
-      set({ loading: true, error: null })
+      set({ isUpdatingAddon: true, error: null })
       const savedAddon = get().library[id]
       if (!savedAddon) throw new Error('Saved addon not found')
 
@@ -538,7 +540,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       set({ error: message })
       throw error
     } finally {
-      set({ loading: false })
+      set({ isUpdatingAddon: false })
     }
   },
 
@@ -1996,7 +1998,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     ])
   },
   replaceTransportUrlUniversally: async (savedAddonId, oldUrl, newUrl, accountId) => {
-    set({ loading: true, error: null })
+    set({ isUpdatingAddon: true, error: null })
     try {
       const normOld = normalizeAddonUrl(oldUrl).toLowerCase()
       const normNew = normalizeAddonUrl(newUrl).toLowerCase()
@@ -2053,7 +2055,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       console.error('[AddonStore] Universal replacement failed:', error)
       throw error
     } finally {
-      set({ loading: false })
+      set({ isUpdatingAddon: false })
     }
   },
 

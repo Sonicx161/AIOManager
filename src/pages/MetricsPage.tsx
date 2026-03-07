@@ -124,7 +124,7 @@ export function MetricsPage() {
                     )}
                     <div className="flex items-center gap-2 w-full sm:w-auto">
                         <Select value={selectedAccountId} onValueChange={setSelectedAccountId}>
-                            <SelectTrigger className="flex-1 sm:w-[180px] h-10 bg-white/5 border-white/10">
+                            <SelectTrigger className="flex-1 sm:w-[180px] h-10 bg-muted/30 border-border/50">
                                 <SelectValue placeholder="All Accounts" />
                             </SelectTrigger>
                             <SelectContent>

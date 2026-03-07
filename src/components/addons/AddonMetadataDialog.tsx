@@ -103,6 +103,7 @@ export function AddonMetadataDialog({
             await onReplaceUrl(newUrl.trim())
             // Success toast is handled by parent, we just clear error
             setError(null)
+            onOpenChange(false)
         } catch (err: any) {
             setError(err.message || 'Failed to replace URL.')
         } finally {

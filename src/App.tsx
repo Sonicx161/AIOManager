@@ -1,7 +1,6 @@
 import { AccountForm } from '@/components/accounts/AccountForm'
 import { AddonInstaller } from '@/components/addons/AddonInstaller'
-import { ExportDialog } from '@/components/ExportDialog'
-import { ImportDialog } from '@/components/ImportDialog'
+
 import { Layout } from '@/components/layout/Layout'
 import { ScrollToTop } from '@/components/ScrollToTop'
 import { Toaster } from '@/components/ui/toaster'
@@ -173,8 +172,7 @@ function App() {
 
       <AccountForm />
       <AddonInstaller />
-      <ExportDialog />
-      <ImportDialog />
+
       <WhatsNewModal />
       <Toaster />
       <KeybindingsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />

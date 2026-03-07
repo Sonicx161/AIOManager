@@ -47,6 +47,7 @@ export function SavedAddonLibrary() {
     getAllTags,
     initialize,
     loading,
+    isUpdatingAddon,
     error,
     checkAllHealth,
     checkingHealth,
@@ -890,6 +891,12 @@ export function SavedAddonLibrary() {
           </TabsList>
 
           <TabsContent value="library" className="space-y-6">
+            {isUpdatingAddon && (
+              <div className="flex items-center gap-2 text-sm text-primary animate-pulse bg-primary/5 p-2 rounded-md border border-primary/20">
+                <AnimatedRefreshIcon className="h-4 w-4" isAnimating={true} />
+                Updating addon...
+              </div>
+            )}
             {!loading && (
               <div className="flex flex-col gap-6 animate-in fade-in duration-500">
                 {/* Actions & Stats Row */}
@@ -1058,7 +1065,7 @@ export function SavedAddonLibrary() {
             )}
 
             {/* Empty State */}
-            {!loading && filteredAddons.length === 0 && (
+            {filteredAddons.length === 0 && (
               <Card>
                 <CardContent className="py-12 text-center">
                   {searchQuery || selectedTag || selectedProfileId ? (
@@ -1097,19 +1104,39 @@ export function SavedAddonLibrary() {
               </Card>
             )}
 
-            {!loading && filteredAddons.length > 0 && (
-
-              selectedProfileId !== null ? (
-                // specific profile selected - show flat flat
-                <div className={cn(
-                  "animate-in fade-in slide-in-from-bottom-4 duration-500",
-                  viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
-                )}>
-                  {filteredAddons.map((addon) => {
-                    const profile = profiles.find(p => p.id === addon.profileId)
-                    if (viewMode === 'list') {
+            {filteredAddons.length > 0 && (
+              <div className={cn(
+                "transition-opacity duration-200",
+                isUpdatingAddon ? "opacity-60 pointer-events-none" : "opacity-100"
+              )}>
+                {selectedProfileId !== null ? (
+                  // specific profile selected - show flat flat
+                  <div className={cn(
+                    "animate-in fade-in slide-in-from-bottom-4 duration-500",
+                    viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
+                  )}>
+                    {filteredAddons.map((addon) => {
+                      const profile = profiles.find(p => p.id === addon.profileId)
+                      if (viewMode === 'list') {
+                        return (
+                          <SavedAddonListRow
+                            key={addon.id}
+                            savedAddon={addon}
+                            latestVersion={latestVersions[addon.manifest.id]}
+                            onUpdate={handleUpdateSavedAddon}
+                            isSelectionMode={isSelectionMode}
+                            isSelected={selectedIds.has(addon.id)}
+                            onToggleSelect={handleToggleSelect}
+                            onLongPress={(id) => {
+                              setIsSelectionMode(true)
+                              handleToggleSelect(id)
+                            }}
+                            profileName={profile?.name}
+                          />
+                        )
+                      }
                       return (
-                        <SavedAddonListRow
+                        <SavedAddonCard
                           key={addon.id}
                           savedAddon={addon}
                           latestVersion={latestVersions[addon.manifest.id]}
@@ -1121,60 +1148,60 @@ export function SavedAddonLibrary() {
                             setIsSelectionMode(true)
                             handleToggleSelect(id)
                           }}
-                          profileName={profile?.name}
+                          profileName={profile ? profile.name : undefined}
                         />
                       )
-                    }
-                    return (
-                      <SavedAddonCard
-                        key={addon.id}
-                        savedAddon={addon}
-                        latestVersion={latestVersions[addon.manifest.id]}
-                        onUpdate={handleUpdateSavedAddon}
-                        isSelectionMode={isSelectionMode}
-                        isSelected={selectedIds.has(addon.id)}
-                        onToggleSelect={handleToggleSelect}
-                        onLongPress={(id) => {
-                          setIsSelectionMode(true)
-                          handleToggleSelect(id)
-                        }}
-                        profileName={profile ? profile.name : undefined}
-                      />
-                    )
-                  })}
-                </div>
-              ) : (
-                // All Addons - Group by Profile
-                <div className="space-y-8 w-full">
-                  {/* Profiles */}
-                  {profiles.map(profile => {
-                    const profileAddons = filteredAddons.filter(a => a.profileId === profile.id)
-                    if (profileAddons.length === 0) return null
-                    const isExpanded = !collapsedProfiles.has(profile.id)
-                    return (
-                      <div key={profile.id} className="space-y-4">
-                        <button
-                          onClick={() => toggleProfile(profile.id)}
-                          className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
-                        >
-                          <h3 className="text-xl font-semibold flex items-center gap-2">
-                            <User className="h-5 w-5" />
-                            {profile.name}
-                          </h3>
-                          <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
-                            {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
-                          </div>
-                        </button>
+                    })}
+                  </div>
+                ) : (
+                  // All Addons - Group by Profile
+                  <div className="space-y-8 w-full">
+                    {/* Profiles */}
+                    {profiles.map(profile => {
+                      const profileAddons = filteredAddons.filter(a => a.profileId === profile.id)
+                      if (profileAddons.length === 0) return null
+                      const isExpanded = !collapsedProfiles.has(profile.id)
+                      return (
+                        <div key={profile.id} className="space-y-4">
+                          <button
+                            onClick={() => toggleProfile(profile.id)}
+                            className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
+                          >
+                            <h3 className="text-xl font-semibold flex items-center gap-2">
+                              <User className="h-5 w-5" />
+                              {profile.name}
+                            </h3>
+                            <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
+                              {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
+                            </div>
+                          </button>
 
-                        {isExpanded && (
-                          <div className={cn(
-                            "animate-in fade-in slide-in-from-top-2 duration-300",
-                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
-                          )}>
-                            {profileAddons.map((addon) => {
-                              if (viewMode === 'list') {
+                          {isExpanded && (
+                            <div className={cn(
+                              "animate-in fade-in slide-in-from-top-2 duration-300",
+                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
+                            )}>
+                              {profileAddons.map((addon) => {
+                                if (viewMode === 'list') {
+                                  return (
+                                    <SavedAddonListRow
+                                      key={addon.id}
+                                      savedAddon={addon}
+                                      latestVersion={latestVersions[addon.manifest.id]}
+                                      onUpdate={handleUpdateSavedAddon}
+                                      isSelectionMode={isSelectionMode}
+                                      isSelected={selectedIds.has(addon.id)}
+                                      onToggleSelect={handleToggleSelect}
+                                      onLongPress={(id) => {
+                                        setIsSelectionMode(true)
+                                        handleToggleSelect(id)
+                                      }}
+                                      profileName={profile.name}
+                                    />
+                                  )
+                                }
                                 return (
-                                  <SavedAddonListRow
+                                  <SavedAddonCard
                                     key={addon.id}
                                     savedAddon={addon}
                                     latestVersion={latestVersions[addon.manifest.id]}
@@ -1189,62 +1216,61 @@ export function SavedAddonLibrary() {
                                     profileName={profile.name}
                                   />
                                 )
-                              }
-                              return (
-                                <SavedAddonCard
-                                  key={addon.id}
-                                  savedAddon={addon}
-                                  latestVersion={latestVersions[addon.manifest.id]}
-                                  onUpdate={handleUpdateSavedAddon}
-                                  isSelectionMode={isSelectionMode}
-                                  isSelected={selectedIds.has(addon.id)}
-                                  onToggleSelect={handleToggleSelect}
-                                  onLongPress={(id) => {
-                                    setIsSelectionMode(true)
-                                    handleToggleSelect(id)
-                                  }}
-                                  profileName={profile.name}
-                                />
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
 
-                  {/* Unassigned */}
-                  {(() => {
-                    const unassigned = filteredAddons.filter(a => !a.profileId || !profiles.some(p => p.id === a.profileId))
-                    if (unassigned.length === 0) return null
-                    const isExpanded = !collapsedProfiles.has('unassigned')
-                    return (
-                      <div className="space-y-4">
-                        <button
-                          onClick={() => toggleProfile('unassigned')}
-                          className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
-                        >
-                          <h3 className="text-xl font-semibold flex items-center gap-2">
-                            <Package className="h-5 w-5" />
-                            Unassigned
-                            <span className="text-sm font-normal text-muted-foreground ml-2">
-                              ({unassigned.length})
-                            </span>
-                          </h3>
-                          <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
-                            {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
-                          </div>
-                        </button>
+                    {/* Unassigned */}
+                    {(() => {
+                      const unassigned = filteredAddons.filter(a => !a.profileId || !profiles.some(p => p.id === a.profileId))
+                      if (unassigned.length === 0) return null
+                      const isExpanded = !collapsedProfiles.has('unassigned')
+                      return (
+                        <div className="space-y-4">
+                          <button
+                            onClick={() => toggleProfile('unassigned')}
+                            className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
+                          >
+                            <h3 className="text-xl font-semibold flex items-center gap-2">
+                              <Package className="h-5 w-5" />
+                              Unassigned
+                              <span className="text-sm font-normal text-muted-foreground ml-2">
+                                ({unassigned.length})
+                              </span>
+                            </h3>
+                            <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
+                              {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
+                            </div>
+                          </button>
 
-                        {isExpanded && (
-                          <div className={cn(
-                            "animate-in fade-in slide-in-from-top-2 duration-300",
-                            viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md overflow-hidden border border-border"
-                          )}>
-                            {unassigned.map((addon) => {
-                              if (viewMode === 'list') {
+                          {isExpanded && (
+                            <div className={cn(
+                              "animate-in fade-in slide-in-from-top-2 duration-300",
+                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md overflow-hidden border border-border"
+                            )}>
+                              {unassigned.map((addon) => {
+                                if (viewMode === 'list') {
+                                  return (
+                                    <SavedAddonListRow
+                                      key={addon.id}
+                                      savedAddon={addon}
+                                      latestVersion={latestVersions[addon.manifest.id]}
+                                      onUpdate={handleUpdateSavedAddon}
+                                      isSelectionMode={isSelectionMode}
+                                      isSelected={selectedIds.has(addon.id)}
+                                      onToggleSelect={handleToggleSelect}
+                                      onLongPress={(id) => {
+                                        setIsSelectionMode(true)
+                                        handleToggleSelect(id)
+                                      }}
+                                    />
+                                  )
+                                }
                                 return (
-                                  <SavedAddonListRow
+                                  <SavedAddonCard
                                     key={addon.id}
                                     savedAddon={addon}
                                     latestVersion={latestVersions[addon.manifest.id]}
@@ -1258,30 +1284,15 @@ export function SavedAddonLibrary() {
                                     }}
                                   />
                                 )
-                              }
-                              return (
-                                <SavedAddonCard
-                                  key={addon.id}
-                                  savedAddon={addon}
-                                  latestVersion={latestVersions[addon.manifest.id]}
-                                  onUpdate={handleUpdateSavedAddon}
-                                  isSelectionMode={isSelectionMode}
-                                  isSelected={selectedIds.has(addon.id)}
-                                  onToggleSelect={handleToggleSelect}
-                                  onLongPress={(id) => {
-                                    setIsSelectionMode(true)
-                                    handleToggleSelect(id)
-                                  }}
-                                />
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })()}
-                </div>
-              )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()}
+                  </div>
+                )}
+              </div>
             )}
           </TabsContent>
 

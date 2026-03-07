@@ -839,9 +839,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               name: (await import('./syncStore')).useSyncStore.getState().auth.name,
                         },
                         addons: JSON.parse((await import('./addonStore')).useAddonStore.getState().exportLibrary()),
+                        accountStates: (await import('./addonStore')).useAddonStore.getState().accountStates,
                         failover: {
                               rules: (await import('./failoverStore')).useFailoverStore.getState().rules,
                               webhook: (await import('./failoverStore')).useFailoverStore.getState().webhook
+                        },
+                        settings: {
+                              theme: localStorage.getItem('stremio-manager:theme') || 'dark',
+                              privacyMode: (await import('./uiStore')).useUIStore.getState().isPrivacyModeEnabled,
+                              libraryViewMode: (await import('./uiStore')).useUIStore.getState().libraryViewMode,
                         }
                   }
 
@@ -869,6 +875,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const { useAddonStore } = await import('./addonStore')
                   await useAddonStore.getState().importLibrary(data, mode === 'merge')
 
+                  // 1.5 Handle Account States (Sync preferences, disabled flags, etc)
+                  if (data.accountStates) {
+                        await useAddonStore.getState().importAccountStates(data.accountStates)
+                  }
+
                   // 2. Handle Failover Rules if present (Resilient scavenge)
                   const { useFailoverStore } = await import('./failoverStore')
                   await useFailoverStore.getState().importRules(data, mode)
@@ -881,6 +892,30 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   }
                   if (Array.isArray(scavengedProfiles) && scavengedProfiles.length > 0) {
                         await useProfileStore.getState().importProfiles(scavengedProfiles)
+                  }
+
+                  // 4. Handle UI Settings if present
+                  if (data.settings) {
+                        const { useUIStore } = await import('./uiStore')
+
+                        // Theme
+                        if (data.settings.theme) {
+                              localStorage.setItem('stremio-manager:theme', data.settings.theme)
+                              // Dispatch an event so ThemeProvider picks it up immediately
+                              window.dispatchEvent(new Event('storage'))
+                        }
+
+                        // Privacy Mode
+                        if (typeof data.settings.privacyMode === 'boolean') {
+                              if (useUIStore.getState().isPrivacyModeEnabled !== data.settings.privacyMode) {
+                                    useUIStore.getState().togglePrivacyMode()
+                              }
+                        }
+
+                        // Library View Mode
+                        if (data.settings.libraryViewMode && ['grid', 'list'].includes(data.settings.libraryViewMode)) {
+                              useUIStore.getState().setLibraryViewMode(data.settings.libraryViewMode)
+                        }
                   }
 
                   // Resilience: Support data.accounts being a wrapper object, a direct array, or missing

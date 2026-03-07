@@ -73,7 +73,7 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
     setFormError(null)
     try {
       await replaceTransportUrlUniversally(savedAddon.id, savedAddon.installUrl, newUrl.trim())
-      // Keep advanced open but updated
+      onClose()
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to replace URL')
     } finally {
@@ -141,18 +141,20 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
           />
         </div>
 
-        <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/30">
-          <div className="space-y-0.5">
-            <Label htmlFor="sync-with-installed" className="text-sm font-semibold">Keep in sync with installed versions</Label>
-            <p className="text-[10px] text-muted-foreground uppercase tracking-tight">
+        <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/30 gap-3">
+          <div className="space-y-0.5 flex-1 min-w-0">
+            <Label htmlFor="sync-with-installed" className="text-sm font-semibold block truncate">Keep in sync with installed versions</Label>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-tight break-words">
               When enabled, changing this addon's URL or metadata in the library will automatically update it across all accounts where it is installed.
             </p>
           </div>
-          <Switch
-            id="sync-with-installed"
-            checked={formData.syncWithInstalled}
-            onCheckedChange={(checked) => setFormData(prev => ({ ...prev, syncWithInstalled: checked }))}
-          />
+          <div className="flex-shrink-0">
+            <Switch
+              id="sync-with-installed"
+              checked={formData.syncWithInstalled}
+              onCheckedChange={(checked) => setFormData(prev => ({ ...prev, syncWithInstalled: checked }))}
+            />
+          </div>
         </div>
 
         {/* Manifest Info */}
@@ -173,15 +175,15 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
                 <span className="text-lg text-muted-foreground">📦</span>
               </div>
             )}
-            <div className="text-sm space-y-1">
-              <p>
+            <div className="text-sm space-y-1 overflow-hidden min-w-0">
+              <p className="truncate" title={savedAddon.manifest.name}>
                 <span className="font-medium">Name:</span> {savedAddon.manifest.name}
               </p>
-              <p>
+              <p className="break-all">
                 <span className="font-medium">ID:</span>{' '}
                 {isPrivacyModeEnabled ? '********' : savedAddon.manifest.id}
               </p>
-              <p>
+              <p className="truncate" title={savedAddon.manifest.version}>
                 <span className="font-medium">Version:</span> {savedAddon.manifest.version}
               </p>
             </div>
@@ -217,18 +219,18 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
             <div className="mt-4 p-4 border rounded-md bg-destructive/5 border-destructive/20 space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
               <div className="space-y-1">
                 <h4 className="text-sm font-semibold text-destructive uppercase tracking-tight">Replace Transport URL</h4>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-xs text-muted-foreground break-words">
                   Swap the underlying manifest URL. This will also update any Autopilot rules using this addon.
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 min-w-0">
                 <Input
                   id="edit-url"
                   type="text"
                   value={newUrl}
                   onChange={(e) => setNewUrl(e.target.value)}
                   placeholder="Enter new manifest URL"
-                  className="flex-1 text-xs bg-background"
+                  className="flex-1 text-xs bg-background min-w-0"
                 />
                 <Button
                   type="button"
@@ -241,7 +243,7 @@ export function SavedAddonDetails({ savedAddon, onClose }: { savedAddon: SavedAd
                 </Button>
               </div>
               {!isPrivacyModeEnabled && (
-                <p className="text-[10px] text-muted-foreground truncate uppercase opacity-50">
+                <p className="text-[10px] text-muted-foreground uppercase opacity-50 break-all">
                   Current: {savedAddon.installUrl}
                 </p>
               )}

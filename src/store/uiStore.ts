@@ -4,8 +4,7 @@ import { create } from 'zustand'
 interface UIStore {
   isAddAccountDialogOpen: boolean
   isAddAddonDialogOpen: boolean
-  isExportDialogOpen: boolean
-  isImportDialogOpen: boolean
+
   isPrivacyModeEnabled: boolean
   isWhatsNewOpen: boolean
   libraryViewMode: 'grid' | 'list'
@@ -14,10 +13,7 @@ interface UIStore {
   closeAddAccountDialog: () => void
   openAddAddonDialog: (accountId: string) => void
   closeAddAddonDialog: () => void
-  openExportDialog: () => void
-  closeExportDialog: () => void
-  openImportDialog: () => void
-  closeImportDialog: () => void
+
   setWhatsNewOpen: (open: boolean) => void
   togglePrivacyMode: () => void
   setLibraryViewMode: (mode: 'grid' | 'list') => void
@@ -32,11 +28,20 @@ const VIEW_MODE_KEY = 'stremio-manager:library-view-mode'
 export const useUIStore = create<UIStore>((set, get) => ({
   isAddAccountDialogOpen: false,
   isAddAddonDialogOpen: false,
-  isExportDialogOpen: false,
-  isImportDialogOpen: false,
-  isPrivacyModeEnabled: false,
+
+  isPrivacyModeEnabled: (() => {
+    try {
+      const stored = localStorage.getItem(PRIVACY_MODE_KEY)
+      return stored !== null ? JSON.parse(stored) : false
+    } catch { return false }
+  })(),
   isWhatsNewOpen: false,
-  libraryViewMode: 'grid',
+  libraryViewMode: (() => {
+    try {
+      const stored = localStorage.getItem(VIEW_MODE_KEY)
+      return stored === 'grid' || stored === 'list' ? stored as 'grid' | 'list' : 'grid'
+    } catch { return 'grid' }
+  })(),
 
   editingAccount: null,
   selectedAccountId: null,
@@ -47,10 +52,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   openAddAddonDialog: (accountId: string) =>
     set({ isAddAddonDialogOpen: true, selectedAccountId: accountId }),
   closeAddAddonDialog: () => set({ isAddAddonDialogOpen: false, selectedAccountId: null }),
-  openExportDialog: () => set({ isExportDialogOpen: true }),
-  closeExportDialog: () => set({ isExportDialogOpen: false }),
-  openImportDialog: () => set({ isImportDialogOpen: true }),
-  closeImportDialog: () => set({ isImportDialogOpen: false }),
+
   setWhatsNewOpen: (open: boolean) => set({ isWhatsNewOpen: open }),
   togglePrivacyMode: () => {
     const newValue = !get().isPrivacyModeEnabled
@@ -62,19 +64,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
     localStorage.setItem(VIEW_MODE_KEY, mode)
   },
   initialize: () => {
-    const storedPrivacy = localStorage.getItem(PRIVACY_MODE_KEY)
-    if (storedPrivacy !== null) {
-      try {
-        set({ isPrivacyModeEnabled: JSON.parse(storedPrivacy) })
-      } catch (e) {
-        console.warn('Failed to parse privacy mode setting:', e)
-        localStorage.removeItem(PRIVACY_MODE_KEY)
-      }
-    }
-
-    const storedViewMode = localStorage.getItem(VIEW_MODE_KEY)
-    if (storedViewMode === 'grid' || storedViewMode === 'list') {
-      set({ libraryViewMode: storedViewMode })
-    }
+    // Privacy mode and viewMode are now eagerly loaded at store creation.
+    // This function is kept as a no-op for backwards compatibility.
   },
 }))

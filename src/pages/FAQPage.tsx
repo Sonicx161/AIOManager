@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { GripVertical, Activity, LayoutGrid, ShieldAlert, Palette, Layers, Edit, FileText, Github, ExternalLink, Lightbulb, Key, Zap, Shield, Cloud, Eye, HeartPulse } from 'lucide-react'
+import { GripVertical, Activity, LayoutGrid, ShieldAlert, Palette, Layers, Edit, FileText, Github, ExternalLink, Lightbulb, Key, Zap, Shield, Cloud, Eye, HeartPulse, Heart, Box } from 'lucide-react'
 import { useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
 
@@ -412,6 +412,81 @@ export function FAQPage() {
               </CardContent>
             </Card>
           </div>
+        </section>
+
+        <section id="support" className="space-y-4 scroll-mt-48">
+          <h2 className="text-xl font-semibold flex items-center gap-2">
+            <Heart className="h-5 w-5 text-rose-500" />
+            Support AIOManager
+          </h2>
+          <Card>
+            <CardHeader>
+              <CardTitle>A Note on Support</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-6 text-muted-foreground text-sm">
+                <p>
+                  AIOManager is a passion project built entirely for free. I honestly feel bad even including a support section because I don't do any of this for money at all, I just wanted to build something useful. However, because so many of you keep generously reaching out and asking for ways to help, I have included these options below so I don't have to keep sharing links individually. You absolutely do not have to contribute, just using the app and being part of the community is more than enough for me. But for those who genuinely want to support the project, here are a few ways you can do so:
+                </p>
+
+                <div className="space-y-3">
+                  <h3 className="text-foreground font-semibold flex items-center gap-2">
+                    <Heart className="h-4 w-4 text-emerald-500" />
+                    Free Ways to Support
+                  </h3>
+                  <ul className="list-disc list-inside space-y-2 ml-2">
+                    <li>
+                      <strong>Star the Repository</strong> on <a href="https://github.com/sonicx161/AIOManager" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">GitHub</a> to help others find the project.
+                    </li>
+                    <li>
+                      <strong>Contribute</strong>: Report issues, suggest features, or submit pull requests.
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="space-y-3">
+                  <h3 className="text-foreground font-semibold flex items-center gap-2">
+                    <Box className="h-4 w-4 text-blue-500" />
+                    Debrid Referrals
+                  </h3>
+                  <p>If you are signing up for a new Debrid provider, using these referral links helps both of us:</p>
+                  <ul className="list-disc list-inside space-y-2 ml-2">
+                    <li>
+                      <a href="https://torbox.app/subscription?referral=a7aecfd0-57c8-48fa-9e49-2904f09d57d2" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">TorBox</a>: On your <strong>first purchase</strong>, we <em>both</em> get 7 bonus days for each month you buy!
+                      <ul className="list-[circle] list-inside ml-6 mt-1 text-xs space-y-0.5 text-muted-foreground">
+                        <li>1 Month = <strong className="text-foreground/80">7 Extra Days</strong></li>
+                        <li>3 Months = <strong className="text-foreground/80">21 Extra Days</strong></li>
+                        <li>6 Months = <strong className="text-foreground/80">42 Extra Days</strong></li>
+                        <li>12 Months = <strong className="text-foreground/80">84 Extra Days</strong></li>
+                      </ul>
+                    </li>
+                    <li>
+                      <a href="http://real-debrid.com/?id=3782026" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">Real-Debrid</a>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="space-y-3">
+                  <h3 className="text-foreground font-semibold flex items-center gap-2">
+                    <Heart className="h-4 w-4 text-rose-500" />
+                    Direct Donations
+                  </h3>
+                  <ul className="list-disc list-inside space-y-2 ml-2">
+                    <li>
+                      <a href="https://github.com/sponsors/sonicx161" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">GitHub Sponsors</a>
+                    </li>
+                    <li>
+                      <a href="https://ko-fi.com/sonicx161" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">Ko-fi</a>
+                    </li>
+                    <li>
+                      <a href="https://buymeacoffee.com/sonicx161" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline font-medium">Buy Me a Coffee</a>
+                    </li>
+                  </ul>
+
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </section>
 
         <section id="credits" className="space-y-4 scroll-mt-48">

@@ -1,9 +1,9 @@
 import { useEffect, useMemo } from 'react'
 import { useProviderStore } from '@/store/providerStore'
 import { useVaultStore } from '@/store/vaultStore'
-import { ProviderHealthBadge } from './ProviderHealthBadge'
+
 import { Button } from '@/components/ui/button'
-import { RefreshCw, Activity, ShieldCheck, ExternalLink } from 'lucide-react'
+import { RefreshCw, Activity, ExternalLink } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 export function ExpiryDashboard() {
@@ -56,33 +56,83 @@ export function ExpiryDashboard() {
                     return (
                         <Card key={key.id} className="overflow-hidden border bg-card/50 shadow-sm backdrop-blur-sm hover:shadow-md transition-all group">
                             <CardHeader className="p-4 pb-2 space-y-0">
-                                <div className="flex items-start justify-between">
-                                    <div className="space-y-1">
+                                <div className="flex flex-row items-start justify-between">
+                                    <div className="flex flex-col">
                                         <CardTitle className="text-sm font-bold truncate max-w-[120px]">{key.name}</CardTitle>
-                                        <div className="flex items-center gap-1.5">
-                                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
-                                                {key.provider.replace('-', ' ')}
-                                            </span>
-                                        </div>
+                                        <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 mt-0.5">
+                                            {key.provider.replace('-', ' ')}
+                                        </span>
                                     </div>
-                                    <ShieldCheck className="h-4 w-4 text-primary/40 group-hover:text-primary transition-colors" />
+                                    {status ? (
+                                        <div className={`px-2 py-0.5 rounded-sm text-[10px] font-black uppercase tracking-widest border ${status.status === 'active' ? 'bg-green-500/10 text-green-500 border-green-500/20' :
+                                            status.status === 'expired' ? 'bg-amber-500/10 text-amber-500 border-amber-500/20' :
+                                                'bg-destructive/10 text-destructive border-destructive/20'
+                                            }`}>
+                                            {status.status || 'UNKNOWN'}
+                                        </div>
+                                    ) : (
+                                        <div className="h-5 w-16 bg-muted animate-pulse rounded-sm" />
+                                    )}
                                 </div>
                             </CardHeader>
-                            <CardContent className="p-4 pt-2">
-                                <div className="mt-2 flex items-center justify-between">
+                            <CardContent className="p-4 pt-1">
+                                <div className="mt-1 space-y-1">
                                     {status ? (
-                                        <ProviderHealthBadge health={status} />
-                                    ) : (
-                                        <div className="h-6 w-20 bg-muted animate-pulse rounded-full" />
-                                    )}
+                                        <>
+                                            <div className="flex flex-col items-start my-2">
+                                                {status.daysRemaining !== null && status.daysRemaining !== undefined ? (() => {
+                                                    const total = status.daysRemaining
+                                                    const years = Math.floor(total / 365)
+                                                    const months = Math.floor((total % 365) / 30)
+                                                    const days = total % 30
+                                                    const parts = []
+                                                    if (years > 0) parts.push(`${years}y`)
+                                                    if (months > 0) parts.push(`${months}mo`)
+                                                    if (days > 0 || parts.length === 0) parts.push(`${days}d`)
+                                                    return (
+                                                        <>
+                                                            <span className="text-2xl font-black text-foreground leading-tight">{parts.join(' ')}</span>
+                                                            {status.expiresAt ? (
+                                                                <span className="text-[10px] text-muted-foreground mt-0.5">Expires {new Date(status.expiresAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                                                            ) : (
+                                                                <span className="h-3 w-1 opacity-0 mt-0.5" />
+                                                            )}
+                                                        </>
+                                                    )
+                                                })() : (
+                                                    <span className="text-2xl font-black text-muted-foreground leading-tight">—</span>
+                                                )}
+                                            </div>
 
-                                    <div className="flex items-center gap-1">
-                                        <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" asChild>
-                                            <a href={getProviderUrl(key.provider)} target="_blank" rel="noopener noreferrer">
-                                                <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
-                                            </a>
-                                        </Button>
-                                    </div>
+                                            {status.error && (
+                                                <p className="text-[10px] text-destructive leading-tight italic mb-2">
+                                                    {status.error}
+                                                </p>
+                                            )}
+
+                                            <div className="flex items-center justify-between border-t border-border/40 mt-3 pt-3">
+                                                <span className="text-[10px] text-muted-foreground">{status.lastChecked ? new Date(status.lastChecked).toLocaleTimeString() : 'Never'}</span>
+                                                <a
+                                                    href={getProviderUrl(key.provider)}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="flex items-center text-[10px] text-primary hover:underline"
+                                                >
+                                                    API Dashboard <ExternalLink className="h-2.5 w-2.5 ml-1" />
+                                                </a>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div className="space-y-1 my-2">
+                                            <div className="h-6 w-20 bg-muted animate-pulse rounded" />
+                                            <div className="h-3 w-28 bg-muted animate-pulse rounded" />
+
+                                            <div className="flex justify-between items-center pt-3 mt-3 border-t border-border/40">
+                                                <div className="h-3 w-16 bg-muted animate-pulse rounded" />
+                                                <div className="h-3 w-16 bg-muted animate-pulse rounded" />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
