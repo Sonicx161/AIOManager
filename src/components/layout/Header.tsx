@@ -61,7 +61,7 @@ export function Header() {
   }
 
   return (
-    <header className="border-b bg-card/95 sticky top-0 z-40">
+    <header className="border-b bg-card/95 sticky top-0 z-50">
       <div className="container mx-auto px-4 py-4 md:py-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="flex items-center justify-between w-full md:w-auto">

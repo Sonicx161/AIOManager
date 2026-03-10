@@ -9,13 +9,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useToast } from '@/hooks/use-toast'
-import { getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
+import { cn, getAddonConfigureUrl, isNewerVersion } from '@/lib/utils'
 import { useAddonStore } from '@/store/addonStore'
 import { Copy, MoreVertical, Pencil } from 'lucide-react'
 import { AnimatedSettingsIcon, AnimatedTrashIcon, AnimatedUpdateIcon } from '../ui/AnimatedIcons'
 import { restorationManager } from '@/lib/autopilot/restorationManager'
 
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { SavedAddon } from '@/types/saved-addon'
 import { SavedAddonDetails } from './SavedAddonDetails'
 import { getTagColor } from '@/lib/tag-utils'
@@ -31,7 +31,7 @@ interface SavedAddonCardProps {
   profileName?: string
 }
 
-export function SavedAddonCard({
+export const SavedAddonCard = React.memo(function SavedAddonCard({
   savedAddon,
   latestVersion,
   onUpdate,
@@ -120,33 +120,13 @@ export function SavedAddonCard({
     <>
       <div
         {...longPressProps}
-        className={`group flex flex-col h-full relative ${isSelectionMode ? 'cursor-pointer' : ''}`}
-        style={{
-          background: 'hsl(var(--muted) / 0.4)',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'hsl(var(--border))',
-          borderRadius: '20px',
-          padding: '20px',
-          transition: 'all 200ms ease',
-          ...(isSelected ? {
-            boxShadow: '0 0 15px hsla(var(--primary), 0.2)',
-            background: 'hsla(var(--primary), 0.1)',
-            borderColor: 'hsl(var(--primary))'
-          } : {})
-        }}
-        onMouseEnter={(e) => {
-          if (!isSelected) {
-            e.currentTarget.style.background = 'hsl(var(--muted) / 0.7)';
-            e.currentTarget.style.borderColor = 'hsl(var(--border))';
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!isSelected) {
-            e.currentTarget.style.background = 'hsl(var(--muted) / 0.4)';
-            e.currentTarget.style.borderColor = 'hsl(var(--border))';
-          }
-        }}
+        className={cn(
+          "group flex flex-col h-full relative rounded-2xl p-5 border transition-all duration-200",
+          isSelectionMode ? "cursor-pointer" : "",
+          isSelected
+            ? "bg-primary/10 border-primary shadow-[0_0_15px_hsla(var(--primary),0.2)]"
+            : "bg-muted/40 border-border hover:bg-muted/70"
+        )}
         onClick={() => {
           if (isLongPressTriggered) return
           if (isSelectionMode && onToggleSelect) {
@@ -358,65 +338,65 @@ export function SavedAddonCard({
 
             <div className="flex-grow"></div>
 
-            <div className="flex items-end justify-between mt-auto pt-2">
-              {/* Tags */}
-              <div className="flex flex-wrap gap-1 relative z-20" onClick={(e) => e.stopPropagation()}>
-                {hasUpdate && onUpdate && (
-                  <button
-                    onClick={handleUpdate}
-                    disabled={updating}
+            {/* Tags + Update button */}
+            <div className="flex flex-wrap gap-1 relative z-20 mt-auto pt-2" onClick={(e) => e.stopPropagation()}>
+              {hasUpdate && onUpdate && (
+                <button
+                  onClick={handleUpdate}
+                  disabled={updating}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '3px',
+                    padding: '2px 7px',
+                    borderRadius: '999px',
+                    background: 'rgba(245,158,11,0.12)',
+                    border: '1px solid rgba(245,158,11,0.3)',
+                    fontFamily: '"DM Mono", monospace',
+                    fontSize: '8px',
+                    fontWeight: 700,
+                    color: '#f59e0b',
+                    cursor: updating ? 'not-allowed' : 'pointer',
+                    opacity: updating ? 0.5 : 1,
+                    flexShrink: 0,
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {updating ? 'Updating...' : <><AnimatedUpdateIcon className="h-3 w-3 mr-1" isAnimating={updating} /> Update</>}
+                </button>
+              )}
+              {savedAddon.tags.map((tag) => {
+                const color = getTagColor(tag)
+                return (
+                  <span
+                    key={tag}
+                    className="font-mono text-[9px] pointer-events-none uppercase tracking-wider font-bold mb-0.5 px-1.5 py-0.5 rounded-md"
                     style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '3px',
-                      padding: '2px 7px',
-                      borderRadius: '999px',
-                      background: 'rgba(245,158,11,0.12)',
-                      border: '1px solid rgba(245,158,11,0.3)',
-                      fontFamily: '"DM Mono", monospace',
-                      fontSize: '8px',
-                      fontWeight: 700,
-                      color: '#f59e0b',
-                      cursor: updating ? 'not-allowed' : 'pointer',
-                      opacity: updating ? 0.5 : 1,
-                      flexShrink: 0,
-                      whiteSpace: 'nowrap'
+                      background: color.bg,
+                      color: color.text,
+                      border: `1px solid ${color.border}`
                     }}
                   >
-                    {updating ? 'Updating...' : <><AnimatedUpdateIcon className="h-3 w-3 mr-1" isAnimating={updating} /> Update</>}
-                  </button>
-                )}
-                {savedAddon.tags.map((tag) => {
-                  const color = getTagColor(tag)
-                  return (
-                    <span
-                      key={tag}
-                      className="font-mono text-[9px] pointer-events-none uppercase tracking-wider font-bold mb-0.5 px-1.5 py-0.5 rounded-md"
-                      style={{
-                        background: color.bg,
-                        color: color.text,
-                        border: `1px solid ${color.border}`
-                      }}
-                    >
-                      {tag}
-                    </span>
-                  )
-                })}
-              </div>
+                    {tag}
+                  </span>
+                )
+              })}
+            </div>
 
-              {/* Consolidated Footer */}
-              <div
-                className="shrink-0 pl-2 text-right"
-                style={{
-                  fontFamily: '"DM Mono", monospace',
-                  fontSize: '9px',
-                  color: 'hsl(var(--muted-foreground) / 0.6)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em'
-                }}
-              >
-                {profileName && <span>{profileName} &bull; </span>}SAVED {getTimeAgo(new Date(savedAddon.createdAt))}
+            {/* Footer: profile + timestamp */}
+            <div className="flex items-center justify-between pt-3 mt-2 border-t border-border/30">
+              <div className="flex items-center gap-1.5 min-w-0">
+                {profileName && (
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-foreground/25 truncate">
+                    {profileName}
+                  </span>
+                )}
               </div>
+              {savedAddon.createdAt && (
+                <span className="text-[10px] text-foreground/20 tabular-nums shrink-0">
+                  {getTimeAgo(new Date(savedAddon.createdAt))}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -451,4 +431,4 @@ export function SavedAddonCard({
       />
     </>
   )
-}
+})

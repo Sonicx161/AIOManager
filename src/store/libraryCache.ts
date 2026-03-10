@@ -81,6 +81,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
     ensureLoaded: async (accounts: StremioAccount[]) => {
         const state = get()
+        if (state.loading) return
         const now = Date.now()
 
         // 1. Check if already loaded in memory and fresh

@@ -9,7 +9,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/version-1.8.4-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
+  [![Version](https://img.shields.io/badge/version-1.8.5-blue.svg)](https://github.com/sonicx161/aiomanager/releases)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
   [![Vite](https://img.shields.io/badge/Vite-B73BFE?style=flat&logo=vite&logoColor=FFD62E)](https://vitejs.dev/)
   [![TailwindCSS](https://img.shields.io/badge/Tailwind_CSS-38B2AC?style=flat&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
@@ -26,7 +26,7 @@
 
 > [!NOTE]
 > **Maintenance Status**
-> AIOManager is now in maintenance mode. Active feature development has wrapped up with v1.7.0. Bug reports via GitHub Issues are welcome and PRs from the community are always open. Maintenance is done on a best-effort basis.
+> AIOManager is in maintenance mode. Active feature development has wrapped up, but bug fixes and stability improvements ship as needed. Bug reports via GitHub Issues are welcome and PRs from the community are always open.
 
 ---
 

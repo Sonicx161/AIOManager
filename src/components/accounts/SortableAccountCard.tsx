@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { AccountCard } from './AccountCard'
 import { StremioAccount } from '@/types/account'
 import { useSortable } from '@dnd-kit/sortable'
@@ -13,7 +14,7 @@ interface SortableAccountCardProps {
     isPrivacyMode?: boolean
 }
 
-export function SortableAccountCard({
+export const SortableAccountCard = memo(function SortableAccountCard({
     account,
     isSelected,
     onToggleSelect,
@@ -56,4 +57,4 @@ export function SortableAccountCard({
             />
         </div>
     )
-}
+})

@@ -18,6 +18,7 @@ import {
 import { normalizeTagName } from '@/lib/addon-validator'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
+import { useAccountStore } from '@/store/accountStore'
 import { AddonManifest, AddonDescriptor } from '@/types/addon'
 import { getEffectiveManifest } from '@/lib/addon-utils'
 import {
@@ -313,9 +314,31 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   },
 
   updateLatestVersions: (versions) => {
-    const newVersions = { ...get().latestVersions, ...versions }
-    set({ latestVersions: newVersions })
-    localforage.setItem('stremio-manager:latest-versions', newVersions).catch(console.error)
+    const merged = { ...get().latestVersions, ...versions }
+
+    // Prune stale entries — remove any manifest ID that is no longer installed
+    // on any account or present in the saved addon library.
+    // Prevents unbounded growth from uninstalled addons accumulating forever.
+    const { accounts } = useAccountStore.getState()
+    const library = get().library
+
+    const liveIds = new Set<string>()
+    for (const account of accounts) {
+      for (const addon of account.addons) {
+        if (addon.manifest?.id) liveIds.add(addon.manifest.id)
+      }
+    }
+    for (const savedAddon of Object.values(library)) {
+      if (savedAddon.manifest?.id) liveIds.add(savedAddon.manifest.id)
+    }
+
+    const pruned: Record<string, string> = {}
+    for (const [id, version] of Object.entries(merged)) {
+      if (liveIds.has(id)) pruned[id] = version
+    }
+
+    set({ latestVersions: pruned })
+    localforage.setItem('stremio-manager:latest-versions', pruned).catch(console.error)
   },
 
   getLatestVersion: (manifestId) => {

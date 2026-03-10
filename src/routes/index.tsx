@@ -4,14 +4,15 @@ import { AccountDetailPage } from '@/pages/AccountDetailPage'
 import { SavedAddonsPage } from '@/pages/SavedAddonsPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 
-import { ActivityPage } from '@/pages/ActivityPage'
-import { MetricsPage } from '@/pages/MetricsPage'
 import { FAQPage } from '@/pages/FAQPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { lazy, Suspense } from 'react'
+import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 
 const ReplayPage = lazy(() => import('@/pages/ReplayPage').then(m => ({ default: m.ReplayPage })))
 const ReplaySharePage = lazy(() => import('@/pages/ReplaySharePage').then(m => ({ default: m.ReplaySharePage })))
+const ActivityPage = lazy(() => import('@/pages/ActivityPage').then(m => ({ default: m.ActivityPage })))
+const MetricsPage = lazy(() => import('@/pages/MetricsPage').then(m => ({ default: m.MetricsPage })))
 
 export function AppRoutes() {
   return (
@@ -19,12 +20,26 @@ export function AppRoutes() {
       <Route path="/" element={<AccountsPage />} />
       <Route path="/saved-addons" element={<SavedAddonsPage />} />
 
-      <Route path="/activity" element={<ActivityPage />} />
-      <Route path="/metrics" element={<MetricsPage />} />
+      <Route path="/activity" element={
+        <ErrorBoundary>
+          <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Activity...</div>}>
+            <ActivityPage />
+          </Suspense>
+        </ErrorBoundary>
+      } />
+      <Route path="/metrics" element={
+        <ErrorBoundary>
+          <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Metrics...</div>}>
+            <MetricsPage />
+          </Suspense>
+        </ErrorBoundary>
+      } />
       <Route path="/replay" element={
-        <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Replay...</div>}>
-          <ReplayPage />
-        </Suspense>
+        <ErrorBoundary>
+          <Suspense fallback={<div className="p-8 text-center animate-pulse">Loading Replay...</div>}>
+            <ReplayPage />
+          </Suspense>
+        </ErrorBoundary>
       } />
       <Route path="/replay/share/:token" element={
         <Suspense fallback={<div style={{ minHeight: '100vh', background: 'hsl(var(--background))' }} />}>

@@ -482,13 +482,6 @@ export const useSyncStore = create<SyncState>()(
                     return
                 }
 
-                (get() as any).addLogEntry({
-                    type: isAuto ? 'push' : 'push',
-                    status: 'success', // Provisional, updated on error
-                    message: isAuto ? 'Auto-sync started' : 'Manual push started',
-                    isAuto
-                })
-
                 set({ lastActionTimestamp: Date.now() })
                 const baseUrl = serverUrl || DEFAULT_SERVER
                 const apiPath = baseUrl.startsWith('http') ? `${baseUrl}/api` : baseUrl

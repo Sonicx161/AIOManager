@@ -143,7 +143,7 @@ export function VaultSettings() {
                     </h2>
                     <p className="text-sm text-muted-foreground">Encrypted locally on this device.</p>
                 </div>
-                <Button size="sm" onClick={handleOpenAdd} className="bg-primary/10 text-primary hover:bg-primary/20 border-none shadow-none">
+                <Button size="sm" variant="outline" onClick={handleOpenAdd} className="border-primary/30 text-primary hover:bg-primary/10">
                     <Plus className="h-4 w-4 mr-2" />
                     Add Key
                 </Button>

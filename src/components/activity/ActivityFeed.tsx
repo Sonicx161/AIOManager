@@ -233,16 +233,14 @@ export function ActivityFeed({
         <div className="space-y-6">
             <Tabs defaultValue="all" onValueChange={setActiveTab} className="w-full">
                 <div className="flex items-center justify-between mb-2 gap-4">
-                    <div className="overflow-x-auto scrollbar-hide">
-                        <TabsList className="flex h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap">
-                            <TabsTrigger value="all" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">All Activity</TabsTrigger>
-                            <TabsTrigger value="movies" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Movies</TabsTrigger>
-                            <TabsTrigger value="series" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Series</TabsTrigger>
-                            <TabsTrigger value="now" className="data-[state=active]:text-green-400 data-[state=active]:bg-green-400/10 rounded-full px-4 border border-border/50 data-[state=active]:border-green-400/20 bg-muted/30 shrink-0 flex items-center shadow-sm">
-                                <Activity className="h-3 w-3 mr-1.5" /> Now
-                            </TabsTrigger>
-                        </TabsList>
-                    </div>
+                    <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full pb-2">
+                        <TabsTrigger value="all" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">All Activity</TabsTrigger>
+                        <TabsTrigger value="movies" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Movies</TabsTrigger>
+                        <TabsTrigger value="series" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm">Series</TabsTrigger>
+                        <TabsTrigger value="now" className="data-[state=active]:text-green-400 data-[state=active]:bg-green-400/10 rounded-full px-4 border border-border/50 data-[state=active]:border-green-400/20 bg-muted/30 shrink-0 flex items-center shadow-sm">
+                            <Activity className="h-3 w-3 mr-1.5" /> Now
+                        </TabsTrigger>
+                    </TabsList>
 
                     <span className="text-[10px] uppercase font-black tracking-wider text-muted-foreground whitespace-nowrap hidden sm:block">
                         Showing {Math.min(visibleCount, filteredHistory.length)} of {filteredHistory.length}

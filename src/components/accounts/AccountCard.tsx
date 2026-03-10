@@ -12,13 +12,14 @@ import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { StremioAccount } from '@/types/account'
-import { AlertCircle, AlertTriangle, ShieldCheck, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ChevronRight } from 'lucide-react'
+import { AlertCircle, AlertTriangle, ShieldCheck, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ChevronRight, ArrowUpCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { maskEmail, getTimeAgo } from '@/lib/utils'
-import { useMemo, useRef, useEffect, useState } from 'react'
+import { maskEmail, getTimeAgo, isNewerVersion } from '@/lib/utils'
+import { memo, useMemo, useRef, useEffect, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useLongPress } from '@/hooks/useLongPress'
 import { useToast } from '@/hooks/use-toast'
+import { useAddonStore } from '@/store/addonStore'
 
 interface AccountCardProps {
   account: StremioAccount
@@ -32,7 +33,7 @@ interface AccountCardProps {
   isPrivacyMode?: boolean
 }
 
-export function AccountCard({
+export const AccountCard = memo(function AccountCard({
   account,
   isSelected = false,
   onToggleSelect,
@@ -54,10 +55,22 @@ export function AccountCard({
       isAddAccountDialogOpen: state.isAddAccountDialogOpen
     }))
   )
-  const allRules = useFailoverStore((state) => state.rules)
-  const failoverRules = useMemo(() => allRules.filter(r => r.accountId === account.id), [allRules, account.id])
+  const failoverRules = useFailoverStore(
+    useShallow((state) => state.rules.filter(r => r.accountId === account.id))
+  )
   const activeRules = useMemo(() => failoverRules.filter(r => r.isActive), [failoverRules])
   const failedOverRules = useMemo(() => activeRules.filter(r => r.activeUrl !== r.priorityChain?.[0]), [activeRules])
+
+
+
+  const updateCount = useAddonStore(
+    useShallow((state) =>
+      account.addons.filter(addon => {
+        const latest = state.latestVersions[addon.manifest.id]
+        return latest && isNewerVersion(addon.manifest.version, latest)
+      }).length
+    )
+  )
 
   // Watch dialog state to prevent accidental navigation when it closes
   useEffect(() => {
@@ -69,6 +82,13 @@ export function AccountCard({
       return () => clearTimeout(timer)
     }
   }, [isAddAccountDialogOpen])
+
+  const [isStabilized, setIsStabilized] = useState(false)
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsStabilized(true), 1800)
+    return () => clearTimeout(timer)
+  }, [])
 
   const items = useLibraryCache((state) => state.items)
   const libraryLoading = useLibraryCache((state) => state.loading)
@@ -258,6 +278,14 @@ export function AccountCard({
               <span className="text-muted-foreground">Addons:</span>
               <span className="font-medium">{account.addons.length}</span>
             </div>
+            {updateCount > 0 && (
+              <div className="flex items-center gap-1.5 text-sm">
+                <ArrowUpCircle className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                <span className="text-blue-400 font-medium">
+                  {updateCount} addon update{updateCount !== 1 ? 's' : ''} available
+                </span>
+              </div>
+            )}
             {activeRules.length > 0 && (
               <div className="flex items-center gap-1.5 text-sm">
                 {failedOverRules.length > 0 ? (
@@ -294,7 +322,7 @@ export function AccountCard({
                 Synced {timeStr}
               </span>
             </div>
-            {account.status === 'error' && (
+            {account.status === 'error' && isStabilized && (
               <div className="bg-destructive/10 border border-destructive/50 rounded-md p-3 mt-3">
                 <div className="flex items-start gap-2">
                   <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
@@ -325,4 +353,4 @@ export function AccountCard({
 
     </Card>
   )
-}
+})

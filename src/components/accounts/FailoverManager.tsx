@@ -18,6 +18,12 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog"
 import { ArrowRight, AlertTriangle, Activity, Trash2, Plus, History, Pencil, Webhook, Check, Copy, Download, FlaskConical, XCircle, Loader2 } from "lucide-react"
 import { useState, useEffect, useMemo } from "react"
 import { identifyAddon } from "@/lib/addon-identifier"
@@ -54,6 +60,21 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
 
     const [ruleName, setRuleName] = useState("")
     const [cooldownMinutes, setCooldownMinutes] = useState<string>("")
+    const [ruleWebhookUrl, setRuleWebhookUrl] = useState("")
+    const [ruleNotifyMode, setRuleNotifyMode] = useState<'default' | 'custom' | 'off'>('default')
+
+    const [isRuleDialogOpen, setIsRuleDialogOpen] = useState(false)
+    const [activeFailoverTab, setActiveFailoverTab] = useState("rules")
+
+    const resetForm = () => {
+        setChain(["", ""])
+        setRuleName("")
+        setCooldownMinutes("")
+        setRuleWebhookUrl("")
+        setRuleNotifyMode('default')
+        setEditingRuleId(null)
+        setIsRuleDialogOpen(false)
+    }
 
     useEffect(() => {
         setWebhookUrl(webhook.url)
@@ -71,7 +92,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
         setWebhook(webhookUrl, !!webhookUrl)
         setShowWebhookConfirm(false)
         if (webhookUrl) {
-            toast({ title: 'Notifications Enabled', description: 'Discord webhook saved.' })
+            toast({ title: 'Notifications Enabled', description: 'Discord or Slack webhook saved.' })
         } else {
             toast({ title: 'Notifications Disabled', description: 'Webhook removed.' })
         }
@@ -121,23 +142,26 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
 
         const cooldownMs = cooldownMinutes ? parseInt(cooldownMinutes) * 60 * 1000 : undefined
 
+        const notifyEnabled = ruleNotifyMode !== 'off'
+        const webhookUrl = ruleNotifyMode === 'custom' ? ruleWebhookUrl.trim() : ''
+
         if (editingRuleId) {
             await updateRule(editingRuleId, {
                 priorityChain: filteredChain,
                 activeUrl: filteredChain[0],
                 name: ruleName.trim() || undefined,
-                cooldown_ms: cooldownMs
+                cooldown_ms: cooldownMs,
+                notifyEnabled,
+                webhookUrl,
             })
             toast({ title: "Rule Updated", description: "Rule settings modified." })
             setEditingRuleId(null)
         } else {
-            await addRule(accountId, filteredChain, ruleName.trim() || undefined, cooldownMs)
+            await addRule(accountId, filteredChain, ruleName.trim() || undefined, cooldownMs, webhookUrl, notifyEnabled)
             toast({ title: "Rule Created", description: "Autopilot is now monitoring this chain." })
         }
 
-        setChain(["", ""])
-        setRuleName("")
-        setCooldownMinutes("")
+        resetForm()
     }
 
     const addToChain = () => setChain([...chain, ""])
@@ -148,12 +172,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
         setChain(newChain)
     }
 
-    const handleCancelEdit = () => {
-        setChain(["", ""])
-        setRuleName("")
-        setCooldownMinutes("")
-        setEditingRuleId(null)
-    }
+
 
     const handleDuplicateRule = async (rule: typeof rules[0]) => {
         await addRule(accountId, [...rule.priorityChain])
@@ -202,10 +221,16 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
         }
     }
 
+    const getTierClassName = (isActiveInRule: boolean, isTier1: boolean) => {
+        if (!isActiveInRule) return 'bg-white/[0.03] border-l-[3px] border-l-transparent'
+        if (isTier1) return 'bg-white/[0.08] border-l-[3px] border-l-primary'
+        return 'bg-amber-500/[0.08] border-l-[3px] border-amber-500'
+    }
+
     return (
         <div className="space-y-6">
-            <Tabs defaultValue="rules" className="space-y-6">
-                <TabsList className="flex h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap overflow-x-auto scrollbar-hide pb-2">
+            <Tabs value={activeFailoverTab} onValueChange={setActiveFailoverTab} className="space-y-6">
+                <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full pb-2">
                     <TabsTrigger
                         value="rules"
                         className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm transition-all"
@@ -220,15 +245,22 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                         <History className="w-4 h-4 mr-2" />
                         Failover History
                     </TabsTrigger>
+                    <TabsTrigger
+                        value="webhooks"
+                        className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm transition-all"
+                    >
+                        <Webhook className="w-4 h-4 mr-2" />
+                        Webhooks
+                    </TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="rules" className="space-y-6">
-                    <div className="bg-muted/30 border border-border rounded-2xl p-5 mb-6 space-y-4">
+                <TabsContent value="webhooks" className="space-y-6">
+                    <div className="bg-muted/30 border border-border rounded-2xl p-5 space-y-4">
                         <div className="flex items-start justify-between">
                             <div>
                                 <h3 className="flex items-center gap-2 text-lg font-bold">
                                     <Webhook className="w-5 h-5 text-primary" />
-                                    Health Webhooks
+                                    Global Webhook
                                 </h3>
                                 <div className="flex items-center gap-2 mt-2">
                                     {webhook.url ? (
@@ -243,11 +275,12 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         </>
                                     )}
                                 </div>
+                                <p className="text-xs text-muted-foreground mt-1">Fallback for all rules unless a rule has its own custom webhook.</p>
                             </div>
                         </div>
                         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
                             <Input
-                                placeholder="https://discord.com/api/webhooks/..."
+                                placeholder="https://discord.com/api/webhooks/... or Slack URL"
                                 value={webhookUrl}
                                 onChange={(e) => setWebhookUrl(e.target.value)}
                                 className="bg-muted/30 border-border rounded-[10px]"
@@ -269,7 +302,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                     webhookUrl: webhook.url,
                                                     accountName: account.name
                                                 })
-                                                toast({ title: 'Test Sent', description: 'Check your Discord channel.' })
+                                                toast({ title: 'Test Sent', description: 'Check your notification channel.' })
                                             } catch (err) {
                                                 toast({ title: 'Test Failed', description: 'Invalid webhook URL or server error.', variant: 'destructive' })
                                             }
@@ -280,20 +313,99 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                 )}
                             </div>
                         </div>
+                        <p className="text-xs text-muted-foreground/60 pt-1">
+                            Supports Discord, Slack, and generic JSON webhooks. Platform is detected automatically from the URL.
+                        </p>
                     </div>
 
-                    <div className="bg-muted/30 border border-border rounded-2xl p-5 mb-6 space-y-5">
-                        <div className="pb-1 text-left">
-                            <h3 className="text-lg font-bold flex items-center gap-2 mb-1.5">
-                                {editingRuleId ? <Pencil className="w-5 h-5 text-primary" /> : <Plus className="w-5 h-5 text-primary" />}
-                                {editingRuleId ? "Edit Priority Chain" : "Create New Autopilot Rule"}
+                    {/* Per-Rule Webhooks */}
+                    <div className="bg-muted/30 border border-border rounded-2xl p-5 space-y-4">
+                        <div>
+                            <h3 className="flex items-center gap-2 text-lg font-bold">
+                                <Webhook className="w-5 h-5 text-blue-400" />
+                                Per-Rule Webhooks
                             </h3>
-                            <p className="text-sm text-foreground/50">
-                                Define an ordered list of fallbacks. Autopilot will always try to keep the highest priority addon active.
-                            </p>
+                            <p className="text-xs text-muted-foreground mt-1">Rules with a custom webhook configured. Edit a rule to change its webhook.</p>
                         </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-1.5">
+                        {accountRules.filter(r => r.webhookUrl && r.notifyEnabled !== false).length === 0 ? (
+                            <div className="text-center py-6 text-muted-foreground bg-muted/20 rounded-lg border border-dashed text-sm">
+                                No rules have a custom webhook configured. Rules use the global webhook by default.
+                            </div>
+                        ) : (
+                            <div className="space-y-2">
+                                {accountRules.filter(r => r.webhookUrl && r.notifyEnabled !== false).map(rule => (
+                                    <div key={rule.id} className="flex items-center justify-between bg-muted/20 border border-border/50 rounded-xl px-4 py-3 gap-3">
+                                        <div className="flex flex-col gap-0.5 min-w-0">
+                                            <span className="text-sm font-medium truncate">
+                                                {rule.name || `Rule ${rule.id.slice(0, 8)}`}
+                                            </span>
+                                            <span className="text-[11px] font-mono text-muted-foreground truncate max-w-xs">
+                                                {rule.webhookUrl}
+                                            </span>
+                                        </div>
+                                        <div className="flex gap-2 shrink-0">
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => {
+                                                    setChain([...rule.priorityChain])
+                                                    setRuleName(rule.name || '')
+                                                    setCooldownMinutes(rule.cooldown_ms ? String(Math.round(rule.cooldown_ms / 60000)) : '')
+                                                    setRuleNotifyMode(rule.notifyEnabled === false ? 'off' : rule.webhookUrl ? 'custom' : 'default')
+                                                    setRuleWebhookUrl(rule.webhookUrl || '')
+                                                    setEditingRuleId(rule.id)
+                                                    setActiveFailoverTab("rules")
+                                                    setIsRuleDialogOpen(true)
+                                                }}
+                                            >
+                                                <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
+                                            </Button>
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={async () => {
+                                                    try {
+                                                        const { useSyncStore } = await import('@/store/syncStore')
+                                                        const { serverUrl } = useSyncStore.getState()
+                                                        const baseUrl = serverUrl || ''
+                                                        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+                                                        await axios.post(`${apiPath}/autopilot/test-webhook`, {
+                                                            webhookUrl: rule.webhookUrl,
+                                                            accountName: account.name
+                                                        })
+                                                        toast({ title: 'Test Sent', description: 'Check your notification channel.' })
+                                                    } catch (err) {
+                                                        toast({ title: 'Test Failed', description: 'Invalid URL or server error.', variant: 'destructive' })
+                                                    }
+                                                }}
+                                            >
+                                                Test
+                                            </Button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </TabsContent>
+
+                <TabsContent value="rules" className="space-y-6">
+
+                    <Dialog open={isRuleDialogOpen} onOpenChange={(open) => { if (!open) resetForm() }}>
+                        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+                            <DialogHeader>
+                                <DialogTitle className="flex items-center gap-2">
+                                    {editingRuleId
+                                        ? <><Pencil className="w-5 h-5 text-primary" /> Edit Priority Chain</>
+                                        : <><Plus className="w-5 h-5 text-primary" /> Create New Autopilot Rule</>
+                                    }
+                                </DialogTitle>
+                                <p className="text-sm text-foreground/50">
+                                    Define an ordered list of fallbacks. Autopilot will always try to keep the highest priority addon active.
+                                </p>
+                            </DialogHeader>
+
+                            <div className="space-y-1.5 pt-4">
                                 <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Rule Name (Optional)</label>
                                 <Input
                                     placeholder="e.g. My Primary Movies"
@@ -302,102 +414,161 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                     className="bg-muted/30 border-border rounded-xl"
                                 />
                             </div>
-                            <div className="space-y-1.5">
-                                <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Notifications Cooldown (Mins)</label>
-                                <Input
-                                    type="number"
-                                    placeholder="10"
-                                    value={cooldownMinutes}
-                                    onChange={(e) => setCooldownMinutes(e.target.value)}
-                                    className="bg-muted/30 border-border rounded-xl"
-                                />
-                            </div>
-                        </div>
-                        <div className="space-y-3">
-                            {chain.map((url, index) => (
-                                <div key={index} className="bg-muted/30 border border-border rounded-xl px-4 py-3 flex flex-col gap-1.5">
-                                    <div className="flex items-center justify-between">
-                                        <span className="font-mono text-[10px] font-bold tracking-wider text-foreground/25">TIER {index + 1}</span>
-                                        <button
-                                            className="text-foreground/20 hover:text-red-400 transition-colors disabled:opacity-30 disabled:hover:text-foreground/20"
-                                            onClick={() => removeFromChain(index)}
-                                            disabled={chain.length <= 2}
-                                        >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                        </button>
+
+                            <div className="bg-muted/20 border border-border/50 rounded-xl p-4 space-y-3">
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30">Notifications</label>
+
+                                <Select
+                                    value={ruleNotifyMode}
+                                    onValueChange={(val: 'default' | 'custom' | 'off') => setRuleNotifyMode(val)}
+                                >
+                                    <SelectTrigger className="bg-muted/30 border-border rounded-xl">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="default">Use global webhook</SelectItem>
+                                        <SelectItem value="custom">Custom webhook for this rule</SelectItem>
+                                        <SelectItem value="off">Off — no notifications for this rule</SelectItem>
+                                    </SelectContent>
+                                </Select>
+
+                                {ruleNotifyMode !== 'off' && (
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Cooldown (Minutes)</label>
+                                        <Input
+                                            type="number"
+                                            placeholder="10"
+                                            value={cooldownMinutes}
+                                            onChange={(e) => setCooldownMinutes(e.target.value)}
+                                            className="bg-muted/30 border-border rounded-xl"
+                                        />
                                     </div>
-                                    <Select value={url} onValueChange={(val) => updateChainUrl(index, val)}>
-                                        <SelectTrigger className="w-full bg-transparent border-0 p-0 h-8 hover:bg-transparent focus:ring-0 shadow-none text-base font-medium focus-visible:ring-0">
-                                            <SelectValue placeholder={`Select Tier ${index + 1} addon...`}>
-                                                {(() => {
-                                                    const selectedAddon = addons.find(a => a.transportUrl === url)
-                                                    if (!selectedAddon) return null
-                                                    return (
+                                )}
+
+                                {ruleNotifyMode === 'custom' && (
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-foreground/30 ml-1">Custom Webhook URL</label>
+                                        <div className="flex gap-2">
+                                            <Input
+                                                placeholder="https://discord.com/api/webhooks/... or Slack URL"
+                                                value={ruleWebhookUrl}
+                                                onChange={(e) => setRuleWebhookUrl(e.target.value)}
+                                                className="bg-muted/30 border-border rounded-xl"
+                                            />
+                                            {ruleWebhookUrl && (
+                                                <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    className="shrink-0"
+                                                    onClick={async () => {
+                                                        try {
+                                                            const { useSyncStore } = await import('@/store/syncStore')
+                                                            const { serverUrl } = useSyncStore.getState()
+                                                            const baseUrl = serverUrl || ''
+                                                            const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+
+                                                            await axios.post(`${apiPath}/autopilot/test-webhook`, {
+                                                                webhookUrl: ruleWebhookUrl.trim(),
+                                                                accountName: account.name
+                                                            })
+                                                            toast({ title: 'Test Sent', description: 'Check your notification channel.' })
+                                                        } catch (err) {
+                                                            toast({ title: 'Test Failed', description: 'Invalid URL or server error.', variant: 'destructive' })
+                                                        }
+                                                    }}
+                                                >
+                                                    Test
+                                                </Button>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-3">
+                                {chain.map((url, index) => (
+                                    <div key={index} className="bg-muted/30 border border-border rounded-xl px-4 py-3 flex flex-col gap-1.5">
+                                        <div className="flex items-center justify-between">
+                                            <span className="font-mono text-[10px] font-bold tracking-wider text-foreground/25">TIER {index + 1}</span>
+                                            <button
+                                                className="text-foreground/20 hover:text-red-400 transition-colors disabled:opacity-30 disabled:hover:text-foreground/20"
+                                                onClick={() => removeFromChain(index)}
+                                                disabled={chain.length <= 2}
+                                            >
+                                                <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                        <Select value={url} onValueChange={(val) => updateChainUrl(index, val)}>
+                                            <SelectTrigger className="w-full bg-transparent border-0 p-0 h-8 hover:bg-transparent focus:ring-0 shadow-none text-base font-medium focus-visible:ring-0">
+                                                <SelectValue placeholder={`Select Tier ${index + 1} addon...`}>
+                                                    {(() => {
+                                                        const selectedAddon = addons.find(a => a.transportUrl === url)
+                                                        if (!selectedAddon) return null
+                                                        return (
+                                                            <div className="flex items-center gap-2">
+                                                                {(selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo) && (
+                                                                    <img
+                                                                        src={selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo}
+                                                                        alt=""
+                                                                        className="w-5 h-5 rounded object-contain"
+                                                                        onError={(e) => {
+                                                                            e.currentTarget.style.display = 'none'
+                                                                        }}
+                                                                    />
+                                                                )}
+                                                                <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
+                                                            </div>
+                                                        )
+                                                    })()}
+                                                </SelectValue>
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {localAddons.map(addon => (
+                                                    <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
                                                         <div className="flex items-center gap-2">
-                                                            {(selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo) && (
+                                                            {(addon.metadata?.customLogo || addon.manifest.logo) && (
                                                                 <img
-                                                                    src={selectedAddon.metadata?.customLogo || selectedAddon.manifest.logo}
+                                                                    src={addon.metadata?.customLogo || addon.manifest.logo}
                                                                     alt=""
-                                                                    className="w-5 h-5 rounded object-contain"
+                                                                    className="w-5 h-5 rounded object-contain bg-muted/30 p-0.5"
                                                                     onError={(e) => {
                                                                         e.currentTarget.style.display = 'none'
                                                                     }}
                                                                 />
                                                             )}
-                                                            <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
+                                                            <span>{addon.metadata?.customName || addon.manifest.name}</span>
                                                         </div>
-                                                    )
-                                                })()}
-                                            </SelectValue>
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {localAddons.map(addon => (
-                                                <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
-                                                    <div className="flex items-center gap-2">
-                                                        {(addon.metadata?.customLogo || addon.manifest.logo) && (
-                                                            <img
-                                                                src={addon.metadata?.customLogo || addon.manifest.logo}
-                                                                alt=""
-                                                                className="w-5 h-5 rounded object-contain bg-muted/30 p-0.5"
-                                                                onError={(e) => {
-                                                                    e.currentTarget.style.display = 'none'
-                                                                }}
-                                                            />
-                                                        )}
-                                                        <span>{addon.metadata?.customName || addon.manifest.name}</span>
-                                                    </div>
-                                                </SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
-                                </div>
-                            ))}
-                            <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={addToChain}
-                                className="w-full bg-muted/30 border border-dashed border-border/50 hover:bg-muted/50 text-foreground/50 hover:text-foreground h-12 rounded-xl"
-                            >
-                                <Plus className="w-4 h-4 mr-2" /> Add Fallback Tier
-                            </Button>
-                        </div>
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                ))}
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={addToChain}
+                                    className="w-full bg-muted/30 border border-dashed border-border/50 hover:bg-muted/50 text-foreground/50 hover:text-foreground h-12 rounded-xl"
+                                >
+                                    <Plus className="w-4 h-4 mr-2" /> Add Fallback Tier
+                                </Button>
+                            </div>
 
-                        <div className="flex gap-2 pt-4 border-t border-border">
-                            <Button
-                                size="sm"
-                                className="flex-1 md:w-auto bg-[#eab308] hover:bg-[#fbbf24] text-black font-[900]"
-                                onClick={handleSaveRule}
-                                disabled={chain.filter(u => !!u).length < 2}
-                            >
-                                {editingRuleId ? "Update Chain" : "Enable Autopilot"}
-                            </Button>
-                            {editingRuleId && (
-                                <Button variant="outline" size="sm" onClick={handleCancelEdit}>
+                            <div className="flex justify-end gap-2 pt-4 border-t border-border mt-4">
+                                <Button variant="ghost" onClick={resetForm}>
                                     Cancel
                                 </Button>
-                            )}
-                        </div>
-                    </div>
+                                <Button
+                                    size="sm"
+                                    className="bg-[#eab308] hover:bg-[#fbbf24] text-black font-[900]"
+                                    onClick={handleSaveRule}
+                                    disabled={chain.filter(u => !!u).length < 2}
+                                >
+                                    {editingRuleId ? "Update Chain" : "Enable Autopilot"}
+                                </Button>
+                            </div>
+                        </DialogContent>
+                    </Dialog>
 
                     <div className="space-y-4">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -406,10 +577,24 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                     <Activity className="w-5 h-5" />
                                     Managed Chains
                                 </h3>
+                                <p className="text-xs text-muted-foreground mt-0.5 hidden sm:block">
+                                    Autopilot keeps the highest-priority addon active at all times.
+                                </p>
+                                <div className="flex-1" />
+                                <Button
+                                    size="sm"
+                                    onClick={() => {
+                                        resetForm()
+                                        setIsRuleDialogOpen(true)
+                                    }}
+                                >
+                                    <Plus className="w-4 h-4 mr-1.5" />
+                                    New Rule
+                                </Button>
                                 {otherAccountsWithRules.length > 0 && (
                                     <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
-                                            <Button variant="outline" size="sm" className="h-7 text-xs gap-1.5">
+                                            <Button variant="outline" size="sm" className="text-xs gap-1.5">
                                                 <Download className="w-3 h-3" />
                                                 Copy Rules From…
                                             </Button>
@@ -431,7 +616,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         <Button
                                             variant="outline"
                                             size="sm"
-                                            className="h-7 text-xs bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-500 border-emerald-500/20"
+                                            className="text-xs border-primary/30 text-primary hover:bg-primary/10"
                                             onClick={() => toggleAllRulesForAccount(accountId, true)}
                                         >
                                             <Check className="w-3 h-3 mr-1" /> Resume All
@@ -439,7 +624,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         <Button
                                             variant="outline"
                                             size="sm"
-                                            className="h-7 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-500 border-amber-500/20"
+                                            className="text-xs border-destructive/30 text-destructive hover:bg-destructive/10"
                                             onClick={() => toggleAllRulesForAccount(accountId, false)}
                                         >
                                             <AlertTriangle className="w-3 h-3 mr-1" /> Pause All
@@ -455,10 +640,14 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                         : { background: 'rgba(245,158,11,0.1)', borderStyle: 'solid', borderWidth: '1px', borderColor: 'rgba(245,158,11,0.2)', color: '#fbbf24' }
                                     }
                                 >
-                                    <span className={`w-2 h-2 rounded-full ${(Date.now() - new Date(lastWorkerRun).getTime()) < 120000
-                                        ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)] animate-pulse'
-                                        : 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]'
-                                        }`} />
+                                    {(Date.now() - new Date(lastWorkerRun).getTime()) < 120000 ? (
+                                        <span className="relative flex h-2 w-2">
+                                            <span className="absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75 animate-ping" />
+                                            <span className="relative inline-flex h-2 w-2 rounded-full bg-green-500" />
+                                        </span>
+                                    ) : (
+                                        <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+                                    )}
                                     <span className="whitespace-nowrap font-mono">{
                                         (Date.now() - new Date(lastWorkerRun).getTime()) < 120000
                                             ? 'LIVE'
@@ -495,6 +684,47 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                         {Math.round(rule.cooldown_ms / 60000)}m
                                                     </div>
                                                 )}
+                                                {rule.notifyEnabled === false ? (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-foreground/30 bg-muted/40 border border-border rounded-full px-2 py-0.5">
+                                                        <XCircle className="w-3 h-3" />
+                                                        Silent
+                                                    </span>
+                                                ) : rule.webhookUrl ? (
+                                                    <span className="inline-flex items-center gap-1.5">
+                                                        <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-blue-400/80 bg-blue-500/10 border border-blue-500/20 rounded-full px-2 py-0.5">
+                                                            <Webhook className="w-3 h-3" />
+                                                            Custom
+                                                        </span>
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-5 px-2 text-[10px] font-bold uppercase tracking-widest text-blue-400/80 border-blue-500/20 hover:bg-blue-500/10 hover:text-blue-400"
+                                                            onClick={async (e) => {
+                                                                e.stopPropagation()
+                                                                try {
+                                                                    const { useSyncStore } = await import('@/store/syncStore')
+                                                                    const { serverUrl } = useSyncStore.getState()
+                                                                    const baseUrl = serverUrl || ''
+                                                                    const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+                                                                    await axios.post(`${apiPath}/autopilot/test-webhook`, {
+                                                                        webhookUrl: rule.webhookUrl,
+                                                                        accountName: account?.name || 'Unknown Account'
+                                                                    })
+                                                                    toast({ title: 'Test Sent', description: 'Check your notification channel.' })
+                                                                } catch (err) {
+                                                                    toast({ title: 'Test Failed', description: 'Invalid URL or server error.', variant: 'destructive' })
+                                                                }
+                                                            }}
+                                                        >
+                                                            Test Webhook
+                                                        </Button>
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-foreground/40 bg-muted/30 border border-border/50 rounded-full px-2 py-0.5">
+                                                        <Webhook className="w-3 h-3" />
+                                                        Global
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="flex items-center gap-2">
                                                 <div className="flex items-center gap-2 mr-2">
@@ -518,6 +748,17 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                 >
                                                     <FlaskConical className="w-4 h-4" />
                                                 </Button>
+                                                <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-foreground/10 hover:text-foreground text-foreground/50" onClick={() => {
+                                                    setChain([...rule.priorityChain])
+                                                    setRuleName(rule.name || '')
+                                                    setCooldownMinutes(rule.cooldown_ms ? String(Math.round(rule.cooldown_ms / 60000)) : '')
+                                                    setRuleNotifyMode(rule.notifyEnabled === false ? 'off' : rule.webhookUrl ? 'custom' : 'default')
+                                                    setRuleWebhookUrl(rule.webhookUrl || '')
+                                                    setEditingRuleId(rule.id)
+                                                    setIsRuleDialogOpen(true)
+                                                }} title="Edit this chain">
+                                                    <Pencil className="w-4 h-4" />
+                                                </Button>
                                                 <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-foreground/10 hover:text-foreground text-foreground/50" onClick={() => handleDuplicateRule(rule)} title="Duplicate this chain">
                                                     <Copy className="w-4 h-4" />
                                                 </Button>
@@ -538,15 +779,9 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                 return (
                                                     <div key={idx} className="flex flex-col">
                                                         <div
-                                                            className="flex items-center gap-3 py-3 px-4 rounded-xl relative z-10 transition-colors"
-                                                            style={isActiveInRule
-                                                                ? (isTier1
-                                                                    ? { background: 'rgba(255,255,255,0.08)', borderLeft: '3px solid hsl(var(--primary))' }
-                                                                    : { background: 'rgba(245,158,11,0.08)', borderLeft: '3px solid #f59e0b' })
-                                                                : { background: 'rgba(255,255,255,0.03)', borderLeft: '3px solid transparent' }
-                                                            }
+                                                            className={`flex items-center gap-3 py-3 px-4 rounded-xl relative z-10 transition-colors ${getTierClassName(isActiveInRule, isTier1)}`}
                                                         >
-                                                            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
+                                                            <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0 bg-white/10">
                                                                 {idx + 1}
                                                             </div>
                                                             {(addon?.metadata?.customLogo || addon?.manifest.logo) && (
@@ -674,6 +909,11 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                                                         setChain(rule.priorityChain)
                                                         setRuleName(rule.name || "")
                                                         setCooldownMinutes(rule.cooldown_ms ? (rule.cooldown_ms / 60000).toString() : "")
+                                                        setRuleWebhookUrl(rule.webhookUrl || "")
+                                                        setRuleNotifyMode(
+                                                            rule.notifyEnabled === false ? 'off' :
+                                                                (rule.webhookUrl ? 'custom' : 'default')
+                                                        )
                                                         setEditingRuleId(rule.id)
                                                         window.scrollTo({ top: 0, behavior: 'smooth' })
                                                     }}
@@ -702,7 +942,7 @@ export function FailoverManager({ accountId }: FailoverManagerProps) {
                 confirmText="Replace Webhook"
                 onConfirm={doSaveWebhook}
             />
-        </div>
+        </div >
     )
 }
 

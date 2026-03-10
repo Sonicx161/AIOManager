@@ -51,14 +51,15 @@ export function ActivityPage() {
     const [searchInput, setSearchInput] = useState('')
     const [searchTerm, setSearchTerm] = useState('')
     const searchInputRef = useRef<HTMLInputElement>(null)
+    const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-    // Debounce search input
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setSearchTerm(searchInput)
-        }, 200)
-        return () => clearTimeout(timer)
-    }, [searchInput])
+    const handleSearchChange = (val: string) => {
+        setSearchInput(val)
+        if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+        searchTimeoutRef.current = setTimeout(() => {
+            setSearchTerm(val)
+        }, 150)
+    }
 
     const [userFilter, setUserFilter] = useState('all')
     const [timeFilter, setTimeFilter] = useState(() => {
@@ -326,13 +327,13 @@ export function ActivityPage() {
                             ref={searchInputRef}
                             placeholder="Search history..."
                             value={searchInput}
-                            onChange={(e) => setSearchInput(e.target.value)}
+                            onChange={(e) => handleSearchChange(e.target.value)}
                             className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors w-full"
                             data-search-focus
                         />
                         {searchInput && (
                             <button
-                                onClick={() => setSearchInput('')}
+                                onClick={() => handleSearchChange('')}
                                 className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors focus:outline-none"
                             >
                                 <X className="h-4 w-4 text-muted-foreground" />

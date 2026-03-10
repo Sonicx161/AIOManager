@@ -18,7 +18,7 @@ import { useProfileStore } from '@/store/profileStore'
 import { StremioAccount } from '@/types/account'
 import { BulkResult } from '@/types/saved-addon'
 import { AlertTriangle, CheckCircle2, Copy, Globe, GripVertical, LayoutGrid, Library, Loader2, PlusCircle, ShieldAlert, ShieldCheck, Trash2, Zap, UserMinus, FileDown, Search, Tags, X } from 'lucide-react'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 
@@ -87,6 +87,16 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
 
   // New State
   const [filterQuery, setFilterQuery] = useState('')
+  const [debouncedFilterQuery, setDebouncedFilterQuery] = useState('')
+  const filterTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleFilterChange = (val: string) => {
+    setFilterQuery(val)
+    if (filterTimeoutRef.current) clearTimeout(filterTimeoutRef.current)
+    filterTimeoutRef.current = setTimeout(() => {
+      setDebouncedFilterQuery(val)
+    }, 150)
+  }
   const [urlList, setUrlList] = useState<string>('')
   const [sourceAccountId, setSourceAccountId] = useState<string>('')
   const [overwriteClone, setOverwriteClone] = useState(false)
@@ -113,9 +123,9 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
   const sortedSavedAddons = Object.values(library)
     .sort((a, b) => a.name.localeCompare(b.name))
     .filter(a => {
-      if (!filterQuery) return true
-      return a.name.toLowerCase().includes(filterQuery.toLowerCase()) ||
-        a.manifest.name.toLowerCase().includes(filterQuery.toLowerCase())
+      if (!debouncedFilterQuery) return true
+      return a.name.toLowerCase().includes(debouncedFilterQuery.toLowerCase()) ||
+        a.manifest.name.toLowerCase().includes(debouncedFilterQuery.toLowerCase())
     })
 
   const allTags = getAllTags()
@@ -151,8 +161,8 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
     ? allAddonsRaw
     : allAddonsRaw.filter(item => !item.addon.flags?.protected)
   ).filter(item => {
-    if (!filterQuery) return true
-    return (item.addon.manifest.name || '').toLowerCase().includes(filterQuery.toLowerCase())
+    if (!debouncedFilterQuery) return true
+    return (item.addon.manifest.name || '').toLowerCase().includes(debouncedFilterQuery.toLowerCase())
   })
 
   const toggleSavedAddon = (savedAddonId: string) => {
@@ -551,11 +561,11 @@ export function BatchOperationsDialog({ selectedAccounts, allAccounts = [], onCl
                         placeholder="Filter..."
                         className="h-7 text-xs pl-7 pr-7"
                         value={filterQuery}
-                        onChange={e => setFilterQuery(e.target.value)}
+                        onChange={e => handleFilterChange(e.target.value)}
                       />
                       {filterQuery && (
                         <button
-                          onClick={() => setFilterQuery('')}
+                          onClick={() => handleFilterChange('')}
                           className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 hover:bg-accent rounded-full transition-colors"
                         >
                           <X className="h-2 w-2 text-muted-foreground" />

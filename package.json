@@ -1,7 +1,7 @@
 {
   "name": "aiomanager",
   "private": true,
-  "version": "1.8.4",
+  "version": "1.8.5",
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
@@ -43,7 +43,6 @@
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-tabs": "^1.1.13",
-    "@tanstack/react-virtual": "^3.13.18",
     "axios": "^1.13.2",
     "better-sqlite3": "^12.6.2",
     "class-variance-authority": "^0.7.1",
@@ -55,7 +54,6 @@
     "fastify": "^5.7.4",
     "fflate": "^0.8.2",
     "framer-motion": "^12.34.3",
-    "glass-refraction": "^0.1.0",
     "html2canvas": "^1.4.1",
     "localforage": "^1.10.0",
     "lucide-react": "^0.562.0",

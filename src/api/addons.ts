@@ -1,16 +1,24 @@
 import { AddonDescriptor } from '@/types/addon'
 import { stremioClient } from './stremio-client'
-import { checkAddonHealth, HealthStatus } from '@/lib/addon-health'
+import { checkAddonHealth, HealthStatus, isLocalOrPrivateUrl } from '@/lib/addon-health'
 import { isNewerVersion, normalizeAddonUrl } from '@/lib/utils'
 import { getEffectiveManifest } from '@/lib/addon-utils'
+
+const KNOWN_DEAD_DOMAINS = ['opensubtitles.strem.io']
+
+function isKnownDeadDomain(url: string): boolean {
+  try {
+    return KNOWN_DEAD_DOMAINS.includes(new URL(url).hostname)
+  } catch {
+    return false
+  }
+}
 
 export async function getAddons(authKey: string, accountContext: string = 'Unknown'): Promise<AddonDescriptor[]> {
   return stremioClient.getAddonCollection(authKey, accountContext)
 }
 
 export async function updateAddons(authKey: string, addons: AddonDescriptor[], accountContext: string = 'Unknown'): Promise<void> {
-  await getAddons(authKey, accountContext)
-
   // CRITICAL: Apply manifest customizations (Raven fix)
   // This ensures that custom names, logos, and descriptions are pushed to Stremio.
   // We FILTER OUT disabled addons here so they are "hidden" in Stremio.
@@ -82,7 +90,13 @@ export async function removeAddon(authKey: string, transportUrl: string, account
 }
 
 export async function fetchAddonManifest(url: string, accountContext: string = 'Unknown', force: boolean = false): Promise<AddonDescriptor> {
-  const origin = new URL(url).origin
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch (error) {
+    throw new Error(`Invalid addon URL: ${url}`);
+  }
+
   await acquireDomainSlot(origin)
   try {
     return await stremioClient.fetchAddonManifest(url, accountContext, force)
@@ -170,7 +184,7 @@ const PENDING_MANIFESTS: Record<string, Promise<AddonDescriptor>> = {}
 // Track active manifest fetches per origin domain to avoid rate limiting
 const DOMAIN_ACTIVE_FETCHES: Record<string, number> = {}
 const DOMAIN_QUEUE: Record<string, (() => void)[]> = {}
-const MAX_CONCURRENT_PER_DOMAIN = 2
+const MAX_CONCURRENT_PER_DOMAIN = 1
 
 function acquireDomainSlot(origin: string): Promise<void> {
   return new Promise((resolve) => {
@@ -196,7 +210,7 @@ function releaseDomainSlot(origin: string): void {
   const next = DOMAIN_QUEUE[origin]?.shift()
   if (next) {
     // Stagger slightly to avoid burst 429s
-    setTimeout(next, 100)
+    setTimeout(next, 500)
   } else {
     // console.log(`[Domain Limiter] [${origin}] SLOT RELEASED (Active: ${active})`)
   }
@@ -225,16 +239,18 @@ export async function checkAddonUpdates(addons: AddonDescriptor[], accountContex
 
         const healthPromise = domainHealthCache[origin] === true
           ? Promise.resolve({ isOnline: true } as HealthStatus)
-          : (async () => {
-            if (!PENDING_CHECKS[origin]) {
-              PENDING_CHECKS[origin] = checkAddonHealth(addon.transportUrl).then((status) => {
-                if (status.isOnline) domainHealthCache[origin] = true
-                setTimeout(() => delete PENDING_CHECKS[origin], 5000) // Cache health for 5s
-                return status
-              })
-            }
-            return await PENDING_CHECKS[origin]
-          })()
+          : isLocalOrPrivateUrl(addon.transportUrl)
+            ? Promise.resolve({ isOnline: false, error: 'Local addon unreachable from server' } as HealthStatus)
+            : (async () => {
+              if (!PENDING_CHECKS[origin]) {
+                PENDING_CHECKS[origin] = checkAddonHealth(addon.transportUrl).then((status) => {
+                  if (status.isOnline) domainHealthCache[origin] = true
+                  setTimeout(() => delete PENDING_CHECKS[origin], 5000) // Cache health for 5s
+                  return status
+                })
+              }
+              return await PENDING_CHECKS[origin]
+            })()
 
         const manifestKey = addon.transportUrl // Key by full URL to avoid version collisions (Issue #1)
         if (!PENDING_MANIFESTS[manifestKey]) {
@@ -254,7 +270,7 @@ export async function checkAddonUpdates(addons: AddonDescriptor[], accountContex
             throw err
           })
           // Manifest cache for 5s to sync burst requests
-          setTimeout(() => delete PENDING_MANIFESTS[manifestKey], 5000)
+          setTimeout(() => delete PENDING_MANIFESTS[manifestKey], 60000)
         }
 
         const [latestManifest, healthStatus] = await Promise.all([
@@ -274,7 +290,9 @@ export async function checkAddonUpdates(addons: AddonDescriptor[], accountContex
           health: healthStatus,
         }
       } catch (error) {
-        console.warn(`[Update Check] Failed to check ${addon.manifest.name}:`, error)
+        if (!isKnownDeadDomain(addon.transportUrl)) {
+          console.warn(`[Update Check] Failed to check ${addon.manifest.name}:`, error)
+        }
         return null
       }
     })
@@ -313,16 +331,18 @@ export async function checkSavedAddonUpdates(
 
         const healthPromise = domainHealthCache[origin] === true
           ? Promise.resolve({ isOnline: true } as HealthStatus)
-          : (async () => {
-            if (!PENDING_CHECKS[origin]) {
-              PENDING_CHECKS[origin] = checkAddonHealth(addon.installUrl).then(status => {
-                if (status.isOnline) domainHealthCache[origin] = true
-                setTimeout(() => delete PENDING_CHECKS[origin], 5000)
-                return status
-              })
-            }
-            return await PENDING_CHECKS[origin]
-          })()
+          : isLocalOrPrivateUrl(addon.installUrl)
+            ? Promise.resolve({ isOnline: false, error: 'Local addon unreachable from server' } as HealthStatus)
+            : (async () => {
+              if (!PENDING_CHECKS[origin]) {
+                PENDING_CHECKS[origin] = checkAddonHealth(addon.installUrl).then(status => {
+                  if (status.isOnline) domainHealthCache[origin] = true
+                  setTimeout(() => delete PENDING_CHECKS[origin], 5000)
+                  return status
+                })
+              }
+              return await PENDING_CHECKS[origin]
+            })()
 
         const manifestKey = addon.installUrl // Key by full URL to avoid version collisions
         if (!PENDING_MANIFESTS[manifestKey]) {
@@ -341,7 +361,7 @@ export async function checkSavedAddonUpdates(
             delete PENDING_MANIFESTS[manifestKey]
             throw err
           })
-          setTimeout(() => delete PENDING_MANIFESTS[manifestKey], 5000)
+          setTimeout(() => delete PENDING_MANIFESTS[manifestKey], 60000)
         }
 
         const [latestManifest, healthStatus] = await Promise.all([
@@ -361,7 +381,9 @@ export async function checkSavedAddonUpdates(
           health: healthStatus,
         }
       } catch (error) {
-        console.warn(`[Update Check] Failed to check ${addon.name}:`, error)
+        if (!isKnownDeadDomain(addon.installUrl)) {
+          console.warn(`[Update Check] Failed to check ${addon.name}:`, error)
+        }
         return null
       }
     })

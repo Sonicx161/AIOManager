@@ -222,7 +222,7 @@ if (db.type === 'sqlite') {
     await db.pragma('journal_mode = WAL')
     await db.pragma('synchronous = NORMAL')
     await db.pragma('temp_store = MEMORY')
-    await db.pragma('cache_size = -2000') // 2MB cache
+    await db.pragma('cache_size = -32000') // 32MB cache
     await db.pragma('auto_vacuum = INCREMENTAL') // Keeps file small over time
 
     // Schedule VACUUM weekly instead of on every startup (prevents blocking request handling)
@@ -284,6 +284,7 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS idx_history_account_ts ON failover_history (account_id, timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_rules_account ON autopilot_rules (account_id);
+  CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id);
 `
 
 // Execute schema creation
@@ -532,7 +533,7 @@ const isSafeUrl = (url) => {
         // Block private/internal ranges
         const hostname = u.hostname
         if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return false
-        if (hostname.startsWith('192.168.') || hostname.startsWith('10.') || hostname.startsWith('172.')) return false
+        if (hostname.startsWith('192.168.') || hostname.startsWith('10.') || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return false
 
         // Fast-Fail Video Extensions (Anti-Abuse)
         if (u.pathname.match(/\.(mp4|mkv|avi|mov|wmv|flv|webm)$/i)) return false
@@ -661,10 +662,25 @@ fastify.get('/api/proxy-image', {
             return { error: `Upstream returned ${response.status}` }
         }
 
-        const contentType = response.headers.get('content-type') || 'application/octet-stream'
+        const contentType = response.headers.get('content-type') || ''
+        if (!contentType.startsWith('image/')) {
+            reply.status(415)
+            return { error: 'Unsupported Media Type: Not an image' }
+        }
+
+        const contentLength = parseInt(response.headers.get('content-length') || '0')
+        if (contentLength > 10 * 1024 * 1024) {
+            reply.status(413)
+            return { error: 'Payload Too Large (>10MB)' }
+        }
 
         const arrayBuffer = await response.arrayBuffer()
         const buffer = Buffer.from(arrayBuffer)
+
+        if (buffer.length > 10 * 1024 * 1024) {
+            reply.status(413)
+            return { error: 'Payload Too Large (>10MB)' }
+        }
 
         reply.header('Access-Control-Allow-Origin', '*')
         reply.header('Cache-Control', 'public, max-age=31536000')
@@ -978,6 +994,30 @@ fastify.all('/api/proxy/:token/*', async (request, reply) => {
             return { error: 'Proxy Error', details: 'Upstream Unreachable' }
         }
     })
+})
+
+// PROXY: Health Check
+fastify.get('/api/addon-health', async (request, reply) => {
+    const { url } = request.query
+
+    if (!url) {
+        reply.status(400);
+        return { isOnline: false, error: 'Bad Request: Missing URL' }
+    }
+
+    if (!isSafeUrl(url)) {
+        reply.status(400);
+        return { isOnline: false, error: 'Bad Request: Unsafe URL' }
+    }
+
+    try {
+        const isOnline = await checkAddonHealthInternal(url)
+        return { isOnline, error: isOnline ? undefined : 'Unreachable' }
+    } catch (err) {
+        fastify.log.error({ category: 'HealthProxy' }, `Failed to check health for ${url}: ${err.message}`)
+        reply.status(500);
+        return { isOnline: false, error: 'Internal Server Error' }
+    }
 })
 
 // --- Autopilot Engine ---
@@ -1395,28 +1435,57 @@ const syncStremioLive = async (authKey, chain, activeUrl, accountId, storedAddon
 // Autopilot configuration
 // Switching is now immediate based on health checks.
 
-const sendDiscordNotification = async (webhookUrl, payload) => {
+const sendNotification = async (webhookUrl, payload) => {
     if (!webhookUrl || !webhookUrl.startsWith('http')) return
 
-    // High-Scale Optimization: Route webhooks through the Proxy Queue.
-    // If 50,000 accounts fail simultaneously, we MUST NOT spam Discord
-    // or we will get the server IP banned.
     return enqueueProxyRequest(webhookUrl, async () => {
         try {
-            await axios.post(webhookUrl, {
-                username: 'AIOManager Autopilot',
-                avatar_url: 'https://raw.githubusercontent.com/Sonicx161/AIOManager/main/public/logo.png',
-                embeds: [{
-                    color: payload.type === 'failover' ? 0xff0000 : (payload.type === 'info' ? 0x3b82f6 : 0x00ff00),
-                    title: payload.type === 'failover' ? '⚠️ Failover' : (payload.type === 'info' ? '📡 Connectivity Test' : '✅ Recovery'),
-                    description: payload.message,
-                    fields: [
-                        { name: 'Account', value: payload.accountName || payload.accountId, inline: true },
-                        { name: 'Active Addon', value: payload.activeName || 'Unknown', inline: true }
-                    ],
+            let body
+
+            if (webhookUrl.includes('discord.com/api/webhooks/')) {
+                // Discord embed format
+                body = {
+                    username: 'AIOManager Autopilot',
+                    avatar_url: 'https://raw.githubusercontent.com/Sonicx161/AIOManager/main/public/logo.png',
+                    embeds: [{
+                        color: payload.type === 'failover' ? 0xff0000 : (payload.type === 'info' ? 0x3b82f6 : 0x00ff00),
+                        title: payload.type === 'failover' ? '⚠️ Failover' : (payload.type === 'info' ? '📡 Connectivity Test' : '✅ Recovery'),
+                        description: payload.message,
+                        fields: [
+                            { name: 'Account', value: payload.accountName || payload.accountId, inline: true },
+                            { name: 'Active Addon', value: payload.activeName || 'Unknown', inline: true }
+                        ],
+                        timestamp: new Date().toISOString()
+                    }]
+                }
+            } else if (webhookUrl.includes('hooks.slack.com/')) {
+                // Slack incoming webhook format
+                const emoji = payload.type === 'failover' ? '⚠️' : (payload.type === 'info' ? '📡' : '✅')
+                body = {
+                    text: `${emoji} *AIOManager Autopilot*\n${payload.message}`,
+                    attachments: [{
+                        color: payload.type === 'failover' ? 'danger' : (payload.type === 'info' ? '#3b82f6' : 'good'),
+                        fields: [
+                            { title: 'Account', value: payload.accountName || payload.accountId || 'Unknown', short: true },
+                            { title: 'Active Addon', value: payload.activeName || 'Unknown', short: true }
+                        ],
+                        footer: 'AIOManager Autopilot',
+                        ts: Math.floor(Date.now() / 1000)
+                    }]
+                }
+            } else {
+                // Generic flat JSON for ntfy, custom endpoints, etc.
+                body = {
+                    source: 'AIOManager Autopilot',
+                    type: payload.type,
+                    message: payload.message,
+                    accountName: payload.accountName || payload.accountId || 'Unknown',
+                    activeName: payload.activeName || 'Unknown',
                     timestamp: new Date().toISOString()
-                }]
-            })
+                }
+            }
+
+            await axios.post(webhookUrl, body)
         } catch (err) {
             fastify.log.error({ category: 'Autopilot' }, `Webhook failed for ${webhookUrl.substring(0, 30)}: ${err.message}`)
         }
@@ -1530,9 +1599,11 @@ const processAutopilotRule = async (rule) => {
         const normUrl = normalizeAddonUrl(url).toLowerCase()
 
         if (isHealthy) {
-            stabilization[normUrl] = { failures: 0, successes: (stabilization[normUrl]?.successes || 0) + 1 }
+            const prevSuccesses = stabilization[normUrl]?.successes || 0
+            stabilization[normUrl] = { failures: 0, successes: Math.min(prevSuccesses + 1, RECOVERY_THRESHOLD) }
         } else {
-            stabilization[normUrl] = { failures: (stabilization[normUrl]?.failures || 0) + 1, successes: 0 }
+            const prevFailures = stabilization[normUrl]?.failures || 0
+            stabilization[normUrl] = { failures: Math.min(prevFailures + 1, FAILOVER_THRESHOLD), successes: 0 }
         }
 
         const successes = stabilization[normUrl]?.successes || 0
@@ -1620,7 +1691,7 @@ const processAutopilotRule = async (rule) => {
                 if (now - lastNotification >= cooldownMs) {
                     const decryptedWebhook = rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : null
                     if (decryptedWebhook) {
-                        await sendDiscordNotification(decryptedWebhook, {
+                        await sendNotification(decryptedWebhook, {
                             type,
                             message: msg,
                             accountId: rule.account_id,
@@ -1638,39 +1709,66 @@ const processAutopilotRule = async (rule) => {
     }
 
     // DB Update: Save state and stats
-    // We update if we synced, or if stabilization stats/timestamps changed (heartbeat).
-    const stabilizationToSave = encrypt(JSON.stringify(stabilization), PRIMARY_KEY)
+    const stabilizationJson = JSON.stringify(stabilization)
     const now = Date.now()
-
-    const needsStatsUpdate = stabilizationToSave !== rule.stabilization || (now - (rule.last_check || 0)) > 300000
+    // Compare plaintext — encrypt() uses a random IV so ciphertext comparisons are always dirty
+    const stabilizationChanged = stabilizationJson !== decryptedStabilizationStr
+    const needsStatsUpdate = stabilizationChanged
 
     if (!needsSync && !needsStatsUpdate) {
-        // Absolutely zero idle writes during stable periods.
+        // Zero idle writes during stable periods.
         return
     }
 
-    const activeUrlToSave = encrypt(targetActiveUrl, PRIMARY_KEY)
-    const authKeyToSave = encrypt(decryptedAuthKey, PRIMARY_KEY)
-    const chainToSave = encrypt(JSON.stringify(chain), PRIMARY_KEY)
-    const addonListToSave = encrypt(JSON.stringify(updatedAddonList), PRIMARY_KEY)
+    const stabilizationToSave = encrypt(stabilizationJson, PRIMARY_KEY)
     const lastNotificationToSave = shouldUpdateNotificationTime ? now : (rule.last_notification || 0)
 
-    if (db.type === 'postgres') {
-        await db.run(`
-            UPDATE autopilot_rules 
-            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
-            WHERE id = $9 
-        `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
-        ])
+    if (needsSync) {
+        // Full write: active URL shifted or violation corrected.
+        // TOAST columns (addon_list, priority_chain, auth_key, active_url) only written here.
+        const activeUrlToSave = encrypt(targetActiveUrl, PRIMARY_KEY)
+        const authKeyToSave = encrypt(decryptedAuthKey, PRIMARY_KEY)
+        const chainToSave = encrypt(JSON.stringify(chain), PRIMARY_KEY)
+        const addonListToSave = encrypt(JSON.stringify(updatedAddonList), PRIMARY_KEY)
+
+        if (db.type === 'postgres') {
+            await db.run(`
+                UPDATE autopilot_rules 
+                SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
+                WHERE id = $9
+            `, [
+                activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
+            ])
+        } else {
+            await db.run(`
+                UPDATE autopilot_rules 
+                SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
+                WHERE id = $9
+            `, [
+                activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
+            ])
+        }
     } else {
-        await db.run(`
-            UPDATE autopilot_rules 
-            SET active_url = $1, auth_key = $2, priority_chain = $3, stabilization = $4, addon_list = $5, last_check = $6, last_notification = $7, updated_at = $8 
-            WHERE id = $9 
-        `, [
-            activeUrlToSave, authKeyToSave, chainToSave, stabilizationToSave, addonListToSave, now, lastNotificationToSave, now, rule.id
-        ])
+        // Heartbeat/stats-only write: stabilization counters ticked or 5-minute heartbeat due.
+        // Excludes addon_list, priority_chain, auth_key, active_url entirely.
+        // On PostgreSQL this avoids TOAST rewrites — these columns are unchanged in this path.
+        if (db.type === 'postgres') {
+            await db.run(`
+                UPDATE autopilot_rules 
+                SET stabilization = $1, last_check = $2, last_notification = $3, updated_at = $4 
+                WHERE id = $5
+            `, [
+                stabilizationToSave, now, lastNotificationToSave, now, rule.id
+            ])
+        } else {
+            await db.run(`
+                UPDATE autopilot_rules 
+                SET stabilization = $1, last_check = $2, last_notification = $3, updated_at = $4 
+                WHERE id = $5
+            `, [
+                stabilizationToSave, now, lastNotificationToSave, now, rule.id
+            ])
+        }
     }
 }
 
@@ -1698,7 +1796,7 @@ const runAutopilot = async () => {
 
         while (hasMore) {
             const rules = await db.query(
-                `SELECT id, account_id, auth_key, priority_chain, addon_list, active_url, webhook_url, stabilization, is_active 
+                `SELECT id, account_id, auth_key, priority_chain, addon_list, active_url, webhook_url, stabilization, is_active, is_automatic, last_check, last_notification 
                  FROM autopilot_rules 
                  WHERE is_active = 1 
                  AND id > $1
@@ -1902,7 +2000,12 @@ const start = async () => {
                 return { error: 'Webhook URL required' }
             }
 
-            await sendDiscordNotification(webhookUrl, {
+            if (!isSafeUrl(webhookUrl)) {
+                reply.status(400);
+                return { error: 'Invalid webhook URL' }
+            }
+
+            await sendNotification(webhookUrl, {
                 type: 'info',
                 message: '🚀 **Connectivity Test Successful**\n\nYour AIOManager Autopilot alerts are configured correctly and active.\n\n**Environment**: High-Scale Optimization\n**Encryption**: AES-256 Verified ✅',
                 accountName: accountName || 'Test Account',

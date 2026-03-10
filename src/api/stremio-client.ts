@@ -230,7 +230,7 @@ export class StremioClient {
    * Domains that should be fetched directly without using the proxy
    * Add domains here that have proper CORS headers or are official Stremio services
    */
-  private readonly DIRECT_FETCH_DOMAINS = ['v3-cinemeta.strem.io', 'cinemeta.strem.io', 'strem.io', '127.0.0.1', 'localhost']
+  private readonly DIRECT_FETCH_DOMAINS = ['v3-cinemeta.strem.io', 'cinemeta.strem.io', 'opensubtitles-v3.strem.io', 'www.strem.io', 'v3-channels.strem.io', '127.0.0.1', 'localhost']
 
   /**
    * Fetch addon manifest from URL
@@ -282,7 +282,6 @@ export class StremioClient {
         throw new Error(`Addon server responded with ${response.status}`)
       }
 
-      // allorigins might return the data as a string, so parse it if needed
       const manifestData = await response.json()
 
       if (!manifestData?.id || !manifestData?.name || !manifestData?.version) {

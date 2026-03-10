@@ -64,7 +64,7 @@ export function SyncDiagnostics() {
                 <div className="flex items-center gap-2">
                     <History className="h-4 w-4 text-primary" />
                     <div>
-                        <h3 className="text-sm font-semibold">Advanced Sync Diagnostics</h3>
+                        <h3 className="text-sm font-semibold">Advanced Cloud Sync Diagnostics</h3>
                         <p className="text-xs text-muted-foreground">History logs and manual overrides</p>
                     </div>
                 </div>
@@ -79,7 +79,7 @@ export function SyncDiagnostics() {
                             <Button
                                 variant="outline"
                                 size="sm"
-                                className="w-full justify-start text-xs border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-600 h-9"
+                                className="w-full justify-start text-xs border-destructive/30 hover:bg-destructive/10 hover:text-destructive h-9"
                                 onClick={() => setShowPushConfirm(true)}
                             >
                                 <Zap className="h-3.5 w-3.5 mr-2 text-amber-500" />
@@ -94,7 +94,7 @@ export function SyncDiagnostics() {
                             <Button
                                 variant="outline"
                                 size="sm"
-                                className="w-full justify-start text-xs border-orange-500/30 hover:bg-orange-500/10 hover:text-orange-600 h-9"
+                                className="w-full justify-start text-xs border-destructive/30 hover:bg-destructive/10 hover:text-destructive h-9"
                                 onClick={() => setShowMirrorConfirm(true)}
                             >
                                 <AlertCircle className="h-3.5 w-3.5 mr-2 text-orange-500" />

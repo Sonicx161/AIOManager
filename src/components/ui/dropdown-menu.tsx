@@ -3,6 +3,7 @@ import * as React from 'react'
 
 interface DropdownMenuProps {
   children: React.ReactNode
+  open?: boolean
   onOpenChange?: (open: boolean) => void
 }
 
@@ -13,12 +14,25 @@ interface DropdownMenuContextValue {
 
 const DropdownMenuContext = React.createContext<DropdownMenuContextValue | undefined>(undefined)
 
-const DropdownMenu = ({ children, onOpenChange }: DropdownMenuProps) => {
-  const [open, setOpen] = React.useState(false)
+const DropdownMenu = ({ children, open: controlledOpen, onOpenChange }: DropdownMenuProps) => {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const isControlled = controlledOpen !== undefined
+  const open = isControlled ? controlledOpen : uncontrolledOpen
 
+  const setOpen = React.useCallback((value: React.SetStateAction<boolean>) => {
+    const newValue = typeof value === 'function' ? value(open) : value
+    if (!isControlled) {
+      setUncontrolledOpen(newValue)
+    }
+    onOpenChange?.(newValue)
+  }, [isControlled, open, onOpenChange])
+
+  // We maintain the effect just in case, but onOpenChange is now called in setOpen directly
   React.useEffect(() => {
-    onOpenChange?.(open)
-  }, [open, onOpenChange])
+    if (!isControlled) {
+      onOpenChange?.(open)
+    }
+  }, [open, isControlled, onOpenChange])
 
   return (
     <DropdownMenuContext.Provider value={{ open, setOpen }}>

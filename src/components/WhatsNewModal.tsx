@@ -20,56 +20,94 @@ const GITHUB_RELEASES_URL = 'https://api.github.com/repos/sonicx161/AIOManager/r
 
 const FALLBACK_RELEASE: Release = {
     tag_name: `v${pkg.version}`,
-    name: `v${pkg.version} - Settings, Themes & Polish`,
+    name: `v${pkg.version} - Performance, Autopilot & UI`,
     published_at: new Date().toISOString(),
     html_url: `https://github.com/sonicx161/AIOManager/releases/tag/v${pkg.version}`,
-    body: `# v${pkg.version} - Settings, Themes & Polish
+    body: `# v1.8.5 — Performance, Autopilot & UI
 
-This update completely redesigns the Settings experience, introduces expansive new developer-focused visual themes, and polishes background loading states across the application.
-
-## ✨ New Features
-
-**Settings Page Redesign**
-The Settings page has been completely rebuilt into a clean tabbed layout — General, Appearance, Data & Sync, and Advanced — so everything has a logical home and nothing is buried. Tabs persist via URL hashes (e.g. \`#appearance\`) so you can bookmark or link directly to any section. Clear History Cache now safely lives in Data & Sync instead of the Danger Zone.
-
-**16 New Developer Themes + Redesigned Previews**
-Added 16 new developer themes: Catppuccin (Latte, Frappé, Macchiato, Mocha), Tokyo Night, Gruvbox Dark, One Dark Pro, Monokai Pro, Night Owl, Solarized Dark, Rosé Pine, SynthWave '84, Ayu Mirage, Cobalt2, Material Palenight, and GitHub Dark Dimmed. Every theme card now features a completely redesigned mini preview so you know exactly what the UI will look like before you click it.
+A deep maintenance release focused on fixing silent failures that have been building up under the hood since v1.8.0. No flashy new pages this time. There were just a lot of things that were quietly broken and are now quietly fixed, plus a new Refresh & Cache management system, a webhook notification system rework for Autopilot, and a full visual pass on the Saved Addons page.
 
 ---
 
-## 🐛 Bug Fixes & Polish
+## 🌟 New Features
 
-**Background Mutations Without Flashing**
-When you edit an addon's URL, name, or metadata, the library list now stays visible and dims slightly with an "Updating addon..." indicator. The page no longer completely blanks out while changes happen in the background.
+**Refresh Choice Dropdown.** The old single-purpose refresh button on the Accounts page has been upgraded to a full management dropdown. You now have granular control over your local data: trigger a global addon update check for all accounts with a live loading spinner for progress, or prune specific local caches without needing a full session reset.
+---
 
-**Instant Settings Loading**
-Privacy mode and library view settings now read directly from \`localStorage\` on initialization. The correct state is present from the very first render, eliminating any visual flashing.
+## ⚡ Autopilot Database Optimization
 
-**Replace URL Dialog Flow**
-The "Replace URL" dialog now automatically dismisses itself upon a successful URL replacement.
+The Autopilot worker was previously triggering unconditional database writes on every heartbeat cycle, even when no state had changed. This was caused by three compounding logic errors that are now resolved.
 
-**UI Adjustments**
-- **Manage Navigation**: The 'Manage' button in the sync summary now correctly routes you to the Saved Addons page as expected.
-- **Metrics Visibility**: The account selector dropdown on the Metrics page now renders correctly on Sonic, Sakura, and all other light themes.
-- **Provider Health Cards**: The provider health cards in Settings now use a left-aligned layout consistent with the rest of the app.
-- **Local-Only Polish**: If you are a local-only user, you now get a clean "Cloud Sync not connected" message in Settings instead of a broken layout.
+All three bugs are now fixed:
+
+- The worker was encrypting the stabilization state to compare it to the stored value. Because the encryption uses a random IV, two encryptions of identical plaintext always produce different ciphertext — so the "did anything change?" check was always returning yes, always writing.
+- Even after fixing that, the success/failure counters inside the stabilization object would keep incrementing every cycle on a healthy instance, meaning the JSON would change anyway (\`{successes: 1}\` → \`{successes: 2}\` → ...) and the early-return would never fire.
+- A 5-minute forced heartbeat write was also running unconditionally as a fallback.
+
+With all three fixed: **on a stable, healthy instance, the worker now produces zero database writes per cycle.** Writes only happen when something actually changes — a failover, a recovery, or a rule violation. For most users this means the worker runs silently for hours or days at a time without touching the database at all.
 
 ---
 
-## 🧹 Maintenance
+## 🔔 Autopilot Webhook Notifications
 
-**Component Cleanup**
-Removed deprecated \`ExportDialog.tsx\` and \`ImportDialog.tsx\` files as this functionality has been fully modernized and seamlessly integrated into the new Data & Sync tab.
+Autopilot can now send you a notification when it does something.
+
+Set a **Global Webhook** in the Webhooks tab inside any account's Failover Manager. AIOManager auto-detects whether the URL is a Discord webhook, Slack incoming webhook, or a generic JSON endpoint and formats the payload accordingly. The global webhook is the fallback for all rules — if a rule doesn't have its own, it inherits this one.
+
+Each rule can also have its own **custom webhook URL** that overrides the global one, a **per-rule notification cooldown** so you don't get spammed during flapping events, and can be set to off entirely if you want that rule to stay silent.
+
+A **Test button** is available directly on the global webhook config, inside the rule creation dialog, and on any rule row that has a custom URL set.
 
 ---
 
-## 💝 Support
+## 🐛 Autopilot: Two Silent Failures Fixed
 
-I honestly feel bad even including a support section because I don't do any of this for money at all, I just wanted to build something useful. However, because so many of you keep generously reaching out and asking for ways to help, I have finally added a formal Support section to the \`README.md\` and changed the "Donate" button to a "Support" button in the footer that redirects to the bottom of the **FAQ** page where a new support section now lives. You absolutely do not have to contribute, but if you genuinely want to, here are a few ways:
+**Manual-only rules were running as automatic.** The worker's SELECT query was missing the \`is_automatic\` column. Since it never loaded, the manual-only guard never fired — every rule ran on the automatic schedule regardless of how you configured it.
 
-**GitHub Sponsors:** https://github.com/sponsors/sonicx161
+**Live Mode syncs were silently broken for self-hosted users.** A stray space in the API path construction was generating a URL like \`/base /api/autopilot/rules\` instead of \`/base/api/autopilot/rules\`. The server returned 404 and the sync failed silently — no error shown, rules just never propagated. If you're running a remote sync server and noticed your Autopilot rules weren't sticking, this was why.
 
-**Ko-fi:** https://ko-fi.com/sonicx161
+---
+
+## 🐛 Other Bug Fixes
+
+**Global webhook went stale after saving.** Updating the global webhook URL in the UI looked like it worked, but the server kept using the old URL until the next restart. Rules that use the default webhook now re-sync immediately when you save a new global URL.
+
+**Update checks were causing 429 bursts on self-hosted addon servers.** When you clicked "Check for Addon Updates," the app was firing a separate manifest fetch pass per account — so if you have 8 accounts all running the same AIOStreams instance, it would hit that server 8 times in rapid succession. The check now deduplicates addon URLs globally before fetching, so each unique addon server is hit exactly once per check run regardless of how many accounts share it.
+
+**Health checks were making network requests to local/private-IP addons.** If you had addons with local addresses (192.168.x.x, 10.x.x.x, etc.) in your library, the app was making live network requests that were guaranteed to fail with \`ERR_CONNECTION_REFUSED\`. These are now skipped before the request is made.
+
+**OpenSubtitles v1 console spam.** The deprecated \`opensubtitles.strem.io\` endpoint returns an HTML error page instead of JSON, causing a \`SyntaxError: Unexpected token '<'\` on every single update check for anyone who has it installed. These are now silently skipped.
+
+**Test webhook endpoint had no SSRF protection.** The \`/api/autopilot/test-webhook\` endpoint would fire an outbound request to any URL without validation. It now runs through the same \`isSafeUrl\` guard as all other proxied requests.
+
+---
+
+## 🎨 Saved Addon Library — Visual Overhaul
+
+The Addons page got a full visual pass to bring it in line with the rest of the app.
+
+**Sidebar** was rebuilt as a proper panel — \`bg-muted/30\` container with rounded-2xl border, primary active states, and a clean PROFILES label. The old flat ghost button list is gone.
+
+**Toolbar** was decluttered. Health indicators (Online · Offline) sit on the left, action buttons on the right in a consistent h-8 row. No more floating stats-in-a-box.
+
+**Cards** — hover state now uses Tailwind instead of \`onMouseEnter\`/\`onMouseLeave\` inline style manipulation. Footer got a proper \`border-t\` separator with profile name left and relative timestamp right.
+
+**Profile section headers** now use the full divider-line treatment with a collapse chevron, matching the rest of the app's section language.
+
+---
+
+## 🔔 Tabs No Longer Require Swiping on Mobile
+
+Every pill-tab row in the app (Accounts, Activity, Failover Manager, Settings, Addons) now wraps to a second line on small screens instead of scrolling horizontally. The Metrics page already had this correct behavior — everything else now matches it.
+
+---
+
+## 🔧 Smaller Fixes
+
+- Button height inconsistency between "New Rule" (h-8) and "Copy Rules From…" (h-7) in Failover Manager — both are now h-8
+- "Update All" button on the Accounts page was hardcoded blue — now uses your active theme's primary color like every other button
+- Selection toolbar on the Addons page was clipping through the app header on scroll — now correctly offsets below it
+- \`latestVersions\` map was growing unboundedly in localforage, writing a larger payload on every update check as you uninstalled addons over time — now pruned after each merge
 `
 }
 
@@ -92,7 +130,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
     const fetchReleases = useCallback(async () => {
         setLoading(true)
         try {
-            const res = await fetch(`${GITHUB_RELEASES_URL}?per_page = 5`)
+            const res = await fetch(`${GITHUB_RELEASES_URL}?per_page=5`)
             if (res.ok) {
                 const data: Release[] = await res.json()
                 // Merge with internal release if not already fetched from GitHub

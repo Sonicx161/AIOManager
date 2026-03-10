@@ -22,7 +22,7 @@ import { TagManagerDialog } from './TagManagerDialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import {
   Plus, Search, X, Package, Layers, User,
-  GripVertical, Pencil, Upload, UserMinus, Grid, List, ChevronRight, ChevronDown,
+  GripVertical, Pencil, Upload, UserMinus, Grid, List, ChevronDown,
   ArrowLeft, Link2, Wand2,
   Check
 } from 'lucide-react'
@@ -57,6 +57,16 @@ export function SavedAddonLibrary() {
   } = useAddonStore()
   const accounts = useAccountStore(state => state.accounts)
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val)
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    searchTimeoutRef.current = setTimeout(() => {
+      setDebouncedSearchQuery(val)
+    }, 150)
+  }
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
   const [showAddDialog, setShowAddDialog] = useState(false)
   const [showProfileReorderDialog, setShowProfileReorderDialog] = useState(false)
@@ -80,7 +90,6 @@ export function SavedAddonLibrary() {
   } = useProfileStore()
 
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null) // null = all, 'unassigned' = no profile
-  const [isProfilesExpanded, setIsProfilesExpanded] = useState(true)
   const [deleteProfileId, setDeleteProfileId] = useState<string | null>(null)
 
   const { libraryViewMode: viewMode, setLibraryViewMode: setViewMode } = useUIStore()
@@ -110,6 +119,7 @@ export function SavedAddonLibrary() {
 
 
   const handleRefresh = useCallback(async () => {
+    if (checkingUpdates) return
     if (savedAddons.length === 0) return
 
     setCheckingUpdates(true)
@@ -227,8 +237,8 @@ export function SavedAddonLibrary() {
     let filtered = savedAddons
 
     // Filter by search query
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase()
+    if (debouncedSearchQuery) {
+      const query = debouncedSearchQuery.toLowerCase()
       filtered = filtered.filter(
         (addon) =>
           addon.name.toLowerCase().includes(query) ||
@@ -249,9 +259,9 @@ export function SavedAddonLibrary() {
       filtered = filtered.filter((addon) => addon.tags.includes(selectedTag))
     }
 
-    // Sort by lastUsed (most recent first), then by name
+    // Sort alphabetically by name
     return filtered.sort((a, b) => a.name.localeCompare(b.name))
-  }, [savedAddons, searchQuery, selectedTag, selectedProfileId, profiles])
+  }, [savedAddons, debouncedSearchQuery, selectedTag, selectedProfileId, profiles])
 
 
   // Selection State
@@ -612,141 +622,131 @@ export function SavedAddonLibrary() {
   return (
     <div className="flex flex-col md:flex-row gap-6">
       {/* Sidebar - Profiles */}
-      <div className="w-full md:w-64 flex-shrink-0 space-y-4">
-        <div className="flex items-center justify-between pr-2">
-          <h2 className="text-lg font-semibold tracking-tight">Profiles</h2>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setShowProfileReorderDialog(true)}
-              disabled={profiles.length === 0}
-              title="Reorder Profiles"
-            >
-              <GripVertical className="h-4 w-4" />
-            </Button>
-            <ProfileDialog trigger={
+      <div className="w-full md:w-56 flex-shrink-0">
+        <div className="bg-muted/30 border border-border rounded-2xl p-3 space-y-1">
+          {/* Header */}
+          <div className="flex items-center justify-between px-2 py-1.5 mb-1">
+            <span className="text-xs font-bold uppercase tracking-widest text-foreground/40">Profiles</span>
+            <div className="flex items-center gap-1">
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8"
-                title="Create Profile"
+                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                onClick={() => setShowProfileReorderDialog(true)}
+                disabled={profiles.length === 0}
+                title="Reorder Profiles"
               >
-                <Plus className="h-4 w-4" />
+                <GripVertical className="h-3.5 w-3.5" />
               </Button>
-            } />
+              <ProfileDialog trigger={
+                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground" title="Create Profile">
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              } />
+            </div>
           </div>
-        </div>
 
-        <ProfileReorderDialog
-          open={showProfileReorderDialog}
-          onOpenChange={setShowProfileReorderDialog}
-        />
+          <ProfileReorderDialog
+            open={showProfileReorderDialog}
+            onOpenChange={setShowProfileReorderDialog}
+          />
 
-        <div className="space-y-1">
-          <Button
-            variant={selectedProfileId === null ? "secondary" : "ghost"}
-            className="w-full justify-start font-normal"
+          {/* All Addons */}
+          <button
+            className={cn(
+              "w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors text-left",
+              selectedProfileId === null
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+            )}
             onClick={() => setSelectedProfileId(null)}
           >
-            <Layers className="mr-2 h-4 w-4 shrink-0" />
-            <span className="flex-1 text-left">All Addons</span>
-            <span className="ml-auto text-[10px] font-bold text-muted-foreground">{savedAddons.length}</span>
-          </Button>
-          <Button
-            variant={selectedProfileId === 'unassigned' ? "secondary" : "ghost"}
-            className="w-full justify-start font-normal"
+            <Layers className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1 truncate">All Addons</span>
+            <span className={cn(
+              "text-[10px] font-bold tabular-nums",
+              selectedProfileId === null ? "text-primary-foreground/70" : "text-foreground/30"
+            )}>{savedAddons.length}</span>
+          </button>
+
+          {/* Unassigned */}
+          <button
+            className={cn(
+              "w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors text-left",
+              selectedProfileId === 'unassigned'
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+            )}
             onClick={() => setSelectedProfileId('unassigned')}
           >
-            <Package className="mr-2 h-4 w-4 opacity-50 shrink-0" />
-            <span className="flex-1 text-left">Unassigned</span>
+            <Package className="h-3.5 w-3.5 shrink-0 opacity-60" />
+            <span className="flex-1 truncate">Unassigned</span>
             {unassignedCount > 0 && (
-              <span className="ml-auto text-[10px] font-bold text-muted-foreground bg-muted/60 rounded-full px-1.5 py-0.5 shrink-0 min-w-[1.25rem] text-center">
-                {unassignedCount}
-              </span>
+              <span className={cn(
+                "text-[10px] font-bold tabular-nums",
+                selectedProfileId === 'unassigned' ? "text-primary-foreground/70" : "text-foreground/30"
+              )}>{unassignedCount}</span>
             )}
-          </Button>
+          </button>
 
-        </div>
-
-        <div className="space-y-1 pt-2 border-t">
-          <div className="flex items-center justify-between px-2 pb-2">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">User Profiles</h3>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 md:hidden"
-              onClick={() => setIsProfilesExpanded(!isProfilesExpanded)}
-            >
-              <ChevronDown className={cn("h-4 w-4 transition-transform", isProfilesExpanded ? "" : "-rotate-90")} />
-            </Button>
-          </div>
-
-          <div className={cn(
-            "space-y-1 transition-all duration-200 overflow-hidden",
-            !isProfilesExpanded && "max-h-0 md:max-h-none opacity-0 md:opacity-100",
-            isProfilesExpanded && "max-h-[500px] opacity-100",
-            "md:max-h-[calc(100vh-400px)] md:overflow-y-auto md:pr-1 custom-scrollbar"
-          )}>
-            {profiles.map(profile => {
-              return (
-                <div key={profile.id} className="group flex items-center gap-1">
-                  <Button
-                    variant={selectedProfileId === profile.id ? "secondary" : "ghost"}
-                    className={cn(
-                      "flex-1 items-center justify-start font-normal min-w-0 pr-2",
-                      selectedProfileId === profile.id && "bg-secondary"
-                    )}
-                    onClick={() => setSelectedProfileId(profile.id)}
-                  >
-                    <User className="mr-2 h-4 w-4 shrink-0" />
-                    <span className="truncate flex-1 text-left">{profile.name}</span>
-                    {(profileAddonCounts[profile.id] || 0) > 0 && (
-                      <span className="ml-auto text-[10px] font-bold text-muted-foreground bg-muted/60 rounded-full px-1.5 py-0.5 shrink-0 min-w-[1.25rem] text-center">
-                        {profileAddonCounts[profile.id]}
-                      </span>
-                    )}
-                  </Button>
-                  <div className="opacity-0 group-hover:opacity-100 flex items-center shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setDeleteProfileId(profile.id)
-                      }}
+          {/* Divider */}
+          {profiles.length > 0 && (
+            <div className="pt-2 mt-1 border-t border-border/50">
+              <div
+                className={cn(
+                  "space-y-0.5 overflow-hidden transition-all",
+                  "max-h-[calc(100vh-400px)] overflow-y-auto pr-0.5 custom-scrollbar"
+                )}
+              >
+                {profiles.map(profile => (
+                  <div key={profile.id} className="group flex items-center gap-1">
+                    <button
+                      className={cn(
+                        "flex-1 flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-sm font-medium transition-colors text-left min-w-0",
+                        selectedProfileId === profile.id
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                      )}
+                      onClick={() => setSelectedProfileId(profile.id)}
                     >
-                      <AnimatedTrashIcon className="h-3 w-3" />
-                    </Button>
-                    <ProfileDialog
-                      profile={profile}
-                      trigger={
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground">
-                          <AnimatedSettingsIcon className="h-3 w-3" />
-                        </Button>
-                      }
-                    />
+                      <User className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate flex-1">{profile.name}</span>
+                      {(profileAddonCounts[profile.id] || 0) > 0 && (
+                        <span className={cn(
+                          "text-[10px] font-bold tabular-nums shrink-0",
+                          selectedProfileId === profile.id ? "text-primary-foreground/70" : "text-foreground/30"
+                        )}>{profileAddonCounts[profile.id]}</span>
+                      )}
+                    </button>
+                    <div className="opacity-0 group-hover:opacity-100 flex items-center shrink-0 transition-opacity">
+                      <ProfileDialog
+                        profile={profile}
+                        trigger={
+                          <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground">
+                            <AnimatedSettingsIcon className="h-3 w-3" />
+                          </Button>
+                        }
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                        onClick={(e) => { e.stopPropagation(); setDeleteProfileId(profile.id) }}
+                      >
+                        <AnimatedTrashIcon className="h-3 w-3" />
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              )
-            })}
-          </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Main Content */}
       <div className="flex flex-col min-w-0 space-y-6 w-full flex-1">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Saved Addon Library</h1>
-            <p className="text-muted-foreground mt-1">
-              Manage your curated collection of addons and profiles.
-            </p>
-          </div>
-        </div>
+        {/* Header — removed standalone title, shown inline in content area */}
 
         <div className="flex flex-col gap-4 w-full pt-2">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 w-full">
@@ -794,7 +794,7 @@ export function SavedAddonLibrary() {
 
           {/* Selection Toolbar */}
           {isSelectionMode && (
-            <div className="sticky top-4 z-50 bg-card border rounded-lg p-3 shadow-md flex flex-col md:flex-row items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2 w-full">
+            <div className="sticky top-[96px] md:top-[186px] z-40 bg-card border rounded-lg p-3 shadow-md flex flex-col md:flex-row items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2 w-full">
               <div className="flex items-center justify-between md:justify-start w-full md:w-auto gap-3">
                 <span className="font-medium text-sm ml-1">
                   {selectedIds.size} Selected
@@ -870,7 +870,7 @@ export function SavedAddonLibrary() {
         )}
 
         <Tabs defaultValue="library" className="w-full">
-          <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap overflow-x-auto scrollbar-hide pb-2 mb-4">
+          <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full pb-2 mb-4">
             <TabsTrigger
               value="library"
               className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm relative transition-all"
@@ -900,97 +900,103 @@ export function SavedAddonLibrary() {
             {!loading && (
               <div className="flex flex-col gap-6 animate-in fade-in duration-500">
                 {/* Actions & Stats Row */}
-                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 p-4 rounded-xl border bg-muted/30">
-                  <div className="flex items-center gap-6">
+                <div className="bg-card border rounded-xl p-3 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4 animate-in fade-in slide-in-from-top-2 w-full mb-2">
+                  {/* Left: health summary */}
+                  <div className="flex items-center gap-4">
                     {savedAddons.length > 0 && (
                       <div className="flex items-center gap-4 text-sm px-1">
-                        <span className="flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full bg-green-500" />
-                          <span className="font-medium">{healthSummary.online}</span>
-                          <span className="text-muted-foreground">Online</span>
+                        <span className="flex items-center gap-1.5 focus-ring rounded-md">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_6px_#22c55e]" />
+                          <span className="font-bold text-foreground">{healthSummary.online}</span>
+                          <span className="text-muted-foreground text-xs">Online</span>
                         </span>
-                        <span className="flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full bg-red-500" />
-                          <span className="font-medium">{healthSummary.offline}</span>
-                          <span className="text-muted-foreground">Offline</span>
+                        <span className="flex items-center gap-1.5 focus-ring rounded-md">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shadow-[0_0_6px_#ef4444]" />
+                          <span className="font-bold text-foreground">{healthSummary.offline}</span>
+                          <span className="text-muted-foreground text-xs">Offline</span>
                         </span>
                       </div>
                     )}
                     {(checkingHealth || checkingUpdates) && (
-                      <span className="text-xs text-muted-foreground flex items-center gap-2 animate-pulse bg-background/50 px-2 py-1 rounded-md border">
+                      <span className="text-xs text-muted-foreground flex items-center gap-1.5 animate-pulse bg-muted/30 px-2 py-0.5 rounded-full border border-border/50">
                         <AnimatedRefreshIcon className="h-3 w-3" isAnimating={true} />
-                        {checkingUpdates ? 'Refreshing manifests...' : 'Checking health...'}
+                        {checkingUpdates ? 'Checking updates...' : 'Checking health...'}
                       </span>
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 w-full lg:w-auto">
-                    <div className="flex items-center justify-center gap-1 bg-background/50 p-1 rounded-lg border col-span-1 h-10 w-full sm:w-auto sm:mr-1">
+                  {/* Right: actions */}
+                  <div className="flex flex-wrap items-center justify-end gap-2 w-full md:w-auto">
+                    {/* View Toggle */}
+                    <div className="flex items-center bg-muted/50 rounded-lg p-0.5 border border-border/50 gap-0.5 mr-1">
                       <Button
                         variant="ghost"
                         size="sm"
-                        className={cn("h-full w-full sm:w-9 p-0", viewMode === 'grid' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
-                        onClick={() => { setViewMode('grid'); setCollapsedProfiles(new Set()); }}
+                        className={cn("h-7 w-7 p-0", viewMode === 'grid' ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
+                        onClick={() => { setViewMode('grid'); setCollapsedProfiles(new Set()) }}
                       >
-                        <Grid className="h-4 w-4" />
+                        <Grid className="h-3.5 w-3.5" />
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className={cn("h-full w-full sm:w-9 p-0", viewMode === 'list' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
-                        onClick={() => { setViewMode('list'); setCollapsedProfiles(new Set()); }}
+                        className={cn("h-7 w-7 p-0", viewMode === 'list' ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
+                        onClick={() => { setViewMode('list'); setCollapsedProfiles(new Set()) }}
                       >
-                        <List className="h-4 w-4" />
+                        <List className="h-3.5 w-3.5" />
                       </Button>
                     </div>
 
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-10 col-span-1 w-full sm:w-auto"
+                      className="h-8 gap-1.5"
                       onClick={handleRefresh}
                       disabled={checkingUpdates || checkingHealth || updatingAll || savedAddons.length === 0}
                     >
-                      <AnimatedRefreshIcon className="h-3.5 w-3.5 mr-2" isAnimating={checkingUpdates || checkingHealth} />
+                      <AnimatedRefreshIcon className="h-3.5 w-3.5" isAnimating={checkingUpdates || checkingHealth} />
                       Refresh
                     </Button>
+
                     {updatesCount > 0 && (
                       <Button
-                        variant="default"
                         size="sm"
-                        className="h-10 bg-primary hover:bg-primary/90 text-primary-foreground col-span-2 sm:col-span-1 w-full sm:w-auto"
+                        className="h-8 gap-1.5"
                         onClick={handleUpdateAll}
                         disabled={updatingAll}
                       >
-                        <AnimatedUpdateIcon className="h-3.5 w-3.5 mr-2" isAnimating={updatingAll} />
+                        <AnimatedUpdateIcon className="h-3.5 w-3.5" isAnimating={updatingAll} />
                         Update {updatesCount}
                       </Button>
                     )}
+
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-10 col-span-1 w-full sm:w-auto px-2"
+                      className="h-8 gap-1.5"
                       onClick={() => setShowBulkUrlReplaceDialog(true)}
                       title="Bulk URL Fragment Replace"
                     >
-                      <Wand2 className="h-3.5 w-3.5 mr-2 shrink-0" />
-                      <span className="truncate">Bulk Replace</span>
+                      <Wand2 className="h-3.5 w-3.5" />
+                      Bulk Replace
                     </Button>
+
                     <Button
                       variant={isSelectionMode ? "secondary" : "outline"}
                       size="sm"
-                      className="h-10 col-span-1 w-full sm:w-auto px-2"
+                      className="h-8 gap-1.5"
                       onClick={toggleSelectionMode}
                     >
-                      <Check className="mr-2 h-4 w-4 shrink-0" />
-                      <span className="truncate">{isSelectionMode ? 'Cancel' : 'Select'}</span>
+                      <Check className="h-3.5 w-3.5" />
+                      {isSelectionMode ? 'Cancel' : 'Select'}
                     </Button>
+
                     <Button
                       size="sm"
-                      className="h-10 col-span-2 sm:col-span-1 w-full sm:w-auto shadow-sm"
+                      className="h-8 gap-1.5 shadow-sm"
                       onClick={handleOpenAddDialog}
                     >
-                      <Plus className="mr-2 h-4 w-4" />
+                      <Plus className="h-3.5 w-3.5" />
                       Add Addon
                     </Button>
                   </div>
@@ -1010,12 +1016,12 @@ export function SavedAddonLibrary() {
                         return `Search ${possessive} addons...`;
                       })()}
                       value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onChange={(e) => handleSearchChange(e.target.value)}
                       className="pl-10 pr-10 h-10 bg-background/50 border-muted focus:bg-background transition-colors"
                     />
                     {searchQuery && (
                       <button
-                        onClick={() => setSearchQuery('')}
+                        onClick={() => handleSearchChange('')}
                         className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors"
                       >
                         <X className="h-4 w-4 text-muted-foreground" />
@@ -1163,18 +1169,25 @@ export function SavedAddonLibrary() {
                       const isExpanded = !collapsedProfiles.has(profile.id)
                       return (
                         <div key={profile.id} className="space-y-4">
-                          <button
-                            onClick={() => toggleProfile(profile.id)}
-                            className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
-                          >
-                            <h3 className="text-xl font-semibold flex items-center gap-2">
-                              <User className="h-5 w-5" />
-                              {profile.name}
-                            </h3>
-                            <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
-                              {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
-                            </div>
-                          </button>
+                          <div className="flex items-center gap-3 pt-2 first:pt-0">
+                            <button
+                              className="flex items-center gap-2 group"
+                              onClick={() => toggleProfile(profile.id)}
+                            >
+                              <ChevronDown className={cn(
+                                "h-3.5 w-3.5 text-foreground/30 transition-transform shrink-0",
+                                collapsedProfiles.has(profile.id) && "-rotate-90"
+                              )} />
+                              <span className="text-sm font-semibold text-foreground/60 group-hover:text-foreground/80 transition-colors flex items-center gap-2">
+                                <User className="h-3.5 w-3.5 shrink-0" />
+                                {profile.name}
+                              </span>
+                            </button>
+                            <span className="text-xs text-foreground/25 font-medium tabular-nums">
+                              {profileAddons.length}
+                            </span>
+                            <div className="flex-1 h-px bg-border/40" />
+                          </div>
 
                           {isExpanded && (
                             <div className={cn(
@@ -1230,21 +1243,25 @@ export function SavedAddonLibrary() {
                       const isExpanded = !collapsedProfiles.has('unassigned')
                       return (
                         <div className="space-y-4">
-                          <button
-                            onClick={() => toggleProfile('unassigned')}
-                            className="w-full group flex items-center justify-between hover:bg-foreground/5 p-2 rounded-lg transition-colors border border-transparent hover:border-foreground/10"
-                          >
-                            <h3 className="text-xl font-semibold flex items-center gap-2">
-                              <Package className="h-5 w-5" />
-                              Unassigned
-                              <span className="text-sm font-normal text-muted-foreground ml-2">
-                                ({unassigned.length})
+                          <div className="flex items-center gap-3 pt-2 first:pt-0">
+                            <button
+                              className="flex items-center gap-2 group"
+                              onClick={() => toggleProfile('unassigned')}
+                            >
+                              <ChevronDown className={cn(
+                                "h-3.5 w-3.5 text-foreground/30 transition-transform shrink-0",
+                                collapsedProfiles.has('unassigned') && "-rotate-90"
+                              )} />
+                              <span className="text-sm font-semibold text-foreground/60 group-hover:text-foreground/80 transition-colors flex items-center gap-2">
+                                <Package className="h-3.5 w-3.5 shrink-0" />
+                                Unassigned
                               </span>
-                            </h3>
-                            <div className="text-muted-foreground opacity-50 group-hover:opacity-100 transition-opacity">
-                              {isExpanded ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
-                            </div>
-                          </button>
+                            </button>
+                            <span className="text-xs text-foreground/25 font-medium tabular-nums">
+                              {unassigned.length}
+                            </span>
+                            <div className="flex-1 h-px bg-border/40" />
+                          </div>
 
                           {isExpanded && (
                             <div className={cn(

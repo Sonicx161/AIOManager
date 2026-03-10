@@ -21,6 +21,8 @@ export interface FailoverRule {
     isAutomatic?: boolean // Toggle for automatic health-based switching
     stabilization?: Record<string, number> // Addon health score
     cooldown_ms?: number // Custom webhook cooldown for this rule
+    webhookUrl?: string      // Per-rule override URL. Empty string = use global default.
+    notifyEnabled?: boolean  // Per-rule notification toggle. Undefined/true = enabled.
 }
 
 export interface WebhookConfig {
@@ -40,7 +42,7 @@ interface FailoverStore {
 
     initialize: () => Promise<void>
     setWebhook: (url: string, enabled: boolean) => Promise<void>
-    addRule: (accountId: string, priorityChain: string[], name?: string, cooldown_ms?: number) => Promise<void>
+    addRule: (accountId: string, priorityChain: string[], name?: string, cooldown_ms?: number, webhookUrl?: string, notifyEnabled?: boolean) => Promise<void>
     updateRule: (ruleId: string, updates: Partial<FailoverRule>) => Promise<void>
     removeRule: (ruleId: string) => Promise<void>
     toggleRuleActive: (ruleId: string, isActive: boolean) => Promise<void>
@@ -75,7 +77,7 @@ const syncRuleToServer = async (rule: FailoverRule) => {
 
         const authKey = await decrypt(account.authKey, sessionKey)
         const baseUrl = serverUrl || ''
-        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')} /api` : '/api'
+        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
         const addonList = account.addons || []
 
@@ -89,7 +91,9 @@ const syncRuleToServer = async (rule: FailoverRule) => {
             is_active: rule.isActive ? 1 : 0,
             is_automatic: rule.isAutomatic !== false ? 1 : 0,
             addonList,
-            webhookUrl: useFailoverStore.getState().webhook.url,
+            webhookUrl: rule.notifyEnabled === false
+                ? ''
+                : (rule.webhookUrl || useFailoverStore.getState().webhook.url),
             cooldown_ms: rule.cooldown_ms
         })
         console.log(`[Autopilot] Rule ${rule.id} synced to server (Live Mode).`)
@@ -178,6 +182,10 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                 set({ lastWorkerRun: new Date(serverHeartbeat) })
                             }
 
+                            // Remove local rules for this account that no longer exist on the server
+                            const serverRuleIds = new Set(serverStates.map((s: any) => s.id))
+                            rules = rules.filter(r => r.accountId !== accountId || serverRuleIds.has(r.id))
+
                             for (const serverRule of serverStates) {
                                 // Check if we already have this rule in local 'rules'
                                 const existsIndex = rules.findIndex(r => r.id === serverRule.id)
@@ -236,6 +244,17 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             } catch (e) {
                 console.warn('[Failover] Server state fetch failed:', e)
             }
+
+            // One-time migration: stamp notifyEnabled on rules that predate per-rule notifications
+            let migrated = false
+            rules = rules.map(r => {
+                if (r.notifyEnabled === undefined || r.notifyEnabled === null) {
+                    migrated = true
+                    return { ...r, webhookUrl: r.webhookUrl ?? '', notifyEnabled: true }
+                }
+                return r
+            })
+            if (migrated) await localforage.setItem(STORAGE_KEY, rules)
 
             set({ rules })
 
@@ -388,9 +407,21 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
         const { useSyncStore } = await import('@/store/syncStore')
         useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+        // Re-sync all rules using default webhook mode so the server gets the updated URL.
+        // Rules in "default" mode have notifyEnabled=true and no custom webhookUrl.
+        // Their webhook_url on the server was baked in at last-sync time and is now stale.
+        if (url) {
+            const defaultModeRules = get().rules.filter(
+                r => r.notifyEnabled !== false && !r.webhookUrl
+            )
+            for (const rule of defaultModeRules) {
+                syncRuleToServer(rule).catch(console.error)
+            }
+        }
     },
 
-    addRule: async (accountId, priorityChain, name, cooldown_ms) => {
+    addRule: async (accountId, priorityChain, name, cooldown_ms, webhookUrl, notifyEnabled) => {
         const safeChain = Array.isArray(priorityChain) ? priorityChain : []
         const newRule: FailoverRule = {
             id: crypto.randomUUID(),
@@ -401,7 +432,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             isAutomatic: true,
             status: 'idle',
             activeUrl: safeChain[0],
-            cooldown_ms
+            cooldown_ms,
+            webhookUrl: webhookUrl || '',
+            notifyEnabled: notifyEnabled !== false,
         }
 
         const rules = [...get().rules, newRule]

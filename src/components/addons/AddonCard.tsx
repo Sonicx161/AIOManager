@@ -36,7 +36,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { useMemo, useState, useEffect } from 'react'
+import React, { useMemo, useState, useEffect } from 'react'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
 import { CatalogEditorDialog } from './CatalogEditorDialog'
@@ -137,7 +137,7 @@ interface AddonCardProps {
   index?: number // Optional for index-based targeting (handling duplicates)
 }
 
-export function AddonCard({
+export const AddonCard = React.memo(function AddonCard({
   addon,
   accountId,
   accountAuthKey,
@@ -709,7 +709,7 @@ export function AddonCard({
                 size="sm"
                 onClick={handleUpdate}
                 disabled={loading || updating || removing}
-                className="w-full font-bold bg-amber-500 hover:bg-amber-400 text-black border-none shadow-sm"
+                className="w-full font-bold"
               >
                 <AnimatedUpdateIcon className="h-4 w-4 mr-2" isAnimating={updating} />
                 {updating ? 'Updating...' : 'Update Available'}
@@ -959,4 +959,4 @@ export function AddonCard({
       />
     </>
   )
-}
+})

@@ -832,7 +832,7 @@ export function MetricsPage() {
                                 >
                                     <Card className="bg-orange-500/5 border-orange-500/10 group-hover:border-orange-500/30 transition-colors">
                                         <CardContent className="p-4 flex items-center gap-4">
-                                            <img src={v.item.poster} className="h-20 w-14 object-cover rounded shadow" />
+                                            <img src={v.item.poster} alt={v.item.name || ""} className="h-20 w-14 object-cover rounded shadow" />
                                             <div className="flex-1 min-w-0">
                                                 <div className="font-bold truncate text-sm">{v.item.name}</div>
                                                 <div className="text-[10px] text-muted-foreground font-bold uppercase mt-1">
@@ -869,7 +869,7 @@ export function MetricsPage() {
                                 <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-4">
                                     {stats.abandonedSeries.map((item: any) => (
                                         <div key={item.id} onClick={() => openStremioDetail(item.type, item.itemId)} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
-                                            <img src={item.poster} className="w-full h-full object-cover" />
+                                            <img src={item.poster} alt={item.name || ""} className="w-full h-full object-cover" />
                                             <div className="absolute top-1 right-1 bg-red-500 text-[10px] text-white px-1.5 rounded font-bold">
                                                 {Math.round(item.progress)}%
                                             </div>
@@ -885,7 +885,7 @@ export function MetricsPage() {
                                 <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-4">
                                     {stats.abandonedMovies.map((item: any) => (
                                         <div key={item.id} onClick={() => openStremioDetail(item.type, item.itemId)} className="relative aspect-[2/3] grayscale hover:grayscale-0 transition-all duration-500 rounded-lg overflow-hidden group cursor-pointer opacity-70 hover:opacity-100 shadow-md">
-                                            <img src={item.poster} className="w-full h-full object-cover" />
+                                            <img src={item.poster} alt={item.name || ""} className="w-full h-full object-cover" />
                                             <div className="absolute top-1 right-1 bg-red-500 text-[10px] text-white px-1.5 rounded font-bold">
                                                 {Math.round(item.progress)}%
                                             </div>
@@ -971,7 +971,7 @@ export function MetricsPage() {
                                     <div className="absolute top-2 left-2 z-20 bg-pink-500 text-white text-[10px] font-black px-1.5 py-0.5 rounded shadow-lg uppercase tracking-widest">
                                         Shared
                                     </div>
-                                    <img src={c.item.poster} className="w-full h-full object-cover transition-transform group-hover:scale-105" />
+                                    <img src={c.item.poster} alt={c.item.name || ""} className="w-full h-full object-cover transition-transform group-hover:scale-105" />
                                     <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/90 to-transparent">
                                         <div className="text-[10px] font-black text-pink-400 uppercase">{c.accounts.size} Accounts</div>
                                         <div className="text-xs font-bold text-white truncate">{c.item.name}</div>
@@ -989,7 +989,7 @@ export function MetricsPage() {
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
                             {stats.topAllTime.map((stat: any, i: number) => (
                                 <div key={stat.item.id} onClick={() => openStremioDetail(stat.item.type, stat.item.itemId)} className="group relative aspect-[2/3] rounded-xl overflow-hidden bg-muted shadow-lg cursor-pointer transition-transform hover:-translate-y-2">
-                                    <img src={stat.item.poster} className="w-full h-full object-cover" />
+                                    <img src={stat.item.poster} alt={stat.item.name || ""} className="w-full h-full object-cover" />
                                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent flex flex-col justify-end p-4 opacity-0 group-hover:opacity-100 transition-opacity">
                                         <div className="text-4xl font-black text-white mb-1">#{i + 1}</div>
                                         <div className="text-xs font-bold text-white/80 uppercase tracking-widest">{stat.count} Plays</div>
@@ -1139,7 +1139,7 @@ export function MetricsPage() {
                                         onClick={() => openStremioDetail(item.type, item.itemId)}
                                         className="group relative w-32 aspect-[2/3] rounded-xl overflow-hidden shadow-xl transition-transform hover:-translate-y-2 cursor-pointer"
                                     >
-                                        <img src={item.poster} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500" />
+                                        <img src={item.poster} alt={item.name || ""} className="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all duration-500" />
                                         <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                                             <div className="text-[8px] font-black text-white uppercase">{item.accountName}'s Choice</div>
                                         </div>

@@ -6,28 +6,48 @@ export interface HealthStatus {
   error?: string
 }
 
+export function isLocalOrPrivateUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url)
+    return (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * Check if an addon URL is accessible
  * @param addonUrl The addon install URL
  * @returns HealthStatus object
  */
 export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> {
+  if (isLocalOrPrivateUrl(addonUrl)) {
+    return { isOnline: false, error: 'Local addon unreachable from server' }
+  }
+
   let domain = addonUrl;
   try { domain = new URL(addonUrl).origin } catch (e) { console.warn('[AddonHealth] Invalid URL for origin extraction:', addonUrl) }
 
-  const performCheck = async (target: string, timeoutMs: number, useProxy: boolean = false): Promise<{ ok: boolean, error?: string }> => {
+  const performCheck = async (target: string, timeoutMs: number): Promise<{ ok: boolean, error?: string }> => {
     try {
       const controller = new AbortController()
       const id = setTimeout(() => controller.abort(), timeoutMs)
 
-      const fetchUrl = useProxy ? `https://api.allorigins.win/raw?url=${encodeURIComponent(target)}` : target;
+      const fetchUrl = target;
 
       // Priority 1: HEAD
       try {
         const response = await fetch(fetchUrl, {
-          method: useProxy ? 'GET' : 'HEAD', // allorigins only supports GET
+          method: 'HEAD',
           signal: controller.signal,
-          mode: useProxy ? 'cors' : 'no-cors',
+          mode: 'no-cors',
           cache: 'no-cache'
         })
 
@@ -43,7 +63,7 @@ export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> 
       const response2 = await fetch(fetchUrl, {
         method: 'GET',
         signal: controller.signal,
-        mode: useProxy ? 'cors' : 'no-cors',
+        mode: 'no-cors',
         cache: 'no-cache'
       })
 
@@ -71,17 +91,19 @@ export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> 
     return { isOnline: true }
   }
 
-  // 3. Final Proxy Fallback - Because CORS often blocks direct browser fetch to addons
+  // 3. Server-side Proxy Fallback
   try {
-    const proxyDomainCheck = await performCheck(domain, 8000, true);
-    if (proxyDomainCheck.ok) return { isOnline: true };
-
-    const proxyManifestCheck = await performCheck(manifestUrl, 8000, true);
-    if (proxyManifestCheck.ok) return { isOnline: true };
-
-    return { isOnline: false, error: proxyManifestCheck.error || manifestCheck.error || 'Connection Failed' }
+    const response = await fetch(`/api/addon-health?url=${encodeURIComponent(addonUrl)}`);
+    if (!response.ok) {
+      return { isOnline: false, error: 'Connection Failed' };
+    }
+    const data = await response.json();
+    return {
+      isOnline: data.isOnline,
+      error: data.error
+    };
   } catch (err) {
-    return { isOnline: false, error: 'Connection Failed via Proxy' }
+    return { isOnline: false, error: 'Connection Failed' };
   }
 }
 
@@ -223,7 +245,7 @@ export async function checkAddonFunctionality(addonUrl: string): Promise<{ isHea
       if (res.ok) manifest = await res.json()
     } catch {
       // Try proxy
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(manifestUrl)}`
+      const proxyUrl = `/api/meta-proxy?url=${encodeURIComponent(manifestUrl)}`
       const res = await fetch(proxyUrl, { signal: controller.signal })
       if (res.ok) manifest = await res.json()
     }
@@ -259,13 +281,7 @@ export async function checkAddonFunctionality(addonUrl: string): Promise<{ isHea
         if (data.metas || data.streams) verifySuccess = true
       }
     } catch {
-      // Try proxy
-      const proxyVerifyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(verifyUrl)}`
-      const res = await fetch(proxyVerifyUrl, { signal: vController.signal })
-      if (res.ok) {
-        const data = await res.json()
-        if (data.metas || data.streams) verifySuccess = true
-      }
+      // Direct only
     }
     clearTimeout(vId)
 

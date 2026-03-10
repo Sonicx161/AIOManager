@@ -44,7 +44,8 @@ export function AddonList({ accountId }: AddonListProps) {
   const account = accounts.find((acc) => acc.id === accountId)
   const { addons, removeAddonByIndex } = useAddons(accountId)
   const openAddAddonDialog = useUIStore((state) => state.openAddAddonDialog)
-  const { checkRules, pullServerState } = useFailoverStore()
+  const checkRules = useFailoverStore((state) => state.checkRules)
+  const pullServerState = useFailoverStore((state) => state.pullServerState)
   const encryptionKey = useAuthStore((state) => state.encryptionKey)
   const syncAccount = useAccountStore((state) => state.syncAccount)
 
@@ -63,6 +64,16 @@ export function AddonList({ accountId }: AddonListProps) {
   const [selectedAddonUrls, setSelectedAddonUrls] = useState<Set<string>>(new Set())
   const [isSelectionMode, setIsSelectionMode] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val)
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    searchTimeoutRef.current = setTimeout(() => {
+      setDebouncedSearchQuery(val)
+    }, 150)
+  }
 
   const toggleAddonSelection = (addonUrl: string) => {
     setSelectedAddonUrls((prev) => {
@@ -149,14 +160,14 @@ export function AddonList({ accountId }: AddonListProps) {
 
   // Filter addons based on search query
   const filteredAddons = useMemo(() => {
-    if (!searchQuery.trim()) return addons
-    const query = searchQuery.toLowerCase()
+    if (!debouncedSearchQuery.trim()) return addons
+    const query = debouncedSearchQuery.toLowerCase()
     return addons.filter((addon) =>
       addon.manifest.name?.toLowerCase().includes(query) ||
       addon.manifest.id?.toLowerCase().includes(query) ||
       addon.manifest.description?.toLowerCase().includes(query)
     )
-  }, [addons, searchQuery])
+  }, [addons, debouncedSearchQuery])
 
   const selectAllAddons = useCallback(() => {
     // Select visible filtered addons
@@ -199,6 +210,7 @@ export function AddonList({ accountId }: AddonListProps) {
   })
 
   const handleCheckUpdates = useCallback(async () => {
+    if (checkingUpdates) return
     if (!account || !encryptionKey) return
 
     setCheckingUpdates(true)
@@ -638,7 +650,7 @@ export function AddonList({ accountId }: AddonListProps) {
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-4">
-        <TabsList className="flex h-auto bg-transparent p-0 gap-2 justify-start w-full whitespace-nowrap overflow-x-auto scrollbar-hide pb-2">
+        <TabsList className="flex flex-wrap h-auto bg-transparent p-0 gap-2 justify-start w-full pb-2">
           <TabsTrigger value="addons" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-full px-4 border border-border/50 data-[state=active]:border-transparent bg-muted/30 shrink-0 shadow-sm relative">
             Installed Addons
             {addons.length > 0 && (
@@ -667,12 +679,12 @@ export function AddonList({ accountId }: AddonListProps) {
                   placeholder="Search addons..."
                   className="pl-10 pr-10 h-10 w-full bg-background/50 border-muted focus:bg-background transition-colors"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => handleSearchChange(e.target.value)}
                   data-search-focus
                 />
                 {searchQuery && (
                   <button
-                    onClick={() => setSearchQuery('')}
+                    onClick={() => handleSearchChange('')}
                     className="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-accent rounded-full transition-colors"
                   >
                     <X className="h-4 w-4 text-muted-foreground" />
@@ -872,7 +884,7 @@ export function AddonList({ accountId }: AddonListProps) {
                         size="sm"
                         onClick={handleReinstallSelected}
                         disabled={updatingAll}
-                        className="flex-1 sm:flex-none border-emerald-500/30 hover:bg-emerald-500/10"
+                        className="flex-1 sm:flex-none border-primary/30 hover:bg-primary/10"
                       >
                         <AnimatedUpdateIcon className="h-4 w-4 mr-1.5" isAnimating={updatingAll} />
                         Reinstall ({selectedAddonUrls.size})
@@ -882,7 +894,7 @@ export function AddonList({ accountId }: AddonListProps) {
                         variant="outline"
                         size="sm"
                         onClick={() => setBulkSaveOpen(true)}
-                        className="flex-1 sm:flex-none border-amber-500/30 hover:bg-amber-500/10"
+                        className="flex-1 sm:flex-none"
                       >
                         <Save className="h-4 w-4 mr-1.5" />
                         Save
