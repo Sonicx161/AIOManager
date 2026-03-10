@@ -549,7 +549,7 @@ fastify.get('/api/meta-proxy', {
             type: 'object',
             required: ['url'],
             properties: {
-                url: { type: 'string', format: 'uri' }
+                url: { type: 'string' }
             }
         }
     }
@@ -631,7 +631,7 @@ fastify.get('/api/proxy-image', {
             type: 'object',
             required: ['url'],
             properties: {
-                url: { type: 'string', format: 'uri' }
+                url: { type: 'string' }
             }
         }
     }

@@ -1926,9 +1926,9 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const updatedLibrary = { ...library }
       let hasChanges = false
 
-      results.forEach(async (result) => {
+      for (const result of results) {
         const addon = updatedLibrary[result.id]
-        if (!addon) return
+        if (!addon) continue
 
         const isOnline = result.health?.isOnline ?? false
 
@@ -1962,7 +1962,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         } else if (isOnline && addon.autoRestore) {
           restorationManager.recordSuccess(addon.installUrl)
         }
-      })
+      }
 
       if (hasChanges) {
         set({ library: updatedLibrary, lastHealthCheck: Date.now() })

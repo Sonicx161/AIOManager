@@ -88,10 +88,12 @@ DropdownMenuTrigger.displayName = 'DropdownMenuTrigger'
 
 interface DropdownMenuContentProps extends React.HTMLAttributes<HTMLDivElement> {
   align?: 'start' | 'center' | 'end'
+  sideOffset?: number
+  collisionPadding?: number
 }
 
 const DropdownMenuContent = React.forwardRef<HTMLDivElement, DropdownMenuContentProps>(
-  ({ className, align = 'end', children, ...props }, _ref) => {
+  ({ className, align = 'end', sideOffset, collisionPadding, children, ...props }, _ref) => {
     const context = React.useContext(DropdownMenuContext)
     if (!context) throw new Error('DropdownMenuContent must be used within DropdownMenu')
 
@@ -122,6 +124,7 @@ const DropdownMenuContent = React.forwardRef<HTMLDivElement, DropdownMenuContent
     return (
       <div
         ref={menuRef}
+        style={{ marginTop: sideOffset ? `${sideOffset}px` : undefined }}
         className={cn(
           'absolute z-50 min-w-[8rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md',
           'animate-in fade-in-0 zoom-in-95',

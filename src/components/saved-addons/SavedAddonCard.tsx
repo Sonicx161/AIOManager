@@ -272,7 +272,7 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
                   <MoreVertical className="h-4 w-4 text-muted-foreground hover:text-foreground transition-colors" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuContent align="end" sideOffset={4} collisionPadding={8} className="w-56">
                 <div className="px-2 py-1.5 text-xs font-bold uppercase tracking-wider text-muted-foreground opacity-70">MANAGE SAVED ADDON</div>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={handleCopyUrl}>

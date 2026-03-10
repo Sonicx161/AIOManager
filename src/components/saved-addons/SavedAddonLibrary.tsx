@@ -557,7 +557,7 @@ export function SavedAddonLibrary() {
     setAdding(true)
     setAddError(null)
     try {
-      const urls = addUrl.split(/[\n,]/).map(u => u.trim()).filter(Boolean)
+      const urls = addUrl.split(/\n/).map(u => u.trim()).filter(Boolean)
 
       if (urls.length === 0) {
         setAddError('No valid URLs found')
@@ -1119,7 +1119,7 @@ export function SavedAddonLibrary() {
                   // specific profile selected - show flat flat
                   <div className={cn(
                     "animate-in fade-in slide-in-from-bottom-4 duration-500",
-                    viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
+                    viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md border border-border/10"
                   )}>
                     {filteredAddons.map((addon) => {
                       const profile = profiles.find(p => p.id === addon.profileId)
@@ -1192,7 +1192,7 @@ export function SavedAddonLibrary() {
                           {isExpanded && (
                             <div className={cn(
                               "animate-in fade-in slide-in-from-top-2 duration-300",
-                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md overflow-hidden border border-border/10"
+                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "w-full flex flex-col rounded-md border border-border/10"
                             )}>
                               {profileAddons.map((addon) => {
                                 if (viewMode === 'list') {
@@ -1266,7 +1266,7 @@ export function SavedAddonLibrary() {
                           {isExpanded && (
                             <div className={cn(
                               "animate-in fade-in slide-in-from-top-2 duration-300",
-                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md overflow-hidden border border-border"
+                              viewMode === 'grid' ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" : "flex flex-col rounded-md border border-border"
                             )}>
                               {unassigned.map((addon) => {
                                 if (viewMode === 'list') {
@@ -1395,7 +1395,7 @@ export function SavedAddonLibrary() {
                   id="addon-url"
                   value={addUrl}
                   onChange={(e) => setAddUrl(e.target.value)}
-                  placeholder="Paste one or more manifest URLs (one per line or comma-separated)"
+                  placeholder="Paste one or more manifest URLs (one per line)"
                   className="min-h-[120px] bg-muted/30 border-border"
                 />
               </div>
