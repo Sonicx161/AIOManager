@@ -284,7 +284,6 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS idx_history_account_ts ON failover_history (account_id, timestamp DESC);
   CREATE INDEX IF NOT EXISTS idx_rules_account ON autopilot_rules (account_id);
-  CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id);
 `
 
 // Execute schema creation
@@ -349,6 +348,14 @@ try {
             await db.run(`ALTER TABLE autopilot_rules ADD COLUMN last_notification BIGINT`)
             fastify.log.info({ category: 'Database' }, 'Migrated: Added last_notification column to autopilot_rules')
         }
+        const hasIsActive = tableInfo.some(col => col.name === 'is_active')
+        if (!hasIsActive) {
+            await db.run(`ALTER TABLE autopilot_rules ADD COLUMN is_active INTEGER DEFAULT 1`)
+            fastify.log.info({ category: 'Database' }, 'Migrated: Added is_active column to autopilot_rules')
+        }
+        try {
+            await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id)`)
+        } catch (e) { }
     }
 } catch (migrationErr) {
     fastify.log.warn({ category: 'Database' }, `Migration warning: ${migrationErr.message}`)

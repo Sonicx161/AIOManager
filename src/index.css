@@ -89,6 +89,10 @@
     @apply border-border;
   }
 
+  html {
+    overflow-y: scroll;
+  }
+
   body {
     @apply bg-background text-foreground font-sans;
     font-family: Geist, system-ui, Avenir, Helvetica, Arial, sans-serif;

@@ -61,6 +61,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         await localforage.setItem(STORAGE_KEY, encryptedData)
 
         set({ keys: updatedKeys })
+        import('@/store/syncStore').then(({ useSyncStore }) => {
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        })
     },
 
     removeKey: async (id) => {
@@ -72,6 +75,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         await localforage.setItem(STORAGE_KEY, encryptedData)
 
         set({ keys: updatedKeys })
+        import('@/store/syncStore').then(({ useSyncStore }) => {
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        })
     },
 
     updateKey: async (id, updates) => {
@@ -85,6 +91,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         await localforage.setItem(STORAGE_KEY, encryptedData)
 
         set({ keys: updatedKeys })
+        import('@/store/syncStore').then(({ useSyncStore }) => {
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        })
     },
 
     moveKey: async (id, direction) => {
@@ -106,6 +115,9 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         await localforage.setItem(STORAGE_KEY, encryptedData)
 
         set({ keys })
+        import('@/store/syncStore').then(({ useSyncStore }) => {
+            useSyncStore.getState().syncToRemote(true).catch(console.error)
+        })
     },
 
     clearVault: async () => {

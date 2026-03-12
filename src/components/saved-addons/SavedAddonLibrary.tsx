@@ -926,7 +926,7 @@ export function SavedAddonLibrary() {
                   </div>
 
                   {/* Right: actions */}
-                  <div className="flex flex-wrap items-center justify-end gap-2 w-full md:w-auto">
+                  <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
                     {/* View Toggle */}
                     <div className="flex items-center bg-muted/50 rounded-lg p-0.5 border border-border/50 gap-0.5 mr-1">
                       <Button
@@ -950,7 +950,7 @@ export function SavedAddonLibrary() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-8 gap-1.5"
+                      className="h-8 gap-1.5 flex-1 md:flex-none"
                       onClick={handleRefresh}
                       disabled={checkingUpdates || checkingHealth || updatingAll || savedAddons.length === 0}
                     >
@@ -961,7 +961,7 @@ export function SavedAddonLibrary() {
                     {updatesCount > 0 && (
                       <Button
                         size="sm"
-                        className="h-8 gap-1.5"
+                        className="h-8 gap-1.5 flex-1 md:flex-none"
                         onClick={handleUpdateAll}
                         disabled={updatingAll}
                       >
@@ -973,7 +973,7 @@ export function SavedAddonLibrary() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-8 gap-1.5"
+                      className="h-8 gap-1.5 flex-1 md:flex-none"
                       onClick={() => setShowBulkUrlReplaceDialog(true)}
                       title="Bulk URL Fragment Replace"
                     >
@@ -984,7 +984,7 @@ export function SavedAddonLibrary() {
                     <Button
                       variant={isSelectionMode ? "secondary" : "outline"}
                       size="sm"
-                      className="h-8 gap-1.5"
+                      className="h-8 gap-1.5 flex-1 md:flex-none"
                       onClick={toggleSelectionMode}
                     >
                       <Check className="h-3.5 w-3.5" />
@@ -993,7 +993,7 @@ export function SavedAddonLibrary() {
 
                     <Button
                       size="sm"
-                      className="h-8 gap-1.5 shadow-sm"
+                      className="h-8 gap-1.5 shadow-sm flex-1 md:flex-none"
                       onClick={handleOpenAddDialog}
                     >
                       <Plus className="h-3.5 w-3.5" />

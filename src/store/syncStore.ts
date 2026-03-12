@@ -402,7 +402,9 @@ export const useSyncStore = create<SyncState>()(
 
                     if (data.vault) {
                         const { useVaultStore } = await import('./vaultStore')
-                        await useVaultStore.getState().importVault(data.vault)
+                        if (!isLocalNewer) {
+                            await useVaultStore.getState().importVault(data.vault)
+                        }
                     }
 
                     set({
