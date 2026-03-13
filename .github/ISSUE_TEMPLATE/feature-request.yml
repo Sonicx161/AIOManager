@@ -1,0 +1,18 @@
+name: 🚀 Feature request
+description: Request a new feature.
+title: "[Feature request]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a new feature!
+        *To prevent duplicates be sure to search for existing feature requests first.*
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature description
+      description: Give as much detail as possible. The better the description, the higher the chance we can implement your request!
+      placeholder: My detailed feature suggestion...
+    validations:
+      required: true
