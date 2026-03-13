@@ -1,0 +1,55 @@
+name: 🐛 Bug Report
+description: File a bug report.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+        *To prevent duplicates be sure to search for existing issues first.*
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version are you using? The version number can be seen at the bottom of your AIOManager page.
+      placeholder: v1.8.5+build.2
+    validations:
+      required: true
+  - type: dropdown
+    id: instance
+    attributes:
+      label: Instance
+      description: What instance are using?
+      multiple: false
+      options:
+        - Selfhosted instance
+        - ElfHosted
+        - Midnight (ForTheWeebs)
+        - Yeb (ForTheWeak)
+        - Kuu
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: What browser are you using?
+      placeholder: Chrome, Firefox, Safari, Edge, Opera, ...
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Give as much detail as possible. The better the description, the higher the chance we can fix the issue!
+      placeholder: Be sure to include screenshots and links, if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks.
+      placeholder: Feel free to leave empty if not applicable.
+      render: shell
