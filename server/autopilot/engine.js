@@ -35,6 +35,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
     const AUTOPILOT_CYCLE_BUDGET_MS = Math.max(5000, parseInt(process.env.AUTOPILOT_CYCLE_BUDGET_MS || '120000', 10) || 120000)
     const HEALTH_CACHE_TTL_MS = Math.max(10000, parseInt(process.env.AUTOPILOT_HEALTH_CACHE_TTL_MS || '30000', 10) || 30000)
     const RULE_RECHECK_MS = Math.max(10000, parseInt(process.env.AUTOPILOT_RULE_RECHECK_MS || '30000', 10) || 30000)
+    const HEARTBEAT_PERSIST_MS = Math.max(30000, parseInt(process.env.AUTOPILOT_HEARTBEAT_PERSIST_MS || '300000', 10) || 300000)
     const ruleRuntimeState = new Map()
 
     const RULE_CACHE_MAX_BYTES = Math.max(0, parseInt(process.env.AUTOPILOT_RULE_CACHE_MAX_BYTES || String(256 * 1024 * 1024), 10) || 0)
@@ -1106,7 +1107,10 @@ export function createAutopilotEngine(fastify, reconciler = null) {
             activeUrl: needsSync && !syncSucceeded ? decryptedActiveUrl : targetActiveUrl
         })
 
-        if (!needsColdUpdate && !needsStatsUpdate) {
+        const lastPersistedCheck = Number(rule.last_check) || 0
+        const heartbeatDue = now - lastPersistedCheck >= HEARTBEAT_PERSIST_MS
+
+        if (!needsColdUpdate && !needsStatsUpdate && !heartbeatDue) {
             return null
         }
 

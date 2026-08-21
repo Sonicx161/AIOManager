@@ -292,6 +292,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             isActive: rule.is_active === 1,
             isAutomatic: rule.is_automatic === 1,
             lastCheck: runtime?.lastCheck ?? rule.last_check,
+            messageTemplate: rule.message_template || null,
             stabilization: runtime?.stabilization ?? parseStabilization(rule.stabilization),
             customCheckUrls: Array.isArray(customCheckUrls) ? customCheckUrls : []
         }
@@ -500,7 +501,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 SELECT r.id, r.priority_chain, r.active_url, r.webhook_url, r.is_active, r.is_automatic,
                        COALESCE(s.last_check, r.last_check) AS last_check,
                        COALESCE(s.stabilization, r.stabilization) AS stabilization,
-                       r.name, r.cooldown_ms, r.custom_check_urls
+                       r.name, r.cooldown_ms, r.custom_check_urls, r.message_template
                 FROM autopilot_rules r
                 LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
                 WHERE r.account_id = $1
@@ -711,7 +712,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             `SELECT r.id, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.is_active, r.is_automatic,
                     COALESCE(s.last_check, r.last_check) AS last_check,
                     COALESCE(s.stabilization, r.stabilization) AS stabilization,
-                    r.name, r.cooldown_ms, r.custom_check_urls
+                    r.name, r.cooldown_ms, r.custom_check_urls, r.message_template
              FROM autopilot_rules r
              LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
              WHERE r.owner_sync_user = $1 AND r.account_id IN (${placeholders})`,

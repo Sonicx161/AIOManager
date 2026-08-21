@@ -644,6 +644,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                             activeUrl: (sr.activeUrl as string) || ((sr.priorityChain as string[]) || [])[0] as string | undefined,
                             lastCheck: sr.lastCheck ? new Date(sr.lastCheck as string | number) : undefined,
                             stabilization: (sr.stabilization as Record<string, number | AutopilotStabilizationEntry>) || {},
+                            webhookUrl: sr.webhookUrl as string | undefined,
+                            messageTemplate: sr.messageTemplate as string | undefined,
+                            customCheckUrls: (sr.customCheckUrls as CustomCheckEntry[]) || [],
                             status: 'idle'
                         }
 

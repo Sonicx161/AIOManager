@@ -592,9 +592,28 @@ export function FailoverManager({
         })
     }
 
-    const handleSimulateRule = async (ruleId: string, chain: string[]) => {
+    const runCustomCheck = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+        try {
+            const { useSyncStore } = await import('@/store/syncStore')
+            const { serverUrl } = useSyncStore.getState()
+            const baseUrl = serverUrl || ''
+            const result = await apiFetch<{ ok?: boolean; status?: number; error?: string }>('/autopilot/test-url', {
+                method: 'POST',
+                baseUrl: baseUrl.startsWith('http') ? baseUrl : undefined,
+                body: { url },
+            })
+            if (!result.ok) return { ok: false, error: result.error || `Server error (${result.status})` }
+            return { ok: Boolean(result.data?.ok), error: result.data?.error }
+        } catch {
+            return { ok: false, error: 'Request failed' }
+        }
+    }
+
+    const handleSimulateRule = async (ruleId: string, chain: string[], customCheckUrls?: CustomCheckEntry[]) => {
         setSimulatingRuleId(ruleId)
         setSimulationResults({})
+
+        const checks = normalizeCustomChecks(customCheckUrls).filter(c => c.url.trim())
 
         for (const url of chain) {
             setSimulationResults(prev => ({
@@ -604,9 +623,29 @@ export function FailoverManager({
 
             try {
                 const health = await checkAddonHealth(url)
+                let healthy = health.isOnline
+                let error = health.error
+
+                // Mirrors engine.js: an unscoped check applies to every addon in the chain.
+                if (healthy && checks.length > 0) {
+                    const normUrl = normalizeAddonUrl(url).toLowerCase()
+                    const applicable = checks.filter(c =>
+                        c.appliesTo.length === 0 ||
+                        c.appliesTo.some(au => normalizeAddonUrl(au).toLowerCase() === normUrl)
+                    )
+                    for (const checkUrl of [...new Set(applicable.map(c => c.url))]) {
+                        const res = await runCustomCheck(checkUrl)
+                        if (!res.ok) {
+                            healthy = false
+                            error = res.error ? `Health check failed: ${res.error}` : 'Health check failed'
+                            break
+                        }
+                    }
+                }
+
                 setSimulationResults(prev => ({
                     ...prev,
-                    [url]: { healthy: health.isOnline, checking: false, error: health.error }
+                    [url]: { healthy, checking: false, error }
                 }))
             } catch (err) {
                 setSimulationResults(prev => ({
@@ -1405,7 +1444,7 @@ export function FailoverManager({
                                                         </Button>
                                                     </DropdownMenuTrigger>
                                                     <DropdownMenuContent align="end" className="w-48">
-                                                        <DropdownMenuItem className="gap-2" onClick={() => handleSimulateRule(rule.id, rule.priorityChain)}>
+                                                        <DropdownMenuItem className="gap-2" onClick={() => handleSimulateRule(rule.id, rule.priorityChain, rule.customCheckUrls)}>
                                                             <FlaskConical className="w-4 h-4" />
                                                             Simulate Check
                                                         </DropdownMenuItem>
