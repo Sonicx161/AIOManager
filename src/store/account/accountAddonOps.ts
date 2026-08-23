@@ -594,6 +594,37 @@ export async function toggleAddonProtection(accountId: string, transportUrl: str
     }
 }
 
+// The addon stays on the account and stops being pushed to the platforms named
+// here. Passing an empty list clears the exclusion.
+export async function setAddonPlatformExclusions(accountId: string, transportUrl: string, platforms: string[], targetIndex?: number) {
+    const store = await getStore()
+    const releaseMutex = await acquireSyncMutex(accountId)
+    const account = getAccountById(store.getState().accounts, accountId)
+    if (!account) { releaseMutex(); return }
+    const prevAccounts = store.getState().accounts
+    try {
+        const excludePlatforms = Array.from(new Set((platforms || []).filter(p => typeof p === 'string' && p)))
+        const updatedAddons = account.addons.map((addon, index) =>
+            (targetIndex !== undefined ? index === targetIndex : normalizeAddonUrl(addon.transportUrl) === normalizeAddonUrl(transportUrl))
+                ? { ...addon, flags: { ...addon.flags, excludePlatforms } }
+                : addon
+        )
+        const updatedAccount = updateActiveProfile({ ...account, addons: updatedAddons }, updatedAddons)
+        const accounts = store.getState().accounts.map((acc) =>
+            acc.id === accountId ? updatedAccount : acc
+        )
+        store.setState({ accounts })
+        persistAccounts(accounts)
+        backgroundSync(accountId, account, updatedAddons)
+    } catch (e) {
+        store.setState({ accounts: prevAccounts })
+        persistAccounts(prevAccounts)
+        throw e
+    } finally {
+        releaseMutex()
+    }
+}
+
 export async function toggleAddonEnabled(accountId: string, transportUrl: string, isEnabled: boolean, silent = false, targetIndex?: number, isAutopilot = false) {
     const store = await getStore()
     const releaseMutex = await acquireSyncMutex(accountId)

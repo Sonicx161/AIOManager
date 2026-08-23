@@ -363,6 +363,12 @@ export interface AccountStore {
             isProtected: boolean,
             targetIndex?: number
       ) => Promise<void>
+      setAddonPlatformExclusions: (
+            accountId: string,
+            transportUrl: string,
+            platforms: string[],
+            targetIndex?: number
+      ) => Promise<void>
       toggleAddonEnabled: (
             accountId: string,
             transportUrl: string,
@@ -1021,6 +1027,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       toggleAddonProtection: async (accountId: string, transportUrl: string, isProtected: boolean, targetIndex?: number) => {
             const { toggleAddonProtection } = await import('./account/accountAddonOps')
             return toggleAddonProtection(accountId, transportUrl, isProtected, targetIndex)
+      },
+
+      setAddonPlatformExclusions: async (accountId: string, transportUrl: string, platforms: string[], targetIndex?: number) => {
+            const { setAddonPlatformExclusions } = await import('./account/accountAddonOps')
+            return setAddonPlatformExclusions(accountId, transportUrl, platforms, targetIndex)
       },
 
       toggleAddonEnabled: async (accountId: string, transportUrl: string, isEnabled: boolean, silent?: boolean, targetIndex?: number, isAutopilot?: boolean) => {
