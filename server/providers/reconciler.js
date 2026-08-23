@@ -24,6 +24,25 @@ function normalizeUrl(url) {
     return normalized.toLowerCase()
 }
 
+// An addon can be held out of one platform without leaving the account, so a
+// user who wants Cinemeta in Stremio but not in Nuvio no longer needs a second
+// account. The exclusion is applied when pushing rather than stored per
+// platform: the account keeps one canonical list and nothing gains a second
+// answer to "is this addon enabled".
+export function isExcludedFor(addon, platform) {
+    const list = addon?.flags?.excludePlatforms
+    return Array.isArray(list) && list.includes(platform)
+}
+
+// Returns the same array when nothing is excluded, so an account that has never
+// set an exclusion allocates nothing and takes the identical path as before.
+export function canonicalForPlatform(canonical, platform) {
+    if (!platform) return canonical
+    return canonical.some(a => isExcludedFor(a, platform))
+        ? canonical.filter(a => !isExcludedFor(a, platform))
+        : canonical
+}
+
 function diffAddons(canonical, platform) {
     const canonicalUrls = new Map(canonical.map(a => [normalizeUrl(a.transportUrl), a]))
     const platformUrls = new Map(platform.map(a => [normalizeUrl(a.transportUrl || a.url), a]))
@@ -426,15 +445,6 @@ export function createReconciler(fastify) {
             return { changes: [], canonical }
         }
 
-        const canonicalUrlSet = new Set(canonical.map(a => normalizeUrl(a.transportUrl)))
-        const canonicalManifestByUrl = new Map(
-            canonical.map(a => [normalizeUrl(a.transportUrl), manifestSignature(a.manifest)])
-        )
-        const customNameByUrl = new Map(
-            canonical
-                .filter(a => a?.metadata?.customName)
-                .map(a => [normalizeUrl(a.transportUrl), a.metadata.customName])
-        )
         const changes = []
 
         for (const connection of targetConnections) {
@@ -443,6 +453,20 @@ export function createReconciler(fastify) {
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): in backoff`)
                 continue
             }
+
+            // Derived per connection rather than once for the account: an addon
+            // excluded from this platform must be absent from the comparison as
+            // well as from the write, or every cycle reads it as drift.
+            const platformCanonical = canonicalForPlatform(canonical, connection.platform)
+            const canonicalUrlSet = new Set(platformCanonical.map(a => normalizeUrl(a.transportUrl)))
+            const canonicalManifestByUrl = new Map(
+                platformCanonical.map(a => [normalizeUrl(a.transportUrl), manifestSignature(a.manifest)])
+            )
+            const customNameByUrl = new Map(
+                platformCanonical
+                    .filter(a => a?.metadata?.customName)
+                    .map(a => [normalizeUrl(a.transportUrl), a.metadata.customName])
+            )
 
             try {
                 const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
@@ -473,7 +497,7 @@ export function createReconciler(fastify) {
                 } catch { /* can't read, assume needs write */ }
 
                 if (needsWrite) {
-                    await writePlatformAddons(driver, connection, canonical, 'reconcile')
+                    await writePlatformAddons(driver, connection, platformCanonical, 'reconcile')
                     changes.push({ type: 'restore', url: '', platform: connection.platform, primary: false })
                 }
                 recordSuccess(accountId, connId)
@@ -507,10 +531,11 @@ export function createReconciler(fastify) {
                     if (!stremioWriter) continue
                     await stremioWriter(connection)
                 } else {
-                    if (canon.length === 0) continue
+                    const platformCanon = canonicalForPlatform(canon, connection.platform)
+                    if (platformCanon.length === 0) continue
                     const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
                     if (!driver) continue
-                    await writePlatformAddons(driver, connection, canon, 'enforce')
+                    await writePlatformAddons(driver, connection, platformCanon, 'enforce')
                 }
                 recordSuccess(accountId, connId)
                 synced.push(connection.platform)
