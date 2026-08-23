@@ -250,9 +250,17 @@ export function createAutopilotEngine(fastify, reconciler = null) {
 
     const CUSTOM_CHECK_TIMEOUT_MS = 10000
 
+    // A URL this instance will not fetch. Distinct from an unreachable one:
+    // nothing was tried, and the reason is the address itself.
+    const CUSTOM_CHECK_BLOCKED = 'blocked'
+
+    // true    the check answered and the addon is healthy
+    // false   the check answered and the addon is not
+    // null    the check could not be made, so it says nothing either way
+    // blocked the address is not one we will fetch
     const performSingleCustomCheck = async (checkUrl) => {
         if (!(await isSafeUrlResolved(checkUrl))) {
-            return false
+            return CUSTOM_CHECK_BLOCKED
         }
         let queueKey = checkUrl
         try { queueKey = new URL(checkUrl).origin } catch (e) { }
@@ -261,7 +269,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
             const timeout = setTimeout(() => controller.abort(), CUSTOM_CHECK_TIMEOUT_MS)
             try {
                 const res = await safeFetchWithRedirects(checkUrl, { signal: controller.signal, methodFallback: true })
-                if (!res) return false
+                if (!res) return null
                 return res.ok || res.status === 401 || res.status === 403
             } finally {
                 clearTimeout(timeout)
@@ -276,29 +284,41 @@ export function createAutopilotEngine(fastify, reconciler = null) {
             const normalized = normalizeAddonUrl(checkUrl).toLowerCase()
             const cached = customCheckCache.get(normalized)
             if (cached && Date.now() - cached.ts < CUSTOM_CHECK_CACHE_TTL) {
-                return cached.healthy
+                return cached.healthy === CUSTOM_CHECK_BLOCKED ? null : cached.healthy
             }
             const existing = customCheckInFlight.get(normalized)
             if (existing) return existing
             const promise = (async () => {
-                let healthy = false
+                let healthy = null
                 try {
                     healthy = await performSingleCustomCheck(checkUrl)
                 } catch (err) {
-                    healthy = false
+                    healthy = null
                     trace('autopilot.customCheck', 'error', { ruleId, url: checkUrl, error: err?.message || String(err) })
                     fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Custom check error for ${truncateUrl(checkUrl)}: ${err?.message}`)
                 }
-                customCheckCache.set(normalized, { healthy, ts: Date.now() })
+                // An unreachable check is not cached, so the next cycle retries it
+                // instead of holding the unknown for the whole TTL. A blocked
+                // address is cached: it will not become fetchable.
+                if (healthy !== null) {
+                    customCheckCache.set(normalized, { healthy, ts: Date.now() })
+                }
                 if (customCheckCache.size > 2000) {
                     const nowTs = Date.now()
                     for (const [key, val] of customCheckCache.entries()) {
                         if (nowTs - val.ts > CUSTOM_CHECK_CACHE_TTL) customCheckCache.delete(key)
                     }
                 }
-                if (!healthy) {
+                if (healthy === false) {
                     trace('autopilot.customCheck', 'failed', { ruleId, url: checkUrl })
                     fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Custom check failed for ${truncateUrl(checkUrl)}`)
+                } else if (healthy === CUSTOM_CHECK_BLOCKED) {
+                    trace('autopilot.customCheck', 'blocked', { ruleId, url: checkUrl })
+                    fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Custom check URL ${truncateUrl(checkUrl)} is not an address this instance will fetch, so it is being ignored`)
+                    healthy = null
+                } else if (healthy === null) {
+                    trace('autopilot.customCheck', 'unknown', { ruleId, url: checkUrl })
+                    fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Custom check unreachable for ${truncateUrl(checkUrl)}, leaving addon health unchanged`)
                 } else {
                     trace('autopilot.customCheck', 'passed', { ruleId, url: checkUrl })
                 }
@@ -308,7 +328,9 @@ export function createAutopilotEngine(fastify, reconciler = null) {
             promise.finally(() => customCheckInFlight.delete(normalized))
             return promise
         })
-        return results.every(r => r === true)
+        // Only a check that answered and said no blocks the addon. A check that
+        // could not be made leaves the verdict to the addon's own health.
+        return !results.some(r => r === false)
     }
 
     const sanitizeManifest = (manifest, transportUrl = '') => {
