@@ -49,7 +49,7 @@ const SNAPSHOT_COMPARE_COLUMNS = SNAPSHOT_COLUMNS.filter(col => !['sync_user', '
 let scanTimer = null
 let isStarted = false
 let isScanning = false
-let credentialCursor = 0
+let credentialCursor = ''
 let nonStremioSkipWarned = false
 const accountStateHashes = new Map()
 
@@ -162,33 +162,31 @@ function computeLibraryHash(library) {
     return hashString(raw)
 }
 
-async function getRegisteredAccountsPage(limit, offset = 0) {
+async function getRegisteredAccountsPage(limit, afterId = '') {
     // Stremio-only: Nuvio/RealStream auth_key rows are JSON token bundles, not Stremio authKeys.
+    // Keyset on the primary key. updated_at moves when an account re-logs in, and an
+    // OFFSET page over a moving sort key skips rows.
     return db.query(
-        `SELECT sync_user, account_id, account_name, auth_key
+        `SELECT id, sync_user, account_id, account_name, auth_key
          FROM server_credentials
-         WHERE credential_type = 'stremio' OR credential_type IS NULL
-         ORDER BY updated_at DESC, id ASC
-         LIMIT $1 OFFSET $2`,
-        [limit, offset]
+         WHERE (credential_type = 'stremio' OR credential_type IS NULL) AND id > $1
+         ORDER BY id ASC
+         LIMIT $2`,
+        [afterId, limit]
     )
 }
 
-async function getAccountsForCycle() {
+export async function getAccountsForCycle() {
     const limit = ACTIVITY_MAX_ACCOUNTS_PER_CYCLE
     let selected = await getRegisteredAccountsPage(limit, credentialCursor)
-    let wrappedCount = 0
 
-    if (selected.length === 0 && credentialCursor > 0) {
-        credentialCursor = 0
-        selected = await getRegisteredAccountsPage(limit, 0)
-    } else if (selected.length < limit && credentialCursor > 0) {
-        const wrapped = await getRegisteredAccountsPage(limit - selected.length, 0)
-        wrappedCount = wrapped.length
-        selected = [...selected, ...wrapped]
+    if (selected.length < limit && credentialCursor !== '') {
+        const seen = new Set(selected.map(row => row.id))
+        const wrapped = await getRegisteredAccountsPage(limit - selected.length, '')
+        selected = [...selected, ...wrapped.filter(row => !seen.has(row.id))]
     }
 
-    credentialCursor = selected.length < limit ? 0 : (wrappedCount > 0 ? wrappedCount : credentialCursor + selected.length)
+    credentialCursor = selected.length > 0 ? selected[selected.length - 1].id : ''
     return selected
 }
 

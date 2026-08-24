@@ -47,6 +47,7 @@ coverage
 # Tests stay local except the CI smoke suite, which must run in CI
 server/tests/*
 !server/tests/static-serving.test.js
+!server/tests/activity-rotation.test.js
 !server/tests/helpers.js
 src/**/*.test.ts
 
