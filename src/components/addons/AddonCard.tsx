@@ -352,8 +352,9 @@ export const AddonCard = React.memo(function AddonCard({
 
   const library = useAddonStore(s => s.library)
   const savedInLibrary = useMemo(() => {
+    const strip = (url: string) => url.split('?')[0].replace(/\/+$/, '')
     return Object.values(library).some(
-      (s) => s.manifest.id === addon.manifest.id && s.installUrl === addon.transportUrl
+      (s) => s.manifest.id === addon.manifest.id && strip(s.installUrl) === strip(addon.transportUrl)
     )
   }, [library, addon.manifest.id, addon.transportUrl])
 

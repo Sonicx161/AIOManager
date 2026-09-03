@@ -3,6 +3,9 @@ import { useVaultStore } from '@/store/vaultStore'
 import { useSyncStore } from '@/store/syncStore'
 import { deriveSyncToken } from '@/lib/crypto'
 import { useAccountStore } from '@/store/accountStore'
+import { getAIOStreamsConfigureUrl, parseAIOStreamsUrl } from './aiostreams-url.ts'
+
+export { getAIOStreamsConfigureUrl, parseAIOStreamsUrl }
 
 const AIOSTREAMS_MANIFEST_IDS = [
     'community.aiostreams',
@@ -18,23 +21,6 @@ export function isAIOStreamsAddon(addon: AddonDescriptor): boolean {
     return false
 }
 
-export function parseAIOStreamsUrl(transportUrl: string): { baseUrl: string; uuid: string } | null {
-    try {
-        const match = transportUrl.match(/^(https?:\/\/.+?)\/stremio\/([^/]+)\//i)
-        if (!match) return null
-        return { baseUrl: match[1], uuid: decodeURIComponent(match[2]) }
-    } catch {
-        return null
-    }
-}
-
-export function getAIOStreamsConfigureUrl(transportUrl: string): string | null {
-    try {
-        return transportUrl.replace(/\/manifest(\.json)?$/i, '/configure').replace(/([^:]\/)\/+/g, '$1')
-    } catch {
-        return null
-    }
-}
 
 export async function fetchAIOStreamsUser(
     baseUrl: string,

@@ -29,7 +29,9 @@ export function parseAIOMetadataUrl(transportUrl: string): { baseUrl: string; uu
 
 export function getAIOMetadataConfigureUrl(transportUrl: string): string | null {
     try {
-        return transportUrl.replace(/\/manifest(\.json)?$/i, '/configure').replace(/([^:]\/)\/+/g, '$1')
+        const [base, query] = transportUrl.split('?')
+        const configure = base.replace(/\/manifest(\.json)?$/i, '/configure').replace(/([^:]\/)\/+/g, '$1')
+        return query ? `${configure}?${query}` : configure
     } catch {
         return null
     }
