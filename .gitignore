@@ -48,6 +48,7 @@ coverage
 server/tests/*
 !server/tests/static-serving.test.js
 !server/tests/helpers.js
+!server/tests/autopilot-chain-flags.test.js
 src/**/*.test.ts
 
 # Temporary files

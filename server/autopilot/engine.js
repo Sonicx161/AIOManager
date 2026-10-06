@@ -9,7 +9,7 @@ import { safeFetchWithRedirects } from '../utils/safe-fetch.js'
 import { deriveAddonName, maskContext, truncateUrl } from '../utils/log-helpers.js'
 import { createStremioDriver } from '../providers/stremio-driver.js'
 import { isUnifiedEnforcement } from '../config.js'
-import { applyOneActiveFlags } from './one-active.js'
+import { applyOneActiveFlags, applyAccountChainFlags } from './one-active.js'
 import { getGlobalWebhook } from './global-webhook.js'
 import { createHealthChecker, HEALTH_CACHE_TTL_MS } from './health-checks.js'
 
@@ -497,7 +497,54 @@ export function createAutopilotEngine(fastify, reconciler = null) {
         return finalAddons
     }
 
-    const enforceConnectionOnly = async (rule, reconciledAddons, chain = [], activeUrl = null) => {
+    // Sibling chains of the same account: chain membership is stable (only the active member
+    // moves), so reading it from the rule rows is safe; the sibling's *target* is read from
+    // the current cycle first (a rule persists active_url only after the whole account batch,
+    // so the DB value is one cycle stale exactly when two chains fail over together) and from
+    // the persisted row second.
+    const cycleTargets = new Map()
+
+    const parseChainValue = (raw) => {
+        const decrypted = decrypt(raw, FALLBACK_KEYS)
+        let parsed = []
+        try {
+            if (Array.isArray(decrypted)) parsed = decrypted
+            else if (typeof decrypted === 'string' && decrypted.startsWith('[')) parsed = JSON.parse(decrypted)
+            else if (typeof raw === 'string' && raw.startsWith('[')) parsed = JSON.parse(raw)
+        } catch { }
+        return Array.isArray(parsed) ? parsed : []
+    }
+
+    // One plan per sibling rule: the chain members another rule owns, plus that chain's target.
+    const siblingChainPlans = async (accountId, ownRuleId, ownChain) => {
+        const own = new Set((ownChain || []).map(u => normalizeAddonUrl(u).toLowerCase()))
+        let rows = []
+        try {
+            rows = await db.query('SELECT id, priority_chain, active_url FROM autopilot_rules WHERE account_id = $1 AND is_active = 1 AND id <> $2', [accountId, ownRuleId])
+        } catch (err) {
+            fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Sibling chain read failed: ${err.message}`)
+            return []
+        }
+        const plans = []
+        for (const row of (rows || [])) {
+            const urls = []
+            for (const url of parseChainValue(row.priority_chain)) {
+                const norm = normalizeAddonUrl(url).toLowerCase()
+                if (!norm || own.has(norm) || urls.includes(norm)) continue
+                urls.push(norm)
+            }
+            if (urls.length === 0) continue
+            const inCycle = cycleTargets.get(row.id)
+            const persisted = normalizeAddonUrl(decrypt(row.active_url, FALLBACK_KEYS) || row.active_url || '').toLowerCase()
+            const target = urls.includes(inCycle) ? inCycle : (urls.includes(persisted) ? persisted : null)
+            // No derivable target: leave that chain's flags untouched rather than disabling it.
+            if (!target) continue
+            plans.push({ ruleId: row.id, urls, target })
+        }
+        return plans
+    }
+
+    const enforceConnectionOnly = async (rule, reconciledAddons, chain = [], activeUrl = null, siblingPlans = null, mirrorUrls = null) => {
         if (!reconciler?.enforceAccount) return { synced: [] }
         const connections = await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)
         const targets = (connections || []).filter(c =>
@@ -511,7 +558,16 @@ export function createAutopilotEngine(fastify, reconciler = null) {
         const guardOpts = (Array.isArray(chain) && chain.length > 0)
             ? { requiredUrls: chain, requiredActiveUrl: activeUrl }
             : {}
-        const result = await reconciler.enforceAccount(rule.account_id, targets, reconciledAddons, guardOpts)
+        const plans = siblingPlans || (await siblingChainPlans(rule.account_id, rule.id, chain))
+        const result = await reconciler.enforceAccount(rule.account_id, targets, reconciledAddons, {
+            ...guardOpts,
+            // Only the chains this rule cannot derive are mirrored from the platform: a decided
+            // target outranks a platform list that has not caught up with it yet, and mirroring a
+            // decided chain would make the guard refuse a perfectly valid write.
+            foreignChainUrls: mirrorUrls ?? plans.flatMap(p => p.urls),
+            // Guard scope: every chain this account manages, not just this rule's.
+            managedChains: [{ urls: chain, target: activeUrl }, ...plans],
+        })
         if (result.synced.length > 0) {
             fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Connection-only enforcement pushed to ${result.synced.join(', ')}.`)
         }
@@ -523,7 +579,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
         const authKey = descriptor.authKey
         if (!authKey) {
             const rule = { account_id: accountId, id: ruleId, owner_sync_user: descriptor.ownerSyncUser, connection_id: descriptor.connectionId, platform: descriptor.platform }
-            const result = await enforceConnectionOnly(rule, storedAddonList, chain, activeUrl)
+            const result = await enforceConnectionOnly(rule, storedAddonList, chain, activeUrl, await siblingChainPlans(accountId, ruleId, chain))
             if (result.chainGuardSkipped) {
                 // Broken chain state: skip so the engine can reconstitute on the next pass.
                 fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Chain guard skipped enforcement for rule ${ruleId}: stored addon list does not carry the active chain tier.`)
@@ -702,6 +758,10 @@ export function createAutopilotEngine(fastify, reconciler = null) {
 
         chain = (await Promise.all(chain.map(async url => (await isSafeUrlResolved(url)) ? url : null))).filter(Boolean)
 
+        // Other rules of this account own the other chains; never write their state from
+        // this rule's snapshot — it is stale from the moment they swap.
+        const siblingPlans = await siblingChainPlans(rule.account_id, rule.id, chain)
+
         if (!Array.isArray(chain) || chain.length === 0) {
             fastify.log.error({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] No valid priority chain. Skipping.`)
             return
@@ -840,11 +900,22 @@ export function createAutopilotEngine(fastify, reconciler = null) {
 
         const decryptedNormalizedActive = currentActiveNorm
         let normalizedTarget = normalizeAddonUrl(targetActiveUrl).toLowerCase()
+        // Publish this cycle's decision so sibling rules derive this chain from it, not from
+        // the persisted active_url (written only after the whole account batch).
+        cycleTargets.set(rule.id, normalizedTarget)
         const normalizedChain = normalizedChainUrls
         const normalizedChainSet = new Set(normalizedChain)
 
-        // Every writer must derive identical one-active flags via the shared helper.
-        const { list: updatedAddonList, violationDetected } = applyOneActiveFlags(addonList, normalizedChain, normalizedTarget)
+        // Every writer must derive identical one-active flags via the shared helper — for every
+        // chain this account manages, not only this rule's (applyAccountChainFlags), otherwise
+        // the writer publishes its stale copy of the sibling chains. Chains this list cannot
+        // express are handed to the write-time mirror instead, so the derivation (this rule's
+        // decided targets) always outranks the platform's not-yet-updated member set.
+        const ownChain = applyOneActiveFlags(addonList, normalizedChain, normalizedTarget)
+        const violationDetected = ownChain.violationDetected
+        const folded = siblingPlans.length > 0 ? applyAccountChainFlags(ownChain.list, siblingPlans) : { list: ownChain.list, skipped: [] }
+        const updatedAddonList = folded.list
+        const mirrorChainUrls = folded.skipped.flatMap(p => p.urls)
 
         let hasChanged = normalizedTarget !== decryptedNormalizedActive
 
@@ -944,7 +1015,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
 
             try {
                 if (!decryptedAuthKey) {
-                    const { synced } = await enforceConnectionOnly(rule, updatedAddonList, chain, targetActiveUrl)
+                    const { synced } = await enforceConnectionOnly(rule, updatedAddonList, chain, targetActiveUrl, siblingPlans, mirrorChainUrls)
                     if (synced.length === 0) throw new Error('Connection enforcement failed')
                     reconciledList = updatedAddonList
                     syncSucceeded = true
