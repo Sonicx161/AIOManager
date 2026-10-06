@@ -2,6 +2,7 @@ import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
 import { trace } from '../utils/trace.js'
+import { chainGuardFailure } from '../autopilot/one-active.js'
 
 const BACKOFF_THRESHOLD = 3
 const BACKOFF_SLOTS = [1, 2, 4, 8, 16]
@@ -289,11 +290,62 @@ function enqueuePlatformWrite(connection, run) {
     return next
 }
 
-async function writePlatformAddons(driver, connection, addons, source) {
+
+// An account runs one rule per addon chain, and every rule stores the ACCOUNT's whole addon
+// list. Pushing that snapshot verbatim therefore rewrites the sibling chains from a copy that
+// goes stale the moment the sibling rule swaps: last writer wins, and the loser's failover is
+// reverted on the platform (observed 2026-10-06 — rule logs "Swapping to: <backup>", client
+// keeps the dead primary). Chain membership is stable, so the caller names the sibling chains;
+// their *state* is mirrored from the platform here, which makes concurrent writers agree
+// regardless of write order. URLs this rule does not manage are still written from the canonical
+// list, so genuine additions are unaffected, and with no sibling chains this is a no-op.
+async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls) {
+    const foreign = new Set((Array.isArray(foreignChainUrls) ? foreignChainUrls : []).map(u => normalizeUrl(u)))
+    if (foreign.size === 0) return canonical
+    const own = new Set((Array.isArray(requiredUrls) ? requiredUrls : []).map(u => normalizeUrl(u)))
+    const urlOf = (a) => normalizeUrl(a?.transportUrl || a?.url || '')
+    let live = []
+    try {
+        live = await readPlatformAddons(driver, connection)
+    } catch (err) {
+        // Conservative fallback: with no live read the stored snapshot is the only source.
+        trace('reconciler', 'reconcileForeignChains.readFailed', { platform: connection.platform, error: err.message })
+        return canonical
+    }
+    if (!Array.isArray(live) || live.length === 0) return canonical
+
+    const out = canonical.filter(a => !foreign.has(urlOf(a)))
+    const present = new Set(out.map(urlOf))
+    for (const row of live) {
+        const url = urlOf(row)
+        if (!url || present.has(url) || own.has(url)) continue
+        if ((row.flags?.enabled ?? row.enabled) === false) continue
+        present.add(url)
+        out.push({
+            transportUrl: row.transportUrl || row.url,
+            manifest: row.manifest || { name: row.name || '' },
+            flags: { ...(row.flags || {}), enabled: true },
+        })
+    }
+    trace('reconciler', 'reconcileForeignChains.merged', { platform: connection.platform, foreign: foreign.size, count: out.length })
+    return out
+}
+
+// `prep` runs inside the per-connection queue slot, so the read it needs, the guard it
+// applies and the write that follows cannot interleave with another writer's (the read
+// target is the platform's own list, which a concurrent writer would otherwise change
+// between our read and our write). It returns { list } or { skip, reason }.
+async function writePlatformAddons(driver, connection, addons, source, prep = null) {
     const c = connection.credentials
-    const prepared = (addons || []).map(applyCustomMetadata)
-    trace('reconciler', 'writePlatformAddons', { platform: connection.platform, source, count: prepared.length, urls: prepared.map(a => a.transportUrl || '') })
-    return enqueuePlatformWrite(connection, () => {
+    return enqueuePlatformWrite(connection, async () => {
+        let list = addons
+        if (typeof prep === 'function') {
+            const outcome = (await prep(addons)) || {}
+            if (outcome.skip) return { skipped: true, reason: outcome.reason || 'prep-skip' }
+            if (Array.isArray(outcome.list)) list = outcome.list
+        }
+        const prepared = (list || []).map(applyCustomMetadata)
+        trace('reconciler', 'writePlatformAddons', { platform: connection.platform, source, count: prepared.length, urls: prepared.map(a => a.transportUrl || '') })
         if (connection.platform === 'stremio' && !isHydraOutbound(connection)) {
             if (!c?.authKey) { const e = new Error('Stremio credentials not loaded'); e.isAuthError = true; throw e }
             return driver.writeAddons(c.authKey, prepared)
@@ -510,12 +562,15 @@ export function createReconciler(fastify) {
         // Skip means NO write, NO recordSuccess (arming the fresh-in-sync guard
         // with an unwritten list would poison it), NO recordFailure (a data
         // problem must not back off the connection).
-        if (Array.isArray(requiredUrls) && requiredUrls.length > 0) {
-            const canonUrlSet = new Set(canon.map(a => normalizeUrl(a.transportUrl)))
-            const survivors = requiredUrls.map(u => normalizeUrl(u)).filter(u => canonUrlSet.has(u))
-            if (survivors.length === 0 || !survivors.includes(normalizeUrl(requiredActiveUrl))) {
-                fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Chain guard: enforced list drops the managed chain (required: ${requiredUrls.length}, survivors: ${survivors.length}, active present: ${survivors.includes(normalizeUrl(requiredActiveUrl))}); skipping write.`)
-                trace('reconciler', 'enforceAccount.chainGuard', { accountId, required: requiredUrls.length, survivors: survivors.length })
+        const managedChains = Array.isArray(opts.managedChains) && opts.managedChains.length > 0
+            ? opts.managedChains
+            : (Array.isArray(requiredUrls) && requiredUrls.length > 0 ? [{ urls: requiredUrls, target: requiredActiveUrl }] : [])
+        let chainGuardSkipped = false
+        {
+            const failure = chainGuardFailure(canon, managedChains)
+            if (failure) {
+                fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Chain guard: enforced list drops a managed chain (${failure}); skipping write.`)
+                trace('reconciler', 'enforceAccount.chainGuard', { accountId, chains: managedChains.length, failure })
                 return { synced: [], connectionStates: getConnectionStates(accountId), chainGuardSkipped: true }
             }
         }
@@ -536,7 +591,16 @@ export function createReconciler(fastify) {
                     if (canon.length === 0) continue
                     const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
                     if (!driver) continue
-                    await writePlatformAddons(driver, connection, canon, 'enforce')
+                    const outcome = await writePlatformAddons(driver, connection, canon, 'enforce', async (list) => {
+                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls)
+                        const failure = chainGuardFailure(merged, managedChains)
+                        if (failure) {
+                            fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Chain guard: merged list would drop a managed chain (${failure}); skipping write.`)
+                            return { skip: true, reason: failure }
+                        }
+                        return { list: merged }
+                    })
+                    if (outcome && outcome.skipped) { chainGuardSkipped = true; continue }
                 }
                 recordSuccess(accountId, connId)
                 synced.push(connection.platform)
@@ -547,7 +611,7 @@ export function createReconciler(fastify) {
         }
 
         trace('reconciler', 'enforceAccount.complete', { accountId, synced, timing: Date.now() - start })
-        return { synced, connectionStates: getConnectionStates(accountId) }
+        return { synced, connectionStates: getConnectionStates(accountId), chainGuardSkipped }
     }
 
     // Nuvio instances that reject the optional plugins table; skip after the first 401
