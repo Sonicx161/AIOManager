@@ -1,3 +1,5 @@
+import { addonEndpointUrl } from './addon-endpoint-url'
+
 export function parseAIOStreamsUrl(transportUrl: string): { baseUrl: string; uuid: string } | null {
     try {
         // AIOStreams alias URLs nest the user under /stremio/u/<alias>/ - skip the
@@ -12,9 +14,7 @@ export function parseAIOStreamsUrl(transportUrl: string): { baseUrl: string; uui
 
 export function getAIOStreamsConfigureUrl(transportUrl: string): string | null {
     try {
-        const [base, query] = transportUrl.split('?')
-        const configure = base.replace(/\/manifest(\.json)?$/i, '/configure').replace(/([^:]\/)\/+/g, '$1')
-        return query ? `${configure}?${query}` : configure
+        return addonEndpointUrl(transportUrl, 'configure')
     } catch {
         return null
     }

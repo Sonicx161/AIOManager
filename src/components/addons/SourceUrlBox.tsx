@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useToast } from '@/hooks/use-toast'
 import { fetchAddonManifest } from '@/api/addons'
-import { cn, getStremioLink, maskUrlLevel, normalizeAddonUrl } from '@/lib/utils'
+import { cn, getStremioLink, maskUrlLevel } from '@/lib/utils'
 import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
@@ -72,7 +72,7 @@ export function SourceUrlBox({
       toast({ title: 'Paste a URL first', variant: 'destructive' })
       return
     }
-    if (normalizeAddonUrl(trimmed) === normalizeAddonUrl(sourceUrl)) {
+    if (trimmed === sourceUrl.trim()) {
       resetEdit()
       return
     }

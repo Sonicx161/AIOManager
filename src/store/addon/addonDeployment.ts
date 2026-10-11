@@ -1618,10 +1618,7 @@ export async function replaceTransportUrlUniversally(
   const _saveLibraryDebounced = m._saveLibraryDebounced as (getState: () => AddonStore) => void
   useAddonStore.setState({ isUpdatingAddon: true, error: null })
   try {
-    const normOld = normalizeAddonUrl(oldUrl)
-    const normNew = normalizeAddonUrl(newUrl)
-
-    if (normOld === normNew) return { updatedAccountIds: [], failedAccounts: [] }
+    if (oldUrl.trim() === newUrl.trim()) return { updatedAccountIds: [], failedAccounts: [] }
 
     let freshManifest = null
     try {

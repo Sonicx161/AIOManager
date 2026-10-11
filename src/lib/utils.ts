@@ -1,3 +1,4 @@
+import { addonEndpointUrl } from './addon-endpoint-url'
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import type { AddonDescriptor } from '@/types/addon'
@@ -151,7 +152,7 @@ export function openStremioDetail(type: string, id: string) {
 }
 
 export function getAddonConfigureUrl(installUrl: string): string {
-  return installUrl.replace('manifest.json', 'configure')
+  try { return addonEndpointUrl(installUrl, 'configure') } catch { return installUrl }
 }
 
 /**

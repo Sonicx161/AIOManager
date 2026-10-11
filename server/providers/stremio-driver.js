@@ -1,3 +1,4 @@
+import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
 import { STREMIO_API } from '../config.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
 import { trace } from '../utils/trace.js'
@@ -37,7 +38,7 @@ export function createStremioDriver() {
             const res = await enqueueProxyRequest(STREMIO_API, () => fetch(`${STREMIO_API}/addonCollectionSet`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'AddonCollectionSet', authKey, addons })
+                body: JSON.stringify({ type: 'AddonCollectionSet', authKey, addons: addons.map(addon => ({ ...addon, transportUrl: addonManifestUrl(addon.transportUrl) })) })
             }))
             if (!res.ok) {
                 const body = await res.text().catch(() => '')

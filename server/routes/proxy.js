@@ -1,3 +1,4 @@
+import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AIOSTREAMS_USER_API_THROTTLE_MS, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, VERSION } from '../config.js'
 import { requireProxyAuth, verifyAuth } from '../auth.js'
@@ -568,7 +569,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         // Stremio rejects addon collections when any embedded manifest is partial.
         // Fill required fields before forwarding so one blocked addon cannot poison the account.
         if (type === 'AddonCollectionSet' && Array.isArray(payload.addons)) {
-            payload.addons = dedupeAddonCollectionByTransportUrl(payload.addons.map(sanitizeAddonForStremio))
+            payload.addons = dedupeAddonCollectionByTransportUrl(payload.addons.map(addon => sanitizeAddonForStremio({ ...addon, transportUrl: addonManifestUrl(addon.transportUrl) })))
             const validationError = validateAddonCollection(payload.addons)
             if (validationError) {
                 fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked invalid AddonCollectionSet: ${validationError}`)

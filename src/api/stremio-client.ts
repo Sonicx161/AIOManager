@@ -1,3 +1,4 @@
+import { addonManifestUrl } from '@/lib/addon-endpoint-url'
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
 import { LibraryItem } from '@/types/activity'
 import { resilientFetch } from '@/lib/api-resilience'
@@ -299,7 +300,7 @@ export class StremioClient {
       const data = await serverPost('/api/stremio-proxy', {
         type: 'AddonCollectionSet',
         authKey,
-        addons,
+        addons: addons.map(addon => ({ ...addon, transportUrl: addonManifestUrl(addon.transportUrl) })),
         allowCollectionShrink: Boolean(options.allowCollectionShrink),
       }, { 'x-account-context': accountContext })
       trace('stremio', 'api-call', { method: 'AddonCollectionSet', timing: Date.now() - start })
@@ -325,7 +326,7 @@ export class StremioClient {
         await serverPost('/api/stremio-proxy', {
           type: 'AddonCollectionSet',
           authKey,
-          addons: previousCollection,
+          addons: previousCollection?.map(addon => ({ ...addon, transportUrl: addonManifestUrl(addon.transportUrl) })),
         }, { 'x-account-context': `${accountContext}: rollback` }).catch((rollbackError) => {
           if (import.meta.env.DEV) console.error('[Stremio] Failed to rollback suspicious addon collection shrink:', rollbackError)
         })
@@ -343,14 +344,7 @@ export class StremioClient {
   private readonly DIRECT_FETCH_DOMAINS = ['v3-cinemeta.strem.io', 'cinemeta.strem.io', 'opensubtitles-v3.strem.io', 'www.strem.io', 'v3-channels.strem.io', '127.0.0.1', 'localhost']
 
   async fetchAddonManifest(transportUrl: string, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, force: boolean = false, retries = 2): Promise<AddonDescriptor> {
-    let manifestUrl: string
-    if (transportUrl.endsWith('/manifest.json') || transportUrl.includes('/manifest.json?')) {
-      manifestUrl = transportUrl
-    } else {
-      manifestUrl = transportUrl.endsWith('/')
-        ? `${transportUrl}manifest.json`
-        : `${transportUrl}/manifest.json`
-    }
+    const manifestUrl = addonManifestUrl(transportUrl)
 
     const shouldFetchDirectly = this.DIRECT_FETCH_DOMAINS.some((domain) => {
       try {
@@ -403,7 +397,7 @@ export class StremioClient {
       const identifiedManifest = identifyAddon(transportUrl, sanitizedManifest)
 
       return {
-        transportUrl,
+        transportUrl: manifestUrl,
         manifest: {
           ...identifiedManifest,
           id: identifiedManifest.id || 'unknown',

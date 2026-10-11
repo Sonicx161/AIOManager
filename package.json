@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
     "preview": "vite preview",
-    "prepare": "husky || true"
+    "prepare": "husky || true",
+    "test:transport": "mkdir -p server/data && node --experimental-vm-modules --test owner-tests/transport.test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",
