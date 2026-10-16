@@ -38,7 +38,7 @@ async function shouldPushToStremio(accountId: string): Promise<boolean> {
     const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
     return isStremioPushEnabled(account)
 }
-import { reconcileTombstones } from '@/lib/addon-tombstones'
+import { restoreAddonDeletions } from '@/lib/addon-tombstones'
 import { trace, briefAddons } from '@/lib/trace'
 import { cloneAddonsWithMode } from '@/lib/clone-mode'
 import type { CloneMode } from '@/lib/clone-mode'
@@ -64,6 +64,26 @@ function updateActiveProfile(account: Account, updatedAddons: AddonDescriptor[])
       p.id === account.activeProfileId ? { ...p, addons: updatedAddons } : p
     ),
   }
+}
+
+function explicitMergeAddons(result: MergeResult, appliedAddons: AddonDescriptor[]): Array<{ transportUrl: string }> {
+  const appliedUrls = new Set(appliedAddons.map(addon => getAddonUrlKey(addon.transportUrl)))
+  return [
+    ...result.added.map(addon => ({ transportUrl: addon.installUrl })),
+    ...result.updated.map(addon => ({ transportUrl: addon.newUrl })),
+  ].filter(addon => appliedUrls.has(getAddonUrlKey(addon.transportUrl)))
+}
+
+async function acknowledgeExplicitInstall(accountId: string, result: MergeResult, appliedAddons: AddonDescriptor[]): Promise<void> {
+  const installed = explicitMergeAddons(result, appliedAddons)
+  if (installed.length === 0) return
+  const { useAccountStore } = await import('../accountStore')
+  const state = useAccountStore.getState()
+  const account = state.accounts.find(a => a.id === accountId)
+  if (!account) return
+  const deletionState = restoreAddonDeletions(account.deletedAddons, account.restoredAddons, installed)
+  useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, ...deletionState } : a) })
+  persistAccounts(useAccountStore.getState().accounts)
 }
 
 export const SAVED_ADDON_ACCOUNT_CONCURRENCY = 5
@@ -251,7 +271,10 @@ export async function applySavedAddonToAccount(
       true
     )
 
-    if (await shouldPushToStremio(accountId)) await updateAddons(authKey, updatedAddons, accountId)
+    if (await shouldPushToStremio(accountId)) {
+      await updateAddons(authKey, updatedAddons, accountId)
+      await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    }
     trace('deploy.apply', 'pushed', { savedAddonId, accountId, count: updatedAddons.length })
     const { pushToConnections } = await import('../account/accountAddonOps')
     pushToConnections(accountId).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
@@ -310,7 +333,10 @@ export async function applyTagToAccount(
       true
     )
 
-    if (await shouldPushToStremio(accountId)) await updateAddons(authKey, updatedAddons, accountId)
+    if (await shouldPushToStremio(accountId)) {
+      await updateAddons(authKey, updatedAddons, accountId)
+      await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    }
     const { pushToConnections } = await import('../account/accountAddonOps')
     pushToConnections(accountId).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
 
@@ -404,12 +430,14 @@ export async function bulkApplySavedAddons(
             lastUpdated: Date.now()
           }
         }))
+        const installed = explicitMergeAddons(mergeResult, updatedAddons)
 
         if (isLocalAccount) {
           const state = useAccountStore.getState()
           const localAccount = state.accounts.find(a => a.id === accountId)
           if (localAccount) {
-            let updatedAccount: Account = { ...localAccount, addons: updatedAddons, deletedAddons: reconcileTombstones(localAccount.deletedAddons, updatedAddons), lastSync: new Date() }
+            const deletionState = restoreAddonDeletions(localAccount.deletedAddons, localAccount.restoredAddons, installed)
+            let updatedAccount: Account = { ...localAccount, addons: updatedAddons, ...deletionState, lastSync: new Date() }
             updatedAccount = updateActiveProfile(updatedAccount, updatedAddons)
             useAccountStore.setState({
               accounts: state.accounts.map(a => a.id === accountId ? updatedAccount : a)
@@ -426,8 +454,8 @@ export async function bulkApplySavedAddons(
           const state = useAccountStore.getState()
           const stremioAccount = state.accounts.find(a => a.id === accountId)
           if (stremioAccount) {
-            const clearedTombstones = reconcileTombstones(stremioAccount.deletedAddons, updatedAddons)
-            useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, deletedAddons: clearedTombstones } : a) })
+            const deletionState = restoreAddonDeletions(stremioAccount.deletedAddons, stremioAccount.restoredAddons, installed)
+            useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, ...deletionState } : a) })
             persistAccounts(useAccountStore.getState().accounts)
           }
           const { pushToConnections } = await import('../account/accountAddonOps')
@@ -1168,12 +1196,14 @@ export async function bulkInstallFromUrls(
         }
 
         const dedupedAddons = dedupeAddonsByTransportUrl(updatedAddons)
+        const installed = explicitMergeAddons(mergeResultDetails, dedupedAddons)
 
         if (isLocalAccount) {
           const state = useAccountStore.getState()
           const localAccount = state.accounts.find(a => a.id === accountId)
           if (localAccount) {
-            let updatedAccount: Account = { ...localAccount, addons: dedupedAddons, deletedAddons: reconcileTombstones(localAccount.deletedAddons, dedupedAddons), lastSync: new Date() }
+            const deletionState = restoreAddonDeletions(localAccount.deletedAddons, localAccount.restoredAddons, installed)
+            let updatedAccount: Account = { ...localAccount, addons: dedupedAddons, ...deletionState, lastSync: new Date() }
             updatedAccount = updateActiveProfile(updatedAccount, dedupedAddons)
             useAccountStore.setState({
               accounts: state.accounts.map(a => a.id === accountId ? updatedAccount : a)
@@ -1189,8 +1219,8 @@ export async function bulkInstallFromUrls(
           const state = useAccountStore.getState()
           const stremioAccount = state.accounts.find(a => a.id === accountId)
           if (stremioAccount) {
-            const clearedTombstones = reconcileTombstones(stremioAccount.deletedAddons, dedupedAddons)
-            useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, deletedAddons: clearedTombstones } : a) })
+            const deletionState = restoreAddonDeletions(stremioAccount.deletedAddons, stremioAccount.restoredAddons, installed)
+            useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, ...deletionState } : a) })
             persistAccounts(useAccountStore.getState().accounts)
           }
           const { pushToConnections } = await import('../account/accountAddonOps')
@@ -1272,8 +1302,11 @@ export async function bulkCloneAccount(
         const newAddons = cloneAddonsWithMode(sourceAddons, targetAddons, { mode: cloneMode, overwrite })
 
         const addonListChanged = !haveSameAddonCollection(targetAddons, newAddons)
-        if (addonListChanged) {
-          await useAccountStore.getState().reorderAddons(accountId, newAddons)
+        const sourceUrls = new Set(sourceAddons.map(addon => getAddonUrlKey(addon.transportUrl)))
+        const explicitInstallUrls = newAddons.filter(addon => sourceUrls.has(getAddonUrlKey(addon.transportUrl))).map(addon => addon.transportUrl)
+        const restoresDeletedAddon = explicitInstallUrls.some(url => localTargetAccount?.deletedAddons?.[normalizeAddonUrl(url)] !== undefined)
+        if (addonListChanged || restoresDeletedAddon) {
+          await useAccountStore.getState().reorderAddons(accountId, newAddons, { explicitInstallUrls })
         }
 
         if (addonListChanged) {

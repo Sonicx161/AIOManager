@@ -41,6 +41,8 @@ export interface Account {
   // Normalized transportUrl -> deletedAt(ms). Stops a deleted addon from being resurrected by
   // an inbound Stremio/cloud sync. See lib/addon-tombstones.ts.
   deletedAddons?: Record<string, number>
+  /** Deletion versions explicitly overridden by a user reinstall. */
+  restoredAddons?: Record<string, number>
 }
 
 export interface AddonChangelogEntry {

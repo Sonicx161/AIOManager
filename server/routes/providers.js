@@ -222,23 +222,25 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // Re-auth from a device that lacks the instance URL must never erase the row's stored
     // self-hosted baseUrl: a baseUrl-less bundle makes every server-side push target api.nuvio.tv.
-    async function preserveExistingNuvioBaseUrl(connectionId, credentialValue) {
+    async function preserveExistingNuvioBaseUrl(connectionId, syncUser, credentialValue) {
         let incoming = null
         try { incoming = typeof credentialValue === 'string' ? JSON.parse(credentialValue) : credentialValue } catch { return credentialValue }
         if (!incoming || typeof incoming !== 'object' || incoming.baseUrl) return credentialValue
-        const existing = await db.get(
-            "SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = 'nuvio' LIMIT 1",
-            [connectionId]
+        const rows = await db.query(
+            "SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND sync_user = $2 AND credential_type = 'nuvio' ORDER BY updated_at DESC, id ASC",
+            [connectionId, syncUser]
         )
-        if (!existing?.auth_key) return credentialValue
-        try {
-            const bundle = JSON.parse(decrypt(existing.auth_key, FALLBACK_KEYS))
-            if (bundle?.baseUrl) {
-                incoming.baseUrl = bundle.baseUrl
-                if (!incoming.publishableKey && bundle.publishableKey) incoming.publishableKey = bundle.publishableKey
-                return JSON.stringify(incoming)
-            }
-        } catch { }
+        for (const existing of rows || []) {
+            if (!existing?.auth_key) continue
+            try {
+                const bundle = JSON.parse(decrypt(existing.auth_key, FALLBACK_KEYS))
+                if (bundle?.baseUrl) {
+                    incoming = { ...incoming, baseUrl: bundle.baseUrl }
+                    if (!incoming.publishableKey && bundle.publishableKey) incoming.publishableKey = bundle.publishableKey
+                    return JSON.stringify(incoming)
+                }
+            } catch { }
+        }
         return credentialValue
     }
 
@@ -262,7 +264,7 @@ export function registerProviderRoutes(fastify, reconciler) {
         const type = ['nuvio', 'realstream', 'hydra'].includes(credentialType) ? credentialType : 'hydra'
         let credentialValue = typeof credential === 'object' ? JSON.stringify(credential) : credential
         if (type === 'nuvio') {
-            credentialValue = await preserveExistingNuvioBaseUrl(connectionId, credentialValue)
+            credentialValue = await preserveExistingNuvioBaseUrl(connectionId, authUser, credentialValue)
         }
         const encrypted = encrypt(credentialValue, PRIMARY_KEY)
         const id = `${type}:${accountId}:${connectionId}`

@@ -8,7 +8,7 @@
     "start": "node index.js",
     "dev": "node --watch index.js",
     "generate-openapi": "node scripts/generate-openapi.js",
-    "test:smoke": "node --test --test-concurrency=1 tests/*.test.js",
+    "test:smoke": "node --import ./test-support/safe-preload.mjs --test --test-concurrency=1 tests/*.test.js",
     "gen:env": "node scripts/generate-env-example.js"
   },
   "dependencies": {

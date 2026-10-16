@@ -44,11 +44,16 @@ Thumbs.db
 # Testing
 coverage
 .nyc_output
-# Tests stay local except the CI smoke suite, which must run in CI
+# Keep local server diagnostics private; explicitly retain the CI smoke suites.
 server/tests/*
 !server/tests/static-serving.test.js
 !server/tests/helpers.js
-src/**/*.test.ts
+# Client regressions are checked in and run in CI.
+!server/tests/nuvio-credential-isolation.test.js
+!server/tests/nuvio-credential-scoping.test.js
+!server/tests/nuvio-addon-replay.test.js
+!server/tests/cloud-sync-consistency.test.js
+!server/tests/sync-force-push.test.js
 
 # Temporary files
 *.tmp

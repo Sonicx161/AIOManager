@@ -5,7 +5,7 @@ import {
     fetchAddonManifest as apiFetchAddonManifest,
 } from '@/api/addons'
 import { mergeAddons, normalizeAddonUrl, hasFallbackAddonName } from '@/lib/utils'
-import { filterResurrectedAuto, loadResurrectionSightings, saveResurrectionSightings, reconcileTombstones } from '@/lib/addon-tombstones'
+import { filterResurrected, mergeAddonDeletionState } from '@/lib/addon-tombstones'
 import { trace } from '@/lib/trace'
 import { fingerprintAddonList } from '@/lib/addon-fingerprint'
 import { mapConcurrent } from '@/lib/concurrency'
@@ -82,10 +82,10 @@ export function mergeRemoteIntoHub(account: Account, remoteAddons: AddonDescript
             }
         })
 
-    const adoption = filterResurrectedAuto(normalizedAddons, account.addons, account.deletedAddons, loadResurrectionSightings())
-    saveResurrectionSightings(adoption.nextSightings)
-    const survivingRemote = adoption.kept
-    trace('sync.merge', 'post-tombstone', { accountId: account.id, survived: survivingRemote.length, stripped: normalizedAddons.length - survivingRemote.length, autoAdopted: adoption.adopted.length })
+    const deletionState = mergeAddonDeletionState(account.deletedAddons, undefined, account.restoredAddons, undefined)
+    const survivingRemote = filterResurrected(normalizedAddons, [], deletionState.deletedAddons)
+    const survivingLocal = filterResurrected(account.addons, [], deletionState.deletedAddons)
+    trace('sync.merge', 'post-tombstone', { accountId: account.id, survived: survivingRemote.length, stripped: normalizedAddons.length - survivingRemote.length })
     const survivingUrls = new Set(survivingRemote.map(a => normalizeAddonUrl(a.transportUrl)))
     const strippedByTombstone = normalizedAddons
         .filter(a => !survivingUrls.has(normalizeAddonUrl(a.transportUrl)))
@@ -102,7 +102,7 @@ export function mergeRemoteIntoHub(account: Account, remoteAddons: AddonDescript
     // Hub-canonical: passive read is additive; only an explicit forceRefresh adopts platform removals.
     // instanceMatch keep-local-url: the local post-fold state is authoritative, so a stale
     // platform entry with an older config URL folds into the local entry instead of duplicating.
-    const out = mergeAddons(account.addons, survivingRemote, { keepMissingLocal: !forceRefresh, instanceMatch: 'keep-local-url' })
+    const out = mergeAddons(survivingLocal, survivingRemote, { keepMissingLocal: !forceRefresh, instanceMatch: 'keep-local-url' })
     trace('sync.merge', 'result', { accountId: account.id, out: out.length, keepMissingLocal: !forceRefresh })
     return out
 }
@@ -304,6 +304,8 @@ async function syncAccountCore(id: string, forceRefresh: boolean): Promise<SyncC
 
     trace('sync.core', 'discovery', { accountId: id, changed: discoveryChanged, final: finalAddons.length, propagateDeletions })
 
+    const deletionState = mergeAddonDeletionState(currentAccount.deletedAddons, undefined, currentAccount.restoredAddons, undefined)
+    finalAddons = filterResurrected(finalAddons, [], deletionState.deletedAddons)
     const prevAddons = currentAccount.addons
     const addonsChanged = fingerprintAddonList(prevAddons) !== fingerprintAddonList(finalAddons)
     trace('sync.core', 'flags', { accountId: id, addonsChanged, discoveryChanged, forceRefresh })
@@ -319,7 +321,7 @@ async function syncAccountCore(id: string, forceRefresh: boolean): Promise<SyncC
         ...currentAccount,
         addons: finalAddons,
         profiles: updatedProfiles,
-        deletedAddons: reconcileTombstones(currentAccount.deletedAddons, finalAddons),
+        ...deletionState,
         lastSync: new Date(),
         status: 'active' as const,
     }

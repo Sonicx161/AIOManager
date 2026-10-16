@@ -26,6 +26,8 @@ jobs:
           }
       - run: npm run lint
       - run: npm run typecheck
+      - name: Client regression tests
+        run: npm run test:client
       - name: Server smoke tests (static serving, sync, hydra)
         run: npm --prefix server run test:smoke
         env:

@@ -1,4 +1,5 @@
 import { threeWayMergeCanonical, type CanonicalAddon } from '@/lib/canonical-merge'
+import { filterResurrected, mergeAddonDeletionState } from '@/lib/addon-tombstones'
 import { getCanonicalBase } from '@/lib/canonical-base'
 import { fetchCanonical } from '@/api/hydra-providers'
 import { serverHasStremioCredential } from '@/lib/canonical-visibility'
@@ -72,12 +73,26 @@ export async function reconcileInboundCanonical(ownership: SyncOwnership = captu
             const current = getAccountById(store.getState().accounts, account.id)
             if (!current) continue
             const base = getCanonicalBase(account.id) as unknown as CanonicalAddon[] | null
-            const local = (current.addons || []) as unknown as CanonicalAddon[]
-            const { addons: merged, changed } = threeWayMergeCanonical(base, local, remoteAddons)
+            const deletionState = mergeAddonDeletionState(current.deletedAddons, undefined, current.restoredAddons, undefined)
+            const local = filterResurrected((current.addons || []) as unknown as CanonicalAddon[], [], deletionState.deletedAddons)
+            const survivingRemote = filterResurrected(remoteAddons, [], deletionState.deletedAddons)
+            const { addons: merged, changed } = threeWayMergeCanonical(base, local, survivingRemote)
             mergedCount = merged.length
-            if (!changed) continue
+            const localSuppressed = local.length !== (current.addons || []).length
+            if (!changed && !localSuppressed) continue
             if (merged.length > 0 && local.length === 0) markFoldedHub(account.id)
-            const updated = { ...current, addons: merged as unknown as AddonDescriptor[], lastSync: new Date() }
+            const mergedAddons = merged as unknown as AddonDescriptor[]
+            const updated = {
+                ...current,
+                addons: mergedAddons,
+                ...deletionState,
+                profiles: current.profiles
+                    ? current.profiles.map(profile => profile.id === (current.activeProfileId || 'default')
+                        ? { ...profile, addons: structuredClone(mergedAddons) }
+                        : profile)
+                    : current.profiles,
+                lastSync: new Date(),
+            }
             const next = store.getState().accounts.map(a => (a.id === account.id ? updated : a))
             store.setState({ accounts: next })
             persistAccounts(next, ownership)

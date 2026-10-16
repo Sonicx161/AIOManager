@@ -231,6 +231,12 @@ export function registerSyncRoutes(fastify) {
         // content_hash (over the random-IV envelope, never stable), a match proves the logical
         // content is unchanged so archive/rewrite/apiKeys churn and the updated_at bump skip.
         const clientHint = typeof data.contentHint === 'string' ? data.contentHint.slice(0, 64) : null
+        // Revision base the client applied (its lastSyncedCloudEtag). Comparing
+        // revisions mistakes no clock for another writer: a slow device clock no
+        // longer self-conflicts, and rapid concurrent writes differing by <5s
+        // still conflict via hash mismatch. Null for first pushes / legacy
+        // snapshots: those fall back to the timestamp guard below.
+        const clientBase = typeof data.baseContentHash === 'string' && data.baseContentHash ? data.baseContentHash : null
         const serverTime = new Date().toISOString()
         data.syncedAt = serverTime
         const storedStr = JSON.stringify(data)
@@ -298,10 +304,20 @@ export function registerSyncRoutes(fastify) {
                 }
 
                 const serverUpdated = row.updated_at || 0
-                if (!force && clientSyncedAt > 0 && serverUpdated > 0 && clientSyncedAt < serverUpdated - 5000) {
-                    fastify.log.info({ category: 'Server' }, `Overlap for ID ${id}: client ${new Date(clientSyncedAt).toISOString()} predates server ${new Date(serverUpdated).toISOString()}, content-hash gates the write`)
+                // Modern clients send the revision they applied; legacy clients send
+                // only a wall-clock baseline. The revision check is authoritative when
+                // both sides carry one; otherwise the timestamp guard applies. force
+                // (explicit user action) bypasses both, unchanged.
+                const hasRevisionBase = clientBase !== null && row.content_hash != null
+                const revisionConflict = hasRevisionBase && clientBase !== row.content_hash
+                const clockConflict = clientSyncedAt > 0 && serverUpdated > 0 && clientSyncedAt < serverUpdated - 5000
+                if (!force && (hasRevisionBase ? revisionConflict : clockConflict)) {
+                    const detail = hasRevisionBase
+                        ? 'cloud revision changed since the client pull'
+                        : 'legacy client timestamp predates server state'
+                    fastify.log.info({ category: 'Server' }, 'Overlap for ID ' + id + ': ' + detail + ', content-hash gates the write')
                     trace('syncRoute', 'push.success', { accountId: id, skipped: true, reason: 'conflict', keysChanged, timing: Date.now() - postStart })
-                    if (keysChanged) await registerApiKeys(tx, id, data.apiKeys, Array.isArray(data.accounts) ? data.accounts : null)
+                    // A rejected snapshot cannot replace the winner's key registry.
                     return { success: true, conflict: true, syncedAt: serverTime, contentHash: row.content_hash ?? null, serverStremioCredentialedAccounts }
                 }
 

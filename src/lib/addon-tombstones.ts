@@ -1,18 +1,17 @@
 // Persisted + synced markers for addons the user explicitly deleted, so an inbound sync (Stremio
 // collection or the cloud blob) can't resurrect them. Keyed by normalized transportUrl -> deletedAt.
-// Tombstones prevent resurrection of deleted addons from remote sources. Hub-side re-adds are safe
-// (reconcileTombstones clears the tombstone at install, filterResurrected checks local presence first).
-// Out-of-band re-adds within the 21-day TTL are intentionally suppressed.
+// Explicit Hub installs record which deletion they overrode so reinstalls converge across devices.
+// A deletion remains in force until the user explicitly installs that URL again.
 export type Tombstones = Record<string, number>
 
 // Kill switch: set false to disable resurrection suppression entirely (filterResurrected becomes a
 // passthrough). Tombstones are still recorded + reconciled, so flipping this back on resumes cleanly.
 export const TOMBSTONES_ENABLED = true
 
-// Short by design: the resurrection window is days (a stale source re-pushing, or a one-time
-// migration restore), so a 3-week TTL covers it while leaving no long-run residue. Any cross-device
-// re-add lag or false-suppression self-expires in weeks rather than months.
-const DEFAULT_TTL_MS = 21 * 24 * 60 * 60 * 1000
+// A stale connection or cloud snapshot may survive for weeks. Expiring a delete would let it
+// reinstall the addon without a user action. The optional ttl parameter remains for callers
+// that deliberately need a bounded migration window.
+const DEFAULT_TTL_MS = Number.POSITIVE_INFINITY
 
 interface AddonLike { transportUrl?: string }
 
@@ -31,10 +30,41 @@ export function normUrl(url: string | undefined): string {
 
 const key = (url: string | undefined) => normUrl(url)
 
-export function addTombstones(tombstones: Tombstones | undefined, urls: Array<string | undefined>, now = Date.now()): Tombstones {
+export function addTombstones(tombstones: Tombstones | undefined, urls: Array<string | undefined>, now = Date.now(), restored?: Tombstones): Tombstones {
     const out: Tombstones = { ...(tombstones || {}) }
-    for (const u of urls) { const k = key(u); if (k) out[k] = now }
+    for (const u of urls) {
+        const k = key(u)
+        // Advance past the observed delete/reinstall even when this device's
+        // clock moved backwards. A fresh delete must beat an older reinstall.
+        if (k) out[k] = Math.max(now, (out[k] ?? 0) + 1, (restored?.[k] ?? 0) + 1)
+    }
     return out
+}
+
+// Restores acknowledge the exact deletion the user explicitly overrode. Merely
+// seeing an addon (or installing it without observing a delete) is not enough to
+// override a later/concurrent deletion on another device.
+export function restoreAddonDeletions(deleted: Tombstones | undefined, restored: Tombstones | undefined, explicitAddons: AddonLike[]): { deletedAddons: Tombstones; restoredAddons: Tombstones } {
+    const deletedAddons = { ...(deleted || {}) }
+    const restoredAddons = { ...(restored || {}) }
+    for (const addon of explicitAddons) {
+        const k = key(addon.transportUrl)
+        const deletion = deletedAddons[k]
+        if (k && deletion !== undefined) {
+            restoredAddons[k] = Math.max(restoredAddons[k] ?? 0, deletion)
+            delete deletedAddons[k]
+        }
+    }
+    return { deletedAddons, restoredAddons }
+}
+
+export function mergeAddonDeletionState(localDeleted: Tombstones | undefined, remoteDeleted: Tombstones | undefined, localRestored: Tombstones | undefined, remoteRestored: Tombstones | undefined): { deletedAddons: Tombstones; restoredAddons: Tombstones } {
+    const deletedAddons = mergeTombstones(localDeleted, remoteDeleted)
+    const restoredAddons = mergeTombstones(localRestored, remoteRestored)
+    for (const [k, deletion] of Object.entries(deletedAddons)) {
+        if ((restoredAddons[k] ?? -1) >= deletion) delete deletedAddons[k]
+    }
+    return { deletedAddons, restoredAddons }
 }
 
 // Latest-delete-wins union across two devices' blobs; expired entries dropped.
@@ -78,7 +108,8 @@ export function reconcileTombstones(tombstones: Tombstones | undefined, mergedAd
     return out
 }
 
-// Tombstoned addons persistently re-pushed by other tools (AIOM Hydra sync) are intentional re-adds - adopt after 3 sightings.
+// Retained for compatibility with older callers. Repeated sightings of the same remote addon
+// cannot establish intent: a failed platform write looks exactly like an intentional re-add.
 export const AUTO_ADOPT_THRESHOLD = 3
 
 export type ResurrectionSightings = Record<string, number>
@@ -107,15 +138,7 @@ export function filterResurrectedAuto<T extends AddonLike>(
         const k = key(addon.transportUrl)
         const tombstoned = k !== '' && tombstones?.[k] !== undefined && now - tombstones[k] < ttl
         if (!k || localKeys.has(k) || !tombstoned) { kept.push(addon); continue }
-        const count = (nextSightings[k] || 0) + 1
-        if (count >= AUTO_ADOPT_THRESHOLD) {
-            delete nextSightings[k]
-            markResurrectionAdopted(k)
-            kept.push(addon)
-            adopted.push(addon)
-            continue
-        }
-        nextSightings[k] = count
+        // A read is not an explicit install, regardless of how many times it repeats.
         suppressedCount++
     }
     return { kept, adopted, suppressedCount, nextSightings }

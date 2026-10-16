@@ -3,6 +3,7 @@ import {
       getAddons,
 } from '@/api/addons'
 import { normalizeAddonUrl, ACCOUNT_COLORS, hasFallbackAddonIdentity } from '@/lib/utils'
+import { mergeAddonDeletionState } from '@/lib/addon-tombstones'
 import { getHostnameIdentifier } from '@/lib/addon-identifier'
 import { loginWithCredentials } from '@/api/auth'
 import { LoginResponse } from '@/api/stremio-client'
@@ -351,7 +352,7 @@ export interface AccountStore {
       installAddonsToAccount: (accountId: string, addonUrls: string[], concurrency?: number) => Promise<{ successCount: number; failCount: number }>
       removeAddonFromAccount: (accountId: string, transportUrl: string) => Promise<void>
       removeAddonByIndexFromAccount: (accountId: string, index: number) => Promise<void>
-      reorderAddons: (accountId: string, newOrder: AddonDescriptor[]) => Promise<void>
+      reorderAddons: (accountId: string, newOrder: AddonDescriptor[], options?: { explicitInstallUrls?: string[] }) => Promise<void>
       bulkDeleteAddons: (accountId: string, keptAddons: AddonDescriptor[], removedUrls: string[]) => Promise<void>
       exportAccounts: (includeCredentials: boolean) => Promise<string>
       exportAccountsForSync: () => Promise<Record<string, unknown>>
@@ -913,9 +914,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             const { bulkDeleteAddons } = await import('./account/accountAddonOps')
             return bulkDeleteAddons(accountId, keptAddons, removedUrls)
       },
-      reorderAddons: async (accountId: string, newOrder: AddonDescriptor[]) => {
+      reorderAddons: async (accountId: string, newOrder: AddonDescriptor[], options?: { explicitInstallUrls?: string[] }) => {
             const { reorderAddons } = await import('./account/accountAddonOps')
-            return reorderAddons(accountId, newOrder)
+            return reorderAddons(accountId, newOrder, options)
       },
 
       exportAccounts: async (includeCredentials: boolean) => {
@@ -981,10 +982,17 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         authKeyCache.set(getStremioAuthKey(updatedAccount), authKey)
                         await upsertAuthKeyHash(updatedAccount.id, authKey)
                         const addons = await getAddons(authKey, updatedAccount.id)
-                        updatedAccount.addons = addons.map((a) => ({
-                              ...a,
-                              manifest: sanitizeAddonManifest(a.manifest, a.transportUrl),
-                        }))
+                        // Re-authentication refreshes credentials, so a stale platform
+                        // snapshot must pass the same additive merge as a passive sync.
+                        const { mergeRemoteIntoHub } = await import('./account/accountSync')
+                        const deletionState = mergeAddonDeletionState(account.deletedAddons, undefined, account.restoredAddons, undefined)
+                        updatedAccount.addons = mergeRemoteIntoHub({ ...account, ...deletionState }, addons)
+                        Object.assign(updatedAccount, deletionState)
+                        updatedAccount.profiles = updatedAccount.profiles?.map(profile =>
+                              profile.id === (updatedAccount.activeProfileId || 'default')
+                                    ? { ...profile, addons: structuredClone(updatedAccount.addons) }
+                                    : profile
+                        )
                         updatedAccount.lastSync = new Date()
                         updatedAccount.status = 'active'
                   }

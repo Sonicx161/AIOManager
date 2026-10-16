@@ -1,5 +1,5 @@
 import { mergeAddons } from '@/lib/utils'
-import { mergeTombstones, filterResurrected, reconcileTombstones, isResurrectionAdopted } from '@/lib/addon-tombstones'
+import { mergeAddonDeletionState, filterResurrected } from '@/lib/addon-tombstones'
 import { readSyncedSettings } from '@/lib/synced-settings'
 import { decrypt, encrypt } from '@/lib/crypto'
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
@@ -135,6 +135,7 @@ async function buildExportData(includeCredentialsValue: boolean, forSync: boolea
             profiles: acc.profiles,
             activeProfileId: acc.activeProfileId,
             deletedAddons: acc.deletedAddons,
+            restoredAddons: acc.restoredAddons,
             addons: processAddons(acc.addons),
             connections: (acc.connections || []).map(c => ({
                 id: c.id,
@@ -480,6 +481,7 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                 profiles: acc.profiles as import('@/types/account').AccountProfile[] | undefined,
                 activeProfileId: acc.activeProfileId as string | undefined,
                 deletedAddons: acc.deletedAddons as Record<string, number> | undefined,
+                restoredAddons: acc.restoredAddons as Record<string, number> | undefined,
                 addons: Array.isArray(acc.addons)
                     ? (acc.addons as Record<string, unknown>[]).map((ad: Record<string, unknown>) => {
                         const transportUrl = String(ad.transportUrl || '')
@@ -649,16 +651,20 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                     })(),
                     activeProfileId: matchedAccount.activeProfileId ?? ra.activeProfileId,
                     ...(() => {
-                        // Union both devices' tombstones, suppress resurrected addons (a delete on
-                        // either device wins), then self-heal the set against the merged result.
-                        const tombstones = mergeTombstones(matchedAccount.deletedAddons, ra.deletedAddons)
-                        for (const adoptedKey of Object.keys(tombstones)) {
-                            if (isResurrectionAdopted(adoptedKey)) delete tombstones[adoptedKey]
-                        }
+                        // A saved local addon is not proof of a reinstall. Resolve both devices'
+                        // explicit restore acknowledgements before either list can enter the merge.
+                        const deletionState = mergeAddonDeletionState(
+                            matchedAccount.deletedAddons,
+                            ra.deletedAddons,
+                            matchedAccount.restoredAddons,
+                            ra.restoredAddons,
+                        )
+                        const localAddons = filterResurrected(matchedAccount.addons, [], deletionState.deletedAddons)
+                        const remoteAddons = filterResurrected(ra.addons, [], deletionState.deletedAddons)
                         const mergedAddons = mode === 'mirror'
-                            ? filterResurrected(ra.addons, [], tombstones)
-                            : mergeAddons(matchedAccount.addons, filterResurrected(ra.addons, matchedAccount.addons, tombstones), { instanceMatch: 'adopt-remote-url' })
-                        return { addons: mergedAddons, deletedAddons: reconcileTombstones(tombstones, mergedAddons) }
+                            ? remoteAddons
+                            : mergeAddons(localAddons, remoteAddons, { instanceMatch: 'adopt-remote-url' })
+                        return { addons: mergedAddons, ...deletionState }
                     })(),
                     connections: mergeConnections(matchedAccount.connections, ra.connections, mode) ?? matchedAccount.connections,
                     primaryConnectionId: ra.primaryConnectionId ?? matchedAccount.primaryConnectionId,
@@ -668,15 +674,12 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                 reconciledAccounts.push(updated)
                 processedLocalIds.add(matchedAccount.id)
             } else {
-                const importedTombstones = mergeTombstones(undefined, ra.deletedAddons)
-                for (const adoptedKey of Object.keys(importedTombstones)) {
-                    if (isResurrectionAdopted(adoptedKey)) delete importedTombstones[adoptedKey]
-                }
-                const importedAddons = filterResurrected(ra.addons, [], importedTombstones)
+                const deletionState = mergeAddonDeletionState(undefined, ra.deletedAddons, undefined, ra.restoredAddons)
+                const importedAddons = filterResurrected(ra.addons, [], deletionState.deletedAddons)
                 const importedAccount = {
                     ...ra,
                     addons: importedAddons,
-                    deletedAddons: reconcileTombstones(importedTombstones, importedAddons),
+                    ...deletionState,
                     authKey: ra.rawKey ? await encrypt(ra.rawKey, getWriteEncryptionKey()) : '',
                     password: ra.password ? await encrypt(ra.password, getWriteEncryptionKey()) : undefined,
                     connections: mergeConnections(undefined, ra.connections, mode),

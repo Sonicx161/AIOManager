@@ -6,7 +6,7 @@ import {
     getAddons,
 } from '@/api/addons'
 import { getAddonVersionKey, normalizeAddonUrl, mergeAddons } from '@/lib/utils'
-import { addTombstones, reconcileTombstones } from '@/lib/addon-tombstones'
+import { addTombstones, restoreAddonDeletions } from '@/lib/addon-tombstones'
 import { AddonDescriptor } from '@/types/addon'
 import { dedupeAddonsByTransportUrl } from '@/lib/addon-dedupe'
 import { mapConcurrent } from '@/lib/concurrency'
@@ -301,7 +301,8 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
             manifest: getEffectiveManifest(addon)
         }))
 
-        let updatedAccount: Account = { ...account, addons: finalAddons, deletedAddons: reconcileTombstones(account.deletedAddons, finalAddons), lastSync: new Date() }
+        const deletionState = restoreAddonDeletions(account.deletedAddons, account.restoredAddons, [{ transportUrl: addonUrl }])
+        let updatedAccount: Account = { ...account, addons: finalAddons, ...deletionState, lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, finalAddons)
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
@@ -391,7 +392,8 @@ export async function installAddonsToAccount(accountId: string, addonUrls: strin
             manifest: getEffectiveManifest(addon)
         }))
 
-        let updatedAccount: Account = { ...account, addons: finalAddons, deletedAddons: reconcileTombstones(account.deletedAddons, finalAddons), lastSync: new Date() }
+        const deletionState = restoreAddonDeletions(account.deletedAddons, account.restoredAddons, fetchedAddons)
+        let updatedAccount: Account = { ...account, addons: finalAddons, ...deletionState, lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, finalAddons)
         const accounts = store.getState().accounts.map((acc) => (
             acc.id === accountId ? updatedAccount : acc
@@ -451,7 +453,7 @@ export async function removeAddonFromAccount(accountId: string, transportUrl: st
             (a) => normalizeAddonUrl(a.transportUrl) !== normalizeAddonUrl(transportUrl)
         )
 
-        let updatedAccount: Account = { ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [transportUrl]), lastSync: new Date() }
+        let updatedAccount: Account = { ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [transportUrl], Date.now(), account.restoredAddons), lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, updatedAddons)
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
@@ -514,7 +516,7 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
         const updatedAddons = [...account.addons]
         updatedAddons.splice(index, 1)
 
-        let updatedAccount: Account = { ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [transportUrl]), lastSync: new Date() }
+        let updatedAccount: Account = { ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [transportUrl], Date.now(), account.restoredAddons), lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, updatedAddons)
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
@@ -541,7 +543,7 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
     }
 }
 
-export async function reorderAddons(accountId: string, newOrder: AddonDescriptor[]) {
+export async function reorderAddons(accountId: string, newOrder: AddonDescriptor[], options: { explicitInstallUrls?: string[] } = {}) {
     const store = await getStore()
     const timestampedOrder = newOrder.map(addon => ({
         ...addon,
@@ -558,7 +560,17 @@ export async function reorderAddons(accountId: string, newOrder: AddonDescriptor
         const account = getAccountById(store.getState().accounts, accountId)
         if (!account) throw new Error('Account not found')
 
-        let updatedAccount: Account = { ...account, addons: timestampedOrder, lastSync: new Date() }
+        // Collection clones explicitly install their source URLs. Ordinary reorders
+        // pass no install intent, so stale list membership cannot cancel a deletion.
+        const explicitUrls = new Set((options.explicitInstallUrls || []).map(normalizeAddonUrl))
+        const explicitAddons = timestampedOrder.filter(addon => explicitUrls.has(normalizeAddonUrl(addon.transportUrl)))
+        const deletionState = restoreAddonDeletions(account.deletedAddons, account.restoredAddons, explicitAddons)
+        if (options.explicitInstallUrls !== undefined) {
+            const keptUrls = new Set(timestampedOrder.map(addon => normalizeAddonUrl(addon.transportUrl)))
+            const removedUrls = account.addons.filter(addon => !keptUrls.has(normalizeAddonUrl(addon.transportUrl))).map(addon => addon.transportUrl)
+            deletionState.deletedAddons = addTombstones(deletionState.deletedAddons, removedUrls, Date.now(), deletionState.restoredAddons)
+        }
+        let updatedAccount: Account = { ...account, addons: timestampedOrder, ...deletionState, lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, timestampedOrder)
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
@@ -585,7 +597,7 @@ export async function bulkDeleteAddons(accountId: string, keptAddons: AddonDescr
         if (!account) throw new Error('Account not found')
 
         const timestamped = keptAddons.map(addon => ({ ...addon, metadata: { ...addon.metadata, lastUpdated: Date.now() } }))
-        let updatedAccount: Account = { ...account, addons: timestamped, deletedAddons: addTombstones(account.deletedAddons, removedUrls), lastSync: new Date() }
+        let updatedAccount: Account = { ...account, addons: timestamped, deletedAddons: addTombstones(account.deletedAddons, removedUrls, Date.now(), account.restoredAddons), lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, timestamped)
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
@@ -1105,7 +1117,7 @@ export async function removeLocalAddons(accountId: string, idsOrUrls: string[]) 
             return !shouldRemove
         })
 
-        const updatedAccount = updateActiveProfile({ ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, removedUrls) }, updatedAddons)
+        const updatedAccount = updateActiveProfile({ ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, removedUrls, Date.now(), account.restoredAddons) }, updatedAddons)
         const accounts = store.getState().accounts.map((acc) =>
             acc.id === accountId ? updatedAccount : acc
         )
@@ -1155,7 +1167,10 @@ export async function replaceTransportUrl(oldUrl: string, newUrl: string, accoun
             return addon
         })
 
-        return updateActiveProfile({ ...account, addons: updatedAddons, lastSync: new Date() }, updatedAddons)
+        const deletionState = normOld !== normNew
+            ? restoreAddonDeletions(account.deletedAddons, account.restoredAddons, [{ transportUrl: newUrl }])
+            : {}
+        return updateActiveProfile({ ...account, addons: updatedAddons, ...deletionState, lastSync: new Date() }, updatedAddons)
     })
 
     store.setState({ accounts: updatedAccounts })

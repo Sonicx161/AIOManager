@@ -29,6 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_kv_store_history_key ON kv_store_history (key, ar
 CREATE TABLE IF NOT EXISTS autopilot_rules (
   id TEXT PRIMARY KEY,
   account_id TEXT,
+  connection_id TEXT,
   auth_key TEXT,
   priority_chain TEXT,
   addon_list TEXT,

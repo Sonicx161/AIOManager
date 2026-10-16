@@ -5,6 +5,7 @@ import { loadSessionKey } from '@/lib/crypto'
 import { toast } from '@/hooks/use-toast'
 import { ACCOUNT_CONTEXT_PROFILE_SWAP } from '@/lib/account-contexts'
 import { buildAddonCollectionDiff } from '@/lib/addon-collection-diff'
+import { restoreAddonDeletions } from '@/lib/addon-tombstones'
 import {
     safeUUID,
     getAccountById,
@@ -172,7 +173,7 @@ export async function switchProfile(accountId: string, targetProfileId: string) 
                 }
                 updatedProfiles.unshift(defaultProfile)
             }
-            newAddons = defaultProfile.addons?.length ? defaultProfile.addons : account.addons
+            newAddons = defaultProfile.addons ?? account.addons
         } else {
             newAddons = targetProfile?.addons ?? []
         }
@@ -190,11 +191,20 @@ export async function switchProfile(accountId: string, targetProfileId: string) 
             }
         }
 
+        const savedTargetExists = isTargetDefault
+            ? !!account.profiles?.some(p => p.id === 'default')
+            : !!targetProfile
+        const deletionState = restoreAddonDeletions(
+            account.deletedAddons,
+            account.restoredAddons,
+            savedTargetExists ? newAddons : []
+        )
         const updatedAccount = {
             ...account,
             addons: newAddons,
             profiles: updatedProfiles,
-            activeProfileId: isTargetDefault ? undefined : targetProfileId
+            activeProfileId: isTargetDefault ? undefined : targetProfileId,
+            ...deletionState,
         }
 
         store.setState({ accounts: store.getState().accounts.map((a) => (a.id === accountId ? updatedAccount : a)) })
