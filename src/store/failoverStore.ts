@@ -652,15 +652,18 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
             set({ rules })
 
-            const currentAccountIds = new Set(useAccountStore.getState().accounts.map(a => a.id))
-            const validRules = rules.filter(r => currentAccountIds.has(r.accountId))
-
-            if (validRules.length !== rules.length) {
-                const orphanIds = rules.filter(r => !currentAccountIds.has(r.accountId)).map(r => r.id)
-                if (import.meta.env.DEV) console.log(`[Failover] Pruning ${orphanIds.length} orphan rules.`)
-                set({ rules: validRules })
-                await localforage.setItem(STORAGE_KEY, validRules)
-                for (const id of orphanIds) deleteRuleFromServer(id).catch(() => {})
+            // Only prune once the account list has loaded; before then every rule looks orphaned.
+            // The prune is local: removing an account already deletes its rules on the server,
+            // and a delete from here would stop the server checking rules that are still in use.
+            const accountState = useAccountStore.getState()
+            if (accountState.hydrated && accountState.accounts.length > 0) {
+                const currentAccountIds = new Set(accountState.accounts.map(a => a.id))
+                const validRules = rules.filter(r => currentAccountIds.has(r.accountId))
+                if (validRules.length !== rules.length) {
+                    if (import.meta.env.DEV) console.log(`[Failover] Pruning ${rules.length - validRules.length} orphan rules locally.`)
+                    set({ rules: validRules })
+                    await localforage.setItem(STORAGE_KEY, validRules)
+                }
             }
 
             failoverHydrated = true
