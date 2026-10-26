@@ -656,7 +656,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             // The prune is local: removing an account already deletes its rules on the server,
             // and a delete from here would stop the server checking rules that are still in use.
             const accountState = useAccountStore.getState()
-            if (accountState.hydrated && accountState.accounts.length > 0) {
+            if (accountState.hydrated) {
                 const currentAccountIds = new Set(accountState.accounts.map(a => a.id))
                 const validRules = rules.filter(r => currentAccountIds.has(r.accountId))
                 if (validRules.length !== rules.length) {
