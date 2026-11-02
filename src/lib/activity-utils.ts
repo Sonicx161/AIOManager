@@ -552,8 +552,7 @@ export function historyEntryToActivityItem(entry: HistoryEntry): ActivityItem {
 }
 
 export function resolveWatchBadgePct(item: ActivityItem): number | undefined {
-    const pct = Math.round(item.progress)
-    if (pct > 0) return pct
+    if (item.progress > 0) return Math.round(item.progress)
     if ((item.timesWatched ?? 0) > 0 || (item.flaggedWatched ?? 0) > 0) return 100
     const isSeries = item.type === 'series' || item.type === 'anime' || item.type === 'episode'
     if (!isSeries && (item.overallTimeWatched ?? 0) > 0) return 100
