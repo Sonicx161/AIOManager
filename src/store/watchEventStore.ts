@@ -109,19 +109,28 @@ export interface ExternalWatchItem {
     timestamp: number
 }
 
+function withFoldedServerIds(winner: WatchEvent, folded: WatchEvent): WatchEvent {
+    const ids = new Set([...(winner.serverIds ?? []), folded.id, ...(folded.serverIds ?? [])])
+    ids.delete(winner.id)
+    if (ids.size === (winner.serverIds?.length ?? 0)) return winner
+    return { ...winner, serverIds: Array.from(ids) }
+}
+
 function collapseDayDuplicates(events: WatchEvent[]): WatchEvent[] {
     const byKey = new Map<string, WatchEvent>()
     for (const e of events) {
         const ek = getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
         const key = `${e.accountId}:${ek}:${getLocalDayKey(e.event_ts)}`
         const existing = byKey.get(key)
-        if (
-            !existing ||
-            e.event_ts > existing.event_ts ||
-            (e.event_ts === existing.event_ts && e.detected_ts > existing.detected_ts)
-        ) {
+        if (!existing) {
             byKey.set(key, e)
+            continue
         }
+        const [winner, loser] = e.event_ts > existing.event_ts ||
+            (e.event_ts === existing.event_ts && e.detected_ts > existing.detected_ts)
+            ? [e, existing]
+            : [existing, e]
+        byKey.set(key, withFoldedServerIds(winner, loser))
     }
     return byKey.size === events.length ? events : Array.from(byKey.values()).sort((a, b) => b.event_ts - a.event_ts)
 }
@@ -284,7 +293,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         // behind the absolute tombstone.
         const serverEventIds = state.events
             .filter(e => targetKeys.has(watchEventIdentityKey(e)))
-            .map(e => e.id)
+            .flatMap(e => [e.id, ...(e.serverIds ?? [])])
         const capped = capDeletedEvents(deleted, state.events)
         const events = filterTombstonedEvents(state.events, capped)
         set({ events, deletedEventKeys: capped })
@@ -671,10 +680,10 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const state = get()
         const now = Date.now()
         const eventsById = new Map(state.events.map(e => [e.id, e]))
-        const localDayKeys = new Set<string>()
+        const localDayKeys = new Map<string, string>()
         for (const e of state.events) {
             const ek = getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
-            localDayKeys.add(`${e.accountId}:${ek}:${getLocalDayKey(e.event_ts)}`)
+            localDayKeys.set(`${e.accountId}:${ek}:${getLocalDayKey(e.event_ts)}`, e.id)
         }
         const newEvents: WatchEvent[] = []
         let changed = false
@@ -719,11 +728,19 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
 
             const ek = getEpisodeIdentity(se.itemId, video_id, event.season, event.episode, event.type)
             const dayKey = `${se.accountId}:${ek}:${getLocalDayKey(se.timestamp)}`
-            if (localDayKeys.has(dayKey)) continue
+            const coveringId = localDayKeys.get(dayKey)
+            if (coveringId !== undefined) {
+                const covering = eventsById.get(coveringId)
+                if (covering && covering.id !== se.id && !covering.serverIds?.includes(se.id)) {
+                    eventsById.set(coveringId, { ...covering, serverIds: [...(covering.serverIds ?? []), se.id] })
+                    changed = true
+                }
+                continue
+            }
 
             newEvents.push(event)
             eventsById.set(se.id, event)
-            localDayKeys.add(dayKey)
+            localDayKeys.set(dayKey, se.id)
             changed = true
         }
 

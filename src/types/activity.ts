@@ -71,6 +71,7 @@ export interface WatchEvent {
     source?: string
     timesWatched?: number
     backfill?: boolean // recovered from Stremio's watched-bitfield (no real per-episode timestamp)
+    serverIds?: string[] // other server rows folded into this episode-day
 }
 
 export interface SnapshotItem {
