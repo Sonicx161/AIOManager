@@ -8,6 +8,7 @@ import { resolveWatchedEpisodes, fetchSeriesVideos } from '@/lib/watched-episode
 import { evictLegacyExternalEvents } from '@/lib/external-watch-events'
 import { EventRollups, emptyRollups, capWatchEventsWithRollups, mergeRollups } from '@/lib/watch-event-rollups'
 import { isIdentityDeleted } from '@/lib/event-tombstones'
+import { isWatchedFlag, serverEventTimeWatched } from '@/lib/server-event-time'
 
 const STORAGE_KEY = 'aio_watch_events_v2'
 
@@ -692,12 +693,13 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 name: se.name || 'Unknown',
                 type: se.type || 'other',
                 poster: se.poster || '',
-                time_watched: se.progress || se.watched || 0,
+                time_watched: serverEventTimeWatched(se),
                 time_watched_delta: undefined,
                 duration: se.duration || 0,
                 season: se.season ?? undefined,
                 episode: se.episode ?? undefined,
                 timesWatched: (se as { timesWatched?: number }).timesWatched,
+                flaggedWatched: isWatchedFlag(se.watched) ? 1 : undefined,
             }
 
             const existingEvent = eventsById.get(se.id)
@@ -706,6 +708,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 if (
                     existingEvent.video_id !== mergedEvent.video_id ||
                     existingEvent.time_watched !== mergedEvent.time_watched ||
+                    existingEvent.flaggedWatched !== mergedEvent.flaggedWatched ||
                     existingEvent.duration !== mergedEvent.duration ||
                     existingEvent.season !== mergedEvent.season ||
                     existingEvent.episode !== mergedEvent.episode ||

@@ -70,6 +70,7 @@ export interface WatchEvent {
     episode?: number
     source?: string
     timesWatched?: number
+    flaggedWatched?: number
     backfill?: boolean // recovered from Stremio's watched-bitfield (no real per-episode timestamp)
 }
 

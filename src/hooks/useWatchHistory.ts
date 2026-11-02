@@ -54,6 +54,7 @@ export interface HistoryEntry {
     progress: number
     overallTimeWatched?: number
     timesWatched?: number
+    flaggedWatched?: number
 
     isInProgress: boolean
     isFromEventLog: boolean
@@ -232,6 +233,7 @@ export function useWatchHistory(accountId?: string): WatchHistoryResult {
                 progress,
                 overallTimeWatched: seriesOverallTime.get(`${event.accountId}:${event.itemId}`),
                 timesWatched: live?.timesWatched ?? event.timesWatched,
+                flaggedWatched: event.flaggedWatched,
                 isInProgress: live?.isInProgress ?? false,
                 isFromEventLog: true,
                 source: event.source || live?.source || 'stremio',
