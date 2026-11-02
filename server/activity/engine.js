@@ -557,8 +557,7 @@ async function scanAccount(syncUser, accountId, accountName, authKey, limits, lo
         if (!snap) {
             const isSeries = isSeriesItem(item)
             if (!isSeries || item.video_id) {
-                const eventTs = parseEventTime(item._ctime) || mtime
-                if (!enqueueEvent(buildEvent(syncUser, accountId, accountName, item, 'first_watch', eventTs))) break
+                if (!enqueueEvent(buildEvent(syncUser, accountId, accountName, item, 'first_watch', mtime))) break
             }
             if (!enqueueSnapshot(buildSnapshot(syncUser, accountId, itemId, item, mtime), null)) break
             continue
