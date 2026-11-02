@@ -137,10 +137,10 @@ export function isActuallyWatched(item) {
     return false
 }
 
-function parseEventTime(value) {
+export function parseEventTime(value) {
     if (!value) return 0
     const parsed = new Date(value).getTime()
-    if (!Number.isFinite(parsed)) return 0
+    if (!Number.isFinite(parsed) || parsed < 0) return 0
     return parsed > Date.now() + 5 * 60 * 1000 ? Date.now() : parsed
 }
 

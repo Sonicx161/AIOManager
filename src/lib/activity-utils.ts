@@ -130,7 +130,7 @@ export function getEpisodeIdentity(
 export function parseStremioDate(dateStr: string | undefined): Date | undefined {
     if (!dateStr) return undefined
     const d = new Date(dateStr)
-    if (isNaN(d.getTime())) return undefined
+    if (isNaN(d.getTime()) || d.getTime() < 0) return undefined
     return d.getTime() > Date.now() + 5 * 60 * 1000 ? new Date() : d
 }
 
