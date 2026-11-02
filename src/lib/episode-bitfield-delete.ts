@@ -23,8 +23,12 @@ export async function planEpisodeBitfieldDelete(args: {
     if (!row) return { kind: 'skip' }
 
     const decoded = await decodeWatchedBitfield(row.state?.watched)
-    // An empty bitfield is "no data", not "nothing watched" — destroying the row would lose real state.
-    if (!decoded || decoded.watchedIndices.length === 0) return { kind: 'fail', reason: 'no-bitfield' }
+    if (!decoded || decoded.watchedIndices.length === 0) {
+        // No watch flags either: the row records no watched episode, so there is nothing to edit remotely.
+        if (!row.state?.timesWatched && !row.state?.flaggedWatched) return { kind: 'skip' }
+        // An empty bitfield on a flagged row is "no data", not "nothing watched" — destroying the row would lose real state.
+        return { kind: 'fail', reason: 'no-bitfield' }
+    }
 
     // Cinemeta-free exact match: a single watched episode whose anchor id equals the target
     // is fully identified without a video list, so an unavailable meta cannot block the delete.
