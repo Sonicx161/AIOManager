@@ -1,4 +1,4 @@
-import { hslToHex, type ThemePalette } from '@/data/themes'
+import { hslToHex, type ThemePalette } from '@/data/theme-core'
 
 function luminanceFor(background: string): number {
     const hex = hslToHex(background)

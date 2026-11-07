@@ -30,6 +30,26 @@ export async function deriveSyncToken(password: string, salt?: string): Promise<
 let pbkdf2Worker: Worker | null = null
 let pbkdf2WorkerFailed = false
 let pbkdf2RequestId = 0
+// A healthy worker is however slow the device is; the hard timeout only exists to
+// recover from a worker that will never answer. Before the first reply it waits
+// far beyond any real 600k-iteration derivation, and once a reply has arrived it
+// adapts to the observed derivation time, so a slow device is never terminated
+// mid-derivation and redone on the main thread (the old fixed 5s cap did exactly
+// that: two derivations per request plus full main-thread blocking).
+const PBKDF2_WORKER_FIRST_TIMEOUT_MS = 30_000
+let pbkdf2WorkerDelivered = false
+let pbkdf2WorkerLastMs = 0
+let pbkdf2FirstTimeoutMs = PBKDF2_WORKER_FIRST_TIMEOUT_MS
+
+function pbkdf2WorkerTimeoutMs(): number {
+    if (!pbkdf2WorkerDelivered) return pbkdf2FirstTimeoutMs
+    return Math.max(pbkdf2FirstTimeoutMs, pbkdf2WorkerLastMs * 6)
+}
+
+/** Test-only knob: shrinks the first-request watchdog so orchestration tests run fast. */
+export function setPbkdf2WorkerFirstTimeoutForTests(ms: number): void {
+    pbkdf2FirstTimeoutMs = ms
+}
 
 interface Pbkdf2WorkerRequest {
   id: number
@@ -92,6 +112,7 @@ function derivePbkdf2ViaWorker(
     return derivePbkdf2OnMain(password, salt, iterations, length)
   }
   const id = ++pbkdf2RequestId
+  const requestStart = Date.now()
   return new Promise<ArrayBuffer>((resolve) => {
     let completed = false
     const cleanup = () => {
@@ -113,6 +134,8 @@ function derivePbkdf2ViaWorker(
         trace('crypto', 'pbkdf2.path', { path: 'main', reason: 'worker-error' })
         doResolve(derivePbkdf2OnMain(password, salt, iterations, length))
       } else {
+        pbkdf2WorkerDelivered = true
+        pbkdf2WorkerLastMs = Date.now() - requestStart
         trace('crypto', 'pbkdf2.path', { path: 'worker' })
         doResolve(data.bits)
       }
@@ -126,12 +149,14 @@ function derivePbkdf2ViaWorker(
     worker.addEventListener('error', onError)
     const request: Pbkdf2WorkerRequest = { id, password, salt, iterations, length }
     worker.postMessage(request)
+    // The fallback only starts after the worker is terminated, so one request never
+    // runs two derivations concurrently; on timeout the worker is presumed dead.
     const timer = setTimeout(() => {
       pbkdf2WorkerFailed = true
       worker.terminate()
       trace('crypto', 'pbkdf2.path', { path: 'main', reason: 'worker-timeout' })
       doResolve(derivePbkdf2OnMain(password, salt, iterations, length))
-    }, 5000)
+    }, pbkdf2WorkerTimeoutMs())
   })
 }
 
@@ -344,7 +369,10 @@ export function restoreLocalAuthSecrets(snapshot: LocalAuthSecretsSnapshot): voi
 const SYNC_KEY_SALT = new TextEncoder().encode('aiomanager-sync-key-v2')
 
 const syncKeyCache = new Map<string, CryptoKey>()
-const SYNC_KEY_CACHE_MAX = 2
+// Distinct password/salt combos alternate more easily than 2 (per-account sync keys,
+// blob re-decodes); derived CryptoKey objects are tiny in-memory handles, and logout
+// still clears the cache wholesale, so a wider bound only avoids 135ms+ re-derivations.
+const SYNC_KEY_CACHE_MAX = 8
 
 async function syncKeyCacheKey(password: string, salt: Uint8Array): Promise<string> {
   let saltKey = ''

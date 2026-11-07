@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useInView } from '@/hooks/use-in-view'
+import { CALENDAR_CELL as CELL, CALENDAR_GAP as GAP, weekColumnIntrinsicSize } from '@/components/metrics/calendar-grid'
 
 interface ContributionGraphProps {
     dailyActivity: Record<string, number>
@@ -11,8 +12,7 @@ interface ContributionGraphProps {
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const CELL = 13
-const GAP = 3
+export const RICH_CELL_MAX_WEEKS = 27
 
 function getIntensity(count: number, max: number): number {
     if (count === 0) return 0
@@ -100,6 +100,14 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
     const labelColWidth = 28
     const weekWidth = CELL + GAP
     const gridWidth = weeks.length * weekWidth
+    // Long all-time histories can contain many years of empty days. Rendering a
+    // Radix tooltip and a Framer Motion controller for every cell makes several
+    // thousand live objects on a phone before the user can even scroll this
+    // panel. Keep the same cells and values, but use lightweight native titles
+    // and static divs beyond half a year. Short ranges retain the richer hover and
+    // entrance animation behavior.
+    const useLightweightCells = weeks.length > RICH_CELL_MAX_WEEKS
+    const intrinsic = weekColumnIntrinsicSize(CELL, GAP)
 
     return (
         <div ref={ref} data-theme-part="panel" className="rounded-2xl border border-border/35 bg-muted/15 p-3">
@@ -115,21 +123,17 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
             >
                 <div style={{ minWidth: `${labelColWidth + gridWidth + 10}px` }}>
                     <div className="relative mb-1" style={{ height: '16px', marginLeft: `${labelColWidth}px` }}>
-                        <svg width={gridWidth} height={16} style={{ overflow: 'visible' }}>
+                        <div className="relative h-4" style={{ width: `${gridWidth}px` }} aria-hidden="true">
                             {monthBorders.map((mb, i) => (
-                                <text
+                                <span
                                     key={i}
-                                    x={mb.weekIndex * weekWidth}
-                                    y={12}
-                                    fill="hsl(var(--muted-foreground))"
-                                    fontSize={10}
-                                    fontWeight={500}
-                                    opacity={0.7}
+                                    className="absolute top-0 text-[10px] font-medium text-muted-foreground/70"
+                                    style={{ left: `${mb.weekIndex * weekWidth}px` }}
                                 >
                                     {mb.label}
-                                </text>
+                                </span>
                             ))}
-                        </svg>
+                        </div>
                     </div>
                     <div className="flex gap-1">
                         <div className="flex flex-col shrink-0" style={{ width: `${labelColWidth}px` }}>
@@ -141,28 +145,52 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
                         </div>
                         <div className="flex" style={{ gap: `${GAP}px` }}>
                             {weeks.map((week, wi) => (
-                                <div key={wi} className="flex flex-col" style={{ gap: `${GAP}px` }}>
+                                // Long all-time ranges render hundreds of week columns that
+                                // start scrolled out of view. Off-screen columns keep their
+                                // exact size but skip style, layout and paint, so the open
+                                // cost stays flat while the calendar looks and scrolls the same.
+                                <div
+                                    key={wi}
+                                    className="flex flex-col"
+                                    style={{
+                                        gap: `${GAP}px`,
+                                        contentVisibility: 'auto',
+                                        containIntrinsicSize: `auto ${intrinsic.width}px auto ${intrinsic.height}px`,
+                                    }}
+                                >
                                     {Array.from({ length: 7 }, (_, di) => {
                                         const day = week[di]
                                         if (!day) return <div key={di} style={{ height: `${CELL}px`, width: `${CELL}px` }} />
                                         const intensity = getIntensity(day.count, maxVal)
-                                        return (
-                                            <Tooltip
+                                        const label = day.count > 0 ? `${day.date}: ${day.count} plays` : `${day.date}: no activity`
+                                        const cell = useLightweightCells ? (
+                                            <div
                                                 key={di}
-                                                content={day.count > 0 ? `${day.date}: ${day.count} plays` : `${day.date}: no activity`}
-                                                delayDuration={100}
-                                            >
-                                                <motion.div
-                                                    style={{
-                                                        height: `${CELL}px`,
-                                                        width: `${CELL}px`,
-                                                        borderRadius: '2px',
-                                                        background: INTENSITY_COLORS[intensity],
-                                                    }}
-                                                    initial={{ opacity: 0, scale: 0.5 }}
-                                                    animate={inView ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
-                                                    transition={{ type: 'spring', stiffness: 200, damping: 20, delay: Math.min((wi * 7 + di) * 0.001, 0.4) }}
-                                                />
+                                                title={label}
+                                                aria-hidden="true"
+                                                style={{
+                                                    height: `${CELL}px`,
+                                                    width: `${CELL}px`,
+                                                    borderRadius: '2px',
+                                                    background: INTENSITY_COLORS[intensity],
+                                                }}
+                                            />
+                                        ) : (
+                                            <motion.div
+                                                style={{
+                                                    height: `${CELL}px`,
+                                                    width: `${CELL}px`,
+                                                    borderRadius: '2px',
+                                                    background: INTENSITY_COLORS[intensity],
+                                                }}
+                                                initial={{ opacity: 0, scale: 0.5 }}
+                                                animate={inView ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
+                                                transition={{ type: 'spring', stiffness: 200, damping: 20, delay: Math.min((wi * 7 + di) * 0.001, 0.4) }}
+                                            />
+                                        )
+                                        return useLightweightCells ? cell : (
+                                            <Tooltip key={di} content={label} delayDuration={100}>
+                                                {cell}
                                             </Tooltip>
                                         )
                                     })}

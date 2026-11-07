@@ -17,6 +17,7 @@ import { useCallback } from 'react'
 export default function KronoriumSearchDialog(props: SharedProps) {
     const { onOpenChange } = props
     const { search, setSearch, query } = useDocsSearch({
+        // Async: the first query pulls the corpus chunks and builds the index.
         client: { search: (q: string) => searchDocs(q) },
     })
     const navigate = useNavigate()

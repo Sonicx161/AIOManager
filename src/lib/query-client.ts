@@ -1,6 +1,7 @@
 import localforage from 'localforage'
-import { QueryClient } from '@tanstack/react-query'
+import { MutationCache, QueryClient, QueryCache } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
+import { handleAdminQueryError } from './admin-session.ts'
 
 /**
  * React Query pilot (Bold Idea 3).
@@ -25,16 +26,27 @@ export const QUERY_PERSIST_KEY = 'aioman:rq-persist'
 // Matches PERSIST_DEBOUNCE_MS in src/lib/manifest-cache.ts
 const QUERY_PERSIST_THROTTLE_MS = 2000
 
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: QUERY_STALE_TIME,
-      gcTime: QUERY_GC_TIME,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      retry: false,
+// Bumped when persisted entries must not survive an upgrade: caches written
+// before dashboard queries were excluded could still hold admin- entries.
+export const QUERY_PERSIST_BUSTER = 'admin-session-scoped-1'
+
+export const queryClient: QueryClient = new QueryClient({
+    queryCache: new QueryCache({
+        // A 401 means the dashboard session ended: back to the sign-in screen.
+        onError: (error: Error) => handleAdminQueryError(queryClient, error),
+    }),
+    mutationCache: new MutationCache({
+        onError: (error: Error) => handleAdminQueryError(queryClient, error),
+    }),
+    defaultOptions: {
+        queries: {
+            staleTime: QUERY_STALE_TIME,
+            gcTime: QUERY_GC_TIME,
+            refetchOnWindowFocus: false,
+            refetchOnReconnect: false,
+            retry: false,
+        },
     },
-  },
 })
 
 // localforage implements the AsyncStorage interface (getItem/setItem/removeItem),

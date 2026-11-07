@@ -42,6 +42,10 @@ const STATE_DETAILS = `
 [data-theme-part="header-status"] button[data-theme-segment]:is(:hover, [data-state="open"]) {
   background-color: hsl(var(--muted) / .55);
 }
+/* A pressed strip cell keeps the transparent strip fill, so it shows state with the accent. */
+[data-theme-part="header-status"] button[data-theme-segment][aria-pressed="true"] {
+  color: hsl(var(--primary));
+}
 [data-theme-part="header-status"] button[data-theme-segment]:focus-visible {
   outline: 2px solid hsl(var(--ring));
   outline-offset: -3px;

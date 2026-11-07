@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, createContext, useContext } from 'react'
 import { cn } from '@/lib/utils'
+import { observeIntersection } from '@/lib/shared-in-view'
 
 interface StaggerContainerProps {
   children: React.ReactNode
@@ -76,17 +77,13 @@ function StaggerItem({
       return
     }
 
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setVisible(true)
-          observer.unobserve(el)
-        }
-      },
-      { rootMargin: '100px', threshold: 0 }
-    )
-    observer.observe(el)
-    return () => observer.disconnect()
+    const disposeObserver = observeIntersection(el, { rootMargin: '100px', threshold: 0 }, entry => {
+      if (entry.isIntersecting) {
+        setVisible(true)
+        disposeObserver()
+      }
+    })
+    return disposeObserver
   }, [])
 
   useEffect(() => {

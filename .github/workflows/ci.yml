@@ -26,6 +26,12 @@ jobs:
           }
       - run: npm run lint
       - run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Built app boots in a real browser
+        run: npm run test:boot
+        env:
+          ENCRYPTION_KEY: test-encryption-key-32bytes-long!!
       - name: Server smoke tests (static serving, sync, hydra)
         run: npm --prefix server run test:smoke
         env:

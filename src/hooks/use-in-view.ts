@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { observeIntersection } from '@/lib/shared-in-view'
 
 export function useInView<T extends HTMLElement>(threshold = 0.1) {
     const ref = useRef<T>(null)
@@ -15,7 +16,6 @@ export function useInView<T extends HTMLElement>(threshold = 0.1) {
 
         let raf1 = 0
         let raf2 = 0
-        let obs: IntersectionObserver | null = null
 
         const trigger = () => {
             if (raf1) cancelAnimationFrame(raf1)
@@ -33,18 +33,17 @@ export function useInView<T extends HTMLElement>(threshold = 0.1) {
             }
         }
 
-        obs = new IntersectionObserver(([entry]) => {
+        const disposeObserver = observeIntersection(el, { threshold, rootMargin: '50px' }, entry => {
             if (entry.isIntersecting && entry.target.getBoundingClientRect().height > 0) {
                 setInView(true)
-                obs!.disconnect()
+                disposeObserver()
             }
-        }, { threshold, rootMargin: '50px' })
-        obs.observe(el)
+        })
 
         return () => {
             cancelAnimationFrame(raf1)
             cancelAnimationFrame(raf2)
-            if (obs) obs.disconnect()
+            disposeObserver()
         }
     }, [threshold])
 

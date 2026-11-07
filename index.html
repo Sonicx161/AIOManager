@@ -3,6 +3,21 @@
 
 <head>
   <meta charset="UTF-8" />
+  <script>
+    // Paint the last theme background before any CSS or module loads (no white flash).
+    (function () {
+      var bg = '#09090b'
+      try {
+        var saved = localStorage.getItem('aio-boot-bg')
+        if (/^#[0-9a-f]{3,8}$/i.test(saved || '')) bg = saved
+      } catch (e) {}
+      document.documentElement.style.backgroundColor = bg
+      var style = document.createElement('style')
+      style.id = 'aio-boot-paint'
+      style.textContent = 'html body{background-color:' + bg + '}'
+      document.head.appendChild(style)
+    })()
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>AIOManager</title>
 
