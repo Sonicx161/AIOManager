@@ -56,11 +56,11 @@ export function createSessionStore({ limits = ADMIN_LIMITS } = {}) {
         const idHash = hashSessionId(id)
         const row = { id_hash: idHash, created_at: createdAt, last_seen_at: now, expires_at: now + absoluteMsFor(remembered), ip_prefix: ipPrefix, ua_hash: uaHash, ua_family: uaFamily, remembered: remembered ? 1 : 0 }
         // The idle half of the sweep must use each row's own idle window, or every
-        // remembered session would be swept after 30 minutes. ($N params are unique:
-        // the db layer binds them positionally.)
+        // remembered session would be swept after 30 minutes. Cutoffs are computed here:
+        // Postgres cannot type bound parameters used in arithmetic inside CASE.
         await db.run(
-            'DELETE FROM admin_sessions WHERE expires_at <= $1 OR last_seen_at + (CASE WHEN remembered = 1 THEN $2 ELSE $3 END) + $4 <= $5',
-            [now, rememberedIdleMs, limits.sessionIdleMs, limits.lastSeenWriteMs, now]
+            'DELETE FROM admin_sessions WHERE expires_at <= $1 OR (remembered = 1 AND last_seen_at <= $2) OR (remembered <> 1 AND last_seen_at <= $3)',
+            [now, now - rememberedIdleMs - limits.lastSeenWriteMs, now - limits.sessionIdleMs - limits.lastSeenWriteMs]
         )
         await db.run(
             'INSERT INTO admin_sessions (id_hash, created_at, last_seen_at, expires_at, ip_prefix, ua_hash, ua_family, remembered) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
