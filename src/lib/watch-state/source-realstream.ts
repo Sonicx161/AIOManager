@@ -194,6 +194,7 @@ export function createRealStreamWatchSource(options: RealStreamWatchSourceOption
             const durationMs = secondsToMs(entry.duration ?? entry.total_duration ?? entry.runtime)
             if (durationMs !== null) record.durationMs = durationMs
             if (playedAt === null) record.notes = ['RealStream supplied no reliable watch time for this entry.']
+            else if (entry.lastWatched == null && entry.last_watched == null && entry.timestamp == null) record.dateConfidence = 'estimated'
             records.push(record)
         }
         for (const broken of brokenContainers) {

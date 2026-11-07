@@ -25,7 +25,7 @@ export async function createWatchMigrationDestination(account: Account, key: Cry
     }
     if (connection.platform === 'nuvio') {
         const { createNuvioWatchDestination } = await import('./destination-nuvio.ts')
-        return createNuvioWatchDestination(await nuvioWatchSession(account, connection, signal, ['sync_push_watched_items', 'sync_push_watch_progress'], assertCurrent))
+        return createNuvioWatchDestination(await nuvioWatchSession(account, connection, signal, ['sync_push_watched_items', 'sync_push_watch_progress'], assertCurrent, { reuse: true }))
     }
     throw new Error('This connection does not expose a supported watch-state write API.')
 }

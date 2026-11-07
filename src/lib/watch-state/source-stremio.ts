@@ -1,6 +1,8 @@
 import type { MigrationProgress, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
 import { canonicalWatchIdentity, sourceTime, watchFingerprint } from './records.ts'
-import { decodeWatchedBitfield } from '../watched-bitfield.ts'
+import { decodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
+import { episodeDateKey, exactEpisodeDates, type WatchEventDateLike } from './event-dates.ts'
+import { isLiveLibraryRow } from '../stremio-liveness.ts'
 
 export interface StremioSeriesVideo {
     id: string
@@ -15,7 +17,13 @@ export interface StremioWatchSourceOptions {
     scope: string
     open(signal: AbortSignal): Promise<{ request: (body: Record<string, unknown>, signal: AbortSignal) => Promise<unknown> }>
     seriesVideos?(id: string): Promise<StremioSeriesVideo[] | null>
+    /** AIOManager's own watch-event log for this login; supplies exact per-episode dates Stremio does not store. */
+    watchEvents?(): readonly WatchEventDateLike[]
+    /** True when the user deleted this item from AIOManager Activity and the row was not watched again since. */
+    isDeletedItem?(itemId: string, rowMtimeMs: number): boolean
 }
+
+const EVENT_CLOCK_TOLERANCE_MS = 5 * 60_000
 
 const PROVIDER_ITEM_ID = /^(?:tt\d{5,}|tmdb:\d+)$/
 const MAX_LIBRARY_ITEMS = 10_000
@@ -122,6 +130,7 @@ async function movieRecords(scope: string, item: LibraryItem): Promise<WatchStat
         playedAt: lastWatchedAt,
         fingerprint: await itemFingerprint(scope, item.raw),
     }
+    if (lastWatchedAt !== null) record.dateConfidence = 'exact'
     if (offset !== null) record.positionMs = offset
     const durationMs = positiveDuration(item.state.duration)
     if (durationMs !== null) record.durationMs = Math.round(durationMs)
@@ -146,7 +155,7 @@ interface EpisodeAccumulator {
     durationMs?: number
 }
 
-async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSeriesVideo[] | null): Promise<WatchStateRecord[]> {
+async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSeriesVideo[] | null, dates: ReadonlyMap<string, number> | null): Promise<WatchStateRecord[]> {
     const episodes = new Map<string, EpisodeAccumulator>()
     const surfaced = new Map<string, WatchStateRecord>()
     const surface = async (notes: string[]) => {
@@ -169,12 +178,12 @@ async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSe
             if (!videos) {
                 await surface(['Episode order for this series could not be verified, so its watched episodes are listed as unmatched.'])
             } else {
-                const anchor = videos[Math.max(...decoded.watchedIndices)]
-                if (!anchor || decoded.videoId !== anchor.id) {
+                const interpreted = await interpretWatchedBitfield(state.watched, videos, { anchorPolicy: 'max', timesWatched })
+                if (interpreted.kind !== 'bits') {
                     await surface(['The watched-episode alignment for this series could not be verified, so it is listed as unmatched.'])
                 } else {
                     let unmappedBits = 0
-                    for (const index of decoded.watchedIndices) {
+                    for (const index of interpreted.indices) {
                         const video = videos[index]
                         const identity = video ? canonicalWatchIdentity('episode', item.id, video.season ?? undefined, video.episode ?? undefined) : null
                         if (!identity) {
@@ -212,6 +221,10 @@ async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSe
         }
     }
     const records: WatchStateRecord[] = [...surfaced.values()]
+    const itemLastWatched = epochMs(state.lastWatched)
+    const slotVideoId = typeof state.video_id === 'string' ? state.video_id : null
+    const slotVerified = season !== undefined && episode !== undefined && itemLastWatched !== null
+        && resumeVideoVerified(item.id, season, episode, slotVideoId, videos)
     for (const [episodeIdentity, accumulator] of episodes) {
         const record: WatchStateRecord = {
             id: `episode:${item.id}:${accumulator.season}:${accumulator.episode}`,
@@ -227,13 +240,24 @@ async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSe
         }
         if (accumulator.positionMs !== undefined) record.positionMs = accumulator.positionMs
         if (accumulator.durationMs !== undefined) record.durationMs = accumulator.durationMs
+        const logged = accumulator.watched && accumulator.season !== undefined && accumulator.episode !== undefined
+            ? dates?.get(episodeDateKey(item.id, accumulator.season, accumulator.episode)) ?? null : null
+        const loggedAt = logged !== null && (itemLastWatched === null || logged <= itemLastWatched + EVENT_CLOCK_TOLERANCE_MS) ? logged : null
+        const isSlot = slotVerified && accumulator.season === season && accumulator.episode === episode
+        if (loggedAt !== null) record.playedAt = loggedAt
+        if (isSlot) {
+            record.resumeSlot = true
+            if (accumulator.positionMs !== undefined) record.resumePlayedAt = itemLastWatched
+            else if (record.playedAt === null) record.playedAt = itemLastWatched
+        }
+        if (record.playedAt !== null || (record.resumePlayedAt ?? null) !== null) record.dateConfidence = 'exact'
         records.push(record)
     }
     return records
 }
 
-async function recordsForItem(scope: string, item: LibraryItem, videos: StremioSeriesVideo[] | null): Promise<WatchStateRecord[]> {
-    if (item.raw.removed === true) {
+async function recordsForItem(scope: string, item: LibraryItem, videos: StremioSeriesVideo[] | null, dates: ReadonlyMap<string, number> | null): Promise<WatchStateRecord[]> {
+    if (!isLiveLibraryRow(item.raw)) {
         return hasAnyState(item.state)
             ? [await unmappedRecord(scope, item, ['This item was removed from the Stremio library. Its retained watch state is listed for review and will not be imported.'])]
             : []
@@ -244,7 +268,7 @@ async function recordsForItem(scope: string, item: LibraryItem, videos: StremioS
             : []
     }
     if (item.kind === 'movie') return movieRecords(scope, item)
-    return seriesRecords(scope, item, videos)
+    return seriesRecords(scope, item, videos, dates)
 }
 
 async function orderedSeriesVideos(loader: StremioWatchSourceOptions['seriesVideos'], id: string): Promise<StremioSeriesVideo[] | null> {
@@ -279,7 +303,7 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
     const { connectionId, label, subject, scope } = options
     const notes = [
         'The Stremio library is account-global: this source reads every profile that shares the signed-in account.',
-        'Stremio stores no per-episode watch dates: migrated episodes are undated rather than dated with an invented time.',
+        'Stremio stores no per-episode watch dates: episodes are dated only from the AIOManager watch history or the current resume episode, and the rest are sent undated.',
         'A series marked watched without per-episode data cannot be expanded to individual episodes.',
     ]
 
@@ -294,6 +318,7 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
         const items: LibraryItem[] = []
         for (const entry of capped ? entries.slice(0, MAX_LIBRARY_ITEMS) : entries) {
             const item = parseLibraryItem(entry)
+            if (options.isDeletedItem?.(item.id, epochMs(item.raw._mtime) ?? 0)) continue
             if (item.kind !== null || hasAnyState(item.state)) items.push(item)
         }
         const videosCache = new Map<string, Promise<StremioSeriesVideo[] | null>>()
@@ -304,6 +329,7 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
             videosCache.set(id, promise)
             return promise
         }
+        const dates = options.watchEvents ? exactEpisodeDates(options.watchEvents(), Date.now()) : null
         const records: WatchStateRecord[] = []
         let done = 0
         const queue = [...items]
@@ -311,11 +337,11 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
             while (queue.length) {
                 signal.throwIfAborted()
                 const item = queue.shift() as LibraryItem
-                const needsVideos = item.raw.removed !== true && item.kind === 'series'
+                const needsVideos = isLiveLibraryRow(item.raw) && item.kind === 'series'
                     && ((typeof item.state.watched === 'string' && item.state.watched !== '')
                         || (positiveDuration(item.state.timeOffset) !== null && intOrUndefined(item.state.season) !== undefined && intOrUndefined(item.state.episode) !== undefined))
                 const videos = needsVideos ? await seriesVideos(item.id) : null
-                records.push(...(await recordsForItem(scope, item, videos)))
+                records.push(...(await recordsForItem(scope, item, videos, dates)))
                 done++
                 if (done % 25 === 0 || done === items.length) progress?.(`Reading watch state: ${done.toLocaleString()} of ${items.length.toLocaleString()} library items`)
             }

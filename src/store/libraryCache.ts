@@ -27,10 +27,45 @@ function invalidatePersistedLibraryFingerprint() {
     _lastPersistedLibraryContent = null
 }
 const seriesRowsForBackfill = new Map<string, LibraryItem[]>()
-const DELETED_ITEMS_KEY = 'aio_library_deleted'
+export const DELETED_ITEMS_KEY = 'aio_library_deleted'
 const CACHE_TTL = 5 * 60 * 1000
 const LIBRARY_FETCH_CONCURRENCY = 5
 const CACHE_VERSION = 4
+// A guest-read (revoked RealStream token) returns zero rows; only a drop this large from the last good read is suspicious.
+const REALSTREAM_SUSPICIOUS_EMPTY_MIN = 10
+const lastRealStreamProgressCounts = new Map<string, number>()
+
+// A revoked RealStream token reads as a guest: a 401 here, or an empty read where the last good
+// one had many. At most one forced revalidation per call (the server rejects a repeat force inside
+// its cooldown); never loops, and any failed suspicious-empty retry keeps the earlier result.
+async function readRealStreamProgressWithHeal<T>(heal: {
+    connId: string
+    accessToken: string
+    forcedToken: () => Promise<string>
+    read: (accessToken: string) => Promise<T[]>
+}): Promise<T[]> {
+    let progress: T[]
+    let forcedRetryUsed = false
+    try {
+        progress = await heal.read(heal.accessToken)
+    } catch (error) {
+        if (!isAuthError(error)) throw error
+        forcedRetryUsed = true
+        progress = await heal.read(await heal.forcedToken())
+    }
+    const lastGood = lastRealStreamProgressCounts.get(heal.connId) ?? 0
+    if (!forcedRetryUsed && progress.length === 0 && lastGood >= REALSTREAM_SUSPICIOUS_EMPTY_MIN) {
+        trace('libraryCache', 'realstream.suspicious-empty', { connectionId: heal.connId, lastGood })
+        try {
+            const retried = await heal.read(await heal.forcedToken())
+            if (retried.length > 0) progress = retried
+        } catch {
+            // ForcedToken rejected inside its cooldown lands here too: keep the earlier result.
+        }
+    }
+    if (progress.length > 0) lastRealStreamProgressCounts.set(heal.connId, progress.length)
+    return progress
+}
 
 let loadPromise: Promise<void> | null = null
 let loadPromiseGeneration = 0
@@ -105,6 +140,7 @@ interface CacheData {
     lastFetched: number
     lastMtimeByAccount: Record<string, string>
     metaMtimesByAccount?: Record<string, Record<string, number>>
+    activityCountByCtx?: Record<string, number>
 }
 
 interface DeletedEntry {
@@ -116,12 +152,16 @@ interface LibraryCacheState {
     lastFetched: number
     lastMtimeByAccount: Record<string, string>
     metaMtimesByAccount: Record<string, Record<string, number>>
+    // ActivityItems the last successful full read produced per context: 0 lets a
+    // zero-activity account take the meta-skip that cachedItems.length > 0 gates today.
+    activityCountByCtx: Record<string, number>
     loading: boolean
     loadingProgress: { current: number; total: number }
     isStale: boolean
 
     ensureLoaded: (accounts: Account[]) => Promise<void>
     invalidate: () => void
+    revalidate: (scopeAccountIds?: string[]) => void
     clear: () => Promise<void>
     removeItems: (itemIds: string[]) => void
     removeItemsForAccount: (accountId: string) => void
@@ -129,13 +169,18 @@ interface LibraryCacheState {
     deletedItemIds: Set<string>
 }
 
-import { isActuallyWatched, transformLibraryItemToActivityItem, transformNuvioWatchedItemToActivityItem, transformNuvioProgressToActivityItem, watchContextKey } from '@/lib/activity-utils'
+import { isActuallyWatched, transformLibraryItemToActivityItem, transformNuvioWatchedItemToActivityItem, transformNuvioProgressToActivityItem, createCinemetaMemo, watchContextKey } from '@/lib/activity-utils'
+import { canonicalIds, registerKnownTmdbAliases, tmdbAliasVersion } from '@/lib/activity-id-alias'
+import { isLiveLibraryRow } from '@/lib/stremio-liveness'
+
+export { isLiveLibraryRow }
 
 export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
     items: [],
     lastFetched: 0,
     lastMtimeByAccount: {},
     metaMtimesByAccount: {},
+    activityCountByCtx: {},
     loading: false,
     loadingProgress: { current: 0, total: 0 },
     isStale: false,
@@ -168,7 +213,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
     removeItemsForAccount: (accountId: string) => {
         bumpCacheGeneration()
-        const { items, lastMtimeByAccount, metaMtimesByAccount } = get()
+        const { items, lastMtimeByAccount, metaMtimesByAccount, activityCountByCtx } = get()
         const filtered = items.filter(item => item.accountId !== accountId)
         const scopePrefix = `${accountId}::`
         const newMtimes = { ...lastMtimeByAccount }
@@ -179,10 +224,14 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
         for (const key of Object.keys(newMetas)) {
             if (key === accountId || key.startsWith(scopePrefix)) delete newMetas[key]
         }
+        const newCounts = { ...activityCountByCtx }
+        for (const key of Object.keys(newCounts)) {
+            if (key === accountId || key.startsWith(scopePrefix)) delete newCounts[key]
+        }
         for (const key of [...seriesRowsForBackfill.keys()]) {
             if (key === accountId || key.startsWith(scopePrefix)) seriesRowsForBackfill.delete(key)
         }
-        set({ items: filtered, lastMtimeByAccount: newMtimes, metaMtimesByAccount: newMetas, isStale: true })
+        set({ items: filtered, lastMtimeByAccount: newMtimes, metaMtimesByAccount: newMetas, activityCountByCtx: newCounts, isStale: true })
         localforage.removeItem(CACHE_KEY).then(() => invalidatePersistedLibraryFingerprint()).catch(() => {})
     },
 
@@ -201,21 +250,43 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
         if (changed) {
             const newMtimes = { ...lastMtimeByAccount }
             delete newMtimes[accountId]
-            set({ metaMtimesByAccount: { ...metaMtimesByAccount, [accountId]: next }, lastMtimeByAccount: newMtimes })
+            const newCounts = { ...get().activityCountByCtx }
+            delete newCounts[accountId]
+            seriesRowsForBackfill.delete(accountId)
+            set({ metaMtimesByAccount: { ...metaMtimesByAccount, [accountId]: next }, lastMtimeByAccount: newMtimes, activityCountByCtx: newCounts })
         }
     },
 
     invalidate: () => {
         bumpCacheGeneration()
         seriesRowsForBackfill.clear()
-        set({ items: [], lastMtimeByAccount: {}, metaMtimesByAccount: {}, isStale: true })
+        set({ items: [], lastMtimeByAccount: {}, metaMtimesByAccount: {}, activityCountByCtx: {}, isStale: true })
         localforage.removeItem(CACHE_KEY).then(() => invalidatePersistedLibraryFingerprint()).catch(() => {})
+    },
+
+    // Refresh without dropping last-known items: a failed account keeps them, and
+    // clearing the scoped meta maps forces a full read instead of a meta-skip.
+    revalidate: (scopeAccountIds) => {
+        bumpCacheGeneration()
+        const inScope = (key: string) => !scopeAccountIds || scopeAccountIds.some(id => key === id || key.startsWith(`${id}::`))
+        const metaMtimesByAccount = { ...get().metaMtimesByAccount }
+        for (const key of Object.keys(metaMtimesByAccount)) {
+            if (inScope(key)) delete metaMtimesByAccount[key]
+        }
+        const activityCountByCtx = { ...get().activityCountByCtx }
+        for (const key of Object.keys(activityCountByCtx)) {
+            if (inScope(key)) delete activityCountByCtx[key]
+        }
+        for (const key of [...seriesRowsForBackfill.keys()]) {
+            if (inScope(key)) seriesRowsForBackfill.delete(key)
+        }
+        set({ metaMtimesByAccount, activityCountByCtx, isStale: true })
     },
 
     clear: async () => {
         bumpCacheGeneration()
         seriesRowsForBackfill.clear()
-        set({ items: [], lastFetched: 0, lastMtimeByAccount: {}, metaMtimesByAccount: {}, isStale: true, deletedItemIds: new Set() })
+        set({ items: [], lastFetched: 0, lastMtimeByAccount: {}, metaMtimesByAccount: {}, activityCountByCtx: {}, isStale: true, deletedItemIds: new Set() })
         await localforage.removeItem(CACHE_KEY); invalidatePersistedLibraryFingerprint()
         await localforage.removeItem(DELETED_ITEMS_KEY)
     },
@@ -232,7 +303,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
             }
             invalidatePersistedLibraryFingerprint()
             localStorage.setItem('aio-cache-version', String(CACHE_VERSION))
-            set({ items: [], lastMtimeByAccount: {}, metaMtimesByAccount: {} })
+            set({ items: [], lastMtimeByAccount: {}, metaMtimesByAccount: {}, activityCountByCtx: {} })
         }
 
         let shouldRetry = true
@@ -291,6 +362,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             const cached = JSON.parse(decrypted) as CacheData
                             const cachedMtimes = cached.lastMtimeByAccount || {}
                             const cachedMetas = cached.metaMtimesByAccount || {}
+                            const cachedCounts = cached.activityCountByCtx || {}
                             const isFresh = now - cached.lastFetched < CACHE_TTL
                             const hasCov = hasAccountCoverage(cachedMtimes, accounts)
                             const savedDeleted = await localforage.getItem<Record<string, DeletedEntry>>(DELETED_ITEMS_KEY)
@@ -321,6 +393,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     lastFetched: cached.lastFetched,
                                     lastMtimeByAccount: cachedMtimes,
                                     metaMtimesByAccount: cachedMetas,
+                                    activityCountByCtx: cachedCounts,
                                     isStale: false,
                                     loading: false,
                                     deletedItemIds: reuseDeletedItemIds(get().deletedItemIds, Object.keys(deletedEntries))
@@ -333,8 +406,13 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     items: reuseActivityItems(get().items, hydratedItems),
                                     lastMtimeByAccount: cachedMtimes,
                                     metaMtimesByAccount: cachedMetas,
+                                    activityCountByCtx: cachedCounts,
                                     deletedItemIds: reuseDeletedItemIds(get().deletedItemIds, Object.keys(deletedEntries))
                                 })
+                            } else {
+                                // A cache of zero-activity scopes has no items but its markers still
+                                // let unchanged metadata skip the full library read.
+                                set({ lastMtimeByAccount: cachedMtimes, metaMtimesByAccount: cachedMetas, activityCountByCtx: cachedCounts })
                             }
                         } catch (e) {
                             if (import.meta.env.DEV) console.error('[LibraryCache] Failed to decrypt cache:', e)
@@ -369,6 +447,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                 const fetchedByAccount = new Map<string, ActivityItem[]>()
                 const newMtimes: Record<string, string> = { ...get().lastMtimeByAccount }
                 const newMetaMtimes: Record<string, Record<string, number>> = { ...get().metaMtimesByAccount }
+                const newActivityCounts: Record<string, number> = { ...get().activityCountByCtx }
                 const allMtimes = new Map<string, number>()
 
                 const buildMergedItems = (): ActivityItem[] => {
@@ -391,16 +470,25 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
                 const [
                     { useWatchEventStore },
-                    { fetchConnectionToken },
+                    { fetchConnectionToken, hashRejectedToken, isNuvioJwtAuthError },
                     { nuvioDriverFor, realStreamDriverFor },
                     { getCachedNuvioToken, setCachedNuvioToken, invalidateNuvioToken },
+                    { invalidateNuvioProfileCache },
                 ] = await Promise.all([
                     import('@/store/watchEventStore'),
                     import('@/api/connection'),
                     import('@/lib/drivers/factory'),
                     import('@/lib/nuvio-token-cache'),
+                    import('@/lib/nuvio-profile-cache'),
                 ])
                 await useWatchEventStore.getState().load()
+                // Registers the mappings already on hand; when that changes what is known,
+                // tombstones and baselines are re-checked through the new aliases.
+                const learnTmdbAliases = (items: ReadonlyArray<{ itemId: string; type: string }>) => {
+                    const version = tmdbAliasVersion()
+                    registerKnownTmdbAliases(items)
+                    if (tmdbAliasVersion() !== version) useWatchEventStore.getState().reapplyTombstones()
+                }
 
                 // Batch cached library metadata checks; failed slots fall back to full account reads.
                 const metaRowsByAccount = new Map<string, Array<[string, number]> | null>()
@@ -409,6 +497,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                 // Decrypt every Stremio login's key up front: the canonical login under the
                 // bare account key, each enabled secondary under its per-connection context.
                 const secondaryAuthKeysByAccount = new Map<string, Array<{ connectionId: string; authKey: string }>>()
+                const unreadableSecondariesByAccount = new Map<string, string[]>()
                 await mapConcurrent(accounts, 5, async (account) => {
                     const stremioAuthKey = readableCanonicalKey(account)
                     if (stremioAuthKey) {
@@ -421,23 +510,26 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     const nativeLogins = getStremioConnections(account)
                     const canonicalId = canonicalStremioIdOf(account)
                     const secondaries: Array<{ connectionId: string; authKey: string }> = []
+                    const unreadable: string[] = []
                     for (const conn of nativeLogins) {
                         if (!conn.enabled || conn.id === canonicalId || !conn.credentials?.authKey) continue
                         try {
                             secondaries.push({ connectionId: conn.id, authKey: await getCachedAuthKey(conn.credentials.authKey, encryptionKey) })
                         } catch {
-                            // Unreadable secondary key: the per-login path records the failure.
+                            unreadable.push(conn.id)
                         }
                     }
                     if (secondaries.length > 0) secondaryAuthKeysByAccount.set(account.id, secondaries)
+                    if (unreadable.length > 0) unreadableSecondariesByAccount.set(account.id, unreadable)
                 })
                 const precheckEntries: Array<{ scopeKey: string; authKey: string; accountContext: string }> = []
                 for (const account of accounts) {
                     const cachedMetaMap = get().metaMtimesByAccount[account.id]
                     const cachedAccountItems = staleByAccount.get(account.id)
+                    const hasCachedAccountItems = (cachedAccountItems?.length ?? 0) > 0
                     const hasEventSnapshot = Boolean(useWatchEventStore.getState().snapshot[account.id])
                     const authKey = authKeyByAccount.get(account.id)
-                    if (cachedMetaMap && cachedAccountItems && cachedAccountItems.length > 0 && hasEventSnapshot && authKey) {
+                    if (cachedMetaMap && (hasCachedAccountItems || newActivityCounts[account.id] === 0) && hasEventSnapshot && authKey) {
                         precheckEntries.push({ scopeKey: account.id, authKey, accountContext: account.id })
                     }
                     for (const secondary of secondaryAuthKeysByAccount.get(account.id) || []) {
@@ -445,24 +537,27 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                         const ctxMetaMap = get().metaMtimesByAccount[ctx]
                         const ctxItems = currentItems.filter(i => i.sourceConnectionId === secondary.connectionId)
                         const ctxSnapshot = Boolean(useWatchEventStore.getState().snapshot[ctx])
-                        if (ctxMetaMap && ctxItems.length > 0 && ctxSnapshot) {
+                        if (ctxMetaMap && (ctxItems.length > 0 || newActivityCounts[ctx] === 0) && ctxSnapshot) {
                             precheckEntries.push({ scopeKey: ctx, authKey: secondary.authKey, accountContext: ctx })
                         }
                     }
                 }
+                // The batch runs un-awaited: cold scopes start their reads immediately and
+                // only the precheck branch in fetchStremioLogin waits for these rows.
+                let batchPromise: Promise<void> | null = null
                 if (precheckEntries.length > 0) {
                     const batchStart = Date.now()
-                    try {
-                        const batchResults = await stremioClient.getLibraryMetaBatch(
-                            precheckEntries.map(e => ({ authKey: e.authKey, accountContext: e.accountContext }))
-                        )
-                        precheckEntries.forEach((entry, i) => metaRowsByAccount.set(entry.scopeKey, batchResults[i] ?? null))
-                        trace('libraryCache', 'meta-batch.hit', { accounts: precheckEntries.length, timing: Date.now() - batchStart })
-                    } catch (err) {
-                        // If batching fails, use the existing per-account metadata path.
-                        batchMetaFailed = true
-                        trace('libraryCache', 'meta-batch.error', { accounts: precheckEntries.length, error: (err as Error)?.message, timing: Date.now() - batchStart })
-                    }
+                    batchPromise = stremioClient
+                        .getLibraryMetaBatch(precheckEntries.map(e => ({ authKey: e.authKey, accountContext: e.accountContext })))
+                        .then(batchResults => {
+                            precheckEntries.forEach((entry, i) => metaRowsByAccount.set(entry.scopeKey, batchResults[i] ?? null))
+                            trace('libraryCache', 'meta-batch.hit', { accounts: precheckEntries.length, timing: Date.now() - batchStart })
+                        })
+                        .catch(err => {
+                            // If batching fails, use the existing per-account metadata path.
+                            batchMetaFailed = true
+                            trace('libraryCache', 'meta-batch.error', { accounts: precheckEntries.length, error: (err as Error)?.message, timing: Date.now() - batchStart })
+                        })
                 }
 
                 // One Stremio login's load. The canonical login runs with ctx = account.id and
@@ -491,7 +586,10 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     const hasEventSnapshot = Boolean(useWatchEventStore.getState().snapshot[login.ctx])
                     const hasSameCanonicalOwner = !isCanonical || !login.ownerConnectionId
                         || useWatchEventStore.getState().snapshotOwners[account.id] === login.ownerConnectionId
-                    if (cachedMetaMap && cachedItems && cachedItems.length > 0 && hasEventSnapshot && hasSameCanonicalOwner) {
+                    if (cachedMetaMap && cachedItems && (cachedItems.length > 0 || newActivityCounts[login.ctx] === 0) && hasEventSnapshot && hasSameCanonicalOwner) {
+                        // Only this branch reads the batch's rows: wait for it here, so
+                        // scopes that skip the precheck never pay the batch round trip.
+                        if (batchPromise) await batchPromise
                         let metaRows: Array<[string, number]> | null = null
                         if (batchMetaFailed) {
                             try {
@@ -502,6 +600,17 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                         } else {
                             const slot = metaRowsByAccount.get(login.ctx)
                             metaRows = slot ?? null
+                            if (metaRows === null && metaRowsByAccount.has(login.ctx)) {
+                                // A failed batch slot should not immediately fan out into a
+                                // full library read. Retry the cheap single-account metadata
+                                // check first; only that account falls back if it also fails.
+                                try {
+                                    metaRows = await stremioClient.getLibraryMeta(login.authKey, login.ctx)
+                                    trace('libraryCache', 'meta-batch.slot-retry', { accountId: account.id, connectionId: login.connectionId, rows: metaRows.length })
+                                } catch {
+                                    metaRows = null
+                                }
+                            }
                         }
                         if (metaRows && metaRows.length > 0 && metaIsUnchanged(cachedMetaMap, metaRows)) {
                             // Canonical meta-skip serves only THIS scope's items: secondary-attributed
@@ -519,6 +628,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             newMtimes[login.ctx] = new Date(maxMs).toISOString()
                             trace('libraryCache', 'stremio.meta-skip', { accountId: account.id, connectionId: login.connectionId, rows: metaRows.length })
                             metaSkipped = true
+                            learnTmdbAliases(cachedItems || [])
                             const cachedRows = seriesRowsForBackfill.get(login.ctx)
                             if (cachedRows && cachedRows.length > 0) {
                                 useWatchEventStore.getState().recordBackfillEpisodes(account.id, cachedRows, { contextKey: login.ctx, sourceConnectionId: login.connectionId, ownerConnectionId: login.ownerConnectionId })
@@ -533,6 +643,8 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     if (metaSkipped) return
 
                     const libraryItems = await stremioClient.getLibraryItems(login.authKey, login.ctx) as LibraryItem[]
+                    // Known id mappings must be in place before seed, diff and backfill admission.
+                    learnTmdbAliases(libraryItems.map(item => ({ itemId: item._id, type: item.type || '' })))
 
                     const metaMap: Record<string, number> = {}
                     for (const item of libraryItems) {
@@ -570,8 +682,9 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                         }
                     })
 
+                    const ownBits = await useWatchEventStore.getState().resolveOwnEpisodeBits(libraryItems, login.ctx)
                     const newEvents = useWatchEventStore.getState().diffAndRecord(
-                        account.id, libraryItems, account, accounts, diffOptions
+                        account.id, libraryItems, account, accounts, { ...diffOptions, ownBits }
                     )
                     if (newEvents.length > 0) {
                         triggerSync()
@@ -582,9 +695,12 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                         .catch(e => { if (import.meta.env.DEV) console.error(`[LibraryCache] bitfield backfill failed for ${account.name || account.id}:`, e) })
 
                     const accountActivity = libraryItems
-                        .filter(item => isActuallyWatched(item))
+                        // Liveness is Stremio's rule (removed && !temp is gone, temp rows
+                        // stay live); deletion suppression is the shipped tombstone path.
+                        .filter(item => isActuallyWatched(item) && isLiveLibraryRow(item))
                         .map(item => transformLibraryItemToActivityItem(item, account, accounts, transformOptions))
 
+                    newActivityCounts[login.ctx] = accountActivity.length
                     sink.push(...accountActivity)
                     newMtimes[login.ctx] = latestMtime
                 }
@@ -625,11 +741,16 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     if (import.meta.env.DEV) console.warn(`[LibraryCache] Secondary Stremio history fetch failed for ${account.name || account.id} (${secondary.connectionId}), preserving last known items:`, err)
                                     trace('libraryCache', 'stremio.secondary.error', { accountId: account.id, connectionId: secondary.connectionId, error: (err as Error)?.message })
                                     const existingSecondary = currentItems.filter(item => item.sourceConnectionId === secondary.connectionId)
-                                    if (existingSecondary.length > 0) {
-                                        accountItems.push(...existingSecondary)
-                                        newMtimes[ctx] = newMtimes[ctx] ?? '0'
-                                    }
+                                    if (existingSecondary.length > 0) accountItems.push(...existingSecondary)
+                                    newMtimes[ctx] = newMtimes[ctx] ?? '0'
                                 }
+                            }
+                            // Undecryptable secondary keys still count toward coverage: keep their
+                            // last-known rows and mark the context so ensureLoaded does not loop.
+                            for (const connectionId of unreadableSecondariesByAccount.get(account.id) || []) {
+                                accountItems.push(...currentItems.filter(item => item.sourceConnectionId === connectionId))
+                                const ctx = watchContextKey(account.id, connectionId)
+                                newMtimes[ctx] = newMtimes[ctx] ?? '0'
                             }
                         } catch (err) {
                             if (import.meta.env.DEV) console.error(`[LibraryCache] Failed to fetch account ${account.name || account.id}:`, err)
@@ -639,6 +760,13 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             // and wiping the cached feed.
                             const stale = staleByAccount.get(account.id)
                             if (stale) accountItems.push(...stale)
+                            // Secondaries were skipped; without their mtime keys the load never
+                            // reaches coverage and ensureLoaded re-runs it in a tight loop.
+                            const skipped = [...(secondaryAuthKeysByAccount.get(account.id) || []).map(s => s.connectionId), ...(unreadableSecondariesByAccount.get(account.id) || [])]
+                            for (const connectionId of skipped) {
+                                const ctx = watchContextKey(account.id, connectionId)
+                                newMtimes[ctx] = newMtimes[ctx] ?? '0'
+                            }
                         }
 
                         // Cross-connection dedup: unattributed items (canonical Stremio, the
@@ -656,6 +784,14 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             if (!activity.sourceConnectionId) return `${account.id}:${unique ? activity.uniqueItemId : activity.itemId}`
                             return `${account.id}:${activity.source}:${activity.sourceConnectionId}:${unique ? activity.uniqueItemId : activity.itemId}`
                         }
+                        // A tmdb: row of a title the Stremio library holds under its tt id is the same
+                        // play when an authoritative mapping says so: compare through it, never rewrite.
+                        learnTmdbAliases(accountItems)
+                        const aliasedKeyHit = (activity: ActivityItem, includeShow: boolean): boolean => {
+                            const canon = canonicalIds(activity)
+                            if (canon === activity) return false
+                            return existingKeys.has(originKey(canon, true)) || (includeShow && existingKeys.has(originKey(canon, false)))
+                        }
 
                         if (nuvioConns.length > 0) {
                             // Sticky per-origin attribution: once multi, always attributed —
@@ -666,7 +802,8 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             const allNuvioNative = (account.connections || []).filter(c => c.platform === 'nuvio')
                             const multiNuvio = ensureMultiOrigin('nuvio', account.id, allNuvioNative.length)
                             await mapConcurrent(nuvioConns, 3, async (conn) => {
-                                const transformOpts = multiNuvio ? { connectionId: conn.id } : undefined
+                                const cinemetaMemo = createCinemetaMemo()
+                                const transformOpts = { ...(multiNuvio ? { connectionId: conn.id } : {}), cinemetaMemo }
                                 const eventOpts = multiNuvio ? { sourceConnectionId: conn.id } : undefined
                                 try {
                                     let token = getCachedNuvioToken(conn.id)
@@ -675,11 +812,75 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         setCachedNuvioToken(conn.id, token)
                                     }
                                     const driver = nuvioDriverFor(conn)
-                                    const profileId = token.profileId ?? conn.credentials?.profileId
-                                    const [watched, progress] = await Promise.all([
-                                        driver.readWatchHistory(token.accessToken, profileId).catch(err => { if (import.meta.env.DEV) console.warn('[LibraryCache] Nuvio readWatchHistory failed:', err); return [] }),
-                                        driver.readWatchProgress(token.accessToken, profileId).catch(err => { if (import.meta.env.DEV) console.warn('[LibraryCache] Nuvio readWatchProgress failed:', err); return [] }),
-                                    ])
+                                    let profileId = token.profileId ?? conn.credentials?.profileId
+                                    const readPair = async (accessToken: string) => {
+                                        const [historyResult, progressResult] = await Promise.allSettled([
+                                            driver.readWatchHistory(accessToken, profileId),
+                                            driver.readWatchProgress(accessToken, profileId),
+                                        ])
+                                        const rejected = [historyResult, progressResult].filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+                                        const authFailure = rejected.find(result => isAuthError(result.reason))
+                                        if (authFailure) throw authFailure.reason
+                                        if (rejected.length === 2) throw rejected[0].reason
+                                        return {
+                                            watched: historyResult.status === 'fulfilled' ? historyResult.value : [],
+                                            progress: progressResult.status === 'fulfilled' ? progressResult.value : [],
+                                            partial: rejected.length > 0,
+                                            failedHistory: historyResult.status === 'rejected',
+                                            failedProgress: progressResult.status === 'rejected',
+                                        }
+                                    }
+                                    let watched: Awaited<ReturnType<typeof driver.readWatchHistory>>
+                                    let progress: Awaited<ReturnType<typeof driver.readWatchProgress>>
+                                    let partialRead = false
+                                    let failedHistory = false
+                                    let failedProgress = false
+                                    try {
+                                        const result = await readPair(token.accessToken)
+                                        watched = result.watched
+                                        progress = result.progress
+                                        partialRead = result.partial
+                                        failedHistory = result.failedHistory
+                                        failedProgress = result.failedProgress
+                                    } catch (readError) {
+                                        // A cached bearer can expire between the token vend and
+                                        // the two parallel reads. Invalidate it and retry the pair
+                                        // once; never turn a 401 into an empty snapshot. A JWT-type
+                                        // 401 asks the server to force-revalidate that exact token.
+                                        if (!isAuthError(readError)) throw readError
+                                        const forcedHash = isNuvioJwtAuthError(readError) ? await hashRejectedToken(token.accessToken) : undefined
+                                        invalidateNuvioToken(conn.id)
+                                        invalidateNuvioProfileCache()
+                                        const refreshed = await fetchConnectionToken(account.id, conn.id, 'nuvio', conn.credentials?.baseUrl, forcedHash ? { rejectedTokenHash: forcedHash } : undefined)
+                                        setCachedNuvioToken(conn.id, refreshed)
+                                        token = refreshed
+                                        profileId = token.profileId ?? conn.credentials?.profileId
+                                        const result = await readPair(token.accessToken)
+                                        watched = result.watched
+                                        progress = result.progress
+                                        partialRead = result.partial
+                                        failedHistory = result.failedHistory
+                                        failedProgress = result.failedProgress
+                                    }
+                                    if (partialRead) {
+                                        trace('libraryCache', 'nuvio.fetch.partial', {
+                                            accountId: account.id,
+                                            connectionId: multiNuvio ? conn.id : undefined,
+                                            failedHistory,
+                                            failedProgress,
+                                        })
+                                        const stale = currentItems.filter(item => item.accountId === account.id && item.source === 'nuvio'
+                                            && (!multiNuvio || !item.sourceConnectionId || item.sourceConnectionId === conn.id))
+                                        for (const item of stale) {
+                                            const staleKey = originKey(item, true)
+                                            const staleBaseKey = originKey(item, false)
+                                            if (existingKeys.has(staleKey) || existingKeys.has(staleBaseKey)) continue
+                                            accountItems.push(item)
+                                            existingKeys.add(staleBaseKey)
+                                            if (item.uniqueItemId) existingKeys.add(staleKey)
+                                        }
+                                        return
+                                    }
                                     if (import.meta.env.DEV) console.info(`[LibraryCache] Nuvio fetched ${watched.length} watched + ${progress.length} progress for ${account.name || account.id}`)
                                     trace('libraryCache', 'nuvio.fetch', { accountId: account.id, connectionId: multiNuvio ? conn.id : undefined, watched: watched.length, progress: progress.length })
                                     const nuvioTitles = new Map<string, string>()
@@ -698,7 +899,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         if (!activity) continue
                                         const pk1 = originKey(activity, true)
                                         const pk2 = originKey(activity, false)
-                                        if (existingKeys.has(pk1) || existingKeys.has(pk2)) continue
+                                        if (existingKeys.has(pk1) || existingKeys.has(pk2) || aliasedKeyHit(activity, true)) continue
                                         seenIds.add(activity.uniqueItemId)
                                         // pk2 (show-level) is checked only — never added — so that
                                         // later episodes of the same show in this batch survive.
@@ -718,7 +919,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         // Episode-level dedup only: a show-level key would drop every
                                         // Nuvio episode of a show that merely exists in the Stremio library.
                                         const wk1 = originKey(activity, true)
-                                        if (existingKeys.has(wk1)) {
+                                        if (existingKeys.has(wk1) || aliasedKeyHit(activity, false)) {
                                             trace('libraryCache', 'nuvio.watched.drop-dedup', { accountId: account.id, connectionId: multiNuvio ? conn.id : undefined, itemId: activity.itemId, uniqueItemId: activity.uniqueItemId, name: activity.name, hit: 'unique' })
                                             continue
                                         }
@@ -750,7 +951,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     trace('libraryCache', 'nuvio.fetch.error', { accountId: account.id, connectionId: multiNuvio ? conn.id : undefined, error: (err as Error)?.message })
                                     if (!toastedNuvioFailures.has(conn.id)) {
                                         toastedNuvioFailures.add(conn.id)
-                                        toast({ title: 'Nuvio history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive' })
+                                        toast({ title: 'Nuvio history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive', href: `/account/${encodeURIComponent(account.id)}` })
                                         setTimeout(() => toastedNuvioFailures.delete(conn.id), 3600000)
                                     }
                                     // A failed login preserves ITS OWN last-known items; sibling
@@ -774,31 +975,32 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     if (!userId) throw new Error('RealStream user ID missing; re-authenticate this connection')
                                     const token = await fetchConnectionToken(account.id, conn.id, 'realstream')
                                     const driver = realStreamDriverFor(conn)
-                                    const progress = await driver.readWatchProgress(token.accessToken, userId).catch(async (e) => {
-                                        if (!isAuthError(e)) throw e
-                                        const refreshed = await driver.refreshAccessToken(token.accessToken)
-                                        return driver.readWatchProgress(refreshed.accessToken, userId)
+                                    const progress = await readRealStreamProgressWithHeal({
+                                        connId: conn.id,
+                                        accessToken: token.accessToken,
+                                        forcedToken: async () => (await fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash: await hashRejectedToken(token.accessToken) })).accessToken,
+                                        read: accessToken => driver.readWatchProgress(accessToken, userId),
                                     })
                                     if (import.meta.env.DEV) console.info(`[LibraryCache] RealStream fetched ${progress.length} progress for ${account.name || account.id}`)
                                     trace('libraryCache', 'realstream.fetch', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, progress: progress.length })
-                                    const progressActivities = await Promise.all(
-                                        progress.map(async (row) => {
-                                            try {
-                                                const rsTitle = row.title
-                                                const rsPoster = row.posterPath
-                                                const activity = await transformNuvioProgressToActivityItem(row, account, accounts, rsTitle, multiRS ? { connectionId: conn.id } : undefined)
-                                                activity.id = multiRS
-                                                    ? `${account.id}:realstream:${conn.id}:${activity.uniqueItemId}`
-                                                    : `${account.id}:realstream:${activity.uniqueItemId}`
-                                                activity.source = 'realstream'
-                                                if (rsTitle && rsTitle.trim()) activity.name = rsTitle.trim()
-                                                if (rsPoster && rsPoster.trim()) activity.poster = rsPoster.trim()
-                                                return activity
-                                            } catch {
-                                                return null
-                                            }
-                                        })
-                                    )
+                                    const cinemetaMemo = createCinemetaMemo()
+                                    const transformOpts = { ...(multiRS ? { connectionId: conn.id } : {}), cinemetaMemo }
+                                    const progressActivities = await mapConcurrent(progress, 5, async (row) => {
+                                        try {
+                                            const rsTitle = row.title
+                                            const rsPoster = row.posterPath
+                                            const activity = await transformNuvioProgressToActivityItem(row, account, accounts, rsTitle, transformOpts)
+                                            activity.id = multiRS
+                                                ? `${account.id}:realstream:${conn.id}:${activity.uniqueItemId}`
+                                                : `${account.id}:realstream:${activity.uniqueItemId}`
+                                            activity.source = 'realstream'
+                                            if (rsTitle && rsTitle.trim()) activity.name = rsTitle.trim()
+                                            if (rsPoster && rsPoster.trim()) activity.poster = rsPoster.trim()
+                                            return activity
+                                        } catch {
+                                            return null
+                                        }
+                                    })
                                     const seenIds = new Set<string>()
                                     for (const activity of progressActivities) {
                                         if (!activity || seenIds.has(activity.uniqueItemId)) continue
@@ -832,7 +1034,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     trace('libraryCache', 'realstream.fetch.error', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, error: (err as Error)?.message })
                                     if (!toastedRealStreamFailures.has(conn.id)) {
                                         toastedRealStreamFailures.add(conn.id)
-                                        toast({ title: 'RealStream history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive' })
+                                        toast({ title: 'RealStream history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive', href: `/account/${encodeURIComponent(account.id)}` })
                                         setTimeout(() => toastedRealStreamFailures.delete(conn.id), 3600000)
                                     }
                                     // Per-login fallback: only THIS connection's items are preserved.
@@ -861,6 +1063,9 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                 }
 
                 await Promise.all(executing)
+                // A precheck scope that left the precheck branch (canonical owner flip)
+                // never awaited the batch: settle it before persisting either way.
+                if (batchPromise) await batchPromise
 
                 if (generation !== cacheGeneration) return
 
@@ -911,13 +1116,14 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     lastFetched: now,
                     lastMtimeByAccount: newMtimes,
                     metaMtimesByAccount: newMetaMtimes,
+                    activityCountByCtx: newActivityCounts,
                     loading: false,
                     isStale: false
                 })
                 trace('libraryCache', 'ensureLoaded.load.complete', { accountCount: accounts.length, items: filteredFinal.length, timing: Date.now() - loadStart })
 
                 if (encryptionKey) {
-                    const content = JSON.stringify({ items: filteredFinal, lastMtimeByAccount: newMtimes, metaMtimesByAccount: newMetaMtimes })
+                    const content = JSON.stringify({ items: filteredFinal, lastMtimeByAccount: newMtimes, metaMtimesByAccount: newMetaMtimes, activityCountByCtx: newActivityCounts })
                     if (content !== _lastPersistedLibraryContent) {
                         _lastPersistedLibraryContent = content
                         // Reuse the content serialized for deduplication: walking a

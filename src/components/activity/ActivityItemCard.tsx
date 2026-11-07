@@ -9,12 +9,15 @@ import { Progress } from '@/components/ui/progress'
 import { Tooltip } from '@/components/ui/tooltip'
 
 import { cn, openStremioDetail, maskNameLevel, maskEmailLevel } from '@/lib/utils'
-import { resolveWatchBadgePct, formatSavedEpisodeRanges } from '@/lib/activity-utils'
+import { resolveWatchBadgePct, formatSavedEpisodeRanges, MIN_PLAUSIBLE_WATCH_MS } from '@/lib/activity-utils'
+import { formatEpisodeRange } from '@/lib/episode-resolution'
 import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
 import { Poster } from '@/components/common/Poster'
 import { PlatformSourceBadge } from '@/components/activity/PlatformSourceBadge'
-import { isReadOnlyMediaActivity, type ActivityNowStatus } from '@/lib/jellyfin/activity'
+import { SwipeActionRow } from '@/components/activity/SwipeActionRow'
+import { isReadOnlyMediaActivity, isTimeApproximate, type ActivityNowStatus } from '@/lib/jellyfin/activity'
+import { formatRelative } from '@/hooks/use-relative-time'
 
 const AVATAR_COLORS = [
   'bg-blue-500/20 text-blue-400',
@@ -61,8 +64,14 @@ export const ActivityItemCard = memo(({
     const savedState = item.importedSavedState === true
     const hasEpisode = Number.isInteger(item.episode) && (item.episode ?? 0) > 0
     const episodeLabel = isEpisodeLike
-        ? hasEpisode ? `S${item.season ?? 1} E${item.episode}` : savedState ? null : 'Episode not recorded'
+        ? hasEpisode
+            ? `S${item.season ?? 1} E${item.episode}`
+            : item.episodeRange
+                ? formatEpisodeRange(item.episodeRange)
+                : savedState ? null : 'Episode unknown'
         : null
+    const episodeUnknown = isEpisodeLike && !hasEpisode && !item.episodeRange && !savedState
+    const episodeTitle = episodeUnknown ? 'The source recorded this show but not which episode was played' : episodeLabel ?? undefined
     // Legacy series aggregates can contain a zero episode and no measured playback.
     // Keep the history visible without claiming a 0% or completed episode.
     const badgePct = isEpisodeLike && !hasEpisode && !(item.duration > 0) && !(item.progress > 0)
@@ -79,12 +88,16 @@ export const ActivityItemCard = memo(({
     const originId = item.sourceConnectionId || item.mediaObservation?.connectionId
     const origin = account?.connections?.find(connection => connection.id === originId)
     const peers = (account?.connections || []).filter(connection => connection.platform === (item.source || 'stremio') && connection.connectionType !== 'hydra-outbound')
-    const originName = origin?.displayName || origin?.mediaServer?.userName || origin?.credentials?.email
+    const connectionName = (connection?: typeof origin) => connection?.displayName || connection?.mediaServer?.userName || connection?.credentials?.email
+    const originName = connectionName(origin)
     const maskedOrigin = originName?.includes('@')
         ? maskEmailLevel(originName, isPrivacyModeEnabled ? privacyLevelEmail : 0)
         : originName ? maskNameLevel(originName, privacyLevel) : ''
+    const originNameIsUnique = !!originName && peers.filter(peer => connectionName(peer) === originName).length === 1
     let connectionLabel = ''
-    if (origin && peers.length > 1) connectionLabel = `${maskedOrigin ? `${maskedOrigin} · ` : ''}Connection ${peers.findIndex(peer => peer.id === origin.id) + 1}`
+    if (origin && peers.length > 1) connectionLabel = maskedOrigin && originNameIsUnique
+        ? maskedOrigin
+        : `${maskedOrigin ? `${maskedOrigin} · ` : ''}Connection ${peers.findIndex(peer => peer.id === origin.id) + 1}`
     else if (originId && !origin) connectionLabel = 'Unlinked connection'
     else if (peers.length > 1) connectionLabel = 'Legacy history · connection unknown'
     const [avatarFailed, setAvatarFailed] = useState(false)
@@ -95,7 +108,7 @@ export const ActivityItemCard = memo(({
         const d = new Date(item.timestamp)
         // Placeholder watch dates (Stremio rows with missing/zero lastWatched) render as unknown
         // instead of "December 31, 2000" / "over 2025 years ago".
-        return isNaN(d.getTime()) || d.getTime() < Date.UTC(1995, 0, 1) ? null : d
+        return isNaN(d.getTime()) || d.getTime() < MIN_PLAUSIBLE_WATCH_MS ? null : d
     }, [item.timestamp])
 
     // Saved watch state has no watch date to claim: the slot labels the state itself,
@@ -103,6 +116,8 @@ export const ActivityItemCard = memo(({
     const dateLabel = savedState
         ? 'Saved watch history'
         : (itemDate ? formatDistanceToNow(itemDate, { addSuffix: true }) : 'Unknown date')
+    const approximate = !savedState && !!itemDate && isTimeApproximate(item)
+    const shortDateLabel = itemDate ? formatRelative(itemDate) ?? dateLabel : dateLabel
 
     const readOnly = isReadOnlyMediaActivity(item)
     const isLive = !!nowStatus
@@ -137,7 +152,7 @@ export const ActivityItemCard = memo(({
     if (viewMode === 'grid') {
         return (
             <div
-                className="group flex min-w-0 flex-col gap-1.5 cursor-pointer overflow-hidden rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                className="group flex min-w-0 flex-col gap-1.5 cursor-pointer rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                 role="button"
                 tabIndex={0}
                 onClick={handleClick}
@@ -161,7 +176,10 @@ export const ActivityItemCard = memo(({
                         src={item.poster}
                         itemId={item.itemId}
                         itemType={item.type}
+                        tmdbId={item.tmdbId}
+                        name={item.name}
                         alt={item.name}
+                        sizes="(min-width: 1536px) 296px, (min-width: 1280px) 244px, (min-width: 1024px) 242px, (min-width: 768px) 238px, (min-width: 640px) 232px, (min-width: 480px) 288px, 204px"
                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                         loading="lazy"
                     />
@@ -203,10 +221,10 @@ export const ActivityItemCard = memo(({
                         <div className="absolute bottom-2 left-2 right-2 z-10 flex items-center gap-1.5">
                             {episodeLabel && (
                                 <span
-                                    title={episodeLabel}
+                                    title={episodeTitle}
                                     className={cn(
-                                        "min-w-0 truncate text-xs font-bold px-1.5 py-0.5 rounded-full bg-black/75",
-                                        getAvatarColor(item.accountColorIndex).split(' ')[1]
+                                        "min-w-0 truncate text-xs px-1.5 py-0.5 rounded-full bg-black/75",
+                                        episodeUnknown ? 'font-medium text-white/70' : cn('font-bold', getAvatarColor(item.accountColorIndex).split(' ')[1])
                                     )}
                                 >
                                     {episodeLabel}
@@ -236,17 +254,11 @@ export const ActivityItemCard = memo(({
 
 
                 <div className="px-0.5 space-y-0.5">
-                    <p className="font-bold text-xs text-foreground leading-tight line-clamp-1 truncate">{item.name}</p>
-                    <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-                        {episodeLabel && (
-                            <span title={episodeLabel} className="min-w-0 truncate font-mono text-xs font-bold text-primary">
-                                {episodeLabel}
-                            </span>
-                        )}
-
+                    <p className="font-bold text-xs text-foreground leading-snug line-clamp-1 truncate">{item.name}</p>
+                    <div className="flex min-w-0 items-center gap-1.5">
                         <div
                             data-theme-part="account-avatar"
-                            className="relative w-4 h-4 shrink-0 flex items-center justify-center overflow-hidden rounded-md"
+                            className="relative w-6 h-6 md:w-7 md:h-7 shrink-0 flex items-center justify-center overflow-hidden rounded-md"
                         >
                             {/* Same muted backdrop the global SquircleOverlay paints, kept local so skins
                                 can suppress the fixed squircle clip with --theme-avatar-filter and apply
@@ -273,10 +285,15 @@ export const ActivityItemCard = memo(({
                                 </span>
                             )}
                         </div>
-                        <span className="min-w-0 text-xs text-muted-foreground font-medium"><span className="block truncate">{userName}</span>{connectionLabel && <span className="block truncate text-[10px] font-normal" title={connectionLabel}>{connectionLabel}</span>}</span>
+                        <span className="min-w-0 truncate text-xs leading-snug text-muted-foreground font-medium" title={connectionLabel ? `${userName} · ${connectionLabel}` : undefined}>
+                            {userName}
+                        </span>
                         {!isLive && (
-                            <span className="text-xs text-muted-foreground/60 font-mono ml-auto shrink-0">
-                                {dateLabel}
+                            <span
+                                className="ml-auto shrink-0 whitespace-nowrap font-mono text-xs leading-snug text-muted-foreground/60"
+                                title={approximate ? 'Time approximate: these episodes were marked watched together' : itemDate && !savedState ? itemDate.toLocaleString() : undefined}
+                            >
+                                {savedState ? 'Saved' : `${approximate ? '~' : ''}${shortDateLabel}`}
                             </span>
                         )}
                     </div>
@@ -286,6 +303,11 @@ export const ActivityItemCard = memo(({
     }
 
     return (
+        <SwipeActionRow
+            id={item.id}
+            disabled={readOnly || isBulkMode}
+            onDelete={onDelete ? () => onDelete(item.id, true) : undefined}
+        >
         <div
             role="button"
             tabIndex={0}
@@ -314,6 +336,9 @@ export const ActivityItemCard = memo(({
                     src={item.poster}
                     itemId={item.itemId}
                     itemType={item.type}
+                    tmdbId={item.tmdbId}
+                    name={item.name}
+                    sizes="(min-width: 768px) 80px, 64px"
                     className="w-full h-full object-cover"
                     loading="lazy"
                 />
@@ -334,7 +359,7 @@ export const ActivityItemCard = memo(({
             <div className="min-w-0 flex-1 space-y-1.5">
 
                 <div className="flex items-start justify-between gap-2">
-                    <h4 className="truncate text-base font-bold leading-tight tracking-tight md:text-lg">{item.name}</h4>
+                    <h4 className="min-w-0 line-clamp-2 break-words text-base font-bold leading-tight tracking-tight md:line-clamp-1 md:text-lg" title={item.name}>{item.name}</h4>
                     {isLive && (
                         <Tooltip content={nowDescription} side="top">
                             <span className="shrink-0 inline-flex items-center gap-1.5 rounded-full border border-success/20 bg-success/10 px-2 py-0.5 text-xs font-semibold uppercase text-success">
@@ -352,7 +377,7 @@ export const ActivityItemCard = memo(({
                     </span>
 
                     {episodeLabel && (
-                        <span className="text-xs font-mono font-bold text-muted-foreground">
+                        <span title={episodeTitle} className={cn('text-xs font-mono text-muted-foreground', episodeUnknown ? 'font-medium opacity-70' : 'font-bold')}>
                             {episodeLabel}
                         </span>
                     )}
@@ -364,7 +389,7 @@ export const ActivityItemCard = memo(({
                     <div className="flex items-center gap-1.5">
                         <div
                             data-theme-part="account-avatar"
-                            className="relative w-5 h-5 shrink-0 flex items-center justify-center overflow-hidden rounded-md"
+                            className="relative w-6 h-6 md:w-7 md:h-7 shrink-0 flex items-center justify-center overflow-hidden rounded-md"
                         >
                             {/* Same muted backdrop the global SquircleOverlay paints, kept local so skins
                                 can suppress the fixed squircle clip with --theme-avatar-filter and apply
@@ -391,7 +416,7 @@ export const ActivityItemCard = memo(({
                                 </span>
                             )}
                         </div>
-                        <span className="min-w-0 text-xs font-semibold text-muted-foreground"><span className="block truncate">{userName}</span>{connectionLabel && <span className="block truncate text-[10px] font-normal" title={connectionLabel}>{connectionLabel}</span>}</span>
+                        <span className="min-w-0 truncate text-xs font-semibold text-muted-foreground" title={connectionLabel ? `${userName} · ${connectionLabel}` : undefined}>{userName}</span>
                     </div>
                     <span className="text-xs text-muted-foreground/60 font-mono">
                         {nowStatus === 'playing' ? 'Watching now' : nowStatus === 'recent' ? 'Recently updated' : dateLabel}
@@ -441,6 +466,7 @@ export const ActivityItemCard = memo(({
                 <Trash2 className="h-4 w-4" />
             </Button>}
         </div>
+        </SwipeActionRow>
     )
 })
 

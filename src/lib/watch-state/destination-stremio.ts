@@ -23,7 +23,8 @@
 //     the row immediately before the Put, and verifies the saved row with an exact readback.
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { canonicalWatchIdentity, hasSavedWatchState, sourceTime, watchFingerprint } from './records.ts'
-import { decodeWatchedBitfield, encodeWatchedBitfield } from '../watched-bitfield.ts'
+import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
+import { isLiveLibraryRow } from '../stremio-liveness.ts'
 import { migrationStage, WatchMigrationError } from './failures.ts'
 
 export interface StremioDestinationVideo {
@@ -113,7 +114,7 @@ function parseDestinationRow(entry: unknown): DestinationRow {
         id,
         name: typeof entry.name === 'string' && entry.name ? entry.name : id,
         kind: entry.type === 'movie' ? 'movie' : entry.type === 'series' || entry.type === 'anime' ? 'series' : null,
-        removed: entry.removed === true,
+        removed: !isLiveLibraryRow(entry),
         state: isRecord(entry.state) ? entry.state : {},
     }
 }
@@ -199,17 +200,9 @@ async function readSeriesBits(state: Record<string, unknown>, index: StremioSeri
         if ((finiteNumber(state.timesWatched) ?? 0) > 0) return { kind: 'unprovable' }
         return { kind: 'none' }
     }
-    const decoded = await decodeWatchedBitfield(watched)
-    if (decoded === null || decoded.watchedIndices.length === 0) return { kind: 'unprovable' }
-    if (!index.byVideoId.has(decoded.videoId)) return { kind: 'unprovable' }
-    const indices: number[] = []
-    for (const value of decoded.watchedIndices) {
-        if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value >= index.order.length) return { kind: 'unprovable' }
-        if (!indices.includes(value)) indices.push(value)
-    }
     const timesWatched = finiteNumber(state.timesWatched)
-    if (timesWatched !== null && timesWatched > 0 && timesWatched !== indices.length) return { kind: 'unprovable' }
-    return { kind: 'bits', indices }
+    const interpreted = await interpretWatchedBitfield(watched, index.order, { anchorPolicy: 'max', timesWatched })
+    return interpreted.kind === 'bits' ? { kind: 'bits', indices: interpreted.indices } : { kind: 'unprovable' }
 }
 
 type SlotStatus = 'absent' | 'target' | 'other' | 'unverified'
@@ -276,8 +269,48 @@ function candidateRowIds(record: WatchStateRecord): string[] {
     return ids
 }
 
+/**
+ * lastWatched is one date per library row and only ever moves forward. A movie takes the
+ * newest exact date the patch carries; a series takes it only for the resume episode.
+ */
+function plannedLastWatched(existing: unknown, patch: WatchStatePatch, scope: 'movie' | 'series'): string | null {
+    if (scope === 'series' && patch.positionMs === undefined && patch.resumeSlot !== true) return null
+    const times: number[] = []
+    if (patch.watched === true) {
+        const time = epochMs(patch.playedAt)
+        if (time !== null) times.push(time)
+    }
+    if (patch.positionMs !== undefined) {
+        const time = epochMs(patch.resumePlayedAt !== undefined ? patch.resumePlayedAt : patch.playedAt)
+        if (time !== null) times.push(time)
+    }
+    if (times.length === 0) return null
+    const newest = Math.max(...times)
+    const current = epochMs(existing)
+    return current !== null && newest <= current ? null : new Date(newest).toISOString()
+}
+
+/**
+ * Stremio devices pull a library row only when its _mtime is newer than the copy they hold,
+ * so a real change must advance _mtime. Continue Watching sorts by _mtime, so it moves only as far
+ * as the watch date requires: just past the stored value, or to a newer exact lastWatched.
+ */
+function stampedRow(base: Record<string, unknown>, state: Record<string, unknown>): Record<string, unknown> {
+    const previous = typeof base._mtime === 'string' ? Date.parse(base._mtime) : Number.NaN
+    const watched = typeof state.lastWatched === 'string' ? Date.parse(state.lastWatched) : Number.NaN
+    const floor = Number.isFinite(previous) ? previous + 1 : Date.now()
+    const next = Math.min(Number.isFinite(watched) ? Math.max(floor, watched) : floor, Math.max(floor, Date.now()))
+    return { ...base, state, _mtime: new Date(next).toISOString() }
+}
+
+function createdMtime(state: Record<string, unknown>, now: string): string {
+    const watched = typeof state.lastWatched === 'string' ? Date.parse(state.lastWatched) : Number.NaN
+    return Number.isFinite(watched) && watched <= Date.parse(now) ? new Date(watched).toISOString() : now
+}
+
 interface EpisodeWriteCheck {
     patch: WatchStatePatch
+    lastWatched?: string | null
     index: StremioSeriesIndex
     season: number
     episode: number
@@ -293,12 +326,12 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
     const capabilities: WatchStateDestination['capabilities'] = {
         watched: true,
         resume: true,
-        dates: false,
+        dates: true,
         counts: false,
         combined: false,
         notes: [
             'Stremio keeps one resume point per series: resume points for different episodes of the same series cannot be combined or replaced.',
-            'Stremio stores no per-episode watch dates or play counts, so original dates and counts cannot be copied.',
+            'Stremio stores no per-episode watch dates or play counts: it keeps one last-watched date per title, only ever moved forward, and exact dates are copied only for movies and the resume episode.',
             'Watched episodes are merged into the destination series row; other watched episodes, the resume point and all library fields are preserved.',
             'Stremio offers no compare-and-swap: every write re-reads the row immediately before saving and verifies it by reading it back.',
         ],
@@ -538,7 +571,8 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         readback: DestinationRow,
         patch: WatchStatePatch,
         baseline: DestinationRow | null,
-        createdRow: Record<string, unknown> | null
+        createdRow: Record<string, unknown> | null,
+        lastWatched: string | null = null
     ): Promise<WatchStateRecord> => {
         if (readback.removed || readback.kind !== 'movie') throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         const state = readback.state
@@ -547,6 +581,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             if (finiteNumber(state.timeOffset) !== patch.positionMs) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
             if (patch.durationMs !== undefined && finiteNumber(state.duration) !== patch.durationMs) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         }
+        if (lastWatched !== null && epochMs(state.lastWatched) !== Date.parse(lastWatched)) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         if (baseline !== null) {
             if (readback.id !== baseline.id || readback.name !== baseline.name) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         } else if (createdRow !== null) {
@@ -557,6 +592,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             if (patch.watched === true) written.add('flaggedWatched')
             if (patch.positionMs !== undefined) written.add('timeOffset')
             if (patch.positionMs !== undefined && patch.durationMs !== undefined) written.add('duration')
+            if (lastWatched !== null) written.add('lastWatched')
             for (const field of STATE_FIELDS) {
                 if (!written.has(field) && state[field] !== baseline.state[field]) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
             }
@@ -568,6 +604,10 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         if (readback.removed || readback.kind !== 'series') throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         if (readback.id !== check.prewrite.id || readback.name !== check.prewrite.name) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         const written = new Set<string>()
+        if (check.lastWatched) {
+            written.add('lastWatched')
+            if (epochMs(readback.state.lastWatched) !== Date.parse(check.lastWatched)) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
+        }
         if (check.patch.watched === true) {
             written.add('watched')
             written.add('timesWatched')
@@ -605,13 +645,15 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             state.timeOffset = patch.positionMs
             if (patch.durationMs !== undefined && Number.isSafeInteger(patch.durationMs) && patch.durationMs >= patch.positionMs) state.duration = patch.durationMs
         }
-        const row: Record<string, unknown> = { _id: rowId, name: expected.title || rowId, type: 'movie', poster: '', removed: false, temp: false, _ctime: now, _mtime: now, state }
+        const lastWatched = plannedLastWatched(undefined, patch, 'movie')
+        if (lastWatched !== null) state.lastWatched = lastWatched
+        const row: Record<string, unknown> = { _id: rowId, name: expected.title || rowId, type: 'movie', poster: '', removed: false, temp: false, _ctime: now, _mtime: createdMtime(state, now), state }
         await putRow(request, row, signal)
         await trackOwnWrite(rowId, row, null, patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
         if (readback === null) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-        const view = await verifyMovieReadback(readback, patch, null, row)
+        const view = await verifyMovieReadback(readback, patch, null, row, lastWatched)
         return { status: 'applied', message: APPLIED_MESSAGE, record: view }
     }
 
@@ -644,13 +686,15 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             state.timeOffset = patch.positionMs
             if (patch.durationMs !== undefined && Number.isSafeInteger(patch.durationMs) && patch.durationMs >= patch.positionMs) state.duration = patch.durationMs
         }
-        const row: Record<string, unknown> = { ...fresh.raw, state }
+        const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'movie')
+        if (lastWatched !== null) state.lastWatched = lastWatched
+        const row = stampedRow(fresh.raw, state)
         await putRow(request, row, signal)
         await trackOwnWrite(rowId, row, null, patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
         if (readback === null) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-        const view = await verifyMovieReadback(readback, patch, fresh, null)
+        const view = await verifyMovieReadback(readback, patch, fresh, null, lastWatched)
         return { status: 'applied', message: APPLIED_MESSAGE, record: view }
     }
 
@@ -678,12 +722,15 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             state.timeOffset = patch.positionMs
             if (patch.durationMs !== undefined && Number.isSafeInteger(patch.durationMs) && patch.durationMs >= patch.positionMs) state.duration = patch.durationMs
         }
-        const row: Record<string, unknown> = { _id: rowId, name: expected.seriesTitle || expected.title || rowId, type: 'series', poster: '', removed: false, temp: false, _ctime: now, _mtime: now, state }
+        const lastWatched = plannedLastWatched(undefined, patch, 'series')
+        if (lastWatched !== null) state.lastWatched = lastWatched
+        const row: Record<string, unknown> = { _id: rowId, name: expected.seriesTitle || expected.title || rowId, type: 'series', poster: '', removed: false, temp: false, _ctime: now, _mtime: createdMtime(state, now), state }
         await putRow(request, row, signal)
         await trackOwnWrite(rowId, row, seasonEpisodeKey(season, episode), patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
         if (readback === null || readback.removed || readback.kind !== 'series' || readback.id !== rowId || readback.name !== row.name) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
+        if (lastWatched !== null && epochMs(readback.state.lastWatched) !== Date.parse(lastWatched)) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         if (patch.watched === true) {
             const bits = await readSeriesBits(readback.state, index)
             if (bits.kind !== 'bits' || bits.indices.length !== 1 || bits.indices[0] !== targetIndex) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
@@ -737,13 +784,15 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             if (slot === 'target' && slotOffset !== null) return unready(SAVED_UNSEEN)
             const mergedBits = [...existingBits, targetIndex].sort((a, b) => a - b)
             const state: Record<string, unknown> = { ...fresh.state, watched: await encodeWatchedBitfield(mergedBits, index.order), timesWatched: mergedBits.length }
-            const row: Record<string, unknown> = { ...fresh.raw, state }
+            const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
+            if (lastWatched !== null) state.lastWatched = lastWatched
+            const row = stampedRow(fresh.raw, state)
             await putRow(request, row, signal)
             await trackOwnWrite(rowId, row, episodeKey, { watched: true })
             signal.throwIfAborted()
             const readback = await readRow(request, rowId, signal, 'readback')
             if (readback === null) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-            const verified = await verifyEpisodeReadback(readback, { patch, index, season, episode, targetIndex, prewrite: fresh, expectedBits: mergedBits })
+            const verified = await verifyEpisodeReadback(readback, { patch, lastWatched, index, season, episode, targetIndex, prewrite: fresh, expectedBits: mergedBits })
             return { status: 'applied', message: APPLIED_MESSAGE, record: verified }
         }
         if (existingBits.includes(targetIndex)) return unready(SAVED_UNSEEN)
@@ -769,13 +818,15 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             timeOffset: positionMs,
         }
         if (patch.durationMs !== undefined && Number.isSafeInteger(patch.durationMs) && patch.durationMs >= positionMs) state.duration = patch.durationMs
-        const row: Record<string, unknown> = { ...fresh.raw, state }
+        const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
+        if (lastWatched !== null) state.lastWatched = lastWatched
+        const row = stampedRow(fresh.raw, state)
         await putRow(request, row, signal)
         await trackOwnWrite(rowId, row, episodeKey, { positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
         if (readback === null) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-        const verified = await verifyEpisodeReadback(readback, { patch, index, season, episode, targetIndex, prewrite: fresh, expectedBits: existingBits })
+        const verified = await verifyEpisodeReadback(readback, { patch, lastWatched, index, season, episode, targetIndex, prewrite: fresh, expectedBits: existingBits })
         return { status: 'applied', message: APPLIED_MESSAGE, record: verified }
     }
 

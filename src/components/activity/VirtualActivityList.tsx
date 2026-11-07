@@ -170,6 +170,31 @@ export function VirtualActivityList({
         const capture = () => {
             cancelAnimationFrame(raf)
             raf = requestAnimationFrame(() => {
+                // Mounted rows are ordered; rows clearly above the viewport top are
+                // skipped arithmetically, borderline rows are confirmed with one row
+                // read, and only the crossing row's cards are measured. Falls back
+                // to scanning every mounted card when no row matches, so the anchor
+                // stays exact.
+                const scrollY = window.scrollY
+                const items = virtualizer.getVirtualItems()
+                let start = 0
+                while (start < items.length && items[start].start - scrollY + items[start].size < -200) start++
+                for (let i = start; i < items.length; i++) {
+                    const rowEl = listRef.current?.querySelector(`[data-index="${items[i].index}"]`)
+                    if (!rowEl) break
+                    if (rowEl.getBoundingClientRect().bottom <= 1) continue
+                    const holders = rowEl.querySelectorAll('[data-activity-item]')
+                    let found = false
+                    for (const el of holders) {
+                        const rect = (el as HTMLElement).getBoundingClientRect()
+                        if (rect.bottom > 1) {
+                            anchorRef.current = { itemId: el.getAttribute('data-activity-item') ?? '', viewportTop: rect.top }
+                            found = true
+                            break
+                        }
+                    }
+                    if (found) return
+                }
                 const holders = listRef.current?.querySelectorAll('[data-activity-item]')
                 if (!holders) return
                 for (const el of holders) {

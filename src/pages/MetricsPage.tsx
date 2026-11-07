@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton, StatCardSkeleton } from '@/components/ui/skeleton'
@@ -10,11 +10,12 @@ import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
-import { useMetricsWorker } from '@/hooks/useMetricsWorker'
+import { useMetricsWorker, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
+import { useSettledSignal } from '@/hooks/useSettledSignal'
 import { useAccountStore } from '@/store/accountStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import type { Account } from '@/types/account'
-import { historyEntryToActivityItem } from '@/lib/activity-utils'
+import { historyEntryToActivityItem, canonicalStremioConnections } from '@/lib/activity-utils'
 import { crossLinkWatcherIndex, type WatcherItemIdentity } from '@/lib/watcher-identity'
 import {
     Activity,
@@ -51,6 +52,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { OperationProgress } from '@/components/ui/operation-progress'
 import { ActivityDetailModal, type DetailItem } from '@/components/activity/ActivityDetailModal'
 import { ActivityHeatmap, ActivitySparkline, WatchFunnel, ContentDonut, FranchiseBars, VelocityChart, WeekComparison, ContributionGraph, SessionDepth, WeeklyRhythm, ComebackRate, DropOffPoint } from '@/components/metrics'
+import { pressable, PRESSABLE_FOCUS } from '@/components/metrics/pressable'
+import { rankedProfileCount } from '@/components/metrics/profile-counts'
 
 const PERSONA_DESCRIPTIONS: Record<string, string> = {
     'The Completer': 'Finishes over 80% of what they start',
@@ -88,6 +91,15 @@ const METRIC_PERIODS = [
 
 type MetricPeriodId = typeof METRIC_PERIODS[number]['id']
 
+// Metrics never renders genres (the worker items omit them), so skip the Cinemeta genre crawl.
+const METRICS_HISTORY_OPTIONS = { genres: false, sessions: false } as const
+
+// Counts up only for the first reveal. Later filter changes swap the number outright so
+// no intermediate value is ever shown.
+function StatNumber({ value, animate }: { value: number; animate: boolean }) {
+    return animate ? <NumberTicker value={value} /> : <>{value.toLocaleString()}</>
+}
+
 function formatMetricHour(hour: number) {
     const normalizedHour = Number.isFinite(hour) ? ((Math.round(hour) % 24) + 24) % 24 : 0
     return new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).format(new Date(2024, 0, 1, normalizedHour))
@@ -124,11 +136,14 @@ function WatcherBadges({ accounts: watchAccs, maskName }: { accounts: Account[];
 export function MetricsPage() {
     useDocumentTitle('Metrics')
     const navigate = useNavigate()
+    const prefersReducedMotion = useReducedMotion()
     const accounts = useAccountStore(s => s.accounts)
+    const accountsById = useMemo(() => new Map(accounts.map(account => [account.id, account])), [accounts])
+    const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
     const cacheLoading = useLibraryCache(s => s.loading)
     const ensureLoaded = useLibraryCache(s => s.ensureLoaded)
     const loadingProgress = useLibraryCache(s => s.loadingProgress)
-    const { history: watchHistory } = useWatchHistory()
+    const { history: watchHistory } = useWatchHistory(undefined, true, METRICS_HISTORY_OPTIONS)
     // Exclude backfilled episodes (synthetic timestamps) from time-based metrics; Replay keeps them in totals.
     const history = useMemo(() => watchHistory.map(historyEntryToActivityItem).filter(item => !item.backfill), [watchHistory])
     const rollups = useWatchEventStore(s => s.rollups)
@@ -153,22 +168,27 @@ export function MetricsPage() {
             : history.filter(item => item.accountId === selectedAccountId)
     , [history, selectedAccountId])
 
+    // Cutoff is fixed per period or data change, like the filter it replaces.
+    const periodStart = useMemo(() => {
+        const days = METRIC_PERIODS.find(option => option.id === selectedPeriod)?.days
+        return days ? Date.now() - days * 864e5 : null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedPeriod, accountFilteredHistory])
+
     const filteredHistory = useMemo(() => {
-        const period = METRIC_PERIODS.find(option => option.id === selectedPeriod)
-        if (!period?.days) return accountFilteredHistory
-        const cutoff = Date.now() - period.days * 864e5
+        if (periodStart == null) return accountFilteredHistory
         return accountFilteredHistory.filter(item => {
             const time = item.timestamp instanceof Date ? item.timestamp.getTime() : new Date(item.timestamp).getTime()
-            return Number.isFinite(time) && time >= cutoff
+            return Number.isFinite(time) && time >= periodStart
         })
-    }, [accountFilteredHistory, selectedPeriod])
+    }, [accountFilteredHistory, periodStart])
 
     const watchersByItemId = useMemo(() => {
         const map = new Map<string, Account[]>()
         const identityByKey = new Map<string, WatcherItemIdentity>()
         for (const item of filteredHistory) {
             if (!item.itemId) continue
-            const acc = accounts.find(a => a.id === item.accountId)
+            const acc = accountsById.get(item.accountId)
             if (!acc) continue
             const list = map.get(item.itemId)
             if (list) {
@@ -182,7 +202,7 @@ export function MetricsPage() {
         // platform-scoped); share watchers so shared titles stop showing "1 person".
         crossLinkWatcherIndex(map, identityByKey)
         return map
-    }, [filteredHistory, accounts])
+    }, [filteredHistory, accountsById])
 
     // Rollups are month-granular all-time aggregates, so they only apply to the unbounded period.
     const scopedRollups = useMemo(() => {
@@ -200,7 +220,23 @@ export function MetricsPage() {
         return { byMonth, daysByAccount: days ? { [selectedAccountId]: days } : {} }
     }, [rollups, selectedAccountId, selectedPeriod])
 
-    const { results: stats, isComputing: workerLoading } = useMetricsWorker(filteredHistory, scopedRollups)
+    const workerOptions = useMemo(() => ({ filterKey: `${selectedAccountId}|${selectedPeriod}`, periodStart, runtimeSource: history }), [selectedAccountId, selectedPeriod, periodStart, history])
+    const { results: latest, isComputing: workerLoading, isCurrent, scope } = useMetricsWorker(accountFilteredHistory, scopedRollups, canonicalConnections, workerOptions)
+
+    // A result is shown only once it was computed for the CURRENT filter on settled data.
+    // Until then the previous stable result stays on screen under the updating bar.
+    const dataSettled = useSettledSignal(history, cacheLoading)
+    const [committed, setCommitted] = useState<{ scope: string; value: MetricsResult } | null>(null)
+    const [entrance, setEntrance] = useState<MetricsResult | null>(null)
+    useEffect(() => {
+        if (!latest || !isCurrent || !dataSettled) return
+        setCommitted(prev => (prev && prev.scope === scope && prev.value === latest ? prev : { scope, value: latest }))
+    }, [latest, isCurrent, dataSettled, scope])
+    const stats = committed && committed.scope === scope ? committed.value : null
+    useEffect(() => {
+        if (stats && !stats._error) setEntrance(prev => prev ?? stats)
+    }, [stats])
+    const animateNumbers = !!stats && stats === entrance
 
     useEffect(() => {
         if (accounts.length > 0) {
@@ -208,8 +244,8 @@ export function MetricsPage() {
         }
     }, [accounts, ensureLoaded])
 
-    const hasMetricsError = Boolean(stats?._error)
-    const isLoading = !stats || (workerLoading && !hasMetricsError)
+    const viewState = metricsViewState(stats, workerLoading)
+    const isRefreshing = viewState === 'ready' && (workerLoading || !isCurrent || !dataSettled)
     const selectedPeriodLabel = METRIC_PERIODS.find(option => option.id === selectedPeriod)?.label || 'All Time'
 
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
@@ -219,8 +255,8 @@ export function MetricsPage() {
 
     return (
         <div className="space-y-4">
-            <Tabs defaultValue="overview" className="w-full">
-                <div className="mb-4 space-y-3">
+            <Tabs defaultValue="overview" className="w-full" aria-busy={isRefreshing}>
+                <div className="relative mb-4 space-y-3">
                     <ToolbarShell contentClassName="gap-2 sm:gap-3">
                         <TabsList className="w-full justify-start overflow-x-auto bg-muted/35 shadow-none sm:w-auto">
                             <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -274,7 +310,7 @@ export function MetricsPage() {
                             >
                                 <motion.div
                                     initial="initial"
-                                    animate="animate"
+                                    animate={prefersReducedMotion ? 'initial' : 'animate'}
                                     className="flex items-center justify-center relative z-10"
                                 >
                                     <motion.svg
@@ -303,7 +339,16 @@ export function MetricsPage() {
                         </div>
                     </ToolbarShell>
 
-                    {(cacheLoading || isLoading) && (
+                    <div
+                        aria-hidden
+                        data-testid="metrics-refreshing"
+                        className={cn(
+                            "pointer-events-none absolute inset-x-0 -bottom-2 h-0.5 overflow-hidden rounded-full bg-primary/50 transition-opacity duration-300",
+                            isRefreshing ? "animate-pulse opacity-100" : "opacity-0"
+                        )}
+                    />
+
+                    {(cacheLoading || viewState === 'skeleton') && (
                         <OperationProgress
                             status="running"
                             current={cacheLoading ? loadingProgress.current : 100}
@@ -319,7 +364,7 @@ export function MetricsPage() {
                     )}
                 </div>
 
-                {hasMetricsError && !workerLoading ? (
+                {viewState === 'error' ? (
                     <TabsContent value="overview" className="space-y-6">
                         <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
                             <Activity className="h-8 w-8 text-muted-foreground opacity-50" />
@@ -329,7 +374,7 @@ export function MetricsPage() {
                             </div>
                         </div>
                     </TabsContent>
-                ) : isLoading ? (
+                ) : viewState === 'skeleton' || !stats ? (
                     <TabsContent value="overview" className="space-y-6">
                         <div className="space-y-4 animate-in fade-in duration-500">
                             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -370,7 +415,7 @@ export function MetricsPage() {
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
                                                 <div className="text-3xl font-bold tabular-nums tracking-tight" style={{ color: label === 'Hours Watched' ? 'hsl(var(--foreground))' : palette.text }}>
-                                                    <NumberTicker value={value} />
+                                                    <StatNumber value={value} animate={animateNumbers} />
                                                 </div>
                                                 <Tooltip content={card.tooltip} side="top">
                                                     <div className="text-xs font-medium text-muted-foreground mt-1 leading-tight cursor-help">{label}</div>
@@ -388,7 +433,7 @@ export function MetricsPage() {
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
                                                 <div className={`text-3xl font-bold tabular-nums tracking-tight ${color}`}>
-                                                    <NumberTicker value={value} />
+                                                    <StatNumber value={value} animate={animateNumbers} />
                                                 </div>
                                                 <Tooltip content={card.tooltip} side="top">
                                                     <div className="text-xs font-medium text-muted-foreground mt-1 leading-tight cursor-help">{label}</div>
@@ -414,7 +459,7 @@ export function MetricsPage() {
                             </CardTitle>
                         </CardHeader>
                         <CardContent>
-                            <ContributionGraph dailyActivity={stats.dailyActivity} loading={workerLoading} />
+                            <ContributionGraph dailyActivity={stats.dailyActivity} />
                         </CardContent>
                     </Card>
 
@@ -429,7 +474,7 @@ export function MetricsPage() {
                                     title={item.name}
                                     itemId={item.itemId || item.id}
                                     itemType={item.type}
-                                    onClick={() => openDetail(item.type, item.itemId || item.id)}
+                                    onClick={() => openDetail(item.type, item.itemId || item.id, item.name, item.poster)}
                                 />
                             ))
                         ) : (
@@ -454,7 +499,7 @@ export function MetricsPage() {
                             </CardHeader>
                             <CardContent className="flex flex-col md:flex-row items-center gap-8">
                                 <div className="text-center md:text-left flex-1">
-                                    <div className="text-4xl font-bold"><NumberTicker value={stats.bingeMasters?.[0]?.bingeDuration || 0} /></div>
+                                    <div className="text-4xl font-bold"><StatNumber value={stats.bingeMasters?.[0]?.bingeDuration || 0} animate={animateNumbers} /></div>
                                     <div className="text-xs font-medium text-muted-foreground uppercase">Titles in one session</div>
                                     <p className="text-sm mt-3 text-muted-foreground">
                                         <span className="font-bold text-primary">{maskAccountName(stats.bingeMasters?.[0]?.name || '')}</span> is currently holding the crown for the most intense watch session.
@@ -466,10 +511,8 @@ export function MetricsPage() {
                                         return (
                                             <div
                                                 key={item.id}
-                                                onClick={() => {
-                                                    openDetail(item.type, item.itemId || item.id)
-                                                }}
-                                                className="content-auto-poster relative w-16 h-24 rounded-xl border-2 border-background overflow-hidden shadow-lg transition-transform hover:-translate-y-2 cursor-pointer"
+                                                {...pressable(() => openDetail(item.type, item.itemId || item.id, item.name, item.poster), item.name)}
+                                                className={cn("content-auto-poster relative w-16 h-24 rounded-xl border-2 border-background overflow-hidden shadow-lg transition-transform hover:-translate-y-2 cursor-pointer", PRESSABLE_FOCUS)}
                                                 style={{ zIndex: 5 - i }}
                                             >
                                                 <Poster
@@ -501,7 +544,7 @@ export function MetricsPage() {
                                 <p className="text-xs text-muted-foreground">Low-key leaderboards for unusual watch habits.</p>
                             </div>
                             <StatusChip variant="muted" icon={<Trophy />}>
-                                {(stats.awards?.midnightSnackers?.length || 0) + (stats.awards?.weekendWarriors?.length || 0) + (stats.awards?.completionChampions?.length || 0)} ranked
+                                {rankedProfileCount(stats.awards)} ranked
                             </StatusChip>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -659,7 +702,7 @@ export function MetricsPage() {
                                             Series loyalty
                                         </div>
                                         <div className="mt-3 text-2xl font-bold tracking-tight">
-                                            <NumberTicker value={Math.round(stats.seriesLoyalty)} />%
+                                            <StatNumber value={Math.round(stats.seriesLoyalty)} animate={animateNumbers} />%
                                         </div>
                                         <p className="mt-1 text-xs text-muted-foreground">Top shows' share of series plays.</p>
                                     </div>
@@ -681,8 +724,8 @@ export function MetricsPage() {
                                     return (
                                     <motion.div
                                         data-theme-part="panel"
-                                        onClick={() => openDetail(fw.item.type, fw.item.itemId)}
-                                        className="group relative flex cursor-pointer items-stretch gap-0 overflow-hidden rounded-2xl border border-border/35 bg-muted/15"
+                                        {...pressable(() => openDetail(fw.item.type, fw.item.itemId, fw.item.name, fw.item.poster))}
+                                        className={cn("group relative flex cursor-pointer items-stretch gap-0 overflow-hidden rounded-2xl border border-border/35 bg-muted/15", PRESSABLE_FOCUS)}
                                         initial={{ opacity: 0, y: 8 }}
                                         animate={{ opacity: 1, y: 0 }}
                                         transition={{ type: 'spring', stiffness: 120, damping: 20 }}
@@ -762,7 +805,7 @@ export function MetricsPage() {
                                                                 </Tooltip>
                                                             )
                                                         })}
-                                                        {u.badges.length === 0 && <span className="text-xs font-semibold text-muted-foreground">Finding persona...</span>}
+                                                        {u.badges.length === 0 && <span className="text-xs font-semibold text-muted-foreground">No standout habit yet</span>}
                                                     </div>
                                                 </div>
                                             </div>
@@ -834,7 +877,7 @@ export function MetricsPage() {
                                                     )}>#{user.rank}</div>
                                                     <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-border/40 bg-muted/35 text-sm font-bold text-muted-foreground shadow-inner overflow-hidden">
                                                         {(() => {
-                                                            const acc = accounts.find(a => a.id === user.id)
+                                                            const acc = accountsById.get(user.id)
                                                             if (acc?.avatar) return <img src={acc.avatar} alt="" className="h-full w-full object-cover" loading="lazy" />
                                                             if (acc?.emoji) return <span className="text-lg">{acc.emoji}</span>
                                                             return user.avatarChar
@@ -879,10 +922,8 @@ export function MetricsPage() {
                                                         return (
                                                             <div
                                                                 key={h.id}
-                                                                onClick={() => {
-                                                                    openDetail(h.type, h.itemId)
-                                                                }}
-                                                                className="content-auto-poster flex-none w-20 sm:w-24 aspect-[2/3] relative group/poster transition-transform hover:-translate-y-1 cursor-pointer"
+                                                                {...pressable(() => openDetail(h.type, h.itemId, h.name, h.poster), h.name)}
+                                                                className={cn("content-auto-poster flex-none w-20 sm:w-24 aspect-[2/3] relative group/poster transition-transform hover:-translate-y-1 cursor-pointer rounded-xl", PRESSABLE_FOCUS)}
                                                             >
                                                                 <Poster
                                                                     src={h.poster}
@@ -922,11 +963,11 @@ export function MetricsPage() {
                                     <Tooltip content="Your content mix across movies, series, and other formats" side="top">
                                         <span className="cursor-help">Format DNA</span>
                                     </Tooltip>
-                                    <StatusChip variant="muted"><NumberTicker value={stats.totalItems} /> titles</StatusChip>
+                                    <StatusChip variant="muted"><StatNumber value={stats.totalItems} animate={animateNumbers} /> titles</StatusChip>
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <ContentDonut typeCounts={stats.typeCounts} loading={workerLoading} />
+                                <ContentDonut typeCounts={stats.typeCounts} />
                             </CardContent>
                         </Card>
 
@@ -945,7 +986,6 @@ export function MetricsPage() {
                                     thisWeekCount={stats.thisWeekCount}
                                     lastWeekCount={stats.lastWeekCount}
                                     weekOverWeek={stats.weekOverWeek}
-                                    loading={workerLoading}
                                 />
                             </CardContent>
                         </Card>
@@ -963,13 +1003,13 @@ export function MetricsPage() {
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
                             {stats.sharedUniverse?.map((c, i: number) => {
                                 const sharedAccs = c.accounts.map(
-                                    (acc: { id: string }) => accounts.find(a => a.id === acc.id)
+                                    (acc: { id: string }) => accountsById.get(acc.id)
                                 ).filter((acc): acc is Account => acc !== undefined)
                                 return (
                                     <div
                                         key={i}
-                                        onClick={() => openDetail(c.item.type, c.item.itemId)}
-                                        className="content-auto-poster relative aspect-[2/3] group cursor-pointer overflow-hidden rounded-2xl border border-border/40 shadow-sm"
+                                        {...pressable(() => openDetail(c.item.type, c.item.itemId, c.item.name, c.item.poster), c.item.name)}
+                                        className={cn("content-auto-poster relative aspect-[2/3] group cursor-pointer overflow-hidden rounded-2xl border border-border/40 shadow-sm", PRESSABLE_FOCUS)}
                                     >
                                         <div className="absolute top-2 left-2 z-20 rounded-full bg-black/55 px-2 py-0.5 text-xs font-semibold uppercase text-white backdrop-blur-sm">
                                             Shared
@@ -1025,7 +1065,7 @@ export function MetricsPage() {
                                 {stats.topAllTime?.map((stat, i: number) => {
                                     const watchAccs = watchersByItemId.get(stat.item.itemId) ?? []
                                     return (
-                                    <div key={stat.item.id} onClick={() => openDetail(stat.item.type, stat.item.itemId)} className="content-auto-poster group relative aspect-[2/3] rounded-2xl overflow-hidden border border-border/40 bg-muted shadow-sm cursor-pointer transition-transform hover:-translate-y-1">
+                                    <div key={stat.item.id} {...pressable(() => openDetail(stat.item.type, stat.item.itemId, stat.item.name, stat.item.poster), stat.item.name)} className={cn("content-auto-poster group relative aspect-[2/3] rounded-2xl overflow-hidden border border-border/40 bg-muted shadow-sm cursor-pointer transition-transform hover:-translate-y-1", PRESSABLE_FOCUS)}>
                                         <Poster
                                             src={stat.item.poster}
                                             itemId={stat.item.itemId || stat.item.id}
@@ -1059,13 +1099,13 @@ export function MetricsPage() {
                         </div>
                         <div className="flex flex-wrap gap-4">
                             {stats.rareFinds?.map((item) => {
-                                const acc = accounts.find(a => a.id === item.accountId)
+                                const acc = accountsById.get(item.accountId)
                                 const watchAccs = acc ? [acc] : []
                                 return (
                                 <div
                                     key={item.itemId}
-                                    onClick={() => openDetail(item.type, item.itemId)}
-                                    className="content-auto-poster group relative w-28 aspect-[2/3] rounded-xl overflow-hidden border border-border/40 shadow-sm transition-transform hover:-translate-y-1 cursor-pointer"
+                                    {...pressable(() => openDetail(item.type, item.itemId, item.name, item.poster), item.name)}
+                                    className={cn("content-auto-poster group relative w-28 aspect-[2/3] rounded-xl overflow-hidden border border-border/40 shadow-sm transition-transform hover:-translate-y-1 cursor-pointer", PRESSABLE_FOCUS)}
                                 >
                                     <Poster
                                         src={item.poster}
@@ -1107,7 +1147,7 @@ export function MetricsPage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <ActivityHeatmap itemsByHour={stats.itemsByHour} loading={workerLoading} />
+                                <ActivityHeatmap itemsByHour={stats.itemsByHour} />
                             </CardContent>
                         </Card>
 
@@ -1118,7 +1158,7 @@ export function MetricsPage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <ActivitySparkline streakMap={stats.streakMap} loading={workerLoading} />
+                                <ActivitySparkline streakMap={stats.streakMap} />
                             </CardContent>
                         </Card>
                     </div>
@@ -1133,7 +1173,7 @@ export function MetricsPage() {
                             </CardTitle>
                         </CardHeader>
                         <CardContent>
-                            <WeeklyRhythm weeklyRhythm={stats.weeklyRhythm} loading={workerLoading} />
+                            <WeeklyRhythm weeklyRhythm={stats.weeklyRhythm} />
                         </CardContent>
                     </Card>
 
@@ -1144,7 +1184,7 @@ export function MetricsPage() {
                                 <CardTitle className="flex items-center gap-2 text-sm">Watch Funnel</CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <WatchFunnel funnel={stats.funnel} loading={workerLoading} />
+                                <WatchFunnel funnel={stats.funnel} />
                             </CardContent>
                         </Card>
                         <Card className="rounded-2xl border-border/40 bg-card/50 shadow-sm">
@@ -1156,7 +1196,7 @@ export function MetricsPage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <SessionDepth sessionDepths={stats.sessionDepths} loading={workerLoading} />
+                                <SessionDepth sessionDepths={stats.sessionDepths} />
                             </CardContent>
                         </Card>
                     </div>
@@ -1172,7 +1212,7 @@ export function MetricsPage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <DropOffPoint avgEpisodes={stats.dropOffAvg} loading={workerLoading} />
+                                <DropOffPoint avgEpisodes={stats.dropOffAvg} />
                             </CardContent>
                         </Card>
                         <Card className="rounded-2xl border-border/40 bg-card/50 shadow-sm">
@@ -1184,7 +1224,7 @@ export function MetricsPage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <ComebackRate titles={stats.comebackTitles} loading={workerLoading} />
+                                <ComebackRate titles={stats.comebackTitles} />
                             </CardContent>
                         </Card>
                     </div>
@@ -1195,7 +1235,7 @@ export function MetricsPage() {
                                 <h2 className="text-sm font-semibold">Franchise Focus</h2>
                                 <StatusChip variant="muted">{stats.franchiseFocus?.length || 0} groups</StatusChip>
                             </div>
-                            <FranchiseBars franchiseFocus={stats.franchiseFocus} loading={workerLoading} />
+                            <FranchiseBars franchiseFocus={stats.franchiseFocus} />
                         </div>
 
                         {/* BINGE VELOCITY */}
@@ -1204,7 +1244,7 @@ export function MetricsPage() {
                                 <h2 className="text-sm font-semibold">Binge Velocity</h2>
                                 <StatusChip variant="muted">{stats.contentVelocity?.length || 0} tracked</StatusChip>
                             </div>
-                            <VelocityChart contentVelocity={stats.contentVelocity} loading={workerLoading} />
+                            <VelocityChart contentVelocity={stats.contentVelocity} />
                         </div>
 
                 </TabsContent >

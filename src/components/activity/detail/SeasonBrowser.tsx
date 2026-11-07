@@ -6,6 +6,8 @@ import { cn } from '@/lib/utils'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { EPISODE_WATCHER_AVATAR_CAP, episodeWatcherLabel, type EpisodeWatcherIndex } from '@/lib/episode-watchers'
 import { fetchSeasonEpisodes, fetchSeasonsList, proxyFetch, type SeasonInfo, type EpisodeInfo } from '@/api/metadata/adapters/tmdb'
+import { SeasonControl } from '@/components/activity/detail/SeasonControl'
+import { shouldUseCompactSeasonPicker, watchedSeasonNumbers } from '@/components/activity/detail/season-picker'
 import type { DetailItem } from '@/components/activity/detail/types'
 
 interface SeasonBrowserProps {
@@ -22,6 +24,8 @@ interface SeasonBrowserProps {
      * opening every episode.
      */
     episodeWatchers?: EpisodeWatcherIndex
+    /** True while the header is stuck flush under the pinned bar: it then joins the bar's block. */
+    joined?: boolean
     onEpisodeClick?: (data: {
         episodeNumber: number
         episodeName: string
@@ -33,7 +37,7 @@ interface SeasonBrowserProps {
     }) => void
 }
 
-export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watchedEpisodes, episodeWatchers, onEpisodeClick }: SeasonBrowserProps) {
+export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watchedEpisodes, episodeWatchers, joined, onEpisodeClick }: SeasonBrowserProps) {
     const [seasons, setSeasons] = useState<SeasonInfo[]>([])
     const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
     const [episodes, setEpisodes] = useState<EpisodeInfo[]>([])
@@ -204,11 +208,28 @@ export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watc
         setSelectedSeason(target)
     }, [cinemetaSeasons, seriesTmdbId, selectedSeason, activeItem, tmdbSeasonsFailed, latestWatchedSeason])
 
+    const pillsRowRef = useRef<HTMLDivElement>(null)
+    // With 8 seasons or fewer the pills stay; the selected pill is centred on open and on change.
+    useEffect(() => {
+        if (selectedSeason === null) return
+        const list = seasons.length > 0 ? seasons : cinemetaSeasons
+        if (shouldUseCompactSeasonPicker(list.length)) return
+        const row = pillsRowRef.current
+        if (!row) return
+        const pill = row.querySelector<HTMLButtonElement>(`[data-season-pill="${selectedSeason}"]`)
+        if (!pill) return
+        const reduced = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        pill.scrollIntoView({ block: 'nearest', inline: 'center', behavior: reduced ? 'auto' : 'smooth' })
+    }, [seasons, cinemetaSeasons, selectedSeason])
+
     if (loading || (seasons.length === 0 && cinemetaSeasons.length === 0)) return null
 
     const activeSeasons = seasons.length > 0 ? seasons : cinemetaSeasons
     const activeEpisodes = seriesTmdbId ? episodes : (cinemetaEpisodesBySeason.get(selectedSeason ?? -1) ?? [])
     const isLoadingEps = seriesTmdbId ? episodesLoading : false
+    const compactPicker = shouldUseCompactSeasonPicker(activeSeasons.length)
+    const watchedSeasonSet = watchedSeasonNumbers(watchedBySeason)
 
     // Anime watch events usually carry absolute episode numbers on a flat season 1,
     // while TMDB splits the show into real seasons. When the watched episode isn't in
@@ -265,43 +286,68 @@ export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watc
 
     return (
         <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
-                <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
-                    <Tv className="h-3.5 w-3.5 text-primary" />
-                    Episodes
-                </h3>
-                {selectedSeason !== null && (() => {
-                    const s = activeSeasons.find(x => x.seasonNumber === selectedSeason)
-                    return s ? (
-                        <span className="text-[11px] font-medium text-muted-foreground/60">
-                            {s.episodeCount} episode{s.episodeCount === 1 ? '' : 's'}
-                            {s.airDate ? ` \u00b7 ${new Date(s.airDate).getFullYear()}` : ''}
-                        </span>
-                    ) : null
-                })()}
-            </div>
+            {/* Tucks 2px under the pinned bar (which paints above it) so fractional display scaling cannot open a crack between them.
+                While joined, the header becomes part of the bar's block: the bar drops its own bottom line
+                and shadow, and the block's line and shadow live at the header's bottom. */}
+            <div
+                data-episodes-bar=""
+                data-joined={joined ? 'true' : undefined}
+                className={cn(
+                    'sticky top-[3.25rem] z-20 -mx-5 space-y-3 px-5 pb-3 pt-3 sm:-mx-8 sm:px-8',
+                    joined
+                        ? 'border-b border-[color:var(--chrome-line)] bg-card shadow-[0_10px_24px_-12px_rgba(0,0,0,0.45)]'
+                        : 'border-b border-border/50 bg-card',
+                )}
+            >
+                <div className="flex items-center justify-between gap-3">
+                    <h3 className={cn('flex items-center gap-2 text-xs font-bold uppercase tracking-widest', joined ? 'text-foreground/80' : 'text-muted-foreground/80')}>
+                        <Tv className="h-3.5 w-3.5 text-primary" />
+                        Episodes
+                    </h3>
+                    {!compactPicker && selectedSeason !== null && (() => {
+                        const s = activeSeasons.find(x => x.seasonNumber === selectedSeason)
+                        return s ? (
+                            <span className={cn('text-[11px] font-medium', joined ? 'text-foreground/70' : 'text-muted-foreground/60')}>
+                                {s.episodeCount} episode{s.episodeCount === 1 ? '' : 's'}
+                                {s.airDate ? ` \u00b7 ${new Date(s.airDate).getFullYear()}` : ''}
+                            </span>
+                        ) : null
+                    })()}
+                </div>
 
-            <div className="scrollbar-hide -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
-                {activeSeasons.map(s => {
-                    const isActive = s.seasonNumber === selectedSeason
-                    return (
-                        <button
-                            key={s.seasonNumber}
-                            type="button"
-                            data-theme-part="tab"
-                            data-state={isActive ? 'active' : 'inactive'}
-                            onClick={() => setSelectedSeason(s.seasonNumber)}
-                            className={cn(
-                                'shrink-0 rounded-full px-4 py-2 text-xs font-bold transition-all active:scale-95',
-                                isActive
-                                    ? (isLight ? 'bg-primary text-primary-foreground shadow' : 'bg-white text-black shadow')
-                                    : (isLight ? 'bg-muted/50 text-muted-foreground hover:bg-muted' : 'bg-white/10 text-white/80 hover:bg-white/20')
-                            )}
-                        >
-                            {s.seasonNumber === 0 ? 'Specials' : `S${s.seasonNumber}`}
-                        </button>
-                    )
-                })}
+                {compactPicker ? (
+                    <SeasonControl
+                        seasons={activeSeasons}
+                        selected={selectedSeason}
+                        onSelect={setSelectedSeason}
+                        watchedSeasons={watchedSeasonSet}
+                        isLight={isLight}
+                    />
+                ) : (
+                    <div ref={pillsRowRef} className="scrollbar-hide -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
+                        {activeSeasons.map(s => {
+                            const isActive = s.seasonNumber === selectedSeason
+                            return (
+                                <button
+                                    key={s.seasonNumber}
+                                    type="button"
+                                    data-theme-part="tab"
+                                    data-season-pill={s.seasonNumber}
+                                    data-state={isActive ? 'active' : 'inactive'}
+                                    onClick={() => setSelectedSeason(s.seasonNumber)}
+                                    className={cn(
+                                        'shrink-0 rounded-full px-4 py-2 text-xs font-bold transition-all active:scale-95',
+                                        isActive
+                                            ? (isLight ? 'bg-primary text-primary-foreground shadow' : 'bg-white text-black shadow')
+                                            : (isLight ? 'bg-muted/50 text-muted-foreground hover:bg-muted' : 'bg-white/10 text-white/80 hover:bg-white/20')
+                                    )}
+                                >
+                                    {s.seasonNumber === 0 ? 'Specials' : `S${s.seasonNumber}`}
+                                </button>
+                            )
+                        })}
+                    </div>
+                )}
             </div>
 
             <div className="space-y-1.5">
@@ -321,13 +367,11 @@ export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watc
                     </p>
                 ) : (
                     activeEpisodes.map(ep => {
-                        // Selection keeps the union (highlighted episode OR actually watched):
-                        // the active/played row stays visually selected, while the watched
-                        // marker (`data-watched`, Check icon) is reserved for episodes with
-                        // real completion evidence — partial history never gets it.
-                        const actuallyWatched = selectedSeason !== null && watchedBySeason.get(selectedSeason)?.has(ep.episodeNumber) === true
-                        const isWatched = (highlight !== null && highlight.season === selectedSeason && highlight.episode === ep.episodeNumber)
-                            || actuallyWatched
+                        // Selection (the active item's episode) and watched (real completion
+                        // evidence) are independent states with separate treatments, so a
+                        // selected row never reads as watched and a row can show both.
+                        const isWatched = selectedSeason !== null && watchedBySeason.get(selectedSeason)?.has(ep.episodeNumber) === true
+                        const isSelected = highlight !== null && highlight.season === selectedSeason && highlight.episode === ep.episodeNumber
                         // Who actually watched this episode (any account in the household).
                         // Informational only: the stack is plain spans with a shared
                         // title/aria label, so nothing interactive nests inside the row
@@ -341,13 +385,14 @@ export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watc
                                 key={ep.episodeNumber}
                                 type="button"
                                 data-theme-part="nav-item"
-                                data-state={isWatched ? 'active' : 'inactive'}
-                                data-watched={actuallyWatched ? 'true' : 'false'}
+                                data-state={isSelected ? 'active' : 'inactive'}
+                                data-watched={isWatched ? 'true' : 'false'}
+                                aria-current={isSelected ? 'true' : undefined}
                                 onClick={() => handleEpisodeClick(ep)}
                                 className={cn(
                                     'group flex w-full items-center gap-3 rounded-xl border p-2 text-left transition-all',
-                                    isWatched
-                                        ? 'border-primary/60 bg-primary/10 shadow-sm'
+                                    isSelected
+                                        ? 'border-primary bg-primary/10 shadow-sm ring-2 ring-primary/40'
                                         : 'border-border/40 bg-muted/20 hover:border-border hover:bg-muted/40'
                                 )}
                             >
@@ -357,31 +402,38 @@ export function SeasonBrowser({ seriesTmdbId, activeItem, isLight, loading, watc
                                     ) : null}
                                     <span className={cn(
                                         'absolute left-1 top-1 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none',
-                                        isWatched
+                                        isSelected
                                             ? 'bg-primary text-primary-foreground'
                                             : 'bg-black/70 text-white'
                                     )}>
                                         E{ep.episodeNumber}
                                     </span>
                                     {isWatched && (
-                                        <span className={cn(
-                                            'absolute bottom-1 right-1 flex h-4 w-4 items-center justify-center rounded-full text-primary-foreground',
-                                            actuallyWatched ? 'bg-primary' : 'bg-primary/70',
-                                        )}>
-                                            {actuallyWatched
-                                                ? <Check className="h-2.5 w-2.5" strokeWidth={3} />
-                                                : <Play className="h-2.5 w-2.5 fill-current" />}
+                                        <span aria-hidden="true" className="absolute bottom-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-success text-success-foreground">
+                                            <Check className="h-2.5 w-2.5" strokeWidth={3} />
                                         </span>
                                     )}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                     <p className={cn(
                                         'line-clamp-1 text-xs font-bold leading-tight sm:text-sm',
-                                        isWatched ? 'text-primary' : 'text-foreground/90'
+                                        isSelected ? 'text-primary' : 'text-foreground/90'
                                     )}>
                                         {ep.name}
                                     </p>
                                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground/70">
+                                        {isSelected && (
+                                            <span data-episode-state="current" className="inline-flex items-center gap-0.5 font-semibold text-primary">
+                                                <Play className="h-3 w-3 fill-current" />
+                                                Current
+                                            </span>
+                                        )}
+                                        {isWatched && (
+                                            <span data-episode-state="watched" className="inline-flex items-center gap-0.5 font-semibold text-success">
+                                                <Check className="h-3 w-3" strokeWidth={3} />
+                                                Watched
+                                            </span>
+                                        )}
                                         {ep.airDate && (
                                             <span className="inline-flex items-center gap-0.5">
                                                 <Calendar className="h-3 w-3" />

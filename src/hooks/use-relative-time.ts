@@ -1,22 +1,8 @@
 import { useEffect, useState } from 'react'
+import { createSharedTicker } from '@/lib/shared-ticker'
 
 /** Shared 60s ticker so every relative-time label re-renders off one interval, not N. */
-const subscribers = new Set<() => void>()
-let intervalId: ReturnType<typeof setInterval> | null = null
-
-const ensureTicker = () => {
-    if (intervalId !== null) return
-    intervalId = setInterval(() => {
-        for (const fn of subscribers) fn()
-    }, 60_000)
-}
-
-const teardownTickerIfIdle = () => {
-    if (subscribers.size === 0 && intervalId !== null) {
-        clearInterval(intervalId)
-        intervalId = null
-    }
-}
+const ticker = createSharedTicker(60_000)
 
 export const formatRelative = (input: number | Date | null | undefined): string | null => {
     if (input === null || input === undefined) return null
@@ -41,15 +27,19 @@ export const formatRelative = (input: number | Date | null | undefined): string 
 export function useRelativeTime(): (input: number | Date | null | undefined) => string | null {
     const [, setTick] = useState(0)
 
-    useEffect(() => {
-        const onTick = () => setTick(t => (t + 1) % 1_000_000)
-        subscribers.add(onTick)
-        ensureTicker()
-        return () => {
-            subscribers.delete(onTick)
-            teardownTickerIfIdle()
-        }
-    }, [])
+    useEffect(() => ticker.subscribe(() => setTick(t => (t + 1) % 1_000_000)), [])
 
     return formatRelative
+}
+
+/** Current time, refreshed on the shared minute ticker so time-derived UI never freezes. */
+export function useNow(): number {
+    const [now, setNow] = useState(() => Date.now())
+
+    useEffect(() => {
+        setNow(Date.now())
+        return ticker.subscribe(() => setNow(Date.now()))
+    }, [])
+
+    return now
 }

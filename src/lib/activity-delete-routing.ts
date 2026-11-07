@@ -22,3 +22,8 @@ export function isBareAnchoredEpisode(row: LibraryItem | undefined, targetUnique
     if (!row || !targetUniqueId) return false
     return !(row.state?.watched || '').trim() && row.state?.video_id === targetUniqueId
 }
+
+// The retry prompt is only honest while an entry is still kept because its remote delete failed.
+export function hasPendingRemoteDelete(outcome: { failed: boolean; keptIds: ReadonlySet<string> }): boolean {
+    return outcome.failed && outcome.keptIds.size > 0
+}

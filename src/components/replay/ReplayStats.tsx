@@ -4,12 +4,13 @@ import { ReplayData } from '@/types/ReplayTypes'
 
 interface ReplayStatsProps {
     data: ReplayData
+    estimatedHours?: number
 }
 
-export function ReplayStats({ data }: ReplayStatsProps) {
+export function ReplayStats({ data, estimatedHours = 0 }: ReplayStatsProps) {
     const stats = [
         { label: 'Titles Watched', value: data.totalTitles, sub: `${data.totalUniqueDiscoveries || 0} Total Discoveries` },
-        { label: 'Hours Streamed', value: data.totalHours, sub: 'Days equivalent: ' + Math.floor(data.totalHours / 24) },
+        { label: 'Hours Streamed', value: data.totalHours, sub: 'Days equivalent: ' + Math.floor(data.totalHours / 24) + (estimatedHours > 0 ? ` · ${estimatedHours.toLocaleString()} h estimated` : '') },
         { label: 'Longest Binge', value: data.longestStreak, sub: 'Consecutive day streak' },
         { label: 'Monthly Avg', value: data.avgTitlesPerMonth, sub: 'Steady engagement' }
     ]

@@ -8,6 +8,7 @@ import { Tooltip } from "@/components/ui/tooltip"
 import { FailoverEmptyState } from "@/components/common/PageEmptyStates"
 import { useHistoryStore } from "@/store/historyStore"
 import { useFailoverStore } from "@/store/failoverStore"
+import { toast } from "@/hooks/use-toast"
 import type { AddonDescriptor } from "@/types/addon"
 import { identifyAddon } from "@/lib/addon-identifier"
 import { normalizeAddonUrl } from "@/lib/utils"
@@ -72,8 +73,10 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
     const handleClearLogs = async () => {
         setIsClearing(true)
         try {
-            await clearLogs()
+            await clearLogs(accountId)
             setShowClearConfirm(false)
+        } catch {
+            toast({ variant: 'destructive', title: 'Clear Failed', description: 'Could not clear history for this account.' })
         } finally {
             setIsClearing(false)
         }
@@ -118,8 +121,8 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
                     <h3 className="text-lg font-bold">Event Log</h3>
                     <p className="text-sm text-foreground/60">Recent autopilot and recovery actions.</p>
                 </div>
-                <Button size="sm" variant="outline" onClick={() => setShowClearConfirm(true)} disabled={isClearing}>
-                    {isClearing ? 'Clearing...' : 'Clear Log'}
+                <Button size="sm" variant="outline" className="min-h-11 sm:min-h-0 shrink-0" onClick={() => setShowClearConfirm(true)} disabled={isClearing}>
+                    {isClearing ? 'Clearing...' : 'Clear history'}
                 </Button>
             </div>
             <div className="space-y-3">
@@ -218,9 +221,9 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
                 if (!open && isClearing) return
                 setShowClearConfirm(open)
             }}
-            title="Clear Event Log?"
-            description="This will permanently remove saved autopilot history. This cannot be undone."
-            confirmText="Clear Log"
+            title="Clear history?"
+            description="Removes Autopilot events for this account. Other accounts are not affected."
+            confirmText="Clear history"
             isDestructive
             isLoading={isClearing}
             onConfirm={() => { void handleClearLogs() }}

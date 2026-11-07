@@ -1,12 +1,12 @@
 import { motion } from 'framer-motion'
-import { ReplayData, RankedTitle } from '@/types/ReplayTypes'
+import { ReplayData } from '@/types/ReplayTypes'
 import { useTheme } from '@/contexts/ThemeContext'
 import { useReplayDisplayMeta } from '@/hooks/useReplayDisplayMeta'
 import { Poster } from '@/components/common/Poster'
 import { useState } from 'react'
 import { Link2, Check } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
-import { deflateSync, strToU8 } from 'fflate'
+import { buildReplayShareUrl } from '@/lib/replay-share-codec'
 
 interface ReplayShareCardProps {
     data: ReplayData
@@ -14,85 +14,13 @@ interface ReplayShareCardProps {
     hideButtons?: boolean
 }
 
-function ShareButtons({ data, userName }: { data: ReplayData; userName?: string }) {
+function ShareButtons({ data }: { data: ReplayData }) {
     const [copied, setCopied] = useState(false)
     const { toast } = useToast()
 
     const handleCopyLink = async () => {
         try {
-            const titlePool: (string | number)[][] = []
-            const titleIdxMap = new Map<string, number>()
-
-            const getTitleIdx = (t: RankedTitle) => {
-                if (!t || !t.itemId) return -1
-                if (titleIdxMap.has(t.itemId)) return titleIdxMap.get(t.itemId)
-                const idx = titlePool.length
-                titlePool.push([
-                    t.itemId.replace(/^tt/, ''),
-                    t.name,
-                    t.type === 'series' ? 1 : 0
-                ])
-                titleIdxMap.set(t.itemId, idx)
-                return idx
-            }
-
-            const payload = [
-                6, // Universal Payload
-                data.year,
-                userName,
-                data.totalTitles,
-                Math.round(data.totalHours),
-                data.totalGenres,
-                data.longestStreak,
-                Math.round(data.avgTitlesPerMonth),
-                Math.round(data.discoveryPercentage),
-                data.totalUniqueDiscoveries,
-                data.persona,
-                data.personaDescription,
-                titlePool,
-                data.topTitles.slice(0, 10).map(t => [getTitleIdx(t), Math.round(t.totalHours), t.watchCount]),
-                (data.discoveries || []).slice(0, 10).map(getTitleIdx),
-                (data.marathonTitles || []).slice(0, 10).map(getTitleIdx),
-                (data.hiddenGems || []).slice(0, 10).map(getTitleIdx),
-                data.topGenres.slice(0, 10).map(g => [g.genre, g.count, Math.round(g.percentage), g.color]),
-                (data.heroPosterArt || []).filter(Boolean).slice(0, 24).map(url => {
-                    const m = url.match(/tt(\d+)/)
-                    return m ? m[1] : null
-                }).filter(Boolean),
-                data.monthlyBreakdown.map(m => [
-                    m.totalTitles,
-                    Math.round(m.totalHours),
-                    (m.top3Titles || []).map(getTitleIdx).filter(idx => idx !== -1),
-                    m.isHighActivity ? 1 : 0
-                ]),
-                data.milestones.map(m => [m.unlocked ? 1 : 0, Math.round(m.value)]),
-                data.hourlyDistribution.map(h => [Math.round(h.percentage), h.count]),
-                data.dailyDistribution.map(d => [Math.round(d.percentage), Math.round(d.count), Math.round(d.hours)]),
-                data.yearOverYear ? [
-                    data.yearOverYear.prevYear,
-                    data.yearOverYear.currentYear,
-                    data.yearOverYear.titlesDelta,
-                    Math.round(data.yearOverYear.hoursDelta),
-                    Math.round(data.yearOverYear.loyaltyDelta),
-                    data.yearOverYear.streakDelta,
-                    data.yearOverYear.prevTitles,
-                    Math.round(data.yearOverYear.prevHours),
-                    data.yearOverYear.currentTitles,
-                    Math.round(data.yearOverYear.currentHours)
-                ] : null,
-                data.peakHour,
-                data.peakDay
-            ]
-
-            const compressed = deflateSync(strToU8(JSON.stringify(payload)), { level: 9 })
-            let binary = ''
-            for (let i = 0; i < compressed.length; i++) binary += String.fromCharCode(compressed[i])
-            const token = btoa(binary)
-                .replace(/\+/g, '-')
-                .replace(/\//g, '_')
-                .replace(/=/g, '')
-
-            await navigator.clipboard.writeText(`${window.location.origin}/replay/share/${token}`)
+            await navigator.clipboard.writeText(buildReplayShareUrl(window.location.origin, data))
             setCopied(true)
             toast({ title: 'Link copied', description: 'Share your Replay with anyone' })
             setTimeout(() => setCopied(false), 2500)
@@ -105,6 +33,7 @@ function ShareButtons({ data, userName }: { data: ReplayData; userName?: string 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', marginTop: '12px' }}>
             <button
+                type="button"
                 data-theme-part="button"
                 onClick={handleCopyLink}
                 style={{
@@ -200,7 +129,7 @@ export function ReplayShareCard({ data, userName, hideButtons }: ReplayShareCard
                     </div>
                 </div>
 
-                {!hideButtons && <ShareButtons data={data} userName={userName} />}
+                {!hideButtons && <ShareButtons data={data} />}
             </div>
         </section>
     )

@@ -1,7 +1,10 @@
 import { memo } from 'react'
+import { useUIStore } from '@/store/uiStore'
+import { maskedInitial } from '@/lib/utils'
 import type { RailWatcher } from '@/components/ui/content-rail'
 
 export const WatcherBadges = memo(function WatcherBadges({ watchers }: { watchers: RailWatcher[] }) {
+    const privacyLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
     if (!watchers || watchers.length === 0) return null
     return (
         <div className="absolute bottom-2 right-2 z-10 flex items-center -space-x-1.5">
@@ -12,7 +15,7 @@ export const WatcherBadges = memo(function WatcherBadges({ watchers }: { watcher
                     ) : w.emoji ? (
                         <span className="text-[9px]">{w.emoji}</span>
                     ) : (
-                        <span className="text-[8px] font-bold text-muted-foreground">{(w.name.charAt(0) || '?').toUpperCase()}</span>
+                        <span className="text-[8px] font-bold text-muted-foreground">{maskedInitial(w.name, privacyLevel) || '?'}</span>
                     )}
                 </div>
             ))}

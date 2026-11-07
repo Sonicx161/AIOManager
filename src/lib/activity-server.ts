@@ -1,6 +1,7 @@
 import { useSyncStore, learnServerCredentialedAccounts } from '@/store/syncStore'
+import { syncUploadTimeoutMs } from '@/lib/api-resilience'
 import { getDeviceAwareAuthHeaders } from '@/lib/device-session'
-import { useWatchEventStore, type ServerActivityEvent } from '@/store/watchEventStore'
+import type { ServerActivityEvent } from '@/store/watchEventStore'
 import { takePendingStremioRepoints, clearPendingStremioRepoint, convertPendingLoginsRemovedToRepoint } from '@/lib/stremio-repoint'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 import { useAuthStore } from '@/store/authStore'
@@ -77,6 +78,13 @@ function writeActivityCursor(ts: number) {
     try { localStorage.setItem(ACTIVITY_CURSOR_KEY, JSON.stringify({ ts, at: Date.now() })) } catch {}
 }
 
+// The watch-event store is only needed once server events actually merge; load it
+// lazily so it stays out of the boot chunk graph.
+async function mergeServerEvents(batch: ServerActivityEvent[]): Promise<void> {
+    const { useWatchEventStore } = await import('@/store/watchEventStore')
+    useWatchEventStore.getState().mergeServerEvents(batch)
+}
+
 export async function fetchAndMergeServerEvents(): Promise<number> {
     const { auth, serverUrl } = useSyncStore.getState()
     if (!auth.isAuthenticated) return 0
@@ -116,7 +124,7 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
             for (const e of events) if (e.timestamp > maxTs) maxTs = e.timestamp
 
             if (batch.length >= MERGE_FLUSH_LIMIT) {
-                useWatchEventStore.getState().mergeServerEvents(batch)
+                await mergeServerEvents(batch)
                 batch.length = 0
             }
 
@@ -127,7 +135,7 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
         }
     }
 
-    if (batch.length > 0) useWatchEventStore.getState().mergeServerEvents(batch)
+    if (batch.length > 0) await mergeServerEvents(batch)
     if (pullComplete && maxTs > 0) writeActivityCursor(maxTs)
 
     return totalMerged
@@ -246,12 +254,12 @@ export async function syncCredentialsToServer(): Promise<number> {
         return Promise.all(secondaries.map(async c => {
             try {
                 const plainKey = await getCachedAuthKey(c.credentials.authKey, encryptionKey)
-                if (plainKey) return { accountId: a.id, connectionId: c.id, authKey: plainKey }
+                if (plainKey) return { accountId: a.id, connectionId: c.id, authKey: plainKey, ...(c.generation ? { generation: c.generation } : {}) }
             } catch { /* unreadable secondary key: not registered this round, still live */ }
             return null
         }))
     }))
-    const connectionKeys = connectionResults.flat().filter((r): r is { accountId: string; connectionId: string; authKey: string } => r !== null)
+    const connectionKeys = connectionResults.flat().filter((r): r is { accountId: string; connectionId: string; authKey: string; generation?: string } => r !== null)
 
     // Deliberate canonical transitions recorded by connectionStore (re-point migration,
     // last-login removal). Attached to this one sync; a failed post leaves them armed,
@@ -278,20 +286,21 @@ export async function syncCredentialsToServer(): Promise<number> {
         // server, vault key or any stremio identity fact changed during the decrypts —
         // posting stale keys under a moved context could clobber fresher state.
         if (!ownershipValid()) return 0
+        const credentialBody = JSON.stringify({
+            accounts: authKeys,
+            connections: connectionKeys,
+            liveConnectionIds,
+            removedStremioLogins,
+            allAccountIds: accounts.map(a => a.id),
+        })
         const res = await fetchWithTimeout(`${apiPath}/credentials/sync`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 ...authHeaders,
             },
-            body: JSON.stringify({
-                accounts: authKeys,
-                connections: connectionKeys,
-                liveConnectionIds,
-                removedStremioLogins,
-                allAccountIds: accounts.map(a => a.id),
-            }),
-        })
+            body: credentialBody,
+        }, syncUploadTimeoutMs(credentialBody.length))
         if (!res.ok) return 0
         const data = await res.json()
         // Publish side effects (learned accounts, consumed transition notes) only while

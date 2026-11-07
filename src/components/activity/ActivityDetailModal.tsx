@@ -1,28 +1,34 @@
-import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
+import { useEffect, useState, useRef, useMemo, useCallback, type CSSProperties } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { toast } from '@/hooks/use-toast'
 import { useTheme } from '@/contexts/ThemeContext'
 
 import { Skeleton } from '@/components/ui/skeleton'
-import { Poster } from '@/components/common/Poster'
+import { Poster, fetchTmdbArtworkByTitle } from '@/components/common/Poster'
+import { detailArtwork } from '@/lib/activity-artwork'
 import { fetchCinemetaDetail, formatSavedEpisodeRanges, type CinemetaMeta, type CinemetaCastMember, type CinemetaReview } from '@/lib/activity-utils'
 import { crossLinkWatcherIndex, watcherMatchesItem, type WatcherItemIdentity } from '@/lib/watcher-identity'
 import { resolveTrailerAsync, type TrailerResult } from '@/lib/trailer-resolver'
-import { fetchTmdbDetailsAsMeta, fetchTmdbImdbId, proxyFetch, fetchSeasonEpisodes, fetchSeasonsList, pickTmdbIdFromFind, type TmdbFindPayload } from '@/api/metadata/adapters/tmdb'
+import { fetchTmdbDetailsAsMeta, fetchTmdbImdbId, proxyFetch, fetchSeasonEpisodes, fetchSeasonsList, pickTmdbIdFromFind, searchCinemeta, type TmdbFindPayload } from '@/api/metadata/adapters/tmdb'
 import { traceAsync } from '@/api/metadata/adapters/shared-fetch'
 import { addToWatchlist, removeFromWatchlist, getWatchlist } from '@/lib/watchlist'
 import { getPmdbRating } from '@/api/metadata/adapters/pmdb'
 import { apiGet } from '@/lib/http-client'
 import { cn, openStremioDetail } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
+import { PinnedBarMaterial } from '@/components/activity/detail/bar-material'
+import { dominantColorFromImageUrl, deriveArtworkChrome, rgbCss, themeSurfaceColors, type ArtworkChrome } from '@/lib/artwork-color'
+import { DialogBack, DialogAltHistory } from '@/components/ui/dialog'
 import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { maskedDisplayName } from '@/components/common/AccountSwitcher'
-import { useWatchHistory } from '@/hooks/useWatchHistory'
+import { useWatchHistory, type HistoryEntry } from '@/hooks/useWatchHistory'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
+import { pickModalHistory, shouldDeriveModalHistory } from '@/lib/activity-detail-history'
 import { buildEpisodeWatcherIndex } from '@/lib/episode-watchers'
-import { Star, Clock, Calendar, Play, ExternalLink, ChevronDown, ChevronUp, Film, Clapperboard, ArrowLeft, User, ChevronLeft, ChevronRight, Tv, Sparkles, Languages, Building2, Layers, Users } from 'lucide-react'
+import { Star, Clock, Calendar, Play, ExternalLink, ChevronDown, ChevronUp, Film, Clapperboard, ArrowLeft, ArrowRight, User, ChevronLeft, ChevronRight, Tv, Sparkles, Languages, Building2, Layers, Users } from 'lucide-react'
 import { RatingBadge, type ProviderRating } from '@/components/activity/detail/RatingBadge'
 import { fetchAdditionalRatings, mergeRatingsKeepExisting } from '@/lib/ratings'
 import { CastInitials } from '@/components/activity/detail/CastInitials'
@@ -33,6 +39,7 @@ import { FilmPosterCard } from '@/components/activity/detail/FilmPosterCard'
 import { CastSection } from '@/components/activity/detail/CastSection'
 import { SeasonBrowser } from '@/components/activity/detail/SeasonBrowser'
 import { EpisodeDetailPage } from '@/components/activity/detail/EpisodeDetailPage'
+import { heroCollapseState, type HeroCollapseGeometry } from '@/components/activity/detail/hero-collapse'
 import type { RailWatcher } from '@/components/ui/content-rail'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -46,6 +53,8 @@ interface ActivityDetailModalProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     item: DetailItem | null
+    /** The caller's unscoped watch history; when omitted the modal derives its own. */
+    watchHistory?: HistoryEntry[]
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -216,7 +225,6 @@ export type NavEntry =
     | {
         kind: 'account'
         accountId: string
-        accountName: string
     }
     | {
         kind: 'episode'
@@ -470,10 +478,16 @@ async function fetchPersonFilmography(
     return ensureCurrentFilm({ person: { name: personName }, movies: [], series: [], anime: [] })
 }
 
-export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetailModalProps) {
+export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: providedWatchHistory }: ActivityDetailModalProps) {
     const { isLight } = useTheme()
     const [activeItem, setActiveItem] = useState<DetailItem | null>(item)
     const [meta, setMeta] = useState<CinemetaMeta | null>(null)
+    const [resolvedImdbId, setResolvedImdbId] = useState<string | null>(null)
+    const [heroAttempt, setHeroAttempt] = useState(0)
+    const [titleBackdrop, setTitleBackdrop] = useState<string | undefined>()
+    // The hero art fades in only after its bytes decode, so a backdrop landing
+    // mid-animation composes smoothly instead of popping over the black fallback.
+    const [heroReadySrc, setHeroReadySrc] = useState<string | null>(null)
     const [loading, setLoading] = useState(false)
     const [failed, setFailed] = useState(false)
     const [descExpanded, setDescExpanded] = useState(false)
@@ -481,6 +495,22 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
     const [providerRatings, setProviderRatings] = useState<ProviderRating[]>([])
     const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
     const [lightboxZoom, setLightboxZoom] = useState(false)
+    const [barShown, setBarShown] = useState({ title: false, play: false, pinned: false })
+    // True while a sticky section header sits flush under the pinned bar: the two
+    // read as one joined block.
+    const [barJoined, setBarJoined] = useState(false)
+    const joinedRef = useRef(false)
+    const barRef = useRef<HTMLDivElement>(null)
+    const barTitleRef = useRef<HTMLParagraphElement>(null)
+    const heroMediaRef = useRef<HTMLDivElement>(null)
+    const heroTitleRef = useRef<HTMLDivElement>(null)
+    const heroActionsRef = useRef<HTMLDivElement>(null)
+    const barPlayRef = useRef<HTMLButtonElement>(null)
+    const heroPlayRef = useRef<HTMLButtonElement>(null)
+    const barCloseRef = useRef<HTMLButtonElement>(null)
+    // Person branch: same pinned-bar machinery, own hero anchors.
+    const personHeroRef = useRef<HTMLDivElement>(null)
+    const personHeroTitleRef = useRef<HTMLDivElement>(null)
 
     const heroPrimaryBtn = isLight
         ? 'bg-primary text-primary-foreground hover:bg-primary/90'
@@ -495,19 +525,25 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
         ? 'bg-primary text-primary-foreground shadow'
         : 'bg-white text-black shadow'
     const heroTabInactive = isLight
-        ? 'bg-muted/50 text-muted-foreground hover:bg-muted'
+        ? 'bg-muted/50 text-foreground/70 hover:bg-muted'
         : 'bg-white/10 text-white/80 hover:bg-white/20'
+
+    // The hero title scrolls with the content; the large-title bar effect only fades it (--tt-o).
+    const heroTitleFadeStyle: CSSProperties = { opacity: 'var(--tt-o, 1)' }
 
     const scrollGalleryRef = useRef<HTMLDivElement>(null)
     const scrollTrailersRef = useRef<HTMLDivElement>(null)
     const scrollRelatedRef = useRef<HTMLDivElement>(null)
     const trailerSectionRef = useRef<HTMLDivElement>(null)
+    // State-backed refs: the observer must attach whenever these mount, not only on open.
+    const [detailScrollEl, setDetailScrollEl] = useState<HTMLDivElement | null>(null)
     const [watchlistTargets, setWatchlistTargets] = useState<Set<string>>(new Set())
     const [watchlistLoading, setWatchlistLoading] = useState(false)
     const [seriesTmdbId, setSeriesTmdbId] = useState<number | null>(null)
 
-    // Adaptive Navigation Stack
+    // ── Adaptive Navigation Stack ─────────────────────────────────────────────
     const [navStack, setNavStack] = useState<NavEntry[]>([])
+    const [forwardStack, setForwardStack] = useState<NavEntry[]>([])
     const [bioExpanded, setBioExpanded] = useState(false)
 
     // ── URL ↔ navStack sync (deep-link support) ──────────────────────────────
@@ -584,8 +620,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                         seriesPoster: item.poster,
                     })
                 } else if (p.account) {
-                    const acc = useAccountStore.getState().accounts.find(a => a.id === p.account)
-                    rebuilt.push({ kind: 'account', accountId: p.account, accountName: acc?.name || 'Account' })
+                    rebuilt.push({ kind: 'account', accountId: p.account })
                 }
                 const personName = p.person
                 if (personName) {
@@ -598,6 +633,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             } else {
                 setNavStack([{ kind: 'item', item }])
             }
+            setForwardStack([])
             setActiveItem(item)
             setSeriesTmdbId(null)
             setBioExpanded(false)
@@ -689,8 +725,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             top = stack[stack.length - 1]
         }
         if (target.account && top.kind === 'item') {
-            const acc = useAccountStore.getState().accounts.find(a => a.id === target.account)
-            stack.push({ kind: 'account', accountId: target.account, accountName: acc?.name || 'Account' })
+            stack.push({ kind: 'account', accountId: target.account })
             top = stack[stack.length - 1]
         }
         if (target.person && !(top.kind === 'person' && top.name === target.person && !top.loading)) {
@@ -698,6 +733,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             personToFetch = target.person
         }
         setNavStack(stack)
+        setForwardStack([])
         if (personToFetch) {
             const personName = personToFetch
             fetchPersonFilmography(personName, filmographyFallbackFor(baseItem))
@@ -749,6 +785,9 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
         return () => { active = false }
     }, [episodeSeriesTmdbId, episodeSeasonNumber])
 
+    const accounts = useAccountStore(state => state.accounts)
+    const maskedAccountLabel = useMaskedAccountLabel()
+
     const previousTitle = previousEntry
         ? previousEntry.kind === 'item'
             ? previousEntry.item.name || 'Details'
@@ -756,18 +795,145 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                 ? previousEntry.name
                 : previousEntry.kind === 'episode'
                     ? previousEntry.seriesName
-                    : previousEntry.accountName
+                    : maskedAccountLabel(accounts.find(a => a.id === previousEntry.accountId))
         : ''
 
     const renderItem: DetailItem | null = currentEntry?.kind === 'item' ? currentEntry.item : (activeItem ?? item)
 
-    const accounts = useAccountStore(state => state.accounts)
     // The closed shell still handles navigation and exit animation, but does not
     // need another history derivation or another set of live query observers.
-    const { history: allWatchHistory } = useWatchHistory(undefined, open)
+    const { history: derivedWatchHistory } = useWatchHistory(undefined, shouldDeriveModalHistory(open, providedWatchHistory))
+    const allWatchHistory = pickModalHistory(providedWatchHistory, derivedWatchHistory)
 
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
     const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
+
+    // The lightbox must not reopen on the next title or a reopened modal.
+    useEffect(() => { setLightboxIndex(null); setLightboxZoom(false) }, [open, renderItem?.itemId])
+
+    // Large-title bar: the bar overlays the hero transparently and only fades solid once the
+    // hero's bottom edge passes under it. The hero title scrolls with the content and fades out
+    // as it reaches the bar, then the bar's own title and thumbnail fade in (iOS-style handoff).
+    // Nothing is moved by script, so nothing can lag behind compositor scrolling. Scroll frames
+    // write CSS variables only; React state flips at the thresholds.
+    // Person view: content loads and hydrates in place, so the collapse re-measures
+    // on the loading and biography transitions as well as the item id.
+    const detailContentKey = currentEntry?.kind === 'person'
+        ? `${currentEntry.name}:${currentEntry.loading}:${currentEntry.biography?.length ?? 0}`
+        : renderItem?.itemId
+    useEffect(() => {
+        setBarShown({ title: false, play: false, pinned: false })
+        setBarJoined(false)
+        joinedRef.current = false
+        if (barRef.current) delete barRef.current.dataset.joined
+        const scroller = detailScrollEl
+        const bar = barRef.current
+        // The person filmography view reuses the same bar and handoff: its hero anchors
+        // are the ident row and the large name, and its sticky filter pills join the bar.
+        const isPerson = currentEntry?.kind === 'person'
+        if (!open || (currentEntry?.kind !== 'item' && !isPerson) || !scroller || !bar) return
+        let geo: HeroCollapseGeometry = {
+            barHeight: bar.offsetHeight,
+            barTitleTop: 0,
+            barTitleHeight: 0,
+            heroBottom: 0,
+            heroTitleTop: 0,
+            heroTitleHeight: 0,
+            actionsBottom: Number.POSITIVE_INFINITY,
+        }
+        let frame = 0
+        let shown = { title: false, play: false, pinned: false }
+        const scrollerTop = () => scroller.getBoundingClientRect().top - scroller.scrollTop
+        // Content elements are measured in doc space (stable while only scrollTop changes).
+        const offsetIn = (el: HTMLElement) => el.getBoundingClientRect().top - scrollerTop()
+        // Pinned bar parts never scroll, so their anchor is the offset from the scroller's top
+        // edge at any scroll position; adding scrollTop here would shift the collapse window
+        // whenever a re-measure happens mid-scroll (e.g. switching items in the open sheet).
+        const pinnedTop = (el: HTMLElement) => el.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        const measure = () => {
+            const barTitle = barTitleRef.current
+            const hero = isPerson ? personHeroRef.current : heroMediaRef.current
+            const block = isPerson ? personHeroTitleRef.current : heroTitleRef.current
+            const text = block?.firstElementChild instanceof HTMLElement ? block.firstElementChild : null
+            const actions = isPerson ? null : heroActionsRef.current
+            const textRect = text ? text.getBoundingClientRect() : null
+            geo = {
+                barHeight: bar.offsetHeight,
+                barTitleTop: barTitle ? pinnedTop(barTitle) : 0,
+                barTitleHeight: barTitle ? barTitle.getBoundingClientRect().height : 0,
+                heroBottom: hero ? offsetIn(hero) + hero.getBoundingClientRect().height : 0,
+                heroTitleTop: textRect ? offsetIn(text!) : 0,
+                heroTitleHeight: textRect ? textRect.height : 0,
+                // While loading there is no actions row; Play stays hidden until one exists.
+                actionsBottom: actions ? offsetIn(actions) + actions.getBoundingClientRect().height : Number.POSITIVE_INFINITY,
+            }
+        }
+        const apply = () => {
+            frame = 0
+            const f = heroCollapseState(scroller.scrollTop, geo)
+            bar.style.setProperty('--bar-bg', String(f.bg))
+            bar.style.setProperty('--bar-title', String(f.barTitleOpacity))
+            bar.style.setProperty('--bar-thumb', String(f.thumb))
+            bar.style.setProperty('--bar-play', String(f.play))
+            // A sticky section header pinned right under the bar joins it into one
+            // block: no shadow or line between the two.
+            const stuckHeader = scroller.querySelector<HTMLElement>(isPerson ? '[data-person-pills]' : '[data-episodes-bar]')
+            const joined = !!stuckHeader && stuckHeader.getBoundingClientRect().top - bar.getBoundingClientRect().bottom < 1
+            if ((bar.dataset.joined === 'true') !== joined) bar.dataset.joined = joined ? 'true' : 'false'
+            if (joined !== joinedRef.current) {
+                joinedRef.current = joined
+                setBarJoined(joined)
+            }
+            heroTitleRef.current?.style.setProperty('--tt-o', String(f.heroTitleOpacity))
+            personHeroTitleRef.current?.style.setProperty('--tt-o', String(f.heroTitleOpacity))
+            const next = { title: f.barTitleOpacity > 0.5, play: f.play > 0.5, pinned: f.bg > 0.5 }
+            if (next.title !== shown.title || next.play !== shown.play || next.pinned !== shown.pinned) {
+                if (shown.play && !next.play && document.activeElement === barPlayRef.current) {
+                    (heroPlayRef.current ?? barCloseRef.current)?.focus({ preventScroll: true })
+                }
+                shown = next
+                setBarShown(next)
+            }
+        }
+        const onScroll = () => { if (!frame) frame = requestAnimationFrame(apply) }
+        measure()
+        apply()
+        scroller.addEventListener('scroll', onScroll, { passive: true })
+        const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
+            if (frame) cancelAnimationFrame(frame)
+            measure()
+            apply()
+        })
+        ro?.observe(scroller)
+        if (scroller.firstElementChild) ro?.observe(scroller.firstElementChild)
+        if (heroTitleRef.current) ro?.observe(heroTitleRef.current)
+        if (heroActionsRef.current) ro?.observe(heroActionsRef.current)
+        if (personHeroRef.current) ro?.observe(personHeroRef.current)
+        if (personHeroTitleRef.current) ro?.observe(personHeroTitleRef.current)
+        // The title block has a fixed height: watch the title itself, which grows when a logo
+        // loads and is swapped when metadata swaps the text title for a logo.
+        let observedTitle: Element | null = null
+        const watchTitle = () => {
+            const next = heroTitleRef.current?.firstElementChild ?? null
+            if (next === observedTitle) return
+            if (observedTitle) ro?.unobserve(observedTitle)
+            observedTitle = next
+            if (next) ro?.observe(next)
+        }
+        watchTitle()
+        const mo = typeof MutationObserver === 'undefined' || !heroTitleRef.current ? null : new MutationObserver(() => {
+            watchTitle()
+            measure()
+            apply()
+        })
+        if (heroTitleRef.current) mo?.observe(heroTitleRef.current, { childList: true })
+        return () => {
+            scroller.removeEventListener('scroll', onScroll)
+            ro?.disconnect()
+            mo?.disconnect()
+            if (frame) cancelAnimationFrame(frame)
+        }
+    }, [open, currentEntry?.kind, detailContentKey, detailScrollEl, loading])
 
     const otherWatchers = useMemo(() => {
         if (!renderItem?.itemId) return []
@@ -917,22 +1083,46 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             } else {
                 await traceAsync('watchlist-add', () => addToWatchlist(itemId, itemType, itemName, itemPoster, accountId))
                 setWatchlistTargets(prev => new Set(prev).add(target))
-                toast({ title: 'Added to Watchlist', description: target === '' ? 'Available in your universal catalog' : `Added to ${accounts.find(a => a.id === target)?.name || 'account'} watchlist` })
+                const targetAccount = accounts.find(a => a.id === target)
+                toast({ title: 'Added to Watchlist', description: target === '' ? 'Available in your universal catalog' : `Added to ${maskedAccountLabel(targetAccount)} watchlist` })
             }
         } catch {
             toast({ variant: 'destructive', title: 'Watchlist update failed' })
         } finally {
             setWatchlistLoading(false)
         }
-    }, [renderItem?.itemId, renderItem?.type, renderItem?.name, renderItem?.poster, watchlistTargets, watchlistLoading, accounts])
+    }, [renderItem?.itemId, renderItem?.type, renderItem?.name, renderItem?.poster, watchlistTargets, watchlistLoading, accounts, maskedAccountLabel])
+
+    // ── Back/forward history ─────────────────────────────────────────────────
+    // The stack is bounded (12 like the sheet-history mockup); a back moves the
+    // popped entry onto the forward stack, a new push clears it, and the hero
+    // Back chip keeps its pop-one behaviour through the same handleGoBack.
+    const MAX_NAV_STACK = 12
 
     const handleGoBack = () => {
         if (navStack.length > 1) {
+            setForwardStack(prev => [...prev, navStack[navStack.length - 1]])
             setNavStack(prev => prev.slice(0, -1))
             setBioExpanded(false)
         }
     }
 
+    const handleGoForward = () => {
+        if (forwardStack.length === 0) return
+        const entry = forwardStack[forwardStack.length - 1]
+        setForwardStack(prev => prev.slice(0, -1))
+        setNavStack(prev => [...prev, entry])
+        setBioExpanded(false)
+    }
+
+    const pushNavEntry = useCallback((entry: NavEntry) => {
+        setForwardStack([])
+        setNavStack(prev => (prev.length >= MAX_NAV_STACK ? [...prev.slice(prev.length - MAX_NAV_STACK + 1), entry] : [...prev, entry]))
+    }, [])
+
+    // Alt+Left/Right inside the sheet runs through the shared DialogAltHistory
+    // stack, so the sheet's history participates in the same per-dialog
+    // arbitration as every other sheet (deepest owner, nested dialogs suspend).
     const handleEpisodeClick = useCallback((data: {
         episodeNumber: number
         episodeName: string
@@ -942,7 +1132,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
         seasonNumber: number
         seriesTmdbId: number | null
     }) => {
-        setNavStack(prev => [...prev, {
+        pushNavEntry({
             kind: 'episode',
             seriesName: renderItem?.name || 'Series',
             seriesImdbId: renderItem?.itemId?.startsWith('tt') ? renderItem.itemId : undefined,
@@ -954,13 +1144,13 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             still: data.still,
             seriesTmdbId: data.seriesTmdbId,
             seriesPoster: renderItem?.poster,
-        }])
-    }, [renderItem?.name, renderItem?.poster, renderItem?.itemId])
+        })
+    }, [renderItem?.name, renderItem?.poster, renderItem?.itemId, pushNavEntry])
 
-    const handleAccountClick = useCallback((accountId: string, accountName: string) => {
-        setNavStack(prev => [...prev, { kind: 'account', accountId, accountName }])
+    const handleAccountClick = useCallback((accountId: string) => {
+        pushNavEntry({ kind: 'account', accountId })
         setBioExpanded(false)
-    }, [])
+    }, [pushNavEntry])
 
     const handlePersonClick = useCallback((person: { name: string; photo?: string }, role: string) => {
         const personEntry: NavEntry = {
@@ -975,13 +1165,13 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             activeTab: 'all',
         }
 
-        setNavStack(prev => [...prev, personEntry])
+        pushNavEntry(personEntry)
         setBioExpanded(false)
 
         fetchPersonFilmography(person.name, filmographyFallbackFor(renderItem, role))
             .then(res => applyPersonResult(person.name, res))
             .catch(() => markPersonLoadFailed(person.name))
-    }, [renderItem, applyPersonResult, markPersonLoadFailed])
+    }, [renderItem, applyPersonResult, markPersonLoadFailed, pushNavEntry])
 
     const handleSelectFilmFromFilmography = (film: FilmographyItem) => {
         const newItem: DetailItem = {
@@ -993,7 +1183,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             voteAverage: film.voteAverage,
         }
         setActiveItem(newItem)
-        setNavStack(prev => [...prev, { kind: 'item', item: newItem }])
+        pushNavEntry({ kind: 'item', item: newItem })
     }
 
     const handleSetFilmographyTab = (tab: 'all' | 'movies' | 'series' | 'anime') => {
@@ -1030,6 +1220,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             performance.measure('detail:metadata', 'detail:metadata:start', 'detail:metadata:end')
         }
         setMeta(null)
+        setResolvedImdbId(null)
         setLoading(true)
         setFailed(false)
         setDescExpanded(false)
@@ -1046,6 +1237,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             const result = await traceAsync('tmdb-enrich', () => fetchTmdbDetailsAsMeta(tmdbNumericId, mediaType))
             const m = result.meta
             if (!active || !m) return
+            if (result.imdbId) setResolvedImdbId(previous => previous ?? result.imdbId)
             if (m.imdbRating) {
                 const tmdbScore = parseFloat(m.imdbRating)
                 if (!isNaN(tmdbScore) && tmdbScore > 0 && !ratings.some(r => r.source === 'tmdb')) {
@@ -1104,6 +1296,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                             setTrailer({ youTubeId: result.trailerYouTubeId, source: 'tmdb' })
                         }
                         if (result.imdbId) {
+                            setResolvedImdbId(result.imdbId)
                             if (!result.trailerYouTubeId) {
                                 resolveTrailerAsync({ imdbId: result.imdbId, type: renderItem.type })
                                     .then(res => { if (active) setTrailer(res) })
@@ -1130,6 +1323,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                         const cinemetaId = fallbackImdb || null
 
                         if (cinemetaId && cinemetaId.startsWith('tt')) {
+                            setResolvedImdbId(cinemetaId)
                             const cinemetaResult = await traceAsync('cinemeta-fallback', () => fetchCinemetaDetail(cinemetaId, renderItem.type))
                             if (active && cinemetaResult) {
                                 setMeta(cinemetaResult)
@@ -1149,27 +1343,16 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                             }
                         } else if (renderItem.name) {
                             const searchType = mediaType === 'tv' ? 'series' : 'movie'
-                            const nameQuery = encodeURIComponent(renderItem.name)
-                            const [movieSearch, seriesSearch] = await Promise.all([
-                                fetch(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${nameQuery}.json`).catch(() => null),
-                                fetch(`https://v3-cinemeta.strem.io/catalog/series/top/search=${nameQuery}.json`).catch(() => null),
-                            ])
+                            const metas = await searchCinemeta(renderItem.name, undefined, searchType)
                             if (!active) return
-                            if ((!movieSearch || !movieSearch.ok) && (!seriesSearch || !seriesSearch.ok)) { setFailed(true); return }
-                            const [movieData, seriesData] = await Promise.all([
-                                movieSearch?.ok ? movieSearch.json().catch(() => null) : null,
-                                seriesSearch?.ok ? seriesSearch.json().catch(() => null) : null,
-                            ])
-                            if (!active) return
-                            const movieMetas: Array<{ id?: string; type?: string; name?: string }> = Array.isArray(movieData?.metas) ? movieData.metas : []
-                            const seriesMetas: Array<{ id?: string; type?: string; name?: string }> = Array.isArray(seriesData?.metas) ? seriesData.metas : []
-                            const metas = searchType === 'series' ? [...seriesMetas, ...movieMetas] : [...movieMetas, ...seriesMetas]
-                            const match = metas.find(m =>
-                                m.type === searchType &&
-                                String(m.name || '').toLowerCase() === renderItem.name!.toLowerCase()
-                            ) || metas.find(m => m.type === searchType) || metas[0]
+                            const normalizedName = renderItem.name.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+                            const matches = metas.filter(m => m.type === searchType
+                                && m.name.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '') === normalizedName)
+                            const uniqueMatches = [...new Map(matches.map(match => [match.id, match])).values()]
+                            const match = uniqueMatches.length === 1 ? uniqueMatches[0] : undefined
                             if (!active) return
                             if (match?.id && String(match.id).startsWith('tt')) {
+                                setResolvedImdbId(String(match.id))
                                 const cinemetaResult = await traceAsync('cinemeta-search', () =>
                                     fetchCinemetaDetail(String(match.id), renderItem.type)
                                 )
@@ -1206,18 +1389,26 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
             // Path B: tt* — Cinemeta baseline + TMDB enrichment in parallel
             const cinemetaPromise = traceAsync('cinemeta', () => fetchCinemetaDetail(renderItem.itemId, renderItem.type))
 
-            // Start TMDB lookup in parallel (with auth headers)
-            const tmdbEnrichPromise = proxyFetch<TmdbFindPayload>(
-                `find/${encodeURIComponent(renderItem.itemId)}?external_source=imdb_id`
-            ).then(data => {
-                if (!data || !active) return
-                const preferTv = renderItem.type === 'series' || renderItem.type === 'anime'
-                const picked = pickTmdbIdFromFind(data, preferTv)
-                if (!picked) return
-                if (picked.via !== 'movie') setSeriesTmdbId(picked.tmdbId)
-                return enrichFromTmdb(picked.tmdbId, picked.mediaType)
-            })
-                .catch(() => { })
+            // Start TMDB lookup in parallel (with auth headers). The row's own TMDB id
+            // wins over find-by-IMDb: a stub IMDb id must not pin the artwork to nothing.
+            const preferTv = renderItem.type === 'series' || renderItem.type === 'anime'
+            const rowTmdbId = typeof renderItem.tmdbId === 'number' && renderItem.tmdbId > 0 ? renderItem.tmdbId : undefined
+            const tmdbEnrichPromise = rowTmdbId
+                ? (async () => {
+                    const mediaType = preferTv ? 'tv' as const : 'movie' as const
+                    if (mediaType === 'tv') setSeriesTmdbId(rowTmdbId)
+                    return enrichFromTmdb(rowTmdbId, mediaType)
+                })().catch(() => { })
+                : proxyFetch<TmdbFindPayload>(
+                    `find/${encodeURIComponent(renderItem.itemId)}?external_source=imdb_id`
+                ).then(data => {
+                    if (!data || !active) return
+                    const picked = pickTmdbIdFromFind(data, preferTv)
+                    if (!picked) return
+                    if (picked.via !== 'movie') setSeriesTmdbId(picked.tmdbId)
+                    return enrichFromTmdb(picked.tmdbId, picked.mediaType)
+                })
+                    .catch(() => { })
 
             // Kick off PMDB and additional ratings (MDBList / RT / Metacritic) in parallel
             traceAsync('pmdb', () => getPmdbRatingFromImdb(renderItem.itemId, renderItem.type))
@@ -1311,11 +1502,80 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
     const cast = useMemo(() => getCast(meta), [meta])
     const crew = useMemo(() => getCrew(meta), [meta])
 
+    const artwork = renderItem ? detailArtwork({
+        itemId: renderItem.itemId,
+        itemPoster: renderItem.poster,
+        itemBackdrop: renderItem.backdrop,
+        metaPoster: meta?.poster,
+        metaBackground: meta?.background,
+        resolvedImdbId: resolvedImdbId ?? undefined,
+        tmdbId: renderItem.tmdbId,
+    }) : undefined
+    // Production year from resolved metadata; only a real release year may gate the search.
+    const titleSearchYear = useMemo(() => {
+        const parsed = Number.parseInt(`${meta?.released ?? meta?.year ?? ''}`.slice(0, 4), 10)
+        return Number.isFinite(parsed) && parsed > 1900 ? parsed : undefined
+    }, [meta?.released, meta?.year])
+    // Hero art's own strict last resort: the title search backdrop joins only after
+    // the row backdrop and metadata enrichment (including the row TMDB id) came
+    // back with nothing, and only as the final candidate in the error chain.
+    useEffect(() => {
+        const title = renderItem?.name?.trim()
+        if (!open || !renderItem || !title || loading || meta?.background || renderItem.backdrop) {
+            setTitleBackdrop(undefined)
+            return
+        }
+        let active = true
+        void fetchTmdbArtworkByTitle(title, titleSearchYear, renderItem.type).then(match => {
+            if (active) setTitleBackdrop(match?.backdropUrl)
+        })
+        return () => { active = false }
+    }, [open, renderItem, loading, meta?.background, titleSearchYear])
+    const backgroundCandidates = artwork
+        ? [...artwork.backgroundCandidates, ...(titleBackdrop && !artwork.backgroundCandidates.includes(titleBackdrop) ? [titleBackdrop] : [])]
+        : []
+    const backgroundKey = backgroundCandidates.join('|')
+    // A new candidate list (e.g. the TMDB backdrop landing) restarts the hero chain.
+    useEffect(() => { setHeroAttempt(0) }, [backgroundKey])
+
+    // Artwork colour: the pinned bar tint, Play pill and section accents take the
+    // poster's dominant colour, muted into the card (title contrast kept >= 4.5:1).
+    // No-CORS poster hosts leave the neutral card chrome.
+    const [artworkChrome, setArtworkChrome] = useState<ArtworkChrome | null>(null)
+    const posterUrl = artwork?.posterSrc ?? null
+    // The bar tint follows the CURRENT nav entry only: a person view resolves its own
+    // photo (neutral when there is none) and never keeps the previous entry's poster colour.
+    const personPhotoUrl = currentEntry?.kind === 'person' && currentEntry.photo
+        ? (currentEntry.photo.startsWith('http') ? currentEntry.photo : `${TMDB_PROFILE_BASE}${currentEntry.photo}`)
+        : null
+    const chromeSourceUrl = currentEntry?.kind === 'person' ? personPhotoUrl : posterUrl
+    useEffect(() => {
+        if (!open) { setArtworkChrome(null); return }
+        if (!chromeSourceUrl) { setArtworkChrome(null); return }
+        let active = true
+        void dominantColorFromImageUrl(chromeSourceUrl).then(dominant => {
+            if (!active) return
+            if (!dominant) { setArtworkChrome(null); return }
+            const { card, fg } = themeSurfaceColors()
+            setArtworkChrome(deriveArtworkChrome(dominant, card, fg))
+        })
+        return () => { active = false }
+    }, [open, chromeSourceUrl])
+
+    // Pinned-bar controls: the solid card bar always takes the theme foreground
+    // with its contrasting focus ring.
+    const barControlTone = 'text-foreground focus-visible:ring-ring/60'
+
     if (!renderItem) return null
 
     const title = meta?.name?.trim() || renderItem.name || 'Unknown Title'
-    const posterSrc = meta?.poster || renderItem.poster
-    const background = meta?.background || renderItem.backdrop
+    const { posterSrc, posterItemId, posterTmdbId } = artwork!
+    const background = backgroundCandidates[heroAttempt]
+    const heroReady = !!background && heroReadySrc === background
+    // Artwork-coloured section accent; null keeps the theme's primary.
+    const sectionAccent = artworkChrome ? { color: rgbCss(artworkChrome.accent) } : undefined
+    // Each hero renders the same src twice (glow + image); a failure advances past that candidate once.
+    const advanceHero = () => setHeroAttempt(value => (value === heroAttempt ? value + 1 : value))
     const year = getYear(meta, renderItem)
     const genres = getGenres(meta, renderItem)
     const description = meta?.description?.trim() || renderItem.description?.trim() || ''
@@ -1362,38 +1622,96 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                 )}
                 hideClose
             >
+                <DialogBack active={navStack.length > 1} onBack={handleGoBack} />
+                <DialogAltHistory
+                    active={open && (navStack.length > 1 || forwardStack.length > 0)}
+                    canBack={navStack.length > 1}
+                    canForward={forwardStack.length > 0}
+                    onBack={handleGoBack}
+                    onForward={handleGoForward}
+                />
                 {currentEntry?.kind === 'person' ? (
                     /* ══ PERSON FILMOGRAPHY VIEW (Separated Movies, Series & Anime) ══════════════════ */
-                    <div className="flex h-[92vh] sm:h-[88vh] flex-col overflow-hidden bg-card text-card-foreground">
-                        {/* Person Header */}
-                        <div className={cn('relative shrink-0 border-b border-border/40 px-4 py-4 sm:px-8 sm:py-5', isLight ? 'bg-muted/50 text-foreground' : 'bg-card text-white')}>
-                            {/* Close button — top-right, frosted glass */}
+                    // pt-0.5 keeps scrolled content off the sheet's top edge row, mirroring the title sheet.
+                    <div className="relative flex min-h-0 flex-1 flex-col pt-0.5">
+                        {/* Pinned person bar: the title sheet's machinery (sheet history, iOS handoff, joined pills) */}
+                        <div
+                            ref={barRef}
+                            data-slim-bar=""
+                            data-person-bar=""
+                            className="group/bar pointer-events-none absolute inset-x-0 top-0 z-40 flex h-14 items-center gap-2 pl-2 pr-3 sm:pl-3"
+                            style={{ '--bar-bg': 0, '--bar-title': 0 } as CSSProperties}
+                        >
+                            <PinnedBarMaterial />
+                            {/* Round back/forward pair, reachable at any scroll depth */}
+                            {(navStack.length > 1 || forwardStack.length > 0) && (
+                                <div className="relative flex shrink-0 items-center gap-1">
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        data-bar-back=""
+                                        onClick={handleGoBack}
+                                        disabled={navStack.length <= 1}
+                                        aria-label={previousEntry ? `Back to ${previousTitle}` : 'Back'}
+                                        className={cn('pointer-events-auto relative flex h-11 w-11 items-center justify-center rounded-full transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-35 sm:h-9 sm:w-9', barControlTone)}
+                                    >
+                                        <ArrowLeft className="h-4 w-4" />
+                                        <span className="sr-only">{previousEntry ? `Back to ${previousTitle}` : 'Back'}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        data-bar-forward=""
+                                        onClick={handleGoForward}
+                                        disabled={forwardStack.length === 0}
+                                        aria-label="Forward"
+                                        className={cn('pointer-events-auto relative flex h-11 w-11 items-center justify-center rounded-full transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-35 sm:h-9 sm:w-9', barControlTone)}
+                                    >
+                                        <ArrowRight className="h-4 w-4" />
+                                        <span className="sr-only">Forward</span>
+                                    </button>
+                                </div>
+                            )}
+                            {/* Small photo and name fade in only after the large name fades out */}
+                            <div aria-hidden={!barShown.title} className="relative flex min-w-0 flex-1 items-center gap-2">
+                                <div
+                                    data-bar-photo=""
+                                    className="relative h-7 w-7 shrink-0 overflow-hidden rounded-full bg-muted ring-1 ring-border/40"
+                                    style={{ opacity: 'var(--bar-title)', transform: 'scale(calc(0.85 + 0.15 * var(--bar-title)))' } as CSSProperties}
+                                >
+                                    {currentEntry.photo ? (
+                                        <img
+                                            src={currentEntry.photo.startsWith('http') ? currentEntry.photo : `${TMDB_PROFILE_BASE}${currentEntry.photo}`}
+                                            alt=""
+                                            className="h-full w-full object-cover"
+                                            loading="lazy"
+                                        />
+                                    ) : (
+                                        <CastInitials name={currentEntry.name} />
+                                    )}
+                                </div>
+                                <p ref={barTitleRef} data-bar-title="" className="min-w-0 flex-1 truncate text-xs font-bold text-foreground sm:text-sm" style={{ opacity: 'var(--bar-title)' }}>{currentEntry.name}</p>
+                            </div>
                             <button
+                                ref={barCloseRef}
                                 type="button"
                                 data-theme-part="button"
                                 onClick={() => onOpenChange(false)}
                                 aria-label="Close"
-                                className={cn('absolute right-4 top-4 z-30 flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-md transition-all hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 active:scale-95', heroFrostedBtn)}
+                                className={cn('pointer-events-auto relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full border shadow-md backdrop-blur-sm transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 sm:h-9 sm:w-9', isLight ? 'border-border/60 bg-card/90 text-foreground hover:bg-muted focus-visible:ring-ring/40' : 'border-white/15 bg-black/50 text-white/90 hover:bg-black/75 focus-visible:ring-white/40')}
                             >
                                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                                 </svg>
                                 <span className="sr-only">Close</span>
                             </button>
+                        </div>
 
-                            {previousEntry && (
-                                <button
-                                    type="button"
-                                    data-theme-part="button"
-                                    onClick={handleGoBack}
-                                    className={cn('mb-3 inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-xs font-bold backdrop-blur-md transition-all active:scale-95', heroGhostBtn)}
-                                >
-                                    <ArrowLeft className="h-4 w-4" />
-                                    Back to {previousTitle}
-                                </button>
-                            )}
-
-                            <div className="flex items-start gap-3 sm:gap-6">
+                        <div ref={setDetailScrollEl} className="scrollbar-hide min-h-0 flex-1 overflow-y-auto overscroll-contain" data-detail-scroll="">
+                            <div className="overflow-x-clip">
+                        {/* Person Header scrolls; the bar replaces it once the name fades out */}
+                        <div className={cn('relative px-4 pb-4 pt-14 sm:px-8 sm:pb-5 sm:pt-[60px]', isLight ? 'bg-muted/50 text-foreground' : 'bg-card text-white')}>
+                            <div ref={personHeroRef} className="flex items-start gap-3 sm:gap-6">
                                 {/* Person Avatar */}
                                 <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-full border-2 border-primary/60 bg-muted shadow-2xl sm:h-24 sm:w-24">
                                     {currentEntry.photo ? (
@@ -1413,9 +1731,11 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                             {currentEntry.knownFor || currentEntry.role || 'Filmography'}
                                         </span>
                                     </div>
-                                    <h2 className={cn('mt-1 text-xl font-extrabold sm:text-2xl tracking-tight sm:text-4xl', isLight ? 'text-foreground' : 'text-white')}>
-                                        {currentEntry.name}
-                                    </h2>
+                                    <div ref={personHeroTitleRef}>
+                                        <h2 style={heroTitleFadeStyle} className={cn('mt-1 text-xl font-extrabold sm:text-2xl tracking-tight sm:text-4xl', isLight ? 'text-foreground' : 'text-white')}>
+                                            {currentEntry.name}
+                                        </h2>
+                                    </div>
 
                                     {/* Birth / Age / Place Info */}
                                     {(() => {
@@ -1458,78 +1778,87 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     )}
                                 </div>
                             )}
+                        </div>
 
-                            {/* Category Filter Tabs */}
-                            {!currentEntry.loading && (currentEntry.movies.length > 0 || currentEntry.series.length > 0 || currentEntry.anime.length > 0) && (
-                                <div className="mt-4 flex items-center gap-2 pt-2 border-t border-white/10">
+                        {/* Category Filter Tabs: stick under the pinned bar and join it, like the episodes header */}
+                        {!currentEntry.loading && (currentEntry.movies.length > 0 || currentEntry.series.length > 0 || currentEntry.anime.length > 0) && (
+                            <div
+                                data-person-pills=""
+                                data-joined={barJoined ? 'true' : undefined}
+                                className={cn(
+                                    'sticky top-[3.25rem] z-20 -mx-4 flex items-center gap-2 overflow-x-auto px-4 pb-3 pt-3 scrollbar-hide sm:-mx-6 sm:px-6',
+                                    barJoined
+                                        ? 'border-b border-[color:var(--chrome-line)] bg-card shadow-[0_10px_24px_-12px_rgba(0,0,0,0.45)]'
+                                        : 'border-b border-border/50 bg-card',
+                                )}
+                            >
+                                <button
+                                    type="button"
+                                    data-theme-part="tab"
+                                    data-state={currentEntry.activeTab === 'all' ? 'active' : 'inactive'}
+                                    onClick={() => handleSetFilmographyTab('all')}
+                                    className={cn(
+                                        'flex min-h-[40px] flex-none items-center whitespace-nowrap rounded-full px-4 text-xs font-bold transition-all',
+                                        currentEntry.activeTab === 'all'
+                                            ? heroTabActive
+                                            : heroTabInactive
+                                    )}
+                                >
+                                    All ({currentEntry.movies.length + currentEntry.series.length + currentEntry.anime.length})
+                                </button>
+                                {currentEntry.movies.length > 0 && (
                                     <button
                                         type="button"
                                         data-theme-part="tab"
-                                        data-state={currentEntry.activeTab === 'all' ? 'active' : 'inactive'}
-                                        onClick={() => handleSetFilmographyTab('all')}
+                                        data-state={currentEntry.activeTab === 'movies' ? 'active' : 'inactive'}
+                                        onClick={() => handleSetFilmographyTab('movies')}
                                         className={cn(
-                                            'rounded-full px-4 py-1 text-xs font-bold transition-all',
-                                            currentEntry.activeTab === 'all'
+                                            'flex min-h-[40px] flex-none items-center whitespace-nowrap rounded-full px-4 text-xs font-bold transition-all',
+                                            currentEntry.activeTab === 'movies'
                                                 ? heroTabActive
                                                 : heroTabInactive
                                         )}
                                     >
-                                        All ({currentEntry.movies.length + currentEntry.series.length + currentEntry.anime.length})
+                                        Movies ({currentEntry.movies.length})
                                     </button>
-                                    {currentEntry.movies.length > 0 && (
-                                        <button
-                                            type="button"
-                                            data-theme-part="tab"
-                                            data-state={currentEntry.activeTab === 'movies' ? 'active' : 'inactive'}
-                                            onClick={() => handleSetFilmographyTab('movies')}
-                                            className={cn(
-                                                'rounded-full px-4 py-1 text-xs font-bold transition-all',
-                                                currentEntry.activeTab === 'movies'
-                                                    ? 'bg-white text-black shadow'
-                                                    : 'bg-white/10 text-white/80 hover:bg-white/20'
-                                            )}
-                                        >
-                                            Movies ({currentEntry.movies.length})
-                                        </button>
-                                    )}
-                                    {currentEntry.series.length > 0 && (
-                                        <button
-                                            type="button"
-                                            data-theme-part="tab"
-                                            data-state={currentEntry.activeTab === 'series' ? 'active' : 'inactive'}
-                                            onClick={() => handleSetFilmographyTab('series')}
-                                            className={cn(
-                                                'rounded-full px-4 py-1 text-xs font-bold transition-all',
-                                                currentEntry.activeTab === 'series'
-                                                    ? 'bg-white text-black shadow'
-                                                    : 'bg-white/10 text-white/80 hover:bg-white/20'
-                                            )}
-                                        >
-                                            TV Series ({currentEntry.series.length})
-                                        </button>
-                                    )}
-                                    {currentEntry.anime.length > 0 && (
-                                        <button
-                                            type="button"
-                                            data-theme-part="tab"
-                                            data-state={currentEntry.activeTab === 'anime' ? 'active' : 'inactive'}
-                                            onClick={() => handleSetFilmographyTab('anime')}
-                                            className={cn(
-                                                'rounded-full px-4 py-1 text-xs font-bold transition-all',
-                                                currentEntry.activeTab === 'anime'
-                                                    ? 'bg-white text-black shadow'
-                                                    : 'bg-white/10 text-white/80 hover:bg-white/20'
-                                            )}
-                                        >
-                                            Anime ({currentEntry.anime.length})
-                                        </button>
-                                    )}
-                                </div>
-                            )}
-                        </div>
+                                )}
+                                {currentEntry.series.length > 0 && (
+                                    <button
+                                        type="button"
+                                        data-theme-part="tab"
+                                        data-state={currentEntry.activeTab === 'series' ? 'active' : 'inactive'}
+                                        onClick={() => handleSetFilmographyTab('series')}
+                                        className={cn(
+                                            'flex min-h-[40px] flex-none items-center whitespace-nowrap rounded-full px-4 text-xs font-bold transition-all',
+                                            currentEntry.activeTab === 'series'
+                                                ? heroTabActive
+                                                : heroTabInactive
+                                        )}
+                                    >
+                                        TV Series ({currentEntry.series.length})
+                                    </button>
+                                )}
+                                {currentEntry.anime.length > 0 && (
+                                    <button
+                                        type="button"
+                                        data-theme-part="tab"
+                                        data-state={currentEntry.activeTab === 'anime' ? 'active' : 'inactive'}
+                                        onClick={() => handleSetFilmographyTab('anime')}
+                                        className={cn(
+                                            'flex min-h-[40px] flex-none items-center whitespace-nowrap rounded-full px-4 text-xs font-bold transition-all',
+                                            currentEntry.activeTab === 'anime'
+                                                ? heroTabActive
+                                                : heroTabInactive
+                                        )}
+                                    >
+                                        Anime ({currentEntry.anime.length})
+                                    </button>
+                                )}
+                            </div>
+                        )}
 
                         {/* Filmography Posters Grid Body */}
-                        <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6 space-y-6 sm:space-y-8">
+                        <div className="space-y-6 px-4 py-4 sm:space-y-8 sm:px-6 sm:py-6">
                             {currentEntry.loading ? (
                                 <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
                                     {Array.from({ length: 12 }).map((_, i) => (
@@ -1549,8 +1878,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     {/* ── MOVIES SECTION ───────────────────────────────────── */}
                                     {(currentEntry.activeTab === 'all' || currentEntry.activeTab === 'movies') && currentEntry.movies.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
-                                                <Film className="h-4 w-4 text-primary" />
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                                <Film className="h-4 w-4 text-primary" style={sectionAccent} />
                                                 Movies ({currentEntry.movies.length})
                                             </h3>
                                             <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
@@ -1564,8 +1893,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     {/* ── TV SERIES SECTION ────────────────────────────────── */}
                                     {(currentEntry.activeTab === 'all' || currentEntry.activeTab === 'series') && currentEntry.series.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
-                                                <Clapperboard className="h-4 w-4 text-primary" />
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                                <Clapperboard className="h-4 w-4 text-primary" style={sectionAccent} />
                                                 TV Series ({currentEntry.series.length})
                                             </h3>
                                             <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
@@ -1579,7 +1908,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     {/* ── ANIME SECTION ────────────────────────────────────── */}
                                     {(currentEntry.activeTab === 'all' || currentEntry.activeTab === 'anime') && currentEntry.anime.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
                                                 <Star className="h-4 w-4 text-amber-400" />
                                                 Anime ({currentEntry.anime.length})
                                             </h3>
@@ -1592,6 +1921,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     )}
                                 </>
                             )}
+                        </div>
+                            </div>
                         </div>
                     </div>
                 ) : currentEntry?.kind === 'episode' ? (
@@ -1614,6 +1945,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                         onAccountClick={handleAccountClick}
                         episodeWatchers={seriesEpisodeWatchers}
                         onGoBack={handleGoBack}
+                        onGoForward={handleGoForward}
+                        canForward={forwardStack.length > 0}
                         onClose={() => onOpenChange(false)}
                         onNavigateEpisode={(season, episode) => {
                             const applyNav = (s: number, e: number) => {
@@ -1669,6 +2002,33 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                 <span className="sr-only">Close</span>
                             </button>
 
+                            {/* Round back/forward pair beside the Back chip */}
+                            {(navStack.length > 1 || forwardStack.length > 0) && (
+                                <div className="mb-3 flex items-center gap-1">
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        onClick={handleGoBack}
+                                        disabled={navStack.length <= 1}
+                                        aria-label={previousEntry ? `Back to ${previousTitle}` : 'Back'}
+                                        className="flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-md transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-35"
+                                    >
+                                        <ArrowLeft className="h-4 w-4" />
+                                        <span className="sr-only">{previousEntry ? `Back to ${previousTitle}` : 'Back'}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        onClick={handleGoForward}
+                                        disabled={forwardStack.length === 0}
+                                        aria-label="Forward"
+                                        className="flex h-9 w-9 items-center justify-center rounded-full border shadow-lg backdrop-blur-md transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 disabled:pointer-events-none disabled:opacity-35"
+                                    >
+                                        <ArrowRight className="h-4 w-4" />
+                                        <span className="sr-only">Forward</span>
+                                    </button>
+                                </div>
+                            )}
                             {previousEntry && (
                                 <button
                                     type="button"
@@ -1698,7 +2058,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                         </span>
                                     </div>
                                     <h2 className={cn('mt-1 text-xl font-extrabold sm:text-2xl tracking-tight sm:text-4xl', isLight ? 'text-foreground' : 'text-white')}>
-                                        {currentEntry.accountName}
+                                        {maskedAccountLabel(accounts.find(a => a.id === currentEntry.accountId))}
                                     </h2>
                                     <p className={cn('mt-1 text-xs', isLight ? 'text-muted-foreground/70' : 'text-white/60')}>
                                         {accountFilms ? `${accountFilms.count} ${accountFilms.count === 1 ? 'title' : 'titles'} watched` : 'Loading history...'}
@@ -1717,8 +2077,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                 <>
                                     {accountFilms.movies.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
-                                                <Film className="h-4 w-4 text-primary" />
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                                <Film className="h-4 w-4 text-primary" style={sectionAccent} />
                                                 Movies ({accountFilms.movies.length})
                                             </h3>
                                             <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
@@ -1731,8 +2091,8 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
 
                                     {accountFilms.series.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
-                                                <Clapperboard className="h-4 w-4 text-primary" />
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                                <Clapperboard className="h-4 w-4 text-primary" style={sectionAccent} />
                                                 TV Series ({accountFilms.series.length})
                                             </h3>
                                             <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
@@ -1745,7 +2105,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
 
                                     {accountFilms.anime.length > 0 && (
                                         <div>
-                                            <h3 className="mb-3.5 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
+                                            <h3 className="mb-3.5 flex items-center gap-2 border-b border-[color:var(--chrome-line)] pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground/80">
                                                 <Star className="h-4 w-4 text-amber-400" />
                                                 Anime ({accountFilms.anime.length})
                                             </h3>
@@ -1762,15 +2122,102 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                     </div>
                 ) : (
                     /* ══ MOVIE DETAIL VIEW ══════════════════════════════════════════ */
-                    <>
-                        <div className="relative w-full shrink-0 overflow-hidden bg-black text-white -mb-1 h-[clamp(110px,22vh,200px)] sm:h-[clamp(180px,24vh,380px)] lg:h-[clamp(220px,38vh,380px)]" style={{ transform: 'translateZ(0)' }}>
+                    // pt-0.5 keeps scrolled content off the sheet's top edge row: a centered sheet can sit on a
+                    // half pixel, and the composited scroller then snaps one row above what the pinned bar covers.
+                    <div className="relative flex min-h-0 flex-1 flex-col pt-0.5">
+                        {/* Large-title bar: fades in piece by piece as the hero passes under it */}
+                        <div
+                            ref={barRef}
+                            data-slim-bar=""
+                            className="group/bar pointer-events-none absolute inset-x-0 top-0 z-40 flex h-14 items-center gap-2 pl-2 pr-3 sm:pl-3"
+                            style={{ '--bar-bg': 0, '--bar-title': 0 } as CSSProperties}
+                        >
+                            {/* Overshoots the sheet's top and side edges (the sheet clips it) so no border or fractional display scaling leaves a strip of content above the pinned bar. While a section header is stuck under the bar the two join into one block: the bar's own bottom line, rim and shadow drop out (the header's surface carries them at the block's bottom edge). */}
+                            <PinnedBarMaterial />
+                            {/* Round back/forward pair, reachable at any scroll depth */}
+                            {(navStack.length > 1 || forwardStack.length > 0) && (
+                                <div className="relative flex shrink-0 items-center gap-1">
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        data-bar-back=""
+                                        onClick={handleGoBack}
+                                        disabled={navStack.length <= 1}
+                                        aria-label={previousEntry ? `Back to ${previousTitle}` : 'Back'}
+                                        className={cn('pointer-events-auto relative flex h-11 w-11 items-center justify-center rounded-full transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-35 sm:h-9 sm:w-9', barControlTone)}
+                                    >
+                                        <ArrowLeft className="h-4 w-4" />
+                                        <span className="sr-only">{previousEntry ? `Back to ${previousTitle}` : 'Back'}</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        data-theme-part="button"
+                                        data-bar-forward=""
+                                        onClick={handleGoForward}
+                                        disabled={forwardStack.length === 0}
+                                        aria-label="Forward"
+                                        className={cn('pointer-events-auto relative flex h-11 w-11 items-center justify-center rounded-full transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 disabled:pointer-events-none disabled:opacity-35 sm:h-9 sm:w-9', barControlTone)}
+                                    >
+                                        <ArrowRight className="h-4 w-4" />
+                                        <span className="sr-only">Forward</span>
+                                    </button>
+                                </div>
+                            )}
+                            <div aria-hidden={!barShown.title} className="relative flex min-w-0 flex-1 items-center gap-2">
+                                <div
+                                    data-bar-thumb=""
+                                    className="relative h-10 w-7 shrink-0 overflow-hidden rounded-md bg-muted ring-1 ring-border/40"
+                                    style={{ opacity: 'var(--bar-thumb)', transform: 'scale(calc(0.85 + 0.15 * var(--bar-thumb)))', ...(artworkChrome ? { '--tw-ring-color': `rgb(${artworkChrome.dominant.r} ${artworkChrome.dominant.g} ${artworkChrome.dominant.b} / 0.55)` } : {}) } as CSSProperties}
+                                >
+                                    <Poster src={posterSrc} itemId={posterItemId} tmdbId={posterTmdbId} itemType={renderItem.type} name={renderItem.name} year={titleSearchYear} alt="" className="h-full w-full object-cover" loading="lazy" />
+                                </div>
+                                <p ref={barTitleRef} data-bar-title="" className="min-w-0 flex-1 truncate text-xs font-bold text-foreground sm:text-sm" style={{ opacity: 'var(--bar-title)' }}>{title}</p>
+                            </div>
+                            {isStremioFriendlyType(normalizedType) && (
+                                <button
+                                    ref={barPlayRef}
+                                    type="button"
+                                    data-theme-part="button"
+                                    aria-hidden={!barShown.play}
+                                    disabled={!barShown.play}
+                                    style={{ opacity: 'var(--bar-play)', ...(artworkChrome ? { background: rgbCss(artworkChrome.pill), color: rgbCss(artworkChrome.pillForeground) } : null) }}
+                                    className={cn('relative inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-4 text-xs font-bold shadow-md transition-transform active:scale-95 sm:h-9 sm:px-5', barShown.play && 'pointer-events-auto', !artworkChrome && heroPrimaryBtn)}
+                                    onClick={() => openStremioDetail(renderItem.type, renderItem.itemId)}
+                                >
+                                    <Play className="h-3.5 w-3.5 fill-current" />
+                                    Play
+                                    <span className="sr-only">{title}</span>
+                                </button>
+                            )}
+                            <button
+                                ref={barCloseRef}
+                                type="button"
+                                data-theme-part="button"
+                                onClick={() => onOpenChange(false)}
+                                aria-label="Close"
+                                className={cn('pointer-events-auto relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full border shadow-md backdrop-blur-sm transition-all hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100 focus-visible:outline-none focus-visible:ring-2 sm:h-9 sm:w-9', isLight ? 'border-border/60 bg-card/90 text-foreground hover:bg-muted focus-visible:ring-ring/40' : 'border-white/15 bg-black/50 text-white/90 hover:bg-black/75 focus-visible:ring-white/40')}
+                            >
+                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                                <span className="sr-only">Close</span>
+                            </button>
+                        </div>
+
+                        <div ref={setDetailScrollEl} className="scrollbar-hide min-h-0 flex-1 overflow-y-auto overscroll-contain" data-detail-scroll="">
+                            <div className="overflow-x-clip">
+                                <div ref={heroMediaRef} className="relative w-full overflow-hidden bg-black text-white -mb-1 h-[clamp(110px,22vh,200px)] sm:h-[clamp(180px,24vh,380px)] lg:h-[clamp(220px,38vh,380px)]" style={{ transform: 'translateZ(0)' }}>
                             <div className="absolute inset-0 bg-black" aria-hidden="true" />
                             {background && (
                                 <img
                                     src={background}
                                     alt=""
                                     aria-hidden="true"
-                                    className="absolute inset-0 h-full w-full object-cover filter blur-3xl opacity-40 scale-125"
+                                    onError={advanceHero}
+                                    className={cn(
+                                        'absolute inset-0 h-full w-full object-cover filter blur-3xl scale-125 transition-opacity duration-300 motion-reduce:transition-none',
+                                        heroReady ? 'opacity-40' : 'opacity-0',
+                                    )}
                                 />
                             )}
 
@@ -1783,7 +2230,12 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     aria-hidden="true"
                                     loading="eager"
                                     decoding="async"
-                                    className="absolute inset-0 h-full w-full object-cover opacity-95 transition-opacity duration-300"
+                                    onError={advanceHero}
+                                    onLoad={() => setHeroReadySrc(background)}
+                                    className={cn(
+                                        'media-ring absolute inset-0 h-full w-full object-cover transition-opacity duration-300 motion-reduce:transition-none',
+                                        heroReady ? 'opacity-95' : 'opacity-0',
+                                    )}
                                     style={{
                                         maskImage: 'linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0.9) 70%, rgba(0,0,0,0) 100%)',
                                         WebkitMaskImage: 'linear-gradient(to bottom, rgba(0,0,0,1) 0%, rgba(0,0,0,0.9) 70%, rgba(0,0,0,0) 100%)',
@@ -1796,36 +2248,10 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                             <div className="pointer-events-none absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/50 via-black/15 to-transparent" />
                             <div className="pointer-events-none absolute inset-y-0 left-0 w-3/5 bg-gradient-to-r from-black/60 via-black/20 to-transparent" />
 
-                            {/* Adaptive Back Button — top-left frosted glass */}
-                            {previousEntry && (
-                                <button
-                                    type="button"
-                                    data-theme-part="button"
-                                    onClick={handleGoBack}
-                                    className="absolute left-2 top-2 sm:left-3 sm:top-3 z-30 inline-flex items-center gap-2 rounded-full border border-white/20 bg-black/60 px-3 py-1 sm:px-4 sm:py-1.5 text-xs font-bold text-white shadow-xl backdrop-blur-md transition-all hover:bg-black/80 hover:scale-105 active:scale-95"
-                                >
-                                    <ArrowLeft className="h-4 w-4" />
-                                    Back to {previousTitle}
-                                </button>
-                            )}
-
-                            {/* Close button — top-right, frosted glass */}
-                            <button
-                                type="button"
-                                data-theme-part="button"
-                                onClick={() => onOpenChange(false)}
-                                aria-label="Close"
-                                className="absolute right-3 top-3 z-30 flex h-9 w-9 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white/90 shadow-lg backdrop-blur-sm transition-all hover:bg-black/75 hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
-                            >
-                                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
-                                <span className="sr-only">Close</span>
-                            </button>
                         </div>
 
                         {/* ══ POSTER + TITLE ROW (overlaps hero) ═══════════════════ */}
-                        <div className="relative z-10 -mt-16 shrink-0 px-4 sm:px-8">
+                        <div className="relative -mt-16 px-4 sm:px-8">
                             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-6">
 
                                 {/* Poster — taller on desktop */}
@@ -1835,10 +2261,13 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     ) : (
                                         <Poster
                                             src={posterSrc}
-                                            itemId={renderItem.itemId}
+                                            itemId={posterItemId}
+                                            tmdbId={posterTmdbId}
                                             itemType={renderItem.type}
+                                            name={renderItem.name}
+                                            year={titleSearchYear}
                                             alt={title}
-                                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                                            className="media-ring h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                                             loading="eager"
                                         />
                                     )}
@@ -1856,15 +2285,19 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                         <>
 
                                             {/* Title — HD logo if available, text fallback */}
-                                            <div className="flex h-16 items-end sm:h-24">
+                                            <div ref={heroTitleRef} data-hero-title="" className="flex h-16 items-end sm:h-24">
                                                 {meta?.logo ? (
                                                     <img
                                                         src={meta.logo}
                                                         alt={title}
-                                                        className="max-h-16 w-auto max-w-[90%] object-contain drop-shadow-lg sm:max-h-24"
+                                                        style={heroTitleFadeStyle}
+                                                        className="relative max-h-16 w-auto max-w-[90%] object-contain drop-shadow-lg sm:max-h-24"
                                                     />
                                                 ) : (
-                                                    <h2 className="text-xl font-extrabold sm:text-2xl leading-tight tracking-tight text-white drop-shadow-sm sm:text-4xl">
+                                                    <h2
+                                                        style={heroTitleFadeStyle}
+                                                        className="relative text-xl font-extrabold sm:text-2xl leading-tight tracking-tight text-white drop-shadow-sm sm:text-4xl"
+                                                    >
                                                         {title}
                                                     </h2>
                                                 )}
@@ -1906,12 +2339,14 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                             )}
 
                                             {/* Action buttons row — Authentic Apple TV Action Pills */}
-                                            <div className="mt-4 flex flex-row flex-wrap items-center gap-2 sm:gap-3">
+                                            <div ref={heroActionsRef} className="mt-4 flex flex-row flex-wrap items-center gap-2 sm:gap-3">
                                                 {isStremioFriendlyType(normalizedType) && (
                                                     <button
+                                                        ref={heroPlayRef}
                                                         type="button"
                                                         data-theme-part="button"
-                                                        className={cn('inline-flex h-11 flex-1 justify-center items-center gap-2.5 rounded-full px-7 text-sm font-bold shadow-xl transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 sm:flex-none sm:w-auto sm:justify-start', heroPrimaryBtn)}
+                                                        style={artworkChrome ? { background: rgbCss(artworkChrome.pill), color: rgbCss(artworkChrome.pillForeground) } : undefined}
+                                                        className={cn('inline-flex h-11 flex-1 justify-center items-center gap-2.5 rounded-full px-7 text-sm font-bold shadow-xl transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 sm:flex-none sm:w-auto sm:justify-start', !artworkChrome && heroPrimaryBtn)}
                                                         onClick={() => openStremioDetail(renderItem.type, renderItem.itemId)}
                                                     >
                                                         <Play className="h-4 w-4 fill-current" />
@@ -1943,7 +2378,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                                     <Tooltip key={id} content={maskedName}>
                                                         <button
                                                             type="button"
-                                                            onClick={() => handleAccountClick(id, acc.name)}
+                                                            onClick={() => handleAccountClick(id)}
                                                             className="relative flex h-9 w-9 items-center justify-center rounded-full border-2 border-background bg-card overflow-hidden transition-transform hover:scale-110 hover:z-10"
                                                         >
                                                             <AccountAvatar
@@ -1963,8 +2398,10 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                             </div>
                         </div>
 
-                        {/* ══ SCROLLABLE BODY ════════════════════════════════════════ */}
-                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-5 sm:px-8">
+                            </div>
+
+                            {/* ══ SCROLLABLE BODY ════════════════════════════════════════ */}
+                            <div className="px-5 py-5 sm:px-8">
                             <div className="space-y-6">
 
                                 {/* Loading skeletons */}
@@ -2056,6 +2493,7 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
                                     episodeWatchers={seriesEpisodeWatchers}
                                     isLight={isLight}
                                     loading={loading}
+                                    joined={barJoined}
                                     onEpisodeClick={handleEpisodeClick}
                                 />
 
@@ -2394,8 +2832,9 @@ export function ActivityDetailModal({ open, onOpenChange, item }: ActivityDetail
 
                                 <div className="h-2" />
                             </div>
+                            </div>
                         </div>
-                    </>
+                    </div>
                 )}
             </DialogContent>
 

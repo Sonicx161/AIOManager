@@ -24,12 +24,12 @@ export const FilmPosterCard = memo(function FilmPosterCard({
             onClick={onClick}
             className={className ?? 'group flex flex-col items-center text-center focus:outline-none'}
         >
-            <div className="relative aspect-[2/3] w-full overflow-hidden rounded-xl bg-muted border border-border/40 shadow-sm transition-[transform,opacity,box-shadow] duration-200 group-hover:border-primary/50 group-hover:shadow-lg">
+            <div className="relative aspect-[2/3] w-full overflow-hidden rounded-xl bg-muted border border-[color:var(--chrome-line)] shadow-sm transition-[transform,opacity,box-shadow] duration-200 group-hover:border-primary/50 group-hover:shadow-lg">
                 {film.poster ? (
                     <img
                         src={film.poster}
                         alt={film.title}
-                        className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        className="media-ring h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                         loading="lazy"
                         onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
                     />

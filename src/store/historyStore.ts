@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import localforage from 'localforage'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { resilientFetch } from '@/lib/api-resilience'
 
 const parseSafe = (s: unknown): Record<string, unknown> | undefined => {
@@ -28,8 +28,9 @@ interface HistoryStore {
     loading: boolean
     initialize: () => Promise<void>
     addLog: (log: Omit<HistoryLog, 'id' | 'timestamp'>) => Promise<void>
-    clearLogs: () => Promise<void>
+    clearLogs: (accountId: string) => Promise<void>
 }
+
 
 export const useHistoryStore = create<HistoryStore>((set, get) => ({
     logs: [],
@@ -54,7 +55,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
                     const accountStore = (await import('@/store/accountStore')).useAccountStore.getState()
-                    const syncToken = await deriveSyncToken(auth.password)
+                    const syncToken = await getSyncPasswordHeader(auth)
                     const promiseResults = await Promise.allSettled(
                         accountStore.accounts.map(account =>
                             resilientFetch(`${apiPath}/autopilot/history/${account.id}`, {
@@ -115,32 +116,25 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
         await localforage.setItem(STORAGE_KEY, newLogs)
     },
 
-    clearLogs: async () => {
-        try {
-            const { useSyncStore } = await import('@/store/syncStore')
-            const { auth, serverUrl } = useSyncStore.getState()
+    clearLogs: async (accountId) => {
+        const { useSyncStore } = await import('@/store/syncStore')
+        const { auth, serverUrl } = useSyncStore.getState()
 
-            if (auth.isAuthenticated) {
-                const baseUrl = serverUrl || ''
-                const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-
-                const accountStore = (await import('@/store/accountStore')).useAccountStore.getState()
-                const syncToken = await deriveSyncToken(auth.password)
-                await Promise.allSettled(
-                    accountStore.accounts.map(account =>
-                        resilientFetch(`${apiPath}/autopilot/history/${account.id}`, {
-                            method: 'DELETE',
-                            retries: 1,
-                            headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
-                        }).catch(e => { if (import.meta.env.DEV) console.warn(e) })
-                    )
-                )
-            }
-        } catch (err) {
-            if (import.meta.env.DEV) console.warn('Server log clear failed, clearing locally anyway:', err)
+        if (auth.isAuthenticated) {
+            const baseUrl = serverUrl || ''
+            const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+            const syncToken = await getSyncPasswordHeader(auth)
+            const res = await resilientFetch(`${apiPath}/autopilot/history/${accountId}`, {
+                method: 'DELETE',
+                retries: 1,
+                headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
+            })
+            // Keep the local logs so a failed server delete is not reported as cleared.
+            if (!res.ok) throw new Error(`Server history delete failed (${res.status})`)
         }
 
-        set({ logs: [] })
-        await localforage.setItem(STORAGE_KEY, [])
+        const remainingLogs = get().logs.filter(l => l.accountId !== accountId)
+        set({ logs: remainingLogs })
+        await localforage.setItem(STORAGE_KEY, remainingLogs)
     }
 }))

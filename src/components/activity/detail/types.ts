@@ -15,6 +15,8 @@ export interface DetailItem {
     backdrop?: string
     accountId?: string
     sourceConnectionId?: string
+    /** Row TMDB id (Jellyfin ProviderIds.Tmdb) for last-resort artwork fallback. */
+    tmdbId?: number
     /** Imported saved watch state: no watch dates; episodes are inspectable but not dated. */
     importedSavedState?: boolean
     savedEpisodes?: SavedEpisodesSummary

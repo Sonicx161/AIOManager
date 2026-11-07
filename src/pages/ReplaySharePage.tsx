@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'react-router-dom'
-import { inflateSync, strFromU8 } from 'fflate'
 import { ChevronUp, ChevronDown } from 'lucide-react'
-import { ReplayData } from '@/types/ReplayTypes'
 import { ReplayHero } from '@/components/replay/ReplayHero'
 import { ReplayYearInNumbers } from '@/components/replay/ReplayYearInNumbers'
 import { ReplayStats } from '@/components/replay/ReplayStats'
@@ -12,148 +10,7 @@ import { ReplayMilestones } from '@/components/replay/ReplayMilestones'
 import { ReplayInsights } from '@/components/replay/ReplayInsights'
 import { ReplayShareCard } from '@/components/replay/ReplayShareCard'
 import { useDocumentTitle } from '@/hooks/use-document-title'
-
-const MILESTONE_TEMPLATES = [
-    { id: 'titles-50', icon: '🎬', title: 'Cineplex Pass', description: 'Watched 50 unique titles', threshold: 50 },
-    { id: 'titles-100', icon: '🏅', title: 'Century Club', description: 'Watched 100 unique titles', threshold: 100 },
-    { id: 'titles-250', icon: '🏆', title: 'Quarter Thousand', description: 'Watched 250 unique titles', threshold: 250 },
-    { id: 'titles-500', icon: '👑', title: 'Half Millennium', description: 'Watched 500 unique titles', threshold: 500 },
-    { id: 'hours-100', icon: '⏱️', title: 'Centurion', description: 'Streamed 100+ hours', threshold: 100 },
-    { id: 'hours-500', icon: '🔥', title: 'Dedicated Viewer', description: 'Streamed 500+ hours', threshold: 500 },
-    { id: 'hours-1000', icon: '💎', title: 'Legendary Status', description: 'Streamed 1,000+ hours', threshold: 1000 },
-    { id: 'streak-7', icon: '📅', title: 'Week Warrior', description: 'Binge streak of 7+ days', threshold: 7 },
-    { id: 'streak-14', icon: '🎯', title: 'Fortnight Force', description: 'Binge streak of 14+ days', threshold: 14 },
-    { id: 'streak-30', icon: '⚡', title: 'Monthly Marathon', description: 'Binge streak of 30+ days', threshold: 30 },
-    { id: 'discoveries-25', icon: '🔍', title: 'Trailblazer', description: 'Discovered 25+ new titles', threshold: 25 },
-]
-
-function decodeShareToken(token: string): { data: ReplayData; userName?: string } | null {
-    try {
-        const bin = atob(token.replace(/-/g, '+').replace(/_/g, '/'))
-        const bytes = Uint8Array.from(bin, c => c.charCodeAt(0))
-        const json = strFromU8(inflateSync(bytes))
-        if (!json) return null
-        const payload = JSON.parse(json)
-        if (!payload) return null
-
-        // Support Universal Positional Array (Full 1:1 Data Parity)
-        if (Array.isArray(payload) && (payload[0] === 5 || payload[0] === 6)) {
-            const isLatest = payload[0] === 6
-            const [
-                _v, y, u, tt, th, tg, ls, apm, dp, tud, p, pd,
-                tp, t, ds, mt, hg, g, hpa, mb, m, hd, dd, yoy, ph, pdb
-            ] = payload
-
-            const pool = (tp || []).map((item: unknown) => {
-                const arr = item as unknown[]
-                return {
-                    itemId: 'tt' + arr[0],
-                    name: arr[1] as string,
-                    type: (arr[2] as number) === 1 ? 'series' : 'movie',
-                    poster: `https://live.metahub.space/poster/small/tt${arr[0]}/img`,
-                    id: 'tt' + arr[0],
-                    uniqueItemId: 'tt' + arr[0],
-                    watchCount: 0,
-                    totalHours: 0,
-                    rank: 0,
-                }
-            })
-
-            const data: ReplayData = {
-                year: y,
-                totalTitles: tt,
-                totalHours: th,
-                totalGenres: tg,
-                longestStreak: ls,
-                avgTitlesPerMonth: apm,
-                topTitles: (t || []).map((item: unknown, i: number) => {
-                    const arr = item as unknown[]
-                    const base = pool[arr[0] as number]
-                    return base ? { ...base, totalHours: arr[1] as number, watchCount: isLatest ? arr[2] as number : 0, rank: i + 1 } : null
-                }).filter(Boolean),
-                topGenres: (g || []).map((item: unknown) => {
-                    const arr = item as unknown[]
-                    return {
-                        genre: arr[0] as string,
-                        count: arr[1] as number,
-                        percentage: arr[2] as number,
-                        color: arr[3] as string,
-                    }
-                }),
-                monthlyBreakdown: (mb || []).map((item: unknown, i: number) => {
-                    const arr = item as unknown[]
-                    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-                    const year = y || new Date().getFullYear()
-                    const mTitles = ((arr[2] || []) as unknown[]).map((idx: unknown, r: number) => {
-                        const base = pool[idx as number]
-                        return base ? { ...base, rank: r + 1 } : null
-                    }).filter(Boolean)
-
-                    return {
-                        month: monthNames[i] || 'Unknown',
-                        monthKey: `${year}-${String(i + 1).padStart(2, '0')}`,
-                        totalTitles: arr[0] as number,
-                        totalHours: arr[1] as number,
-                        topTitle: mTitles[0] || null,
-                        top3Titles: mTitles,
-                        isHighActivity: arr[3] === 1
-                    }
-                }),
-                discoveries: (ds || []).map((idx: number) => pool[idx]).filter(Boolean),
-                marathonTitles: (mt || []).map((idx: number) => pool[idx]).filter(Boolean),
-                hiddenGems: (hg || []).map((idx: number) => pool[idx]).filter(Boolean),
-                availableYears: [],
-                availableMonths: [],
-                heroPosterArt: (hpa || []).map((id: string) => `https://live.metahub.space/poster/small/tt${id}/img`),
-                persona: p ?? '',
-                personaDescription: pd ?? '',
-                milestones: MILESTONE_TEMPLATES.map((tmpl, i) => {
-                    // 'm' is an array of [unlocked, value]
-                    const milestoneData = isLatest ? (m || [])[i] : null
-                    return {
-                        ...tmpl,
-                        unlocked: isLatest ? milestoneData?.[0] === 1 : (m || []).includes(tmpl.id),
-                        value: isLatest ? milestoneData?.[1] ?? 0 : 0
-                    }
-                }),
-                hourlyDistribution: (hd || []).map((item: unknown[] | number, h: number) => ({
-                    hour: h,
-                    percentage: isLatest ? (item as unknown[])[0] as number : item as number,
-                    count: isLatest ? (item as unknown[])[1] as number : 0
-                })),
-                dailyDistribution: (dd || []).map((item: unknown[] | number, d: number) => ({
-                    day: d,
-                    dayName: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][d],
-                    percentage: isLatest ? (item as unknown[])[0] as number : item as number,
-                    count: isLatest ? (item as unknown[])[1] as number : 0,
-                    hours: isLatest ? (item as unknown[])[2] as number : 0
-                })),
-                yearOverYear: yoy ? {
-                    prevYear: yoy[0],
-                    currentYear: yoy[1],
-                    titlesDelta: yoy[2],
-                    hoursDelta: yoy[3],
-                    loyaltyDelta: yoy[4],
-                    streakDelta: yoy[5],
-                    prevTitles: isLatest ? yoy[6] : 0,
-                    prevHours: isLatest ? yoy[7] : 0,
-                    currentTitles: isLatest ? yoy[8] : 0,
-                    currentHours: isLatest ? yoy[9] : 0
-                } : null,
-                peakHour: ph ?? 0,
-                peakDay: pdb ?? '',
-                discoveryPercentage: dp ?? 0,
-                totalUniqueDiscoveries: tud ?? 0,
-            }
-            return { data, userName: u }
-        }
-
-        return null
-    } catch (e) {
-        if (import.meta.env.DEV) console.error('[ShareDecode] Error:', e)
-        return null
-    }
-}
+import { decodeReplayShare, shareTokenFromLocation, stripShareIdParam, type DecodedReplayShare } from '@/lib/replay-share-codec'
 
 const sections = [
     { id: 'hero', label: 'Overview' },
@@ -169,7 +26,7 @@ const sections = [
 export function ReplaySharePage() {
     useDocumentTitle('Replay')
     const { token } = useParams<{ token: string }>()
-    const [decoded, setDecoded] = useState<{ data: ReplayData; userName?: string } | null | 'error' | 'loading'>('loading')
+    const [decoded, setDecoded] = useState<DecodedReplayShare | null | 'error' | 'loading'>('loading')
     const [activeSection, setActiveSection] = useState('hero')
     const scrollContainerRef = useRef<HTMLDivElement>(null)
 
@@ -212,10 +69,19 @@ export function ReplaySharePage() {
     }, [])
 
     useEffect(() => {
-        if (!token) { setDecoded('error'); return }
-        const result = decodeShareToken(token)
-        setDecoded(result ?? 'error')
+        const shareToken = shareTokenFromLocation(token, window.location.hash)
+        if (!shareToken) { setDecoded('error'); return }
+        setDecoded(decodeReplayShare(shareToken) ?? 'error')
     }, [token])
+
+    // The app re-adds the bookmark ?id= after its own effects run, so strip on the next tick.
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            const next = stripShareIdParam(window.location.href)
+            if (next) window.history.replaceState(window.history.state, '', next)
+        }, 0)
+        return () => clearTimeout(timer)
+    })
 
     if (decoded === 'loading') {
         return (
@@ -260,6 +126,8 @@ export function ReplaySharePage() {
                 gap-3 p-2 bg-white/5 border border-white/10 shadow-2xl rounded-full 
                 hidden md:flex backdrop-blur-md items-center">
                 <button
+                    type="button"
+                    aria-label="Previous section"
                     data-theme-part="button"
                     onClick={() => handleScrollDirection('up')}
                     disabled={activeSection === sections[0].id}
@@ -273,6 +141,9 @@ export function ReplaySharePage() {
                     <div key={section.id}
                         className="relative group flex items-center justify-center">
                         <button
+                            type="button"
+                            aria-label={section.label}
+                            aria-current={activeSection === section.id ? 'true' : undefined}
                             data-theme-part="tab"
                             data-state={activeSection === section.id ? 'active' : 'inactive'}
                             onClick={() => scrollToSection(section.id)}
@@ -291,6 +162,8 @@ export function ReplaySharePage() {
                 ))}
                 <div className="w-px h-2 bg-white/10" />
                 <button
+                    type="button"
+                    aria-label="Next section"
                     data-theme-part="button"
                     onClick={() => handleScrollDirection('down')}
                     disabled={activeSection === sections[sections.length - 1].id}

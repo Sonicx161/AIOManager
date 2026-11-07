@@ -1,13 +1,14 @@
 import { useMemo, useState, useEffect, useRef, startTransition } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Sparkles, AlertCircle, ChevronUp, ChevronDown, CalendarDays, X } from 'lucide-react'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { useAccountStore } from '@/store/accountStore'
-import { computeReplayData } from '@/lib/compute-replay-data'
-import type { ReplayData } from '@/types/ReplayTypes'
-import { historyEntryToActivityItem } from '@/lib/activity-utils'
+import { useUIStore } from '@/store/uiStore'
+import { maskedDisplayName } from '@/components/common/AccountSwitcher'
+import { computeReplayData, type ReplayDataWithEstimate } from '@/lib/compute-replay-data'
+import { historyEntryToActivityItem, canonicalStremioConnections } from '@/lib/activity-utils'
 import { ReplayHero } from '@/components/replay/ReplayHero'
 import { ReplayStats } from '@/components/replay/ReplayStats'
 import { ReplayYearInNumbers } from '@/components/replay/ReplayYearInNumbers'
@@ -20,18 +21,24 @@ import { ReplayAccountSwitcher } from '@/components/replay/ReplayAccountSwitcher
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 
+const REPLAY_HISTORY_OPTIONS = { sessions: false } as const
+
 export function ReplayPage() {
     useDocumentTitle('Replay')
     const navigate = useNavigate()
     const containerRef = useRef<HTMLDivElement>(null)
     const { loading, ensureLoaded } = useLibraryCache()
-    const { history: watchHistory } = useWatchHistory()
+    const { history: watchHistory } = useWatchHistory(undefined, true, REPLAY_HISTORY_OPTIONS)
     const items = useMemo(() => watchHistory.map(historyEntryToActivityItem), [watchHistory])
     const accounts = useAccountStore(s => s.accounts)
+    const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
     const [userSelectedYear, setUserSelectedYear] = useState<number | string | null>(null)
     const [selectedAccountId, setSelectedAccountId] = useState<string>('all')
     const [activeSection, setActiveSection] = useState('hero')
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+    const reduceMotion = useReducedMotion()
+    const namePrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
+    const emailPrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelEmail : 0))
 
     // Force body background to Replay's own dark color to prevent theme gradient bleed
     useEffect(() => {
@@ -72,15 +79,15 @@ export function ReplayPage() {
         return items.filter(item => item.accountId === selectedAccountId)
     }, [items, selectedAccountId])
 
-    const [allTimeData, setAllTimeData] = useState<ReplayData | null>(null)
-    const [replayData, setReplayData] = useState<ReplayData | null>(null)
+    const [allTimeData, setAllTimeData] = useState<ReplayDataWithEstimate | null>(null)
+    const [replayData, setReplayData] = useState<ReplayDataWithEstimate | null>(null)
 
     useEffect(() => {
         if (!filteredItems.length) return
         startTransition(() => {
-            setAllTimeData(computeReplayData(filteredItems, 'all-time'))
+            setAllTimeData(computeReplayData(filteredItems, 'all-time', { canonicalConnections }))
         })
-    }, [filteredItems])
+    }, [filteredItems, canonicalConnections])
 
     const activeSelectedYear = userSelectedYear ?? (allTimeData?.availableYears?.[0] ?? 'all-time')
     const isSpecificMonth = typeof activeSelectedYear === 'string' && activeSelectedYear !== 'all-time' && activeSelectedYear.includes('-')
@@ -88,9 +95,9 @@ export function ReplayPage() {
     useEffect(() => {
         if (!filteredItems.length || !allTimeData) return
         startTransition(() => {
-            setReplayData(computeReplayData(filteredItems, activeSelectedYear))
+            setReplayData(computeReplayData(filteredItems, activeSelectedYear, { canonicalConnections }))
         })
-    }, [filteredItems, activeSelectedYear, allTimeData])
+    }, [filteredItems, activeSelectedYear, allTimeData, canonicalConnections])
 
     const sections = useMemo(() => {
         const base = [
@@ -165,14 +172,13 @@ export function ReplayPage() {
 
 
     const userName = useMemo(() => {
-        if (selectedAccountId !== 'all') {
-            const acc = accounts.find(a => a.id === selectedAccountId)
-            return acc?.name || 'Unknown'
-        }
+        const label = (acc: (typeof accounts)[number] | undefined) =>
+            acc ? maskedDisplayName(acc.name, acc.email, namePrivacy, emailPrivacy) || 'Unknown' : 'Unknown'
+        if (selectedAccountId !== 'all') return label(accounts.find(a => a.id === selectedAccountId))
         if (accounts.length === 0) return ''
-        if (accounts.length === 1) return accounts[0].name
+        if (accounts.length === 1) return label(accounts[0])
         return `All Accounts (+${accounts.length})`
-    }, [accounts, selectedAccountId])
+    }, [accounts, selectedAccountId, namePrivacy, emailPrivacy])
 
     useEffect(() => {
         ensureLoaded(accounts)
@@ -192,7 +198,7 @@ export function ReplayPage() {
             <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white', minHeight: '100vh' } as React.CSSProperties}>
                 <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
                     <motion.div
-                        animate={{ rotate: 360, scale: [1, 1.1, 1] }}
+                        animate={reduceMotion ? undefined : { rotate: 360, scale: [1, 1.1, 1] }}
                         transition={{ duration: 2, repeat: Infinity }}
                         className="w-16 h-16 bg-white/10 rounded-full flex items-center justify-center border border-white/20 mb-8"
                     >
@@ -217,6 +223,7 @@ export function ReplayPage() {
                         We couldn't find any watch history for your accounts. Start watching something to see your Replay!
                     </p>
                     <button
+                        type="button"
                         data-theme-part="button"
                         onClick={() => navigate('/metrics')}
                         className="bg-[#151520] shadow-xl border border-white/10 px-8 py-4 rounded-full text-white font-bold uppercase flex items-center gap-3 hover:bg-white/10 transition-all"
@@ -242,6 +249,8 @@ export function ReplayPage() {
                 <div className="fixed top-0 inset-x-0 h-20 md:h-24 z-[100] flex items-center justify-between px-4 md:px-8 bg-gradient-to-b from-[#08080f]/95 to-transparent pointer-events-none pt-2 md:pt-0">
                     <div className="w-1/4 md:w-1/3 flex justify-start pointer-events-auto">
                         <button
+                            type="button"
+                            aria-label="Exit Replay"
                             data-theme-part="button"
                             onClick={() => navigate('/metrics')}
                             className="bg-white/5 md:bg-[#151520] backdrop-blur-md shadow-xl border border-white/10 p-2.5 md:p-3 rounded-full md:rounded-xl text-white/40 hover:text-white transition-all flex items-center gap-3 group"
@@ -294,6 +303,9 @@ export function ReplayPage() {
                                 return (
                                     <div key={year} className="flex flex-col items-center">
                                         <button
+                                            type="button"
+                                            aria-label={String(year)}
+                                            aria-pressed={isSelectedYear}
                                             data-theme-part="tab"
                                             data-state={isSelectedYear ? 'active' : 'inactive'}
                                             onClick={() => handleYearChange(year)}
@@ -350,6 +362,9 @@ export function ReplayPage() {
                                                                         animate={{ opacity: 1, scale: 1 }}
                                                                         exit={{ opacity: 0, scale: 0.8 }}
                                                                         transition={{ delay: index * 0.04 }}
+                                                                        type="button"
+                                                                        aria-label={new Date(yn, mn - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' })}
+                                                                        aria-pressed={isSelectedMonth}
                                                                         data-theme-part="tab"
                                                                         data-state={isSelectedMonth ? 'active' : 'inactive'}
                                                                         onClick={() => handleYearChange(monthStr)}
@@ -396,6 +411,9 @@ export function ReplayPage() {
                             <div style={{ width: '1px', height: '8px', background: 'rgba(255,255,255,0.08)', margin: '4px 0' }} />
 
                             <button
+                                type="button"
+                                aria-label="All time"
+                                aria-pressed={activeSelectedYear === 'all-time'}
                                 data-theme-part="tab"
                                 data-state={activeSelectedYear === 'all-time' ? 'active' : 'inactive'}
                                 onClick={() => handleYearChange('all-time')}
@@ -429,6 +447,9 @@ export function ReplayPage() {
 
                         {/* Mobile Toggle Button */}
                         <button
+                            type="button"
+                            aria-label={isMobileMenuOpen ? 'Hide periods' : 'Choose period'}
+                            aria-expanded={isMobileMenuOpen}
                             data-theme-part="button"
                             className={`md:hidden w-10 h-10 flex items-center justify-center rounded-full transition-all ${isMobileMenuOpen ? 'mt-1 bg-white/5 text-rose-400 border border-rose-400/30' : 'bg-white/10 text-white hover:bg-white/20'}`}
                             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
@@ -440,6 +461,8 @@ export function ReplayPage() {
                     {/* SECTION NAVIGATION - FLOATING LEFT PILL */}
                     <div className="fixed top-1/2 left-6 -translate-y-1/2 z-50 flex flex-col gap-3 p-2 bg-white/5 border border-white/10 shadow-2xl rounded-full hidden md:flex backdrop-blur-md items-center">
                         <button
+                            type="button"
+                            aria-label="Previous section"
                             data-theme-part="button"
                             onClick={() => handleScrollDirection('up')}
                             disabled={activeSection === sections[0].id}
@@ -453,6 +476,9 @@ export function ReplayPage() {
                         {sections.map(section => (
                             <div key={section.id} className="relative group flex items-center justify-center">
                                 <button
+                                    type="button"
+                                    aria-label={section.label}
+                                    aria-current={activeSection === section.id ? 'true' : undefined}
                                     data-theme-part="tab"
                                     data-state={activeSection === section.id ? 'active' : 'inactive'}
                                     onClick={() => scrollToSection(section.id)}
@@ -471,6 +497,8 @@ export function ReplayPage() {
                         <div className="w-px h-2 bg-white/10" />
 
                         <button
+                            type="button"
+                            aria-label="Next section"
                             data-theme-part="button"
                             onClick={() => handleScrollDirection('down')}
                             disabled={activeSection === sections[sections.length - 1].id}
@@ -491,7 +519,7 @@ export function ReplayPage() {
                         >
                             <div id="section-hero"><ReplayHero data={replayData} userName={userName} /></div>
                             <div id="section-glance"><ReplayYearInNumbers data={replayData} /></div>
-                            <div id="section-stats"><ReplayStats data={replayData} /></div>
+                            <div id="section-stats"><ReplayStats data={replayData} estimatedHours={replayData.estimatedHours} /></div>
                             <div id="section-titles"><ReplayTopTitles data={replayData} allTimeData={allTimeData} /></div>
                             {!isSpecificMonth && <div id="section-months"><ReplayMonths data={replayData} /></div>}
                             <div id="section-milestones"><ReplayMilestones data={replayData} /></div>

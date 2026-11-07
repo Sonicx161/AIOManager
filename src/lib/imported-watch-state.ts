@@ -121,18 +121,56 @@ export interface WatchBadgeShape {
     flaggedWatched?: number
     overallTimeWatched?: number
     importedSavedState?: boolean
+    /** Credited watch time (ms); for event rows this is historical credit, not a resume. */
+    watched?: number
+    /** Known runtime (ms); turns a resume position into a percent. */
+    duration?: number
+    /**
+     * Authoritative current resume position (ms); present only when the current library
+     * state supplied one. When present it, not `watched`, is the resume evidence: a
+     * near-zero supplied resume is a reset artifact and must fall through to completion
+     * instead of borrowing historical credit (Sol R2-10).
+     */
+    liveResume?: number
 }
+
+// 95% or more is a finished watch; below that the percent never rounds up to a false 95.
+const COMPLETED_PCT = 95
+const badgeFromPct = (pct: number): number => (pct >= COMPLETED_PCT ? 100 : Math.min(COMPLETED_PCT - 1, Math.round(pct)))
+
+// Mirrors the row model's own in-progress floor (transformLibraryItemToActivityItem):
+// a resume below it is a reset artifact (Stremio writes a ~1 ms offset on a completed
+// rewatch), not a real partial watch, so authoritative completion wins over it.
+const NEAR_ZERO_RESUME_PCT = 0.5
 
 /**
  * Watch badge resolution. Saved-only imported series never resolve a percent or a completed
  * mark: with no duration and no resume there is nothing measurable to report. A real resume
  * progress still wins when present, and a positive watched flag (flaggedWatched, i.e. a
- * marked-watched movie) legitimately resolves to 100.
+ * marked-watched movie) legitimately resolves to 100. A near-zero resume (below the row
+ * model's in-progress floor) never defeats authoritative completion evidence.
  */
 export function resolveWatchBadgePct(item: WatchBadgeShape): number | undefined {
     const progress = item.progress ?? 0
-    if (progress > 0) return Math.round(progress)
+    if (progress >= NEAR_ZERO_RESUME_PCT) return badgeFromPct(progress)
     if (item.importedSavedState && isSeriesType(item.type)) return undefined
+    const runtime = item.duration ?? 0
+    if (item.liveResume !== undefined) {
+        // The current state supplied a resume: it is the only resume evidence. A real
+        // partial rewatch keeps its percent; a near-zero reset falls through so
+        // completion evidence wins without consulting historical credit (#85, Sol R2-10).
+        if (item.liveResume > 0 && runtime > 0) {
+            const resumePct = Math.min(100, (item.liveResume / runtime) * 100)
+            if (resumePct >= NEAR_ZERO_RESUME_PCT) return badgeFromPct(resumePct)
+        }
+    } else {
+        // No current resume: credited time may still describe a genuine partial watch.
+        const resume = item.watched ?? 0
+        if (resume > 0 && runtime > 0) {
+            const resumePct = Math.min(100, (resume / runtime) * 100)
+            if (resumePct >= NEAR_ZERO_RESUME_PCT) return badgeFromPct(resumePct)
+        }
+    }
     if ((item.timesWatched ?? 0) > 0 || (item.flaggedWatched ?? 0) > 0) return 100
     if (!isSeriesType(item.type) && (item.overallTimeWatched ?? 0) > 0) return 100
     return 0

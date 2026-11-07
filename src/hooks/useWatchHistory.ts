@@ -1,16 +1,23 @@
-import { useMemo, useState, useEffect, useDeferredValue, useCallback, useRef } from 'react'
-import { useWatchEventStore } from '@/store/watchEventStore'
+import { useMemo, useState, useEffect, useDeferredValue, useRef } from 'react'
+import { useWatchEventStore, filterTombstonedEvents } from '@/store/watchEventStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useAccountStore } from '@/store/accountStore'
 import { ActivityItem, SavedEpisodesSummary } from '@/types/activity'
-import { getLocalDayKey, getEpisodeIdentity, fetchCinemetaDetail, historyEntryToActivityItem } from '@/lib/activity-utils'
+import { getEpisodeIdentity, fetchCinemetaDetail, historyEntryToActivityItem } from '@/lib/activity-utils'
+import { resolveUnrecordedEpisodes } from '@/lib/episode-resolution'
 import { summarizeSavedEpisodes } from '@/lib/imported-watch-state'
 import { useJellyfinActivity, type MediaReadIssue } from '@/hooks/useJellyfinActivity'
-import { mergeMediaHistory, mergeMediaItems } from '@/lib/jellyfin/activity'
+import { activityNowStatus, collapseImportedCopies, mergeMediaHistory, mergeMediaItems } from '@/lib/jellyfin/activity'
 import { reconcileRailProgress } from '@/lib/rail-progress'
 import { trace } from '@/lib/trace'
 import { usePacedValue } from '@/hooks/usePacedValue'
+import { hasSeriesEventIdentity } from '@/lib/watch-event-cap'
 import { isUnresolvedActivityName } from '@/lib/activity-metadata-overlay'
+import { collapseHistoryEvents } from '@/lib/watch-history-collapse'
+import { newestLiveOverlayEventIds, liveOverlayIdentityMatches } from '@/lib/watch-history-live-overlay'
+import { canonicalEpisodeIdentity, tmdbAliasVersion, aliasDeletedAt } from '@/lib/activity-id-alias'
+import { stremioScopeResolver } from '@/lib/connection-identity'
+import { dedupWatchEntries } from '@/lib/watch-history-final-dedup'
 
 const GENRE_CACHE_STORAGE_KEY = 'aio-genre-map-v1'
 let _genreCache: Map<string, string[]> | null = null
@@ -33,6 +40,30 @@ function depsEqual(a: unknown[], b: unknown[]): boolean {
     if (a.length !== b.length) return false
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
     return true
+}
+
+const LIVE_SESSION_FRESH_MS = 120_000
+
+/**
+ * Continue Watching order: actively playing sessions, then paused live sessions and
+ * recently active progress, then everything else. Newest first within a tier; full
+ * ties (tier, timestamp) break on id so the order is deterministic across loads.
+ * Ordering only, nothing is dropped.
+ */
+export function orderContinueWatching(items: readonly ActivityItem[], now = Date.now()): ActivityItem[] {
+    const byId = (a: ActivityItem, b: ActivityItem) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    const ranked = items.map(item => {
+        const status = activityNowStatus(item, now)
+        const observation = item.mediaObservation
+        const liveAge = observation?.kind === 'live' ? now - (observation.reportedAt ?? observation.checkedAt) : NaN
+        const tier = status === 'playing' ? 0
+            : status === 'recent' || (liveAge >= -5_000 && liveAge < LIVE_SESSION_FRESH_MS) ? 1
+            : 2
+        const time = item.timestamp.getTime()
+        return { item, tier, time: Number.isFinite(time) ? time : 0 }
+    })
+    ranked.sort((a, b) => a.tier - b.tier || b.time - a.time || byId(a.item, b.item))
+    return ranked.map(entry => entry.item)
 }
 
 function loadGenreCache(): Map<string, string[]> {
@@ -93,11 +124,13 @@ export interface HistoryEntry {
     backfill?: boolean     // recovered from the watched-bitfield (synthetic timestamp)
     /** Imported saved watch state: no real watch dates; presented as saved state, never a dated watch. */
     importedSavedState?: boolean
+    timeApproximate?: boolean
     /** Verified saved-episode summary recovered from the watched bitfield (series aggregates). */
     savedEpisodes?: SavedEpisodesSummary
     genres?: string[]
 
-    // Live overlay (only set when this item is also in current library)
+    // Live overlay (only on the newest event of this play identity when it is also in the
+    // current library; live-only entries always carry it)
     liveProgress?: number
     liveWatched?: number
     liveEpisode?: string
@@ -113,8 +146,40 @@ export interface WatchHistoryResult {
     loading: boolean
 }
 
-export function useWatchHistory(accountId?: string, enabled = true): WatchHistoryResult {
-    const media = useJellyfinActivity(accountId, enabled)
+export interface WatchHistoryOptions {
+    /** Resolve missing genres from Cinemeta in the background. Default true; pages that never render genres opt out. */
+    genres?: boolean
+    /** Poll Jellyfin live sessions. Default true; pages that never show live playback opt out. */
+    sessions?: boolean
+    /** Jellyfin media reads (head, archive walks, sessions). Views that filter Jellyfin rows out opt out entirely. */
+    media?: boolean
+}
+
+/** Cinemeta ids whose genres still need fetching; empty when the crawl is opted out. */
+export function genreCrawlTargets(
+    events: ReadonlyArray<{ itemId?: string; type?: string }> | undefined,
+    genreMap: ReadonlyMap<string, string[]>,
+    genresEnabled: boolean,
+): { seen: Set<string>; needs: string[]; typeByItemId: Map<string, string | undefined> } {
+    const seen = new Set<string>()
+    const typeByItemId = new Map<string, string | undefined>()
+    if (!genresEnabled || !events || events.length === 0) return { seen, needs: [], typeByItemId }
+    for (const e of events) {
+        const id = e.itemId
+        if (id && id.startsWith('tt') && !seen.has(id)) {
+            seen.add(id)
+            typeByItemId.set(id, e.type)
+        }
+    }
+    return { seen, needs: [...seen].filter(id => !genreMap.has(id)), typeByItemId }
+}
+
+const NO_SESSION_POLL = { sessions: false } as const
+const DEFAULT_MEDIA_OPTIONS = {} as const
+
+export function useWatchHistory(accountId?: string, enabled = true, options?: WatchHistoryOptions): WatchHistoryResult {
+    const genresEnabled = options?.genres !== false
+    const media = useJellyfinActivity(accountId, enabled && options?.media !== false, options?.sessions === false ? NO_SESSION_POLL : DEFAULT_MEDIA_OPTIONS)
     const rawEvents = useWatchEventStore(s => enabled ? s.events : NO_WATCH_EVENTS)
     const rawLiveItems = useLibraryCache(s => enabled ? s.items : NO_LIBRARY_ITEMS)
     const loading = useLibraryCache(s => enabled && s.loading)
@@ -135,21 +200,9 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
     // bare account scope with legacy and server-merged canonical rows (so one watch never
     // shows twice), while every other login keeps its `accountId::connectionId` scope.
     // Post-promotion, the demoted login's frozen scopeKeys (rewritten by the migration)
-    // agree with this computation.
-    const canonicalStremioByAccount = useMemo(() => {
-        const m = new Map<string, string | undefined>()
-        for (const a of accounts) {
-            const native = (a.connections || []).filter(c => c.platform === 'stremio' && (c.connectionType == null || c.connectionType === 'native'))
-            m.set(a.id, native.find(c => c.id === a.primaryConnectionId)?.id ?? native[0]?.id)
-        }
-        return m
-    }, [accounts])
-    const ctxOf = useCallback((accountId: string, sourceConnectionId?: string) => {
-        if (!sourceConnectionId) return accountId
-        return sourceConnectionId !== canonicalStremioByAccount.get(accountId)
-            ? `${accountId}::${sourceConnectionId}`
-            : accountId
-    }, [canonicalStremioByAccount])
+    // agree with this computation. The legacy `${accountId}:stremio` marker is the
+    // attribution of a possibly removed login and never folds onto a stored connection.
+    const ctxOf = useMemo(() => stremioScopeResolver(accounts), [accounts])
 
     const baseDerivationRef = useRef<{ deps: unknown[]; value: { history: HistoryEntry[]; inProgress: ActivityItem[]; hasEventLog: boolean } } | null>(null)
 
@@ -210,7 +263,7 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
         // reference comparison instead of a second O(events + live items) derivation.
         // The body is a pure derivation of the deps, so an abandoned attempt's value
         // is exactly what the committed attempt produces for the same inputs.
-        const deps = [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents]
+        const deps = [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents, ctxOf, tmdbAliasVersion()]
         const cached = baseDerivationRef.current
         if (cached && depsEqual(cached.deps, deps)) return cached.value
         const normalizeName = (s: string) => s.normalize('NFC').toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -246,17 +299,11 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             }
         ]))
 
-        const filteredEvents = (accountId
+        // Tombstones apply again at render: an alias learned after the delete still hides the sibling.
+        const filteredEvents = filterTombstonedEvents(accountId
             ? events.filter(e => e.accountId === accountId)
-            : events
-        ).filter(e => {
-            const isSeries = e.type === 'series' || e.type === 'anime' || e.type === 'episode'
-            if (!isSeries) return true
-            if (e.episode != null) return true
-            if (e.season != null) return true
-            if (e.video_id !== e.itemId) return true
-            return false
-        })
+            : events, deletedEventKeys
+        ).filter(hasSeriesEventIdentity)
 
         const dedupedEvents = Array.from(
             filteredEvents.reduce((map, e) => {
@@ -268,69 +315,21 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             }, new Map<string, typeof filteredEvents[0]>()).values()
         )
 
-        const sessionEvents = Array.from(
-            dedupedEvents.reduce((map, event) => {
-                const episodeKey = getEpisodeIdentity(event.itemId, event.video_id, event.season, event.episode, event.type)
-                const key = `${ctxOf(event.accountId, event.sourceConnectionId)}:${episodeKey}:${getLocalDayKey(event.event_ts)}`
-                const existing = map.get(key)
-                if (
-                    !existing ||
-                    event.event_ts > existing.event_ts ||
-                    (event.event_ts === existing.event_ts && event.detected_ts > existing.detected_ts)
-                ) {
-                    map.set(key, event)
-                }
-                return map
-            }, new Map<string, (typeof dedupedEvents)[number]>()).values()
-        )
+        const seriesDedupedEvents = collapseHistoryEvents(dedupedEvents, ctxOf)
 
-        const EPISODE_DEDUP_WINDOW_MS = 172800000
-        type SessionEvent = (typeof sessionEvents)[number]
-
-        const seriesGroups = new Map<string, SessionEvent[]>()
-        const nonSeriesEvents: SessionEvent[] = []
-        for (const event of sessionEvents) {
-            const isSeries = event.type === 'series' || event.type === 'anime' || event.type === 'episode'
-            if (!isSeries) {
-                nonSeriesEvents.push(event)
-                continue
-            }
-            const episodeKey = getEpisodeIdentity(event.itemId, event.video_id, event.season, event.episode, event.type)
-            const key = `${ctxOf(event.accountId, event.sourceConnectionId)}:${episodeKey}`
-            const arr = seriesGroups.get(key)
-            if (arr) arr.push(event)
-            else seriesGroups.set(key, [event])
-        }
-
-        const seriesDeduped: SessionEvent[] = []
-        for (const arr of seriesGroups.values()) {
-            arr.sort((a, b) => a.event_ts - b.event_ts || a.detected_ts - b.detected_ts)
-            let kept: SessionEvent | null = null
-            for (const event of arr) {
-                if (kept === null) {
-                    kept = event
-                } else if (event.event_ts - kept.event_ts <= EPISODE_DEDUP_WINDOW_MS) {
-                    if (
-                        event.event_ts > kept.event_ts ||
-                        (event.event_ts === kept.event_ts && event.detected_ts > kept.detected_ts)
-                    ) {
-                        kept = event
-                    }
-                } else {
-                    seriesDeduped.push(kept)
-                    kept = event
-                }
-            }
-            if (kept) seriesDeduped.push(kept)
-        }
-
-        const seriesDedupedEvents = [...nonSeriesEvents, ...seriesDeduped]
+        // The live overlay mirrors the library's CURRENT row, so only the newest event of
+        // that exact play identity may borrow it (#85/F-01); historical rows keep their
+        // own event progress.
+        const newestLiveEventIds = newestLiveOverlayEventIds(seriesDedupedEvents, ctxOf)
 
         const eventEntries: HistoryEntry[] = seriesDedupedEvents.map(event => {
             const ctx = ctxOf(event.accountId, event.sourceConnectionId)
             const live = liveByAccountItem.get(
                 `${ctx}:${getEpisodeIdentity(event.itemId, event.video_id, event.season, event.episode, event.type)}`
             )
+            const liveOverlay = live !== undefined && newestLiveEventIds.has(event.id) && liveOverlayIdentityMatches(event, live)
+                ? live
+                : undefined
             const meta = accountMeta.get(event.accountId)
             const duration = event.duration || live?.duration || 0
             const watchedProgress = event.time_watched || 0
@@ -369,16 +368,16 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
                 sourceConnectionId: event.sourceConnectionId ?? live?.sourceConnectionId,
                 backfill: event.backfill,
                 genres: genreMap.get(event.itemId),
-                liveProgress: live?.progress,
-                liveWatched: live?.watched,
-                liveEpisode: live?.uniqueItemId,
+                liveProgress: liveOverlay?.progress,
+                liveWatched: liveOverlay?.watched,
+                liveEpisode: liveOverlay?.uniqueItemId,
             }
         })
 
         // Find live items not represented in the event log yet
         // (new items added since last diff, or first-run before any events)
         const eventItemIds = new Set(seriesDedupedEvents.map(e =>
-            `${ctxOf(e.accountId, e.sourceConnectionId)}:${getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)}`
+            `${ctxOf(e.accountId, e.sourceConnectionId)}:${canonicalEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)}`
         ))
         const eventIdentityKeys = new Set<string>()
         for (const entry of seriesDedupedEvents) {
@@ -393,14 +392,14 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             : liveItems
         ).filter(item => {
             const ctx = ctxOf(item.accountId, item.sourceConnectionId)
-            const deletedTs = deletedEventKeys[`${ctx}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`]
+            const deletedTs = aliasDeletedAt(deletedEventKeys, ctx, item.itemId, item.uniqueItemId, item.season, item.episode, item.type)
             if (deletedTs !== undefined && item.timestamp.getTime() <= deletedTs) {
                 trace('useWatchHistory', 'liveonly.tombstoned', { accountId: item.accountId, itemId: item.itemId, source: item.source, name: item.name, ts: item.timestamp.getTime(), deletedTs })
                 return false
             }
             if (item.source && item.source !== 'stremio') return true
             if (eventItemIds.has(
-                `${ctx}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`
+                `${ctx}:${canonicalEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`
             )) return false
             const name = normalizeName(item.name || '')
             if (name && item.episode != null && eventIdentityKeys.has(`${ctx}:${name}:${item.episode}`)) return false
@@ -451,29 +450,7 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
         const allEntries = [...eventEntries, ...liveOnlyEntries]
             .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
-        const finalDedup = new Map<string, HistoryEntry>()
-        for (const entry of allEntries) {
-            const normalizedName = normalizeName(entry.name || '')
-            const isSeries = entry.type === 'series' || entry.type === 'anime' || entry.type === 'episode'
-            const entryCtx = ctxOf(entry.accountId, entry.sourceConnectionId)
-            // Correlate platform duplicates within a watch day, preserving earlier watches.
-            const watchDay = entry.timestamp.toDateString()
-            const episodeKey = isSeries && entry.episode != null
-                ? `${entryCtx}:${watchDay}:${normalizedName}:${entry.season ?? 1}:${entry.episode}`
-                : `${entryCtx}:${watchDay}:${normalizedName}`
-
-            const existing = finalDedup.get(episodeKey)
-            if (!existing) {
-                finalDedup.set(episodeKey, entry)
-            } else {
-                const existingScore = (existing.progress || 0) + (existing.poster ? 50 : 0) + (existing.duration ? 50 : 0)
-                const newScore = (entry.progress || 0) + (entry.poster ? 50 : 0) + (entry.duration ? 50 : 0)
-                if (newScore > existingScore) {
-                    finalDedup.set(episodeKey, entry)
-                }
-            }
-        }
-        const dedupedList = Array.from(finalDedup.values())
+        const dedupedList = dedupWatchEntries(allEntries, ctxOf)
 
         const bestNamesByItemId = new Map<string, { name: string; poster?: string }>()
         for (const entry of dedupedList) {
@@ -506,7 +483,6 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
                 ? liveItems.filter(i => i.accountId === accountId)
                 : liveItems
             ).filter(i => i.isInProgress)
-                .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
                 .map(item => ({
                     ...item,
                     key: `${ctxOf(item.accountId, item.sourceConnectionId)}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`,
@@ -521,21 +497,10 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
         }
         baseDerivationRef.current = { deps, value }
         return value
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents])
+    }, [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents, ctxOf])
 
     useEffect(() => {
-        if (!events || events.length === 0) return
-        const seen = new Set<string>()
-        const typeByItemId = new Map<string, string | undefined>()
-        for (const e of events) {
-            const id = e.itemId
-            if (id && id.startsWith('tt') && !seen.has(id)) {
-                seen.add(id)
-                typeByItemId.set(id, e.type)
-            }
-        }
-        const needsGenres = [...seen].filter(id => !genreMap.has(id))
+        const { seen, needs: needsGenres, typeByItemId } = genreCrawlTargets(events, genreMap, genresEnabled)
         if (needsGenres.length === 0) return
         let cancelled = false
         const BATCH = 5
@@ -570,7 +535,7 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             }
         })()
         return () => { cancelled = true }
-    }, [events, genreMap])
+    }, [events, genreMap, genresEnabled])
 
     const combinedHistoryCacheRef = useRef<{ deps: unknown[]; value: HistoryEntry[] } | null>(null)
     const combinedHistory = useMemo(() => {
@@ -584,7 +549,7 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             const deletedAt = deletedEventKeys[`${ctxOf(item.accountId, item.sourceConnectionId)}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`]
             return deletedAt === undefined || item.timestamp.getTime() > deletedAt
         }
-        const merged = mergeMediaHistory(history.map(historyEntryToActivityItem), media.history.filter(notDeleted))
+        const merged = resolveUnrecordedEpisodes(collapseImportedCopies(mergeMediaHistory(history.map(historyEntryToActivityItem), media.history.filter(notDeleted))))
         const entries: HistoryEntry[] = merged.map(item => {
             const existing = byId.get(item.id)
             return existing ? { ...existing, mediaSources: item.mediaSources, mediaTargets: item.mediaTargets } : {
@@ -600,7 +565,7 @@ export function useWatchHistory(accountId?: string, enabled = true): WatchHistor
             const deletedAt = deletedEventKeys[`${ctxOf(item.accountId, item.sourceConnectionId)}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`]
             return deletedAt === undefined || item.timestamp.getTime() > deletedAt
         }
-        return mergeMediaItems(inProgress, media.inProgress.filter(notDeleted))
+        return orderContinueWatching(mergeMediaItems(inProgress, media.inProgress.filter(notDeleted)))
     }, [inProgress, media.inProgress, deletedEventKeys, ctxOf])
     return { history: combinedHistory, inProgress: combinedInProgress, hasEventLog, loading: loading || media.initialLoading, refreshMedia: media.refresh, mediaIssues: media.readIssues }
 }

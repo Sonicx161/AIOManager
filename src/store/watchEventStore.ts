@@ -2,16 +2,21 @@ import { create } from 'zustand'
 import localforage from 'localforage'
 import { WatchEvent, SnapshotItem, LibraryItem } from '@/types/activity'
 import { Account } from '@/types/account'
-import { getSeasonEpisode, isActuallyWatched, isDatelessSavedWatchState, getLocalDayKey, getEpisodeIdentity, watchContextKey, parseScopedAccountId } from '@/lib/activity-utils'
+import { getSeasonEpisode, isActuallyWatched, isDatelessSavedWatchState, isResumeDismissal, getLocalDayKey, getEpisodeIdentity, watchContextKey, parseScopedAccountId, tombstoneReplayProven } from '@/lib/activity-utils'
 import { scopeIndexesFor, reuseScopePartitionedIndexes, stremioTimeOf } from '@/lib/watch-event-indexes'
-import { MIN_EVENTS_GLOBAL } from '@/lib/watch-event-cap'
-import { decodeWatchedBitfield } from '@/lib/watched-bitfield'
-import { resolveWatchedEpisodes, fetchSeriesVideos } from '@/lib/watched-episodes'
+import { MIN_EVENTS_GLOBAL, hasSeriesEventIdentity } from '@/lib/watch-event-cap'
+import { decodeWatchedBitfield, hasNoWatchedBits, isWellFormedWatchedField, resolveWatchedBitsAgainstVideos } from '@/lib/watched-bitfield'
+import { mapConcurrent } from '@/lib/concurrency'
+import { resolveWatchedEpisodes, fetchSeriesVideos, getCachedSeriesVideos } from '@/lib/watched-episodes'
 import { evictLegacyExternalEvents } from '@/lib/external-watch-events'
 import { EventRollups, emptyRollups, capWatchEventsWithRollups, mergeRollups } from '@/lib/watch-event-rollups'
 import { isIdentityDeleted } from '@/lib/event-tombstones'
+import { aliasIdentityKeys, aliasDeletedAt, canonicalEpisodeIdentity } from '@/lib/activity-id-alias'
 
 const STORAGE_KEY = 'aio_watch_events_v2'
+
+/** Own-bit results per item; pending lists items whose bit is unknown only because the episode list was not cached. */
+export type OwnEpisodeBits = Map<string, boolean> & { pending?: ReadonlySet<string> }
 
 // Per-session guard: `${accountId}:${seriesId}:${watchedString}` already attempted, so repeated
 // library refreshes don't re-decode + re-fetch Cinemeta for unchanged series.
@@ -27,6 +32,45 @@ type Snapshot = Record<string, Record<string, SnapshotItem>>
 
 function isSeriesItem(item: LibraryItem): boolean {
     return item.type === 'series' || item.type === 'anime' || item.type === 'episode'
+}
+
+// Series: the watched bitfield (marks on other episodes). Movies: the watched flag and count.
+function watchMarkOf(item: LibraryItem): string {
+    const s = item.state || {}
+    const raw = isSeriesItem(item) ? String(s.watched || '') : `${s.flaggedWatched ?? 0}|${s.timesWatched ?? 0}`
+    let hash = 0x811c9dc5
+    for (let i = 0; i < raw.length; i++) hash = Math.imul(hash ^ raw.charCodeAt(i), 0x01000193)
+    return (hash >>> 0).toString(36)
+}
+
+/**
+ * Whether a same-episode library write is a real watch of that episode. Stremio keeps
+ * video_id on the last played episode when others are marked watched (e.g. synced from
+ * another app), and every such write bumps _mtime and lastWatched; those are not plays.
+ * An unknown prior is never evidence: a baseline rebuilt from server rows records nothing
+ * until a local baseline exists. Otherwise the evidence is the resume position moving; or,
+ * with known marks, watch time gained while the marks stayed the same, or this episode's
+ * own watched bit turning on (decoded against the series' episode list) as its own time
+ * grew. A bit left unknown only because the episode list was not cached (well-formed
+ * marks, list missing) does not block that: with own time grown, a known-off or cache-pending
+ * prior counts, so a finish between polls is never dropped. A prior unknown for any other
+ * reason (malformed marks) stays no evidence. An older local baseline without marks needs
+ * watch time gained with lastWatched past it for a series; for a movie any change counts.
+ */
+function isSameEpisodeWatch(item: LibraryItem, prior: SnapshotItem, watchedDelta: number, ownBit: boolean | undefined): boolean {
+    if (prior.fromServer) return false
+    if ((item.state?.timeOffset || 0) !== (prior.timeOffset || 0)) return true
+    if (prior.watchMark === undefined) {
+        if (!isSeriesItem(item)) return true
+        return watchedDelta > 0 && (stremioTimeOf(item.state?.lastWatched) ?? 0) > prior.mtime
+    }
+    const marksChanged = prior.watchMark !== watchMarkOf(item)
+    if (!isSeriesItem(item)) return watchedDelta > 0 || marksChanged
+    if (!marksChanged) return watchedDelta > 0
+    const ownTimeGained = (item.state?.timeWatched || 0) > (prior.timeWatched || 0)
+    const priorUsable = prior.ownBit === false || (prior.ownBit === undefined && prior.ownBitPending === true)
+    if (!ownTimeGained || !priorUsable) return false
+    return ownBit === true || ownBit === undefined
 }
 
 function sanitizeSeason(s: number | undefined | null): number | undefined {
@@ -76,10 +120,15 @@ interface WatchEventState {
         items: LibraryItem[],
         account: Account,
         accounts: Account[],
-        options?: { contextKey?: string; sourceConnectionId?: string; ownerConnectionId?: string }
+        options?: { contextKey?: string; sourceConnectionId?: string; ownerConnectionId?: string; ownBits?: OwnEpisodeBits }
     ) => WatchEvent[]
 
+    /** Whether each changed series item's own current episode is marked in its watched bitfield (offline data only). */
+    resolveOwnEpisodeBits: (items: LibraryItem[], contextKey?: string) => Promise<OwnEpisodeBits>
+
     mergeServerEvents: (serverEvents: ServerActivityEvent[]) => void
+    /** Re-applies tombstones (events and pinned baselines) after new id aliases make more of them match. */
+    reapplyTombstones: () => void
 
     mergeExternalWatchEvents: (accountId: string, platform: string, items: ExternalWatchItem[], options?: { sourceConnectionId?: string }) => void
 
@@ -124,6 +173,18 @@ export interface ExternalWatchItem {
     timestamp: number
     /** No real watch date behind this row (undated external import): the timestamp is the sync observation. */
     backfill?: boolean
+}
+
+// The server stores Stremio's completion flag in `watched` (0/1), not a duration.
+function isWatchedFlag(se: ServerActivityEvent): boolean {
+    const watched = Number(se.watched) || 0
+    return watched > 0 && watched <= 1
+}
+
+function serverTimeWatched(se: ServerActivityEvent): number {
+    if (se.progress > 0) return se.progress
+    if (isWatchedFlag(se)) return se.duration > 0 ? se.duration : 0
+    return Number(se.watched) || 0
 }
 
 function collapseDayDuplicates(events: WatchEvent[]): WatchEvent[] {
@@ -213,12 +274,58 @@ export function watchEventIdentityKey(e: { accountId: string; sourceConnectionId
 }
 
 function isEventTombstoned(e: WatchEvent, deleted: Record<string, number>): boolean {
-    return isIdentityDeleted(watchEventIdentityKey(e), deleted, e.event_ts)
+    if (isIdentityDeleted(watchEventIdentityKey(e), deleted, e.event_ts)) return true
+    if (!e.itemId.startsWith('tt') && !e.itemId.startsWith('tmdb:')) return false
+    return aliasIdentityKeys(eventScopeKey(e), e.itemId, e.video_id, e.season, e.episode, e.type)
+        .some(key => isIdentityDeleted(key, deleted, e.event_ts))
 }
 
-function filterTombstonedEvents(events: WatchEvent[], deleted: Record<string, number> | undefined): WatchEvent[] {
+export function filterTombstonedEvents(events: WatchEvent[], deleted: Record<string, number> | undefined): WatchEvent[] {
     if (!deleted || Object.keys(deleted).length === 0) return events
     return events.filter(e => !isEventTombstoned(e, deleted))
+}
+
+// Tombstone time of one play's identity, the single lookup every admission path uses; it
+// looks through a known tmdb:/IMDb alias in both directions.
+function identityDeletedAt(scope: string, itemId: string, videoId: string | undefined, season: number | undefined, episode: number | undefined, type: string, deleted: Record<string, number>): number | undefined {
+    return aliasDeletedAt(deleted, scope, itemId, videoId, season, episode, type)
+}
+
+// A deleted episode stays deleted until per-identity replay proof: the episode's own
+// resume position moved from a known baseline after the delete (tombstoneReplayProven).
+// An unknown prior (first sighting, an episode change, a baseline rebuilt from server
+// rows) is never evidence, so marks on other episodes can never re-seed it.
+function tombstoneHolds(item: LibraryItem, deletedAt: number | undefined, priorOffset?: number): boolean {
+    if (deletedAt === undefined) return false
+    return !tombstoneReplayProven({
+        deletedAt,
+        offset: item.state?.timeOffset || 0,
+        priorOffset,
+        lastWatched: stremioTimeOf(item.state?.lastWatched) ?? 0,
+    })
+}
+
+// Baselines a pre-fix build advanced past a delete (or rebuilt from a deleted row) are pinned
+// at the delete time; the next diff then needs real playback of that episode to record it.
+function pinTombstonedBaselines(snapshot: Snapshot, deleted: Record<string, number>): Snapshot {
+    if (Object.keys(deleted).length === 0) return snapshot
+    let next = snapshot
+    for (const [ctx, items] of Object.entries(snapshot)) {
+        let pinned: Record<string, SnapshotItem> | null = null
+        for (const [itemId, entry] of Object.entries(items || {})) {
+            const deletedAt = Math.min(
+                identityDeletedAt(ctx, itemId, entry.video_id, entry.season, entry.episode, 'movie', deleted) ?? Infinity,
+                identityDeletedAt(ctx, itemId, entry.video_id, entry.season, entry.episode, 'series', deleted) ?? Infinity,
+            )
+            if (!(entry.mtime > deletedAt)) continue
+            pinned ??= { ...items }
+            pinned[itemId] = { ...entry, mtime: deletedAt }
+        }
+        if (!pinned) continue
+        if (next === snapshot) next = { ...snapshot }
+        next[ctx] = pinned
+    }
+    return next
 }
 
 function capDeletedEvents(deleted: Record<string, number>, survivingEvents: WatchEvent[]): Record<string, number> {
@@ -249,18 +356,14 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
     initialize: (events, snapshot, deletedEventKeys, incomingRollups, snapshotOwners) => {
         const cleaned = events.filter(e => {
             const isSeries = e.type === 'series' || e.type === 'anime' || e.type === 'episode'
-            if (!isSeries) return true
-            if (e.season != null && e.season > 100) return false
-            if (e.episode != null) return true
-            if (e.season != null) return true
-            if (e.video_id !== e.itemId) return true
-            return false
+            if (isSeries && e.season != null && e.season > 100) return false
+            return hasSeriesEventIdentity(e)
         })
         const deleted = deletedEventKeys ?? get().deletedEventKeys
         const alive = filterTombstonedEvents(collapseDayDuplicates(cleaned), deleted)
         const { kept: capped, rollups: folded } = capWatchEventsWithRollups(alive, get().rollups)
         const rollups = incomingRollups ? mergeRollups(folded, incomingRollups) : folded
-        set({ events: capped, snapshot, snapshotOwners: snapshotOwners ?? get().snapshotOwners, rollups, deletedEventKeys: deleted, initialized: true })
+        set({ events: capped, snapshot: pinTombstonedBaselines(snapshot, deleted), snapshotOwners: snapshotOwners ?? get().snapshotOwners, rollups, deletedEventKeys: deleted, initialized: true })
         persistWatchEvents()
         if (deletedEventKeys) persistDeletedEvents(deleted)
     },
@@ -269,22 +372,28 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const state = get()
         if (state.initialized) return
         try {
-            const deleted = (await localforage.getItem<Record<string, number>>(DELETED_EVENTS_KEY)) || {}
+            // Beta candidates briefly persisted {deleted, pinned}; reads tolerate that
+            // shape so their tombstones survive, writes use the shipped flat map.
+            const storedDeleted = await localforage.getItem<unknown>(DELETED_EVENTS_KEY)
+            let deleted: Record<string, number> = {}
+            if (storedDeleted && typeof storedDeleted === 'object' && !Array.isArray(storedDeleted)) {
+                const inner = (storedDeleted as { deleted?: unknown }).deleted
+                deleted = (inner && typeof inner === 'object' && !Array.isArray(inner)
+                    ? inner
+                    : storedDeleted) as Record<string, number>
+            }
             const stored = await localforage.getItem<{ events: WatchEvent[]; snapshot: Snapshot; snapshotOwners?: Record<string, string>; rollups?: EventRollups }>(STORAGE_KEY)
             if (stored && stored.events) {
                 const cleaned = stored.events.filter(e => {
                     const isSeries = e.type === 'series' || e.type === 'anime' || e.type === 'episode'
-                    if (!isSeries) return true
-                    if (e.season != null && e.season > 100) return false
-                    if (e.episode != null) return true
-                    if (e.season != null) return true
-                    if (e.video_id !== e.itemId) return true
-                    return false
+                    if (isSeries && e.season != null && e.season > 100) return false
+                    return hasSeriesEventIdentity(e)
                 })
                 const collapsed = filterTombstonedEvents(collapseDayDuplicates(cleaned), deleted)
                 const rollups = stored.rollups ? { ...emptyRollups(), ...stored.rollups } : get().rollups
-                set({ events: collapsed, snapshot: stored.snapshot || {}, snapshotOwners: stored.snapshotOwners || {}, rollups, deletedEventKeys: deleted, initialized: true })
-                if (collapsed.length !== stored.events.length) persistWatchEvents()
+                const snapshot = pinTombstonedBaselines(stored.snapshot || {}, deleted)
+                set({ events: collapsed, snapshot, snapshotOwners: stored.snapshotOwners || {}, rollups, deletedEventKeys: deleted, initialized: true })
+                if (collapsed.length !== stored.events.length || snapshot !== stored.snapshot) persistWatchEvents()
             } else {
                 set({ deletedEventKeys: deleted, initialized: true })
             }
@@ -301,9 +410,10 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const deleted = { ...state.deletedEventKeys }
         const targetKeys = new Set<string>()
         for (const it of items) {
-            const key = `${watchContextKey(it.accountId, it.sourceConnectionId)}:${getEpisodeIdentity(it.itemId, it.uniqueItemId, it.season, it.episode, it.type)}`
-            deleted[key] = now
-            targetKeys.add(key)
+            for (const key of aliasIdentityKeys(watchContextKey(it.accountId, it.sourceConnectionId), it.itemId, it.uniqueItemId, it.season, it.episode, it.type)) {
+                deleted[key] = now
+                targetKeys.add(key)
+            }
         }
         // Mirror the drop onto the server's activity rows, fire-and-forget: every stored
         // event carrying a just-tombstoned identity is deleted by its (server-assigned) id.
@@ -318,6 +428,13 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         set({ events, deletedEventKeys: capped })
         persistWatchEvents()
         persistDeletedEvents(capped)
+        // F3: the tombstone is durable only once the cloud carries it; an abrupt session
+        // end before the periodic push would resurrect the delete on the next sign-in.
+        // syncToRemote(true) is the existing coalesced path: sliding 1500ms debounce, so a
+        // batch or consecutive deletes still send exactly one wire push.
+        void import('@/store/syncStore')
+            .then(m => m.useSyncStore.getState().syncToRemote(true))
+            .catch(() => { })
         if (serverEventIds.length > 0) {
             void import('@/lib/activity-server')
                 .then(m => m.deleteServerActivityEvents(serverEventIds))
@@ -409,6 +526,31 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         persistDeletedEvents(deleted)
     },
 
+    resolveOwnEpisodeBits: async (items, contextKey) => {
+        const bits = new Map<string, boolean>()
+        const cachePending = new Set<string>()
+        const baseline = contextKey ? get().snapshot[contextKey] || {} : undefined
+        const pending = items.filter(item => {
+            if (!isSeriesItem(item) || !item._id?.startsWith('tt') || !item.state?.video_id) return false
+            const prior = baseline?.[item._id]
+            return !prior || (stremioTimeOf(item._mtime) ?? 0) > prior.mtime
+        })
+        await mapConcurrent(pending, 6, async item => {
+            const videoId = item.state?.video_id
+            const watched = item.state?.watched
+            // No bitfield, or a readable one with every bit clear: this episode is known unmarked.
+            if (!watched || await hasNoWatchedBits(watched)) { bits.set(item._id, false); return }
+            const videos = await getCachedSeriesVideos(item._id)
+            if (!videos) {
+                if (await isWellFormedWatchedField(watched)) cachePending.add(item._id)
+                return
+            }
+            const resolved = await resolveWatchedBitsAgainstVideos(watched, videos)
+            if (resolved.kind === 'bits') bits.set(item._id, resolved.indices.some(index => videos[index]?.id === videoId))
+        })
+        return Object.assign(bits, { pending: cachePending })
+    },
+
     diffAndRecord: (accountId, items, _account, _accounts, options) => {
         const now = Date.now()
         let state = get()
@@ -461,7 +603,10 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 current.timeWatched !== next.timeWatched ||
                 (current.duration || 0) !== (next.duration || 0) ||
                 current.season !== next.season ||
-                current.episode !== next.episode
+                current.episode !== next.episode ||
+                current.watchMark !== next.watchMark ||
+                current.ownBit !== next.ownBit ||
+                current.ownBitPending !== next.ownBitPending
             ) {
                 snapshotChanged = true
             }
@@ -527,7 +672,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             // This gives retroactive history for the entire existing library on first run.
             if (!prior) {
                 if (!isActuallyWatched(item)) {
-                    setSnapshotItem(item._id, { mtime, video_id, overallTimeWatched: 0, timeWatched: 0, timeOffset: 0 })
+                    setSnapshotItem(item._id, { mtime, video_id, overallTimeWatched: 0, timeWatched: 0, timeOffset: 0, watchMark: watchMarkOf(item) })
                     continue
                 }
                 // Imported saved watch state (bitfield aggregates, flagged-only movies) has no
@@ -537,17 +682,21 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 // it gains real anchors. Per-episode history comes from recordBackfillEpisodes.
                 const datelessSaved = isDatelessSavedWatchState(item)
                 const isSeries = isSeriesItem(item)
+                const seedDismissed = isResumeDismissal(item)
+                const seedLastWatched = stremioTimeOf(item.state?.lastWatched) ?? 0
                 const hasVideoId = !!(item.state?.video_id && item.state.video_id.trim() !== '')
-                if (!datelessSaved && (!isSeries || hasVideoId)) {
+                const { season: seedSeason, episode: seedEpisode } = getSeasonEpisode(item)
+                const seedDeletedAt = identityDeletedAt(ctx, item._id, video_id, sanitizeSeason(seedSeason), seedEpisode, item.type || 'other', get().deletedEventKeys)
+                const seedDeleted = tombstoneHolds(item, seedDeletedAt)
+                if (!datelessSaved && (!isSeries || hasVideoId) && !seedDeleted) {
                     const seedTs = Math.max(
                         stremioTimeOf(item._ctime) ?? 0,
-                        stremioTimeOf(item.state?.lastWatched) ?? 0,
-                        mtime
+                        seedLastWatched,
+                        seedDismissed ? 0 : mtime
                     )
                     if (seedTs > 0) {
                         const seedId = `${ctx}:${video_id}:${seedTs}`
                         if (!existingEventIds.has(seedId)) {
-                            const { season, episode } = getSeasonEpisode(item)
                             newEvents.push({
                                 id: seedId,
                                 accountId,
@@ -561,23 +710,27 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                                 time_watched: item.state?.timeWatched || 0,
                                 time_watched_delta: item.state?.overallTimeWatched || 0,
                                 duration: item.state?.duration || 0,
-                                season: sanitizeSeason(season),
-                                episode,
+                                season: sanitizeSeason(seedSeason),
+                                episode: seedEpisode,
                                 ...eventAttribution,
                             })
                             existingEventIds.add(seedId)
                         }
                     }
                 }
-                const { season: seedSeason, episode: seedEpisode } = getSeasonEpisode(item)
                 setSnapshotItem(item._id, {
-                    mtime, video_id,
+                    // A held tombstone pins the baseline at or before the delete so the preserve
+                    // path can never date a copy after it.
+                    mtime: seedDeleted ? Math.min(mtime, seedDeletedAt as number) : seedDismissed ? seedLastWatched : mtime, video_id,
                     overallTimeWatched: item.state?.overallTimeWatched || 0,
                     timeWatched: item.state?.timeWatched || 0,
                     timeOffset: item.state?.timeOffset || 0,
                     duration: item.state?.duration || 0,
                     season: sanitizeSeason(seedSeason),
                     episode: seedEpisode,
+                    watchMark: watchMarkOf(item),
+                    ownBit: options?.ownBits?.get(item._id),
+                    ownBitPending: options?.ownBits?.pending?.has(item._id) || undefined,
                 })
                 continue
             }
@@ -602,14 +755,20 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 preserveSnapshotEvent(item, prior)
             }
 
-            if (!datelessSaved && (mtimeChanged || episodeAdvanced) && isActuallyWatched(item)) {
-                const currentOverall = item.state?.overallTimeWatched || 0
-                const priorOverall = prior.overallTimeWatched || 0
-                const delta = Math.max(0, currentOverall - priorOverall)
-                const currentTW = item.state?.timeWatched || 0
-                const priorTW = prior.timeWatched || 0
-                const deltaTW = Math.max(0, currentTW - priorTW)
-                const watchedDelta = delta || deltaTW
+            const dismissed = !datelessSaved && !episodeAdvanced && mtimeChanged && isResumeDismissal(item, prior)
+            const currentOverall = item.state?.overallTimeWatched || 0
+            const delta = Math.max(0, currentOverall - (prior.overallTimeWatched || 0))
+            const currentTW = item.state?.timeWatched || 0
+            const deltaTW = Math.max(0, currentTW - (prior.timeWatched || 0))
+            const watchedDelta = delta || deltaTW
+            const anchorDeletedAt = identityDeletedAt(ctx, item._id, video_id, currentSeason, currentEpisode, item.type || 'other', get().deletedEventKeys)
+            const deletedAnchor = !datelessSaved && !dismissed && (mtimeChanged || episodeAdvanced)
+                && tombstoneHolds(item, anchorDeletedAt, episodeAdvanced || prior.fromServer ? undefined : prior.timeOffset)
+            // A write that is not a play of this episode refreshes the baseline but keeps its
+            // mtime, so the preserve path never turns the write time into a watch either.
+            const notAPlay = !datelessSaved && !dismissed && !episodeAdvanced && mtimeChanged && !isSameEpisodeWatch(item, prior, watchedDelta, options?.ownBits?.get(item._id))
+
+            if (!datelessSaved && !dismissed && !deletedAnchor && !notAPlay && (mtimeChanged || episodeAdvanced) && isActuallyWatched(item)) {
                 const episodeKey = getEpisodeIdentity(item._id, video_id, currentSeason, currentEpisode, item.type || 'other')
                 const sessionKey = `${ctx}:${episodeKey}:${getLocalDayKey(mtime)}`
                 const mergeCandidate = !episodeAdvanced
@@ -658,15 +817,25 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 }
             }
 
-            if (mtimeChanged || episodeAdvanced) {
+            // A dismissal leaves the baseline untouched: advancing it would let the next
+            // scan preserve the dismissal mtime as a watch, and a later real watch still
+            // diffs against the true last-watched state.
+            if (!dismissed && (mtimeChanged || episodeAdvanced)) {
                 setSnapshotItem(item._id, {
-                    mtime, video_id,
+                    mtime: deletedAnchor ? Math.min(prior.mtime, anchorDeletedAt as number) : notAPlay ? prior.mtime : mtime, video_id,
                     overallTimeWatched: item.state?.overallTimeWatched || 0,
                     timeWatched: item.state?.timeWatched || 0,
                     timeOffset: item.state?.timeOffset || 0,
                     duration: item.state?.duration || 0,
                     season: currentSeason,
                     episode: currentEpisode,
+                    watchMark: watchMarkOf(item),
+                    ownBit: options?.ownBits?.get(item._id),
+                    // A refresh that was not a play keeps the old baseline; it may not turn an
+                    // unknown-for-another-reason prior (malformed marks) into a cache-pending one.
+                    ownBitPending: notAPlay && prior.ownBit === undefined && prior.ownBitPending !== true
+                        ? undefined
+                        : options?.ownBits?.pending?.has(item._id) || undefined,
                 })
             }
         }
@@ -768,8 +937,8 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     confirmedExistingIdentities.add(identity)
                     continue
                 }
-                // A fabricated ts would bypass the tombstone gate; tombstoned identities backfill from real dates only.
-                if (lastWatchedTs === undefined && isIdentityDeleted(`${ctx}:${identity}`, get().deletedEventKeys)) continue
+                // The bitfield carries no per-episode date, so it can never prove a re-watch after a delete.
+                if (identityDeletedAt(ctx, seriesId, ep.videoId, season, episode, item.type || 'series', get().deletedEventKeys) !== undefined) continue
                 const id = `bf:${ctx}:${ep.videoId}`
                 if (existingIds.has(id)) continue
 
@@ -837,12 +1006,21 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
 
     reset: () => {
         cancelPendingPersist()
-        // Deletes are durable: reset clears watch data but NEVER the tombstones — wiping
+        // Deletes are durable: reset clears watch data but NEVER the tombstones; wiping
         // them would resurrect every deleted event on the next pull.
         const deleted = get().deletedEventKeys
         set({ events: [], snapshot: {}, snapshotOwners: {}, deletedEventKeys: deleted, rollups: emptyRollups(), initialized: false })
         localforage.removeItem(STORAGE_KEY).catch(() => {})
         if (Object.keys(deleted).length > 0) persistDeletedEvents(deleted)
+    },
+
+    reapplyTombstones: () => {
+        const state = get()
+        const events = filterTombstonedEvents(state.events, state.deletedEventKeys)
+        const snapshot = pinTombstonedBaselines(state.snapshot, state.deletedEventKeys)
+        if (events.length === state.events.length && snapshot === state.snapshot) return
+        set({ events, snapshot })
+        persistWatchEvents()
     },
 
     mergeServerEvents: (serverEvents) => {
@@ -875,15 +1053,21 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 name: se.name || 'Unknown',
                 type: se.type || 'other',
                 poster: se.poster || '',
-                time_watched: se.progress || se.watched || 0,
+                time_watched: serverTimeWatched(se),
                 time_watched_delta: undefined,
                 duration: se.duration || 0,
                 season: se.season ?? undefined,
                 episode: se.episode ?? undefined,
                 timesWatched: (se as { timesWatched?: number }).timesWatched,
+                // Stamped only when set: the server row's watched bit is not evidence to clear
+                // a checksum-verified per-episode flag already stamped on the event.
+                ...(isWatchedFlag(se) ? { flaggedWatched: 1 } : {}),
+                ...(se.overallTimeWatched != null ? { overall_time_watched: Number(se.overallTimeWatched) } : {}),
                 scopeKey: se.accountId,
                 ...(sourceConnectionId ? { sourceConnectionId } : {}),
             }
+
+            if (isEventTombstoned(event, state.deletedEventKeys)) continue
 
             const existingEvent = eventsById.get(se.id)
             if (existingEvent) {
@@ -891,12 +1075,14 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 if (
                     existingEvent.video_id !== mergedEvent.video_id ||
                     existingEvent.time_watched !== mergedEvent.time_watched ||
+                    existingEvent.flaggedWatched !== mergedEvent.flaggedWatched ||
                     existingEvent.duration !== mergedEvent.duration ||
                     existingEvent.season !== mergedEvent.season ||
                     existingEvent.episode !== mergedEvent.episode ||
                     existingEvent.sourceConnectionId !== mergedEvent.sourceConnectionId ||
                     existingEvent.scopeKey !== mergedEvent.scopeKey ||
-                    existingEvent.event_ts !== mergedEvent.event_ts
+                    existingEvent.event_ts !== mergedEvent.event_ts ||
+                    existingEvent.overall_time_watched !== mergedEvent.overall_time_watched
                 ) {
                     eventsById.set(se.id, mergedEvent)
                     changed = true
@@ -917,21 +1103,22 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         if (newEvents.length === 0 && !changed) return
 
         const sorted = Array.from(eventsById.values()).sort((a, b) => b.event_ts - a.event_ts)
-        const { kept: capped, rollups } = capWatchEventsWithRollups(
-            filterTombstonedEvents(sorted, get().deletedEventKeys),
-            state.rollups
-        )
+        const alive = filterTombstonedEvents(sorted, get().deletedEventKeys)
+        const { kept: capped, rollups } = capWatchEventsWithRollups(alive, state.rollups)
         const newSnapshot = { ...state.snapshot }
         const snapshotAcc = new Map<string, Record<string, SnapshotItem>>()
-        for (const e of sorted) {
-        const ctx = eventScopeKey(e)
+        for (const e of alive) {
+            const ctx = eventScopeKey(e)
             let acc = snapshotAcc.get(ctx)
             if (!acc) {
                 acc = { ...(newSnapshot[ctx] || {}) }
                 snapshotAcc.set(ctx, acc)
             }
             const existing = acc[e.itemId]
-            if (!existing || e.event_ts >= existing.mtime) {
+            if (existing && e.event_ts >= existing.mtime && existing.video_id === (e.video_id || e.itemId)) {
+                // Same episode: the local marks and times stay; server rows carry neither.
+                acc[e.itemId] = { ...existing, mtime: e.event_ts }
+            } else if (!existing || e.event_ts >= existing.mtime) {
                 acc[e.itemId] = {
                     mtime: e.event_ts,
                     video_id: e.video_id || e.itemId,
@@ -941,6 +1128,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     duration: e.duration || 0,
                     season: e.season,
                     episode: e.episode,
+                    fromServer: true,
                 } as SnapshotItem
             }
         }
@@ -959,7 +1147,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const eventsById = new Map(state.events.map(e => [e.id, e]))
         const sessionKeys = new Set<string>()
         for (const e of state.events) {
-            const ek = getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
+            const ek = canonicalEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
             sessionKeys.add(`${eventScopeKey(e)}:${ek}:${getLocalDayKey(e.event_ts)}`)
         }
         const incomingEventIds = new Set<string>()
@@ -970,7 +1158,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             const video_id = item.video_id || item.itemId
             const episodeKey = getEpisodeIdentity(item.itemId, video_id, item.season, item.episode, item.type)
             const dayKey = getLocalDayKey(item.timestamp)
-            const sessionKey = `${ctx}:${episodeKey}:${dayKey}`
+            const sessionKey = `${ctx}:${canonicalEpisodeIdentity(item.itemId, video_id, item.season, item.episode, item.type)}:${dayKey}`
             const eventId = `ext:${platform}:${ctx}:${episodeKey}:${dayKey}`
             incomingEventIds.add(eventId)
             incomingDayVideoKeys.add(`${dayKey}:${video_id}`)

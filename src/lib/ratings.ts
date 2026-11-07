@@ -3,12 +3,12 @@ import type { ProviderRating, RatingSource } from '@/components/activity/detail/
 export async function authedFetch(url: string, options?: RequestInit): Promise<Response> {
     try {
         const { useSyncStore } = await import('@/store/syncStore')
-        const { deriveSyncToken } = await import('@/lib/crypto')
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
         const auth = useSyncStore.getState().auth
         const headers: Record<string, string> = { ...(options?.headers as Record<string, string>) }
         if (auth.isAuthenticated) {
             headers['x-sync-user'] = auth.id
-            headers['x-sync-password'] = await deriveSyncToken(auth.password)
+            headers['x-sync-password'] = await getSyncPasswordHeader(auth)
         }
         return fetch(url, { ...options, headers })
     } catch {

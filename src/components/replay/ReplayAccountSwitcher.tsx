@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { ChevronDown, Search, Check, Users } from 'lucide-react'
 import { Account } from '@/types/account'
-import { accountMatchesQuery } from '@/lib/account-compat'
-import { ACCOUNT_COLORS } from '@/lib/utils'
+import { accountMatchesQuery, getAccountEmail } from '@/lib/account-compat'
+import { ACCOUNT_COLORS, maskEmailLevel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
+import { maskedDisplayName } from '@/components/common/AccountSwitcher'
 
 interface ReplayAccountSwitcherProps {
     accounts: Account[]
@@ -15,6 +17,9 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
     const [query, setQuery] = useState('')
     const containerRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLInputElement>(null)
+    const namePrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
+    const emailPrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelEmail : 0))
+    const displayName = (acc: Account) => maskedDisplayName(acc.name, getAccountEmail(acc), namePrivacy, emailPrivacy)
 
     useEffect(() => {
         if (!open) return
@@ -42,7 +47,10 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
 
     const triggerLabel = selectedAccountId === 'all'
         ? 'All Accounts'
-        : accounts.find(a => a.id === selectedAccountId)?.name ?? 'All Accounts'
+        : (() => {
+            const acc = accounts.find(a => a.id === selectedAccountId)
+            return acc ? displayName(acc) : 'All Accounts'
+        })()
 
     const triggerColor = selectedAccountId === 'all'
         ? null
@@ -55,6 +63,8 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
         <div ref={containerRef} className="relative shrink-0 pointer-events-auto">
 
             <button
+                type="button"
+                aria-expanded={open}
                 data-theme-part="select-trigger"
                 onClick={() => setOpen(v => !v)}
                 style={{
@@ -175,7 +185,7 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
                                 }}
                             />
                             {query && (
-                                <button data-theme-part="button" onClick={() => setQuery('')} style={{
+                                <button type="button" aria-label="Clear search" data-theme-part="button" onClick={() => setQuery('')} style={{
                                     background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '50%',
                                     width: 16, height: 16, cursor: 'pointer', color: 'rgba(255,255,255,0.5)',
                                     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -189,6 +199,8 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
 
                         {!query && (
                             <button
+                                type="button"
+                                aria-pressed={selectedAccountId === 'all'}
                                 data-theme-part="menu-item"
                                 onClick={() => { onSelect('all'); setOpen(false); setQuery('') }}
                                 style={{
@@ -242,11 +254,15 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
                                 const colorIndex = accounts.indexOf(acc) % ACCOUNT_COLORS.length
                                 const color = ACCOUNT_COLORS[colorIndex]
                                 const isSelected = selectedAccountId === acc.id
-                                const initials = getInitials(acc.name)
+                                const name = displayName(acc)
+                                const initials = getInitials(name)
+                                const email = maskEmailLevel(getAccountEmail(acc) || '', emailPrivacy)
 
                                 return (
                                     <button
                                         key={acc.id}
+                                        type="button"
+                                        aria-pressed={isSelected}
                                         data-theme-part="menu-item"
                                         onClick={() => { onSelect(acc.id); setOpen(false); setQuery('') }}
                                         style={{
@@ -285,15 +301,15 @@ export function ReplayAccountSwitcher({ accounts, selectedAccountId, onSelect }:
                                                 display: 'flex', alignItems: 'center', gap: '6px'
                                             }}>
                                                 {acc.emoji && <span style={{ flexShrink: 0 }}>{acc.emoji}</span>}
-                                                <span>{acc.name}</span>
+                                                <span>{name}</span>
                                             </div>
-                                            {(acc as { email?: string }).email && (
+                                            {email && email !== name && (
                                                 <div style={{
                                                     fontFamily: '"DM Mono", monospace', fontSize: 9, fontWeight: 500,
                                                     color: 'rgba(255,255,255,0.25)', letterSpacing: '0.05em',
                                                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                                                     marginTop: 1,
-                                                }}>{(acc as { email?: string }).email}</div>
+                                                }}>{email}</div>
                                             )}
                                         </div>
 

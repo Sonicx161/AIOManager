@@ -1,6 +1,8 @@
 import { ActivityItem } from '@/types/activity'
 import { ReplayData, RankedTitle, GenreStat, MonthStat, Milestone, HourlyDistribution, DailyDistribution, YearOverYearDelta } from '@/types/ReplayTypes'
 import { getCinemetaPosterUrl } from '@/lib/cinemeta-utils'
+import { cumulativeWatchKey } from '@/lib/activity-utils'
+import { buildRuntimeIndex, computeWatchHours, hoursRowFromItem, msToHours, type RuntimeIndex } from '@/lib/watch-hours'
 import { format } from 'date-fns'
 
 const GENRE_COLORS: Record<string, string> = {
@@ -25,28 +27,95 @@ const GENRE_COLORS: Record<string, string> = {
     'Western': '#d97706' // Amber
 }
 
-export function computeReplayData(history: ActivityItem[], targetYear: number | string): ReplayData {
+/**
+ * Hours per row from the shared helper, so Replay agrees with Metrics and Activity. Credit is
+ * computed over every row given, then `sumOver` totals just a period, so a year never re-seeds
+ * a cumulative counter.
+ */
+function watchTimeByRow(items: ActivityItem[], runtimes: RuntimeIndex, canonical?: ReadonlyMap<string, string | undefined>) {
+    const result = computeWatchHours(items.map(item => hoursRowFromItem(item, cumulativeWatchKey(item, canonical))), runtimes)
+    const times = new Map<ActivityItem, number>()
+    const estimates = new Map<ActivityItem, number>()
+    items.forEach((item, index) => {
+        times.set(item, result.rowMs[index])
+        estimates.set(item, result.rowEstimatedMs[index])
+    })
+    const sumOver = (rows: ActivityItem[]) => {
+        let totalMs = 0
+        let estimatedMs = 0
+        for (const row of rows) {
+            totalMs += times.get(row) ?? 0
+            estimatedMs += estimates.get(row) ?? 0
+        }
+        return { totalMs, estimatedMs }
+    }
+    return { times, sumOver }
+}
+
+const localDayKey = (timestamp: Date | string | number) => format(new Date(timestamp), 'yyyy-MM-dd')
+
+function localDayNumber(key: string): number {
+    const [y, m, d] = key.split('-').map(Number)
+    return Math.round(new Date(y, m - 1, d).getTime() / 86400000)
+}
+
+function longestRun(dayKeys: string[]): number {
+    let longest = 0
+    let current = 0
+    let last: number | null = null
+    for (const key of dayKeys) {
+        const day = localDayNumber(key)
+        current = last !== null && day - last === 1 ? current + 1 : 1
+        longest = Math.max(longest, current)
+        last = day
+    }
+    return longest
+}
+
+export type ReplayDataWithEstimate = ReplayData & { estimatedHours: number }
+
+export function computeReplayData(
+    history: ActivityItem[],
+    targetYear: number | string,
+    options?: { canonicalConnections?: ReadonlyMap<string, string | undefined>; now?: Date }
+): ReplayDataWithEstimate {
+    const canonical = options?.canonicalConnections
     const isSpecificMonth = typeof targetYear === 'string' && targetYear !== 'all-time' && targetYear.includes('-');
+
+    // Parsing each timestamp once per call removes repeated `new Date` allocations; output is unchanged.
+    const parsedDates = new Map<ActivityItem, Date>()
+    const toDate = (item: ActivityItem): Date => {
+        let d = parsedDates.get(item)
+        if (!d) {
+            d = new Date(item.timestamp)
+            parsedDates.set(item, d)
+        }
+        return d
+    }
 
     const filteredHistory = targetYear === 'all-time'
         ? history
         : isSpecificMonth
-            ? history.filter(item => format(new Date(item.timestamp), 'yyyy-MM') === targetYear)
-            : history.filter(item => new Date(item.timestamp).getFullYear() === targetYear)
+            ? history.filter(item => format(toDate(item), 'yyyy-MM') === targetYear)
+            : history.filter(item => toDate(item).getFullYear() === targetYear)
 
     const historyBeforeTarget = targetYear === 'all-time'
         ? []
         : isSpecificMonth
-            ? history.filter(item => {
+            ? (() => {
                 const [dy, dm] = (targetYear as string).split('-').map(Number)
-                return new Date(item.timestamp) < new Date(dy, dm - 1, 1)
-            })
-            : history.filter(item => new Date(item.timestamp).getFullYear() < (targetYear as number))
+                const monthStart = new Date(dy, dm - 1, 1)
+                return history.filter(item => toDate(item) < monthStart)
+            })()
+            : history.filter(item => toDate(item).getFullYear() < (targetYear as number))
 
     // Backfilled episodes (recovered from the watched-bitfield) have a synthetic timestamp, so they
     // count toward titles/episodes/discoveries but are excluded from every time-based stat (monthly
     // breakdown, streaks, hourly/daily distribution, busiest day, YoY hours).
     const timeHistory = filteredHistory.filter(item => !item.backfill)
+    const runtimes = buildRuntimeIndex(history)
+    const { times: timeByRow, sumOver } = watchTimeByRow(history, runtimes, canonical)
+    const { totalMs: periodMs, estimatedMs: periodEstimatedMs } = sumOver(filteredHistory)
 
     const titleMap = new Map<string, {
         item: ActivityItem,
@@ -62,20 +131,8 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         titleCounts: Map<string, { item: ActivityItem, count: number }>
     }>()
 
-    const overallSeen = new Map<string, number>()
-
     filteredHistory.forEach(item => {
-        const hours = item.backfill
-            ? 0
-            : (() => {
-                if (item.overallTimeWatched && item.overallTimeWatched > 0) {
-                    const prev = overallSeen.get(item.itemId) || 0
-                    const delta = Math.max(0, item.overallTimeWatched - prev)
-                    overallSeen.set(item.itemId, item.overallTimeWatched)
-                    return delta / 3600000
-                }
-                return ((item.duration && item.progress) ? item.duration * (item.progress / 100) : item.duration || 3600000) / 3600000
-            })();
+        const hours = (timeByRow.get(item) ?? 0) / 3600000
 
         const uniqueId = item.itemId;
         const current = titleMap.get(uniqueId) || {
@@ -87,7 +144,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
 
         current.count++
         current.totalHours += hours
-        current.years.add(new Date(item.timestamp).getFullYear())
+        current.years.add(toDate(item).getFullYear())
         titleMap.set(uniqueId, current)
 
         if (item.genres) {
@@ -97,22 +154,11 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         }
     })
 
-    const monthOverallSeen = new Map<string, number>()
-
     timeHistory.forEach(item => {
-        const rawTimeMs = (() => {
-            if (item.overallTimeWatched && item.overallTimeWatched > 0) {
-                const prev = monthOverallSeen.get(item.itemId) || 0
-                const delta = Math.max(0, item.overallTimeWatched - prev)
-                monthOverallSeen.set(item.itemId, item.overallTimeWatched)
-                return delta
-            }
-            return (item.duration && item.progress) ? item.duration * (item.progress / 100) : item.duration || 3600000
-        })()
-        const hours = rawTimeMs / 3600000
+        const hours = (timeByRow.get(item) ?? 0) / 3600000
 
         const uniqueId = item.itemId;
-        const mKey = format(new Date(item.timestamp), 'yyyy-MM')
+        const mKey = format(toDate(item), 'yyyy-MM')
         const mData = monthMap.get(mKey) || { titles: new Set(), hours: 0, titleCounts: new Map() }
         mData.titles.add(uniqueId)
         mData.hours += hours
@@ -151,7 +197,9 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
 
     const months: MonthStat[] = []
     if (targetYear !== 'all-time' && !isSpecificMonth) {
-        for (let m = 0; m < 12; m++) {
+        const now = options?.now ?? new Date()
+        const lastMonth = Number(targetYear) === now.getFullYear() ? now.getMonth() + 1 : 12
+        for (let m = 0; m < lastMonth; m++) {
             const mKey = `${targetYear}-${String(m + 1).padStart(2, '0')}`
             const mData = monthMap.get(mKey)
             const d = new Date(targetYear as number, m, 1)
@@ -208,29 +256,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         .sort((a, b) => b.totalHours - a.totalHours)
         .slice(0, 10)
 
-    const activeDates = Array.from(new Set(timeHistory.map(item => new Date(item.timestamp).toISOString().split('T')[0]))).sort()
-    let longestStreak = 0
-    let currentStreak = 0
-    let lastTimestampMs: number | null = null
-
-    activeDates.forEach(dateStr => {
-        const [y, m, d] = dateStr.split('-').map(Number)
-        const currentTimestampMs = Date.UTC(y, m - 1, d)
-
-        if (lastTimestampMs === null) {
-            currentStreak = 1
-        } else {
-            const diffDays = Math.round((currentTimestampMs - lastTimestampMs) / (1000 * 60 * 60 * 24))
-
-            if (diffDays === 1) {
-                currentStreak++
-            } else {
-                currentStreak = 1
-            }
-        }
-        longestStreak = Math.max(longestStreak, currentStreak)
-        lastTimestampMs = currentTimestampMs
-    })
+    const longestStreak = longestRun(Array.from(new Set(timeHistory.map(item => localDayKey(toDate(item))))).sort())
 
     const heroPosterArt = rankedTitles.slice(0, 48).map(t => {
         const tt = t.itemId?.match(/tt\d+/i)?.[0]
@@ -238,14 +264,14 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
     })
 
     const calculatePersona = () => {
-        const totalHours = Math.round(Array.from(titleMap.values()).reduce((sum, d) => sum + d.totalHours, 0))
+        const totalHours = msToHours(periodMs)
         const nightOwlHours = timeHistory.filter(h => {
-            const hour = new Date(h.timestamp).getHours()
+            const hour = toDate(h).getHours()
             return hour >= 0 && hour <= 5
         }).length
 
         const weekendHours = timeHistory.filter(h => {
-            const day = new Date(h.timestamp).getDay()
+            const day = toDate(h).getDay()
             return day === 0 || day === 6
         }).length
 
@@ -287,7 +313,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
 
     const persona = calculatePersona()
 
-    const totalHoursComputed = Math.round(Array.from(titleMap.values()).reduce((sum, d) => sum + d.totalHours, 0))
+    const totalHoursComputed = msToHours(periodMs)
 
     const milestones: Milestone[] = [
         { id: 'titles-50', icon: '🎬', title: 'Cineplex Pass', description: 'Watched 50 unique titles', value: titleMap.size, threshold: 50, unlocked: titleMap.size >= 50 },
@@ -306,7 +332,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
 
     const hourCounts = new Array(24).fill(0)
     timeHistory.forEach(item => {
-        const hour = new Date(item.timestamp).getHours()
+        const hour = toDate(item).getHours()
         hourCounts[hour]++
     })
     const maxHourCount = Math.max(...hourCounts, 1)
@@ -320,20 +346,10 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
     const dayCounts = new Array(7).fill(0)
     const dayHours = new Array(7).fill(0)
-    const dayOverallSeen = new Map<string, number>()
     timeHistory.forEach(item => {
-        const day = new Date(item.timestamp).getDay()
+        const day = toDate(item).getDay()
         dayCounts[day]++
-        const timeWatchedMs = (() => {
-            if (item.overallTimeWatched && item.overallTimeWatched > 0) {
-                const prev = dayOverallSeen.get(item.itemId) || 0
-                const delta = Math.max(0, item.overallTimeWatched - prev)
-                dayOverallSeen.set(item.itemId, item.overallTimeWatched)
-                return delta
-            }
-            return (item.duration && item.progress) ? item.duration * (item.progress / 100) : item.duration || 3600000
-        })()
-        dayHours[day] += timeWatchedMs / 3600000
+        dayHours[day] += (timeByRow.get(item) ?? 0) / 3600000
     })
     const maxDayHour = Math.max(...dayHours, 1)
     const dailyDistribution: DailyDistribution[] = dayCounts.map((count, day) => ({
@@ -349,43 +365,19 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
     let yearOverYear: YearOverYearDelta | null = null
     if (typeof targetYear === 'number') {
         const prevYearNum = targetYear - 1
-        const prevYearHistory = history.filter(item => new Date(item.timestamp).getFullYear() === prevYearNum)
+        const prevYearHistory = history.filter(item => toDate(item).getFullYear() === prevYearNum)
 
         if (prevYearHistory.length > 0) {
             const prevYearTimeHistory = prevYearHistory.filter(i => !i.backfill)
             const prevTitles = new Set(prevYearHistory.map(i => i.itemId)).size
-            const prevOverallSeen = new Map<string, number>()
-            const prevHours = Math.round(prevYearTimeHistory.reduce((sum, item) => {
-                let tw: number
-                if (item.overallTimeWatched && item.overallTimeWatched > 0) {
-                    const prev = prevOverallSeen.get(item.itemId) || 0
-                    tw = Math.max(0, item.overallTimeWatched - prev)
-                    prevOverallSeen.set(item.itemId, item.overallTimeWatched)
-                } else {
-                    tw = (item.duration && item.progress) ? item.duration * (item.progress / 100) : item.duration || 3600000
-                }
-                return sum + tw / 3600000
-            }, 0))
+            const prevHours = msToHours(sumOver(prevYearHistory).totalMs)
             const prevSeriesCount = new Set(prevYearHistory.filter(i => i.type === 'series').map(i => i.itemId)).size
             const prevLoyalty = prevTitles > 0 ? Math.round((prevSeriesCount / prevTitles) * 100) : 0
 
             const currentSeriesCount = Array.from(titleMap.values()).filter(t => t.item.type === 'series').length
             const currentLoyalty = titleMap.size > 0 ? Math.round((currentSeriesCount / titleMap.size) * 100) : 0
 
-            // Previous year streak (UTC based for consistency)
-            const prevDates = Array.from(new Set(prevYearTimeHistory.map(i => new Date(i.timestamp).toISOString().split('T')[0]))).sort()
-            let prevStreak = 0, prevCurrentStreak = 0
-            let prevLast: Date | null = null
-            prevDates.forEach(ds => {
-                const d = new Date(ds)
-                if (!prevLast) { prevCurrentStreak = 1 }
-                else {
-                    const diff = Math.ceil(Math.abs(d.getTime() - prevLast.getTime()) / 86400000)
-                    prevCurrentStreak = diff === 1 ? prevCurrentStreak + 1 : 1
-                }
-                prevStreak = Math.max(prevStreak, prevCurrentStreak)
-                prevLast = d
-            })
+            const prevStreak = longestRun(Array.from(new Set(prevYearTimeHistory.map(i => localDayKey(toDate(i))))).sort())
 
             const pctDelta = (current: number, prev: number) => prev === 0 ? (current > 0 ? 100 : 0) : Math.round(((current - prev) / prev) * 100)
 
@@ -420,8 +412,8 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         discoveries,
         marathonTitles,
         hiddenGems,
-        availableYears: Array.from(new Set(history.map(item => new Date(item.timestamp).getFullYear()))).sort((a, b) => b - a),
-        availableMonths: Array.from(new Set(history.map(item => format(new Date(item.timestamp), 'yyyy-MM')))).sort((a, b) => b.localeCompare(a)),
+        availableYears: Array.from(new Set(history.map(item => toDate(item).getFullYear()))).sort((a, b) => b - a),
+        availableMonths: Array.from(new Set(history.map(item => format(toDate(item), 'yyyy-MM')))).sort((a, b) => b.localeCompare(a)),
         heroPosterArt,
         persona: persona.name,
         personaDescription: persona.description,
@@ -432,6 +424,7 @@ export function computeReplayData(history: ActivityItem[], targetYear: number | 
         peakHour,
         peakDay,
         discoveryPercentage,
-        totalUniqueDiscoveries
+        totalUniqueDiscoveries,
+        estimatedHours: msToHours(periodEstimatedMs),
     }
 }

@@ -3,7 +3,8 @@ import { Account } from '@/types/account'
 import type { HistoryEntry } from '@/hooks/useWatchHistory'
 import { getAccountEmail } from '@/store/accountStore'
 import { sanitizePosterUrl } from '@/lib/utils'
-import { parseCinemetaGenres, fetchCinemetaDetail } from './cinemeta-cache.ts'
+import { fetchCinemetaSlim } from './cinemeta-cache.ts'
+import { nuvioSourceTime } from './nuvio-time.ts'
 import {
     isSavedOnlySeriesRow,
     isFlaggedOnlyMovieRow,
@@ -25,6 +26,31 @@ export { isSavedOnlySeriesRow, isFlaggedOnlyMovieRow, isDatelessSavedWatchState,
  */
 export function watchContextKey(accountId: string, sourceConnectionId?: string): string {
     return sourceConnectionId ? `${accountId}::${sourceConnectionId}` : accountId
+}
+
+/** Canonical native Stremio login per account; its rows share the bare account scope. */
+export function canonicalStremioConnections(accounts: ReadonlyArray<Pick<Account, 'id' | 'connections' | 'primaryConnectionId'>>): Map<string, string | undefined> {
+    const canonical = new Map<string, string | undefined>()
+    for (const account of accounts) {
+        const native = (account.connections || []).filter(c => c.platform === 'stremio' && (c.connectionType == null || c.connectionType === 'native'))
+        canonical.set(account.id, native.find(c => c.id === account.primaryConnectionId)?.id ?? native[0]?.id)
+    }
+    return canonical
+}
+
+/**
+ * Scope of a cumulative counter such as overallTimeWatched: one per account, platform,
+ * login and title, so different viewers of the same title never offset each other.
+ */
+export function cumulativeWatchKey(
+    item: Pick<ActivityItem, 'accountId' | 'source' | 'sourceConnectionId' | 'itemId'>,
+    canonical?: ReadonlyMap<string, string | undefined>
+): string {
+    const source = item.source || 'stremio'
+    const connection = item.sourceConnectionId && !(source === 'stremio' && canonical?.get(item.accountId) === item.sourceConnectionId)
+        ? item.sourceConnectionId
+        : ''
+    return `${item.accountId}|${source}|${connection}|${item.itemId}`
 }
 
 /**
@@ -109,13 +135,54 @@ export function getUniqueItemId(item: LibraryItem): string {
     return baseId
 }
 
+// Stremio uses placeholder dates such as 0001-01-01 for "never"; anything this old is not a watch.
+export const MIN_PLAUSIBLE_WATCH_MS = Date.UTC(1995, 0, 1)
+
+const DISMISSAL_MTIME_LEAD_MS = 10 * 60 * 1000
+const DISMISSAL_CLOCK_SLACK_MS = 1000
+
+export interface ResumeDismissalPrior {
+    mtime?: number
+    video_id?: string
+    timeOffset?: number
+    overallTimeWatched?: number
+    timeWatched?: number
+}
+
+/**
+ * Stremio's Continue Watching dismiss zeroes the resume offset and bumps _mtime while
+ * lastWatched stays put. Without a prior snapshot the signal is _mtime running well past
+ * lastWatched at a zero offset; with one, a resume offset dropping to zero with no new
+ * watch time and no lastWatched advance past the prior scan.
+ */
+export function isResumeDismissal(item: LibraryItem, prior?: ResumeDismissalPrior): boolean {
+    const s = item.state
+    if ((s?.timeOffset ?? 0) > 0) return false
+    const lwRaw = s?.lastWatched ? new Date(s.lastWatched).getTime() : NaN
+    const lw = Number.isFinite(lwRaw) && lwRaw >= MIN_PLAUSIBLE_WATCH_MS ? lwRaw : undefined
+
+    if (prior) {
+        if (prior.video_id && s?.video_id && prior.video_id !== s.video_id) return false
+        const overallDelta = (s?.overallTimeWatched ?? 0) - (prior.overallTimeWatched ?? 0)
+        const watchedDelta = (s?.timeWatched ?? 0) - (prior.timeWatched ?? 0)
+        if (overallDelta > 0 || watchedDelta > 0) return false
+        if ((prior.timeOffset ?? 0) > 0 && prior.mtime) {
+            return lw === undefined || lw <= prior.mtime + DISMISSAL_CLOCK_SLACK_MS
+        }
+    }
+
+    if (lw === undefined || !item._mtime) return false
+    const mt = new Date(item._mtime).getTime()
+    return Number.isFinite(mt) && mt - lw > DISMISSAL_MTIME_LEAD_MS
+}
+
 export function getWatchTimestamp(item: LibraryItem): Date {
     const times: number[] = []
     if (item.state?.lastWatched) {
         const d = new Date(item.state.lastWatched)
         if (!isNaN(d.getTime())) times.push(d.getTime())
     }
-    if (item._mtime) {
+    if (item._mtime && !isResumeDismissal(item)) {
         const d = new Date(item._mtime)
         if (!isNaN(d.getTime())) times.push(d.getTime())
     }
@@ -183,6 +250,24 @@ export function getLocalDayKey(timestamp: number): string {
     return `${date.getFullYear()}-${month}-${day}`
 }
 
+/**
+ * Per-identity replay proof that releases an Activity tombstone (Sol R1 F4): the
+ * episode's OWN resume position moved from a known baseline after the delete. A
+ * lastWatched-only advance (Stremio bumps it when other episodes are marked watched)
+ * or any mark change never releases it, and an unknown baseline is never evidence.
+ * Used by the event differencer's tombstone gates.
+ */
+export function tombstoneReplayProven(args: {
+    deletedAt: number | undefined
+    offset: number
+    priorOffset?: number
+    lastWatched: number
+}): boolean {
+    if (args.deletedAt === undefined) return false
+    if (args.priorOffset === undefined) return false
+    return args.offset > 0 && args.offset !== args.priorOffset && args.lastWatched > args.deletedAt
+}
+
 export function getEpisodeIdentity(
     itemId: string,
     videoId: string | undefined,
@@ -211,7 +296,7 @@ export function getEpisodeIdentity(
 export function parseStremioDate(dateStr: string | undefined): Date | undefined {
     if (!dateStr) return undefined
     const d = new Date(dateStr)
-    if (isNaN(d.getTime())) return undefined
+    if (isNaN(d.getTime()) || d.getTime() < MIN_PLAUSIBLE_WATCH_MS) return undefined
     return d.getTime() > Date.now() + 5 * 60 * 1000 ? new Date() : d
 }
 
@@ -287,7 +372,7 @@ interface NuvioWatchedItem {
     title?: string
     season?: number | null
     episode?: number | null
-    watched_at?: number
+    watched_at?: number | string
 }
 
 interface NuvioProgressItem {
@@ -300,17 +385,37 @@ interface NuvioProgressItem {
     duration?: number
     /** Explicit percentage-only progress from providers without an elapsed time/runtime. */
     progressPercent?: number
-    last_watched?: number
+    last_watched?: number | string
 }
 
-async function resolveCinemeta(imdbId: string, type?: string): Promise<{ name: string; poster: string; genres: string[] }> {
-    const meta = await fetchCinemetaDetail(imdbId, type)
-    if (!meta) return { name: '', poster: '', genres: [] }
-    return {
-        name: meta.name || '',
-        poster: sanitizePosterUrl(meta.poster) || '',
-        genres: parseCinemetaGenres(meta),
-    }
+export interface CinemetaResolution {
+    name: string
+    poster: string
+    genres: string[]
+}
+
+/** Per-run share of one Cinemeta lookup: the many episode rows of a series resolve once. */
+export type CinemetaMemo = Map<string, Promise<CinemetaResolution>>
+
+export function createCinemetaMemo(): CinemetaMemo {
+    return new Map()
+}
+
+async function resolveCinemeta(imdbId: string, type?: string, memo?: CinemetaMemo): Promise<CinemetaResolution> {
+    const memoKey = `${type || ''}|${imdbId}`
+    const shared = memo?.get(memoKey)
+    if (shared) return shared
+    const task = (async (): Promise<CinemetaResolution> => {
+        const slim = await fetchCinemetaSlim(imdbId, type)
+        if (!slim) return { name: '', poster: '', genres: [] }
+        return {
+            name: slim.name,
+            poster: sanitizePosterUrl(slim.poster) || '',
+            genres: slim.genres ?? [],
+        }
+    })()
+    memo?.set(memoKey, task)
+    return task
 }
 
 function nuvioUniqueId(contentId: string, season?: number | null, episode?: number | null): string {
@@ -335,7 +440,7 @@ function accountActivityMeta(account: Account, accounts: Account[]) {
     }
 }
 
-export async function transformNuvioWatchedItemToActivityItem(row: NuvioWatchedItem, account: Account, accounts: Account[], options?: { connectionId?: string }): Promise<ActivityItem> {
+export async function transformNuvioWatchedItemToActivityItem(row: NuvioWatchedItem, account: Account, accounts: Account[], options?: { connectionId?: string; cinemetaMemo?: CinemetaMemo }): Promise<ActivityItem> {
     const uniqueItemId = nuvioUniqueId(row.content_id, row.season, row.episode)
     const meta = accountActivityMeta(account, accounts)
     // Undated rows must not borrow the sync time as a fake watch date: during a
@@ -343,10 +448,10 @@ export async function transformNuvioWatchedItemToActivityItem(row: NuvioWatchedI
     // chain into one giant fake binge session. Observation time still orders the
     // row in lists, but the backfill marker excludes it from time-based stats,
     // exactly like Stremio bitfield recoveries.
-    const watchedAtMs = Number(row.watched_at)
-    const undated = !(watchedAtMs > 0)
+    const watchedAtMs = nuvioSourceTime(row.watched_at)
+    const undated = watchedAtMs === null
     const watchedAt = undated ? Date.now() : watchedAtMs
-    const resolved = await resolveCinemeta(row.content_id, row.content_type)
+    const resolved = await resolveCinemeta(row.content_id, row.content_type, options?.cinemetaMemo)
     let name: string
     if (row.episode != null && resolved.name.trim()) {
         name = resolved.name
@@ -387,7 +492,7 @@ export async function transformNuvioWatchedItemToActivityItem(row: NuvioWatchedI
 
 // Progress rows carry no title (only watched rows do), so the caller can pass a title resolved
 // from the watched-items list for the same content_id to avoid showing a raw id as the name.
-export async function transformNuvioProgressToActivityItem(row: NuvioProgressItem, account: Account, accounts: Account[], titleHint?: string, options?: { connectionId?: string }): Promise<ActivityItem> {
+export async function transformNuvioProgressToActivityItem(row: NuvioProgressItem, account: Account, accounts: Account[], titleHint?: string, options?: { connectionId?: string; cinemetaMemo?: CinemetaMemo }): Promise<ActivityItem> {
     const uniqueItemId = row.video_id || nuvioUniqueId(row.content_id, row.season, row.episode)
     const meta = accountActivityMeta(account, accounts)
     const percentOnly = row.progressPercent !== undefined
@@ -399,10 +504,10 @@ export async function transformNuvioProgressToActivityItem(row: NuvioProgressIte
     // Same undated rule as watched rows: no real last_watched means the timestamp
     // is the sync observation, not a watch date; mark it so binge/session stats
     // and other time-based metrics exclude it.
-    const lastWatchedMs = Number(row.last_watched)
-    const undated = !(lastWatchedMs > 0)
+    const lastWatchedMs = nuvioSourceTime(row.last_watched)
+    const undated = lastWatchedMs === null
     const lastWatched = undated ? Date.now() : lastWatchedMs
-    const resolved = await resolveCinemeta(row.content_id, row.content_type)
+    const resolved = await resolveCinemeta(row.content_id, row.content_type, options?.cinemetaMemo)
     let name: string
     if (row.episode != null && resolved.name.trim()) {
         name = resolved.name
@@ -453,7 +558,18 @@ export function historyEntryToActivityItem(entry: HistoryEntry): ActivityItem {
         firstWatched: entry.firstWatched,
         duration: entry.duration,
         watched: entry.isFromEventLog ? entry.watched : (entry.liveWatched ?? entry.watched),
-        progress: Math.min(entry.isFromEventLog ? entry.progress : (entry.liveProgress ?? entry.progress), 100),
+        // The live overlay is the CURRENT state of this exact play identity (attached only
+        // to the newest event of the identity while the library still holds the row), so
+        // its progress is the display state; the event's own measure stays historical
+        // (#85's unmeasured-event borrow and Sol R1 F5's 23%-event-vs-93%-row both hold).
+        progress: Math.min(
+            entry.liveProgress ?? entry.progress,
+            100,
+        ),
+        // Authoritative current resume, separate from the credited time above (Sol R2-10):
+        // present only when the overlay supplied one, so a near-zero reset never falls
+        // back to historical event credit in the badge.
+        liveResume: entry.liveWatched,
         timesWatched: entry.timesWatched,
         flaggedWatched: entry.flaggedWatched,
         isInProgress: entry.isInProgress,
@@ -464,6 +580,7 @@ export function historyEntryToActivityItem(entry: HistoryEntry): ActivityItem {
         sourceConnectionId: entry.sourceConnectionId,
         backfill: entry.backfill,
         importedSavedState: entry.importedSavedState,
+        timeApproximate: entry.timeApproximate,
         savedEpisodes: entry.savedEpisodes,
         genres: entry.genres,
         readOnly: entry.readOnly,

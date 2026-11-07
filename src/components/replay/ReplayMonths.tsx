@@ -48,12 +48,18 @@ export function ReplayMonths({ data }: ReplayMonthsProps) {
                             initial={{ opacity: 0, y: 20 }}
                             whileInView={{ opacity: 1, y: 0 }}
                             transition={{ delay: i * 0.05 }}
-                            className={`transition-all duration-300 cursor-pointer ${month.isHighActivity ? `scale-[1.02] z-10 ${isLight ? 'shadow-2xl shadow-primary/10' : 'shadow-xl shadow-primary/5'}` : 'opacity-80 hover:opacity-100 hover:scale-[1.01]'
+                            className={`transition-all duration-300 h-full ${month.isHighActivity ? `scale-[1.02] z-10 ${isLight ? 'shadow-2xl shadow-primary/10' : 'shadow-xl shadow-primary/5'}` : 'opacity-80 hover:opacity-100 hover:scale-[1.01]'
                                 }`}
-                            onClick={() => setSelectedMonth(month)}
                         >
-                            <div data-theme-part="card" className={`p-8 rounded-xl h-full flex flex-col justify-between border-2 transition-colors hover:border-primary/30 bg-white/5 shadow-xl ${month.isHighActivity ? 'border-primary/50' : 'border-white/10'
-                                }`}>
+                            <button
+                                type="button"
+                                aria-haspopup="dialog"
+                                aria-label={`${month.month} ${month.monthKey?.split('-')[0] ?? ''}, ${month.totalTitles} titles, ${Math.round(month.totalHours)} hours`}
+                                onClick={() => setSelectedMonth(month)}
+                                className={`w-full h-full text-left cursor-pointer p-8 rounded-xl flex flex-col justify-between border-2 transition-colors hover:border-primary/30 bg-white/5 shadow-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${month.isHighActivity ? 'border-primary/50' : 'border-white/10'
+                                    }`}
+                                data-theme-part="card"
+                            >
                                 <div className="space-y-6">
                                     <div className="flex justify-between items-start">
                                         <div className="space-y-1">
@@ -85,7 +91,7 @@ export function ReplayMonths({ data }: ReplayMonthsProps) {
                                     <span className="text-sm font-bold uppercase text-white/70 group-hover:text-primary transition-colors">Details</span>
                                     <ArrowRight className="w-4 h-4 text-white/20 group-hover:text-primary transition-all translate-x-0 group-hover:translate-x-1" />
                                 </div>
-                            </div>
+                            </button>
                         </motion.div>
                     ))}
                 </div>
@@ -93,7 +99,7 @@ export function ReplayMonths({ data }: ReplayMonthsProps) {
 
             <Dialog open={!!selectedMonth} onOpenChange={(open) => !open && setSelectedMonth(null)}>
                 <DialogContent
-                    className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[95vw] md:w-[600px] max-w-[95vw] bg-[#0d0d15]/80 backdrop-blur-3xl border border-white/10 text-white p-0 rounded-xl max-h-[85vh] overflow-y-auto no-scrollbar z-[200] shadow-2xl"
+                    className="sm:max-w-[600px] bg-popover border-white/10 text-white p-0 rounded-xl max-h-[85vh] overflow-y-auto no-scrollbar shadow-2xl"
                 >
 
                     <div className="relative w-full p-6 md:p-8 pt-12 md:pt-16">
@@ -115,12 +121,12 @@ export function ReplayMonths({ data }: ReplayMonthsProps) {
                     <div className="p-6 md:p-8 pt-0 space-y-6 md:space-y-8">
 
                         <div className="flex gap-4">
-                            <div className="flex-1 bg-white/5 backdrop-blur-md p-5 rounded-[24px] border border-white/5 relative overflow-hidden group">
+                            <div className="flex-1 bg-white/5 backdrop-blur-md p-5 rounded-xl border border-white/5 relative overflow-hidden group">
                                 <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                                 <div className="text-sm font-bold text-white/70 uppercase mb-1 relative z-10">Titles</div>
                                 <div className="text-3xl md:text-4xl font-bold relative z-10">{selectedMonth?.totalTitles}</div>
                             </div>
-                            <div className="flex-1 bg-white/5 backdrop-blur-md p-5 rounded-[24px] border border-white/5 relative overflow-hidden group">
+                            <div className="flex-1 bg-white/5 backdrop-blur-md p-5 rounded-xl border border-white/5 relative overflow-hidden group">
                                 <div className="absolute inset-0 bg-gradient-to-br from-primary/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                                 <div className="text-sm font-bold text-white/70 uppercase mb-1 relative z-10">Hours</div>
                                 <div className="text-3xl md:text-4xl font-bold relative z-10">{Math.round(selectedMonth?.totalHours || 0)}</div>
@@ -135,30 +141,33 @@ export function ReplayMonths({ data }: ReplayMonthsProps) {
                             </div>
                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 md:gap-4">
                                 {selectedMonth?.top3Titles?.map((title, i) => (
-                                    <div
+                                    <button
                                         key={title.itemId}
+                                        type="button"
+                                        aria-label={`#${i + 1} ${title.name}, open in Stremio`}
                                         onClick={() => handleTitleClick(title)}
-                                        className="relative group cursor-pointer aspect-[2/3] rounded-[20px] overflow-hidden border border-white/10 shadow-lg"
+                                        className="relative block w-full cursor-pointer group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aspect-[2/3] rounded-[20px] overflow-hidden border border-white/10 shadow-lg"
                                     >
                                         <Poster
                                             src={title.poster}
+                                            displayWidth={240}
                                             itemId={title.itemId}
                                             itemType={title.type}
                                             className="w-full h-full object-cover transition-transform duration-700 ease-out group-hover:scale-110"
                                             alt=""
                                         />
-                                        <div className="absolute inset-0 bg-gradient-to-t from-[#0d0d15]/90 via-[#0d0d15]/20 to-transparent opacity-90 md:opacity-0 md:group-hover:opacity-100 transition-opacity duration-300" />
+                                        <div className="absolute inset-0 bg-gradient-to-t from-[#0d0d15]/90 via-[#0d0d15]/20 to-transparent opacity-90 md:opacity-0 md:group-hover:opacity-100 md:group-focus-visible:opacity-100 transition-opacity duration-300" />
 
                                         <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-md text-white px-2 py-0.5 rounded-lg text-sm font-bold italic shadow-md border border-white/10">
                                             #{i + 1}
                                         </div>
 
-                                        <div className="absolute bottom-0 left-0 right-0 p-3 translate-y-2 md:translate-y-4 md:opacity-0 group-hover:translate-y-0 opacity-100 md:group-hover:opacity-100 transition-all duration-300">
+                                        <div className="absolute bottom-0 left-0 right-0 p-3 translate-y-2 md:translate-y-4 md:opacity-0 group-hover:translate-y-0 group-focus-visible:translate-y-0 opacity-100 md:group-hover:opacity-100 md:group-focus-visible:opacity-100 transition-all duration-300">
                                             <div className="text-xs md:text-xs font-bold leading-tight line-clamp-2 text-shadow-sm">
                                                 {title.name}
                                             </div>
                                         </div>
-                                    </div>
+                                    </button>
                                 ))}
                                 {(!selectedMonth?.top3Titles || selectedMonth.top3Titles.length === 0) && (
                                     <div className="col-span-3 flex flex-col items-center justify-center py-12 text-white/20 font-bold italic border border-dashed border-white/5 rounded-xl bg-white/5">

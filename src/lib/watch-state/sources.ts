@@ -107,40 +107,67 @@ export async function stremioWatchSession(account: Account, connection: Connecti
 
 export interface NuvioWatchSession extends Omit<NuvioWatchSourceOptions, 'open'> {
     open(signal: AbortSignal): Promise<{ rpc: (fn: string, body: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>; profileIndex: number }>
+    /** Forces a fresh token and identity verification; reuse sessions call it once at the start of an import run. */
+    beginRun(signal: AbortSignal): Promise<void>
 }
 
-export async function nuvioWatchSession(account: Account, connection: Connection, signal: AbortSignal, allowedWrites: readonly string[] = [], assertCurrent: () => void = () => {}): Promise<NuvioWatchSession> {
-    const { DEFAULT_BASE_URL, DEFAULT_PUBLISHABLE_KEY } = await import('../drivers/nuvio.ts')
-    const { fetchConnectionToken } = await import('../../api/connection.ts')
-    const base = normalizedBaseUrl(connection.credentials.baseUrl || DEFAULT_BASE_URL)
-    const publishableKey = connection.credentials.publishableKey || DEFAULT_PUBLISHABLE_KEY
-    const open = async (openSignal: AbortSignal) => {
-        const token = await fetchConnectionToken(account.id, connection.id, 'nuvio', connection.credentials.baseUrl)
+export interface NuvioWatchSessionOptions {
+    /** Reuse one verified token and profile for the life of the session instead of re-opening on every open(). */
+    reuse?: boolean
+    fetchToken?: (accountId: string, connectionId: string, platform: string, baseUrl?: string | null) => Promise<{ accessToken: string; expiresAt: number; profileId: string | null }>
+}
+
+const NUVIO_TOKEN_MARGIN_MS = 120_000
+
+interface NuvioLive {
+    accessToken: string
+    expiresAt: number
+    profileIndex: number
+    subjectId: string
+    profileId: string
+    profileName: string | null
+}
+
+export async function nuvioWatchSession(account: Account, connection: Connection, signal: AbortSignal, allowedWrites: readonly string[] = [], assertCurrent: () => void = () => {}, sessionOptions: NuvioWatchSessionOptions = {}): Promise<NuvioWatchSession> {
+    const reuse = sessionOptions.reuse === true
+    const fetchToken = sessionOptions.fetchToken ?? (await import('../../api/connection.ts')).fetchConnectionToken
+    let baseUrl = connection.credentials.baseUrl
+    let publishableKey = connection.credentials.publishableKey
+    if (!baseUrl || !publishableKey) {
+        const { DEFAULT_BASE_URL, DEFAULT_PUBLISHABLE_KEY } = await import('../drivers/nuvio.ts')
+        baseUrl = baseUrl || DEFAULT_BASE_URL
+        publishableKey = publishableKey || DEFAULT_PUBLISHABLE_KEY
+    }
+    const base = normalizedBaseUrl(baseUrl)
+    const post = async (accessToken: string, fn: string, body: Record<string, unknown>, requestSignal: AbortSignal): Promise<Response> => {
+        assertCurrent()
+        requestSignal.throwIfAborted()
+        return fetch(`${base}/rest/v1/rpc/${fn}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: publishableKey, Authorization: `Bearer ${accessToken}` },
+            body: JSON.stringify(body),
+            signal: AbortSignal.any([requestSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+            credentials: 'omit',
+            referrerPolicy: 'no-referrer',
+            redirect: 'error',
+        })
+    }
+    const readBody = async (response: Response): Promise<unknown> => {
+        if (!response.ok) throw new Error(`Nuvio refused this operation (HTTP ${response.status}). Check the selected user or profile and retry.`)
+        if (response.status === 204) return null
+        return response.json()
+    }
+    const guard = (fn: string) => {
+        if (!NUVIO_READ_RPCS.includes(fn) && !allowedWrites.includes(fn)) throw new Error('Unsupported watch-state operation.')
+    }
+    const authenticate = async (openSignal: AbortSignal): Promise<NuvioLive> => {
+        const token = await fetchToken(account.id, connection.id, 'nuvio', connection.credentials.baseUrl)
         assertCurrent()
         openSignal.throwIfAborted()
         const savedProfile = connection.credentials.profileId ?? connection.credentials.profileIndex
         const chosen = savedProfile ?? token.profileId
         if (chosen === undefined || chosen === null || chosen === '') throw new Error('Choose a specific Nuvio profile in Connections first.')
-        let profileIndex: number | null = null
-        const rpc = async (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal): Promise<unknown> => {
-            if (!NUVIO_READ_RPCS.includes(fn) && !allowedWrites.includes(fn)) throw new Error('Unsupported watch-state operation.')
-            if (fn !== 'sync_pull_profiles' && (profileIndex === null || body.p_profile_id !== profileIndex)) throw new Error('The selected Nuvio profile changed. Preview again before importing.')
-            assertCurrent()
-            requestSignal.throwIfAborted()
-            const response = await fetch(`${base}/rest/v1/rpc/${fn}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', apikey: publishableKey, Authorization: `Bearer ${token.accessToken}` },
-                body: JSON.stringify(body),
-                signal: AbortSignal.any([requestSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-                credentials: 'omit',
-                referrerPolicy: 'no-referrer',
-                redirect: 'error',
-            })
-            if (!response.ok) throw new Error(`Nuvio refused this operation (HTTP ${response.status}). Check the selected user or profile and retry.`)
-            if (response.status === 204) return null
-            return response.json()
-        }
-        const profiles = await rpc('sync_pull_profiles', {}, openSignal)
+        const profiles = await readBody(await post(token.accessToken, 'sync_pull_profiles', {}, openSignal))
         if (!Array.isArray(profiles)) throw new Error('Nuvio did not verify the available profiles.')
         const rows = profiles.map(object)
         const resolveProfile = (choice: string) => {
@@ -155,7 +182,6 @@ export async function nuvioWatchSession(account: Account, connection: Connection
             || token.profileId !== null && token.profileId !== undefined && resolveProfile(String(token.profileId)) !== profile) {
             throw new Error('The selected Nuvio profile changed. Select it again in Connections before importing.')
         }
-        profileIndex = Number(index)
         let subjectId: string
         try {
             let payload = token.accessToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
@@ -167,26 +193,72 @@ export async function nuvioWatchSession(account: Account, connection: Connection
             throw new Error('Nuvio did not supply an identifiable authenticated user.')
         }
         return {
-            rpc,
+            accessToken: token.accessToken,
+            expiresAt: token.expiresAt,
             profileIndex: Number(index),
             subjectId,
             profileId: typeof profile.id === 'string' ? profile.id : '',
             profileName: typeof profile.name === 'string' ? profile.name : null,
         }
     }
-    const initial = await open(signal)
+    const initial = await authenticate(signal)
     signal.throwIfAborted()
+    const sameIdentity = (candidate: NuvioLive) => candidate.subjectId === initial.subjectId && candidate.profileId === initial.profileId && candidate.profileIndex === initial.profileIndex
+    const identityChanged = () => new Error('The Nuvio user or profile changed. Preview again from the start.')
+    const profileChanged = () => new Error('The selected Nuvio profile changed. Preview again before importing.')
+    const bound = (profileIndex: number, send: (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal) => Promise<unknown>) => ({
+        profileIndex,
+        rpc: async (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal): Promise<unknown> => {
+            guard(fn)
+            if (fn !== 'sync_pull_profiles' && body.p_profile_id !== profileIndex) throw profileChanged()
+            return send(fn, body, requestSignal)
+        },
+    })
+
+    let live = initial
+    let renewing: Promise<void> | null = null
+    // Single-flight renewal; a caller whose token was already replaced skips the refetch.
+    const renew = (renewSignal: AbortSignal, staleToken: string | null): Promise<void> => {
+        if (staleToken !== null && live.accessToken !== staleToken) return Promise.resolve()
+        renewing ??= (async () => {
+            try {
+                const fresh = await authenticate(renewSignal)
+                if (!sameIdentity(fresh)) throw identityChanged()
+                live = fresh
+            } finally {
+                renewing = null
+            }
+        })()
+        return renewing
+    }
+    const usable = () => Number.isFinite(live.expiresAt) && Date.now() < live.expiresAt - NUVIO_TOKEN_MARGIN_MS
+    const shared = bound(initial.profileIndex, async (fn, body, requestSignal) => {
+        const used = live.accessToken
+        let response = await post(used, fn, body, requestSignal)
+        if (response.status === 401) {
+            await renew(requestSignal, used)
+            response = await post(live.accessToken, fn, body, requestSignal)
+        }
+        return readBody(response)
+    })
     return {
         connectionId: connection.id,
         label: migrationSourceLabel(connection),
         subject: initial.profileName ?? `Profile ${initial.profileIndex}`,
         scope: `nuvio:${await watchFingerprint([base, initial.subjectId, initial.profileId, initial.profileIndex])}`,
         open: async openSignal => {
-            const fresh = await open(openSignal)
-            if (fresh.subjectId !== initial.subjectId || fresh.profileId !== initial.profileId || fresh.profileIndex !== initial.profileIndex) {
-                throw new Error('The Nuvio user or profile changed. Preview again from the start.')
+            if (reuse) {
+                if (!usable()) await renew(openSignal, null)
+                openSignal.throwIfAborted()
+                assertCurrent()
+                return shared
             }
-            return { rpc: fresh.rpc, profileIndex: fresh.profileIndex }
+            const fresh = await authenticate(openSignal)
+            if (!sameIdentity(fresh)) throw identityChanged()
+            return bound(fresh.profileIndex, async (fn, body, requestSignal) => readBody(await post(fresh.accessToken, fn, body, requestSignal)))
+        },
+        beginRun: async runSignal => {
+            if (reuse) await renew(runSignal, null)
         },
     }
 }
@@ -281,12 +353,60 @@ async function createJellyfinMigrationSource(connection: Connection, key: Crypto
     return createJellyfinWatchSource(connection, value => decrypt(value, key), signal)
 }
 
+async function stremioEventLog(account: Account, connection: Connection): Promise<StremioWatchSourceOptions['watchEvents']> {
+    try {
+        const [{ useWatchEventStore }, { stremioScopedEvents }] = await Promise.all([import('../../store/watchEventStore.ts'), import('./event-dates.ts')])
+        const native = (account.connections || []).filter(item => item.platform === 'stremio' && isNativeConnection(item))
+        const canonicalId = native.find(item => item.id === account.primaryConnectionId)?.id ?? native[0]?.id
+        const canonical = connection.id === 'native-stremio' || canonicalId === undefined || canonicalId === connection.id
+        return () => stremioScopedEvents(useWatchEventStore.getState().events, account.id, connection.id, canonical)
+    } catch {
+        return undefined
+    }
+}
+
+// A Stremio item deleted from Activity must not re-enter through migration. The
+// aio_library_deleted blacklist is keyed by Activity ids; a row mtime newer than the
+// delete means the user watched it again (Smart Restore's release rule).
+async function stremioActivityDeletionGuard(account: Account): Promise<StremioWatchSourceOptions['isDeletedItem']> {
+    try {
+        const [{ useLibraryCache, DELETED_ITEMS_KEY }, { default: localforage }] = await Promise.all([import('../../store/libraryCache.ts'), import('localforage')])
+        const saved = await localforage.getItem<Record<string, { deletedAt?: unknown }>>(DELETED_ITEMS_KEY)
+        const deletedAtByKey = new Map<string, number>()
+        for (const [key, entry] of Object.entries(saved || {})) {
+            const at = typeof entry?.deletedAt === 'number' && Number.isFinite(entry.deletedAt) ? entry.deletedAt : 0
+            deletedAtByKey.set(key, at)
+        }
+        for (const key of useLibraryCache.getState().deletedItemIds) {
+            if (!deletedAtByKey.has(key)) deletedAtByKey.set(key, Date.now())
+        }
+        if (deletedAtByKey.size === 0) return undefined
+        const keyScopes = ['', 'stremio:native-stremio', ...(account.connections || [])
+            .filter(item => item.platform === 'stremio' && isNativeConnection(item))
+            .map(item => `stremio:${item.id}`)]
+        return (itemId, rowMtimeMs) => {
+            let deletedAt: number | null = null
+            for (const keyScope of keyScopes) {
+                const at = deletedAtByKey.get(`${account.id}:${keyScope}${keyScope ? ':' : ''}${itemId}`)
+                if (at !== undefined && (deletedAt === null || at > deletedAt)) deletedAt = at
+            }
+            return deletedAt !== null && rowMtimeMs <= deletedAt
+        }
+    } catch {
+        return undefined
+    }
+}
+
 export async function createWatchMigrationSource(account: Account, key: CryptoKey, connectionId: string, signal: AbortSignal, assertCurrent: () => void = () => {}): Promise<WatchStateSource> {
     const connection = watchMigrationSources(account).find(item => item.id === connectionId)
     if (!connection) throw new Error('This connection is not available as a watch-state source.')
     try {
         assertCurrent()
-        if (connection.platform === 'stremio') return createStremioWatchSource(await stremioWatchSession(account, connection, key, signal, assertCurrent))
+        if (connection.platform === 'stremio') {
+            const session = await stremioWatchSession(account, connection, key, signal, assertCurrent)
+            const [watchEvents, isDeletedItem] = await Promise.all([stremioEventLog(account, connection), stremioActivityDeletionGuard(account)])
+            return createStremioWatchSource({ ...session, watchEvents, isDeletedItem })
+        }
         if (connection.platform === 'nuvio') return createNuvioWatchSource(await nuvioWatchSession(account, connection, signal, [], assertCurrent))
         if (connection.platform === 'realstream') return createRealStreamWatchSource(await realStreamWatchSession(account, connection, signal, assertCurrent))
         if (connection.platform === 'jellyfin') return await createJellyfinMigrationSource(connection, key, signal)

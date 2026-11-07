@@ -7,16 +7,21 @@ import { Button } from '@/components/ui/button'
 import { TabsTrigger } from '@/components/ui/tabs'
 import { WorkspaceTabs } from '@/components/ui/workspace-tabs'
 import { ActivityEmptyState } from '@/components/common/PageEmptyStates'
-import { NumberTicker } from '@/components/ui/number-ticker'
 import { activityNowStatuses } from '@/lib/jellyfin/activity'
+import { buildRuntimeIndex, msToHours } from '@/lib/watch-hours'
+import { activityHeaderHoursCached } from '@/lib/activity-hours'
 import {
     buildFeedRows,
     buildItemOrder,
     detectGridColumns,
+    keepNowStatusIdentity,
     GRID_BREAKPOINT_COLUMNS,
     resolveFocusTarget,
     SAVED_GROUP_DATE,
 } from './feed-rows'
+import { usePhoneViewport } from '@/hooks/usePhoneViewport'
+import { usePullToRefresh } from '@/hooks/usePullToRefresh'
+import { PullToRefreshIndicator } from './PullToRefreshIndicator'
 import { ActivityDateHeader, ActivityItemSlot, VirtualActivityList } from './VirtualActivityList'
 
 const INITIAL_VISIBLE_COUNT = 60
@@ -33,10 +38,14 @@ const ACTIVITY_TAB_LABELS: Record<string, string> = {
 interface ActivityFeedProps {
     history: ActivityItem[]
     allHistory?: ActivityItem[]
+    /** Raw watch rows (no backfill) the header hours are computed over, same as Metrics. */
+    hoursSource?: ActivityItem[]
+    /** Minutes folded out of the event log, added only when the whole feed is in view. */
+    rollupMinutes?: number
     currentActivity?: ActivityItem[]
     viewMode?: 'grid' | 'list'
-    todayHours?: number
-    todayTrend?: 'up' | 'down'
+    /** Row ids in the viewer/search scope; credit is computed over these before the feed's tab and window apply. */
+    hoursScope?: ReadonlySet<string>
     onToggleSelect?: (id: string | string[]) => void
     onDelete?: (id: string | string[], removeFromLibrary: boolean) => void
     onOpenDetail?: (item: ActivityItem) => void
@@ -46,23 +55,40 @@ interface ActivityFeedProps {
      *  model as an undated trailing group, so it reveals, keyboard-navigates and
      *  selects through the exact same windowing as dated rows. */
     importedSummaries?: ActivityItem[]
+    /** History is still loading for the first time: counts show a placeholder, never partial numbers. */
+    settling?: boolean
+    /** A refresh is running over an already settled feed: the header keeps its last numbers. */
+    refreshing?: boolean
+    /** Page-level filters (viewer, period, search) that the header numbers depend on. */
+    filterKey?: string
+    canonicalConnections?: ReadonlyMap<string, string | undefined>
+    /** The page's own refresh; enables phone pull-to-refresh when provided. */
+    onRefresh?: () => unknown
 }
 
 export function ActivityFeed({
     history,
     allHistory = history,
+    hoursSource = allHistory,
+    rollupMinutes = 0,
     currentActivity,
     viewMode = 'grid',
-    todayHours = 0,
-    todayTrend = 'up',
+    hoursScope,
     onToggleSelect,
     onDelete,
     onOpenDetail,
     selectedItems,
     isBulkMode = false,
     importedSummaries = [],
+    settling = false,
+    refreshing = false,
+    filterKey = '',
+    canonicalConnections,
+    onRefresh,
 }: ActivityFeedProps) {
     const safeSelectedItems = selectedItems ?? EMPTY_SELECTED_ITEMS
+    const phone = usePhoneViewport()
+    const pull = usePullToRefresh({ enabled: phone && !!onRefresh, onRefresh })
     const [activeTab, setActiveTab] = useState("all")
     const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT)
     const [showScrollTop, setShowScrollTop] = useState(false)
@@ -75,7 +101,12 @@ export function ActivityFeed({
         document.addEventListener('visibilitychange', update)
         return () => { clearInterval(timer); document.removeEventListener('visibilitychange', update) }
     }, [])
-    const nowStatuses = useMemo(() => activityNowStatuses(allHistory, now, currentActivity), [allHistory, now, currentActivity])
+    const nowStatusesRef = useRef<ReturnType<typeof activityNowStatuses> | undefined>(undefined)
+    const nowStatuses = useMemo(() => {
+        const next = keepNowStatusIdentity(nowStatusesRef.current, activityNowStatuses(allHistory, now, currentActivity))
+        nowStatusesRef.current = next
+        return next
+    }, [allHistory, now, currentActivity])
 
     useEffect(() => {
         setVisibleCount(INITIAL_VISIBLE_COUNT)
@@ -134,31 +165,33 @@ export function ActivityFeed({
     // item boundaries, never whole date groups), decomposed into rows the
     // virtualizer can window when the feed grows long.
     const feedModel = useMemo(
-        () => buildFeedRows(filteredHistory, visibleCount, { viewMode, columns }),
-        [filteredHistory, visibleCount, viewMode, columns],
+        () => buildFeedRows(filteredHistory, visibleCount, { viewMode, columns, nowStatuses }),
+        [filteredHistory, visibleCount, viewMode, columns, nowStatuses],
     )
     const hasMore = feedModel.visibleItemCount < filteredHistory.length
     const itemOrder = useMemo(() => buildItemOrder(feedModel.rows), [feedModel])
 
-    const filteredWatchHours = useMemo(() => {
-        const seriesWithOverall = new Map<string, number>()
-        let totalMs = 0
-        for (const item of filteredHistory) {
-            // Undated saved state accounts no watch time; it must never inflate hours.
-            if (item.importedSavedState) continue
-            const isSeries = item.type === 'series' || item.type === 'anime' || item.type === 'episode'
-            if (isSeries && item.overallTimeWatched) {
-                const prev = seriesWithOverall.get(item.itemId) || 0
-                if (item.overallTimeWatched > prev) {
-                    totalMs += item.overallTimeWatched - prev
-                    seriesWithOverall.set(item.itemId, item.overallTimeWatched)
-                }
-            } else {
-                totalMs += item.watched || 0
-            }
+    const runtimeIndex = useMemo(() => buildRuntimeIndex(hoursSource), [hoursSource])
+    // Stable identity for the visible-id set (rebuilt only when the filtered feed
+    // changes) so the cached header-hours computation can hit across feed remounts.
+    const visibleIdsRef = useRef<{ source: typeof filteredHistory; ids: Set<string> } | null>(null)
+    if (!visibleIdsRef.current || visibleIdsRef.current.source !== filteredHistory) {
+        const ids = new Set<string>()
+        for (const item of filteredHistory) ids.add(item.id)
+        visibleIdsRef.current = { source: filteredHistory, ids }
+    }
+    const visibleIds = visibleIdsRef.current.ids
+    const headerHours = useMemo(() => {
+        const { totalMs, todayMs, yesterdayMs } = activityHeaderHoursCached(hoursSource, runtimeIndex, canonicalConnections, Date.now(), hoursScope, visibleIds)
+        return {
+            total: msToHours(totalMs + (activeTab === 'all' ? rollupMinutes * 60000 : 0)),
+            today: Math.round(todayMs / 360000) / 10,
+            trend: todayMs >= yesterdayMs ? 'up' as const : 'down' as const,
         }
-        return Math.round(totalMs / 3600000)
-    }, [filteredHistory])
+    }, [visibleIds, hoursSource, runtimeIndex, canonicalConnections, hoursScope, activeTab, rollupMinutes])
+    const filteredWatchHours = headerHours.total
+    const todayHours = headerHours.today
+    const todayTrend = headerHours.trend
     const tabCounts = useMemo(() => {
         let now = 0
         let movies = 0
@@ -177,6 +210,16 @@ export function ActivityFeed({
             series,
         }
     }, [combinedHistory, nowStatuses])
+
+    // Header numbers only change when the feed has settled or the user changes a filter.
+    // During a refresh over a settled feed they keep their last values instead of flickering.
+    const liveStats = { tabCounts, showing: feedModel.visibleItemCount, total: filteredHistory.length, hours: filteredWatchHours }
+    const statsKey = `${filterKey}|${activeTab}`
+    const frozenStatsRef = useRef<{ key: string; stats: typeof liveStats } | null>(null)
+    if (!refreshing || frozenStatsRef.current === null || frozenStatsRef.current.key !== statsKey) {
+        frozenStatsRef.current = { key: statsKey, stats: liveStats }
+    }
+    const stats = frozenStatsRef.current.stats
 
     const formatDateHeader = useCallback((dateStr: string) => {
         if (dateStr === 'Unknown Date' || dateStr === SAVED_GROUP_DATE) return dateStr
@@ -336,35 +379,32 @@ export function ActivityFeed({
 
     const renderTabCount = (count: number) => (
         <span data-theme-part="badge" className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-lg border border-border/35 bg-background/70 px-1.5 text-xs font-semibold tabular-nums text-muted-foreground">
-            {count}
+            {settling ? <span aria-hidden className="animate-pulse">...</span> : count.toLocaleString()}
         </span>
     )
 
     return (
         <div className="space-y-6">
+            <PullToRefreshIndicator distance={pull.distance} phase={pull.phase} refreshing={pull.refreshing} />
             <WorkspaceTabs label="Activity history filters" value={activeTab} panelValue={activeTab} onValueChange={setActiveTab} className="w-full" tabs={<>
-                        <TabsTrigger value="all">All Activity {renderTabCount(tabCounts.all)}</TabsTrigger>
-                        <TabsTrigger value="now">Recent {renderTabCount(tabCounts.now)}</TabsTrigger>
-                        <TabsTrigger value="movies">Movies {renderTabCount(tabCounts.movies)}</TabsTrigger>
-                        <TabsTrigger value="series">Series {renderTabCount(tabCounts.series)}</TabsTrigger>
+                        <TabsTrigger value="all">All Activity {renderTabCount(stats.tabCounts.all)}</TabsTrigger>
+                        <TabsTrigger value="now">Recent {renderTabCount(stats.tabCounts.now)}</TabsTrigger>
+                        <TabsTrigger value="movies">Movies {renderTabCount(stats.tabCounts.movies)}</TabsTrigger>
+                        <TabsTrigger value="series">Series {renderTabCount(stats.tabCounts.series)}</TabsTrigger>
             </>} actions={
                     <div data-theme-part="badge" className="flex max-w-full flex-nowrap items-center gap-x-1.5 gap-y-1 overflow-x-auto rounded-xl border border-border/40 bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-sm">
-                        <span className="opacity-70">Showing</span>
-                        <span className="font-semibold tabular-nums text-foreground">
-                            {filteredHistory.length === 0
-                                ? '0'
-                                : <NumberTicker value={feedModel.visibleItemCount} />
-                            }
-                        </span>
-                        <span className="opacity-50">of</span>
-                        <span className="font-semibold tabular-nums text-foreground">
-                            {filteredHistory.length === 0
-                                ? '0'
-                                : <NumberTicker value={filteredHistory.length} />
-                            }
-                        </span>
-                        <span className="h-3.5 w-px bg-border/60" />
-                        <span className="tabular-nums text-foreground"><NumberTicker value={filteredWatchHours} />h total</span>
+                        {settling ? (
+                            <span className="animate-pulse opacity-70">Loading history...</span>
+                        ) : (
+                            <>
+                                <span className="opacity-70">Showing</span>
+                                <span className="font-semibold tabular-nums text-foreground">{stats.showing.toLocaleString()}</span>
+                                <span className="opacity-50">of</span>
+                                <span className="font-semibold tabular-nums text-foreground">{stats.total.toLocaleString()}</span>
+                                <span className="h-3.5 w-px bg-border/60" />
+                                <span className="tabular-nums text-foreground">{stats.hours.toLocaleString()}h total</span>
+                            </>
+                        )}
                         {todayHours > 0 && (
                             <>
                                 <span className="h-3.5 w-px bg-border/60" />

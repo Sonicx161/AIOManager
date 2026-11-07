@@ -16,24 +16,78 @@ export function emptyRollups(): EventRollups {
     return { byMonth: {}, daysByAccount: {}, foldedThrough: {} }
 }
 
-function toLocalDayKey(timestamp: number): string {
-    const date = new Date(timestamp)
-    if (isNaN(date.getTime())) return 'unknown'
+const DAY_MS = 86_400_000
+const DATE_RANGE_MS = 8.64e15
+const DAY_CACHE_MAX = 8192
+
+interface DaySegment { start: number; ymd: string; ym: string }
+
+// Local month/day keys, one segment cache per UTC day instead of two Date objects
+// per evicted event. The local date inside a UTC day moves monotonically forward
+// and changes at most a couple of times, so each day is split by bisection on the
+// exact Date-derived parts: keys are identical to the per-event Date computation
+// across DST transitions, half-hour zones and offset jumps.
+const daySegments = new Map<number, DaySegment[]>()
+
+function dateParts(ts: number): { ymd: string; ym: string } {
+    const date = new Date(ts)
     const month = String(date.getMonth() + 1).padStart(2, '0')
-    const day = String(date.getDate()).padStart(2, '0')
-    return `${date.getFullYear()}-${month}-${day}`
+    const ym = `${date.getFullYear()}-${month}`
+    return { ymd: `${ym}-${String(date.getDate()).padStart(2, '0')}`, ym }
 }
 
-function toMonthKey(event: WatchEvent): string {
-    const date = new Date(event.event_ts)
-    const month = String(date.getMonth() + 1).padStart(2, '0')
-    return `${event.accountId}:${event.itemId}:${date.getFullYear()}-${month}`
+function boundaryBetween(lo: number, hi: number, ymd: string): number {
+    while (hi - lo > 1) {
+        const mid = lo + ((hi - lo) >> 1)
+        if (dateParts(mid).ymd === ymd) lo = mid
+        else hi = mid
+    }
+    return hi
+}
+
+function buildDaySegments(start: number): DaySegment[] {
+    const end = start + DAY_MS
+    const segments: DaySegment[] = []
+    let segStart = start
+    let segParts = dateParts(segStart)
+    for (;;) {
+        const lastParts = dateParts(end - 1)
+        if (lastParts.ymd === segParts.ymd || end - segStart <= 1) {
+            segments.push({ start: segStart, ...segParts })
+            return segments
+        }
+        const boundary = boundaryBetween(segStart, end, segParts.ymd)
+        segments.push({ start: segStart, ...segParts })
+        segStart = boundary
+        segParts = dateParts(boundary)
+    }
+}
+
+function localKeys(ts: number): { ymd: string; ym: string } {
+    // Matches the per-event Date forms: Date() truncates fractional ms toward zero
+    // before resolving local parts, and out-of-range/NaN timestamps keep the legacy
+    // keys ('unknown' day, 'NaN-NaN' month) the old builders produced.
+    if (!Number.isFinite(ts)) return { ymd: 'unknown', ym: 'NaN-NaN' }
+    const ms = Math.trunc(ts)
+    if (ms < -DATE_RANGE_MS || ms > DATE_RANGE_MS) return { ymd: 'unknown', ym: 'NaN-NaN' }
+    const index = Math.floor(ms / DAY_MS)
+    let segments = daySegments.get(index)
+    if (!segments) {
+        segments = buildDaySegments(index * DAY_MS)
+        if (daySegments.size >= DAY_CACHE_MAX) daySegments.clear()
+        daySegments.set(index, segments)
+    }
+    if (segments.length === 1 || ms < segments[1].start) return segments[0]
+    return segments.length === 2 || ms < segments[2].start ? segments[1] : segments[2]
 }
 
 export function foldEvicted(events: WatchEvent[], rollups: EventRollups): EventRollups {
     if (events.length === 0) return rollups
 
-    const byMonth = { ...rollups.byMonth }
+    // Folded months accumulate in a Map: each key is seeded from the incoming
+    // rollups on first touch and mutated in place afterwards, so an evicted event
+    // costs no per-key object allocation. Merged back once at the end.
+    const foldedByMonth = new Map<string, { count: number; minutes: number }>()
     const daysByAccount: Record<string, Set<string>> = {}
     // Guard compares against the pre-fold watermark only, so an unsorted batch never skips an event.
     const baseWatermark: Record<string, number> = {}
@@ -49,25 +103,31 @@ export function foldEvicted(events: WatchEvent[], rollups: EventRollups): EventR
         }
         if (event.event_ts <= highWater) continue
 
-        const key = toMonthKey(event)
-        const entry = byMonth[key]
-        if (entry) {
-            byMonth[key] = { count: entry.count + 1, minutes: entry.minutes + (event.time_watched || 0) / 60000 }
-        } else {
-            byMonth[key] = { count: 1, minutes: (event.time_watched || 0) / 60000 }
+        const keys = localKeys(event.event_ts)
+        const key = `${event.accountId}:${event.itemId}:${keys.ym}`
+        let entry = foldedByMonth.get(key)
+        if (entry === undefined) {
+            const existing = rollups.byMonth[key]
+            entry = existing ? { count: existing.count, minutes: existing.minutes } : { count: 0, minutes: 0 }
+            foldedByMonth.set(key, entry)
         }
+        entry.count++
+        entry.minutes += (event.time_watched || 0) / 60000
 
         let days = daysByAccount[event.accountId]
         if (!days) {
             days = new Set(rollups.daysByAccount[event.accountId] || [])
             daysByAccount[event.accountId] = days
         }
-        days.add(toLocalDayKey(event.event_ts))
+        days.add(keys.ymd)
 
         if (event.event_ts > (newWatermark[event.accountId] ?? -Infinity)) {
             newWatermark[event.accountId] = event.event_ts
         }
     }
+
+    const byMonth = { ...rollups.byMonth }
+    for (const [key, entry] of foldedByMonth) byMonth[key] = entry
 
     for (const [accountId, ts] of Object.entries(newWatermark)) {
         foldedThrough[accountId] = Math.max(foldedThrough[accountId] ?? -Infinity, ts)

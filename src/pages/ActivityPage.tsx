@@ -1,6 +1,6 @@
 import { triggerSync } from '@/lib/sync-trigger'
 import { ActivityFeed } from '@/components/activity/ActivityFeed'
-import { MediaDeleteScope } from '@/components/activity/MediaDeleteScope'
+import { MediaReadBanner } from '@/components/activity/MediaReadBanner'
 import { ActivityDetailModal } from '@/components/activity/ActivityDetailModal'
 import { ForYouPage } from '@/components/for-you/ForYouPage'
 import { AccountDetailPage } from '@/components/for-you/AccountDetailPage'
@@ -16,7 +16,8 @@ import { useDiscoveryPrefs, useDiscoveryStore, CONTINUE_WATCHING_CONTEXT } from 
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { isReadOnlyMediaActivity } from '@/lib/jellyfin/activity'
-import { deleteJellyfinWatchItems } from '@/lib/jellyfin/delete-history'
+import { deleteJellyfinWatchItems, mediaDeleteTargets } from '@/lib/jellyfin/delete-history'
+import { refreshJellyfinMedia } from '@/components/providers/useJellyfinMedia'
 import { stremioClient } from '@/api/stremio-client'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
@@ -24,45 +25,40 @@ import { useSyncStore } from '@/store/syncStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import { useUIStore } from '@/store/uiStore'
 import { ActivityItemSkeleton } from '@/components/ui/skeleton'
-import { historyEntryToActivityItem, nuvioProgressKey, getCachedCinemetaName, watchContextKey, peerLoginLabel } from '@/lib/activity-utils'
-import { isUnresolvedActivityName } from '@/lib/activity-metadata-overlay'
+import { historyEntryToActivityItem, nuvioProgressKey, getCachedCinemetaName, watchContextKey, peerLoginLabel, canonicalStremioConnections } from '@/lib/activity-utils'
+import { activitySearchHaystack, activityItemTimeMs } from '@/lib/activity-search-cache'
+import { continueWatchingRail } from '@/lib/activity-continue-watching'
+import { rollupMinutes } from '@/lib/activity-hours'
+import { useSettledOnce } from '@/hooks/useSettledSignal'
 import { useActivityMetadata } from '@/hooks/useActivityMetadata'
+import { enrichActivityItemsByIdentity } from '@/lib/activity-cross-source-enrichment'
 import { planEpisodeBitfieldDelete } from '@/lib/episode-bitfield-delete'
-import { isEpisodeScopedDelete, isBareAnchoredEpisode } from '@/lib/activity-delete-routing'
+import { isEpisodeScopedDelete, isBareAnchoredEpisode, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
 import { fetchSeriesVideos } from '@/lib/watched-episodes'
 import type { Account } from '@/types/account'
 
 import { FloatingActionBar } from '@/components/ui/floating-action-bar'
-import { Grid, List, Search, Check, X, PlayCircle } from 'lucide-react'
+import { Grid, List, Search, Check, X } from 'lucide-react'
 import { AnimatedRefreshIcon, AnimatedTrashIcon } from '@/components/ui/AnimatedIcons'
 import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { motion } from 'framer-motion'
 import { toast } from '@/hooks/use-toast'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import { cn, maskNameLevel, maskEmailLevel } from '@/lib/utils'
 import { SYNCED_SETTINGS_EVENT, type ActivitySettings } from '@/lib/synced-settings'
-import {
-    AlertDialog,
-    AlertDialogAction,
-    AlertDialogCancel,
-    AlertDialogContent,
-    AlertDialogDescription,
-    AlertDialogFooter,
-    AlertDialogHeader,
-    AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
+import { scheduleUndoable, usePendingUndoIds } from '@/lib/undo-action'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { OperationProgress } from '@/components/ui/operation-progress'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
 import { Tooltip } from '@/components/ui/tooltip'
-import { Poster } from '@/components/common/Poster'
-import { PlatformSourceBadge } from '@/components/activity/PlatformSourceBadge'
+import { UpNextCard } from '@/components/activity/UpNextCard'
+import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { mapConcurrent } from '@/lib/concurrency'
 import { getPlatformEntry } from '@/lib/platform-registry'
 import { trace } from '@/lib/trace'
 
 const ACTIVITY_ACCOUNT_DELETE_CONCURRENCY = 4
+const CONTINUE_WATCHING_LIMIT = 24
 const ACTIVITY_ITEM_DELETE_CONCURRENCY = 5
 
 /**
@@ -248,7 +244,7 @@ export function ActivityPage() {
     const ensureLoaded = useLibraryCache(s => s.ensureLoaded)
     const loading = useLibraryCache(s => s.loading)
     const loadingProgress = useLibraryCache(s => s.loadingProgress)
-    const invalidate = useLibraryCache(s => s.invalidate)
+    const revalidate = useLibraryCache(s => s.revalidate)
     const removeItems = useLibraryCache(s => s.removeItems)
     const syncIsAuthenticated = useSyncStore(s => s.auth.isAuthenticated)
     const syncId = useSyncStore(s => s.auth.id)
@@ -275,41 +271,13 @@ export function ActivityPage() {
     // is imported SAVED state (bitfield-aggregate series, flagged-only movies): those rows carry no
     // watch dates at all, so they are kept for the dedicated imported group below instead of leaking
     // into the dated chronology as a phantom watch on the import date.
+    const mappedHistory = useMemo(() => watchHistory.map(historyEntryToActivityItem), [watchHistory])
     const sourceHistory: ActivityItem[] = useMemo(
-        () => {
-            const items = watchHistory.map(historyEntryToActivityItem).filter(item => !item.backfill || item.importedSavedState)
-
-            const bestByItemId = new Map<string, { name: string; poster?: string; genres?: string[] }>()
-            for (const item of items) {
-                if (isUnresolvedActivityName(item.name)) continue
-                const existing = bestByItemId.get(item.itemId)
-                if (!existing || item.name.length > existing.name.length) {
-                    bestByItemId.set(item.itemId, { name: item.name, poster: item.poster || undefined, genres: item.genres })
-                }
-            }
-
-            if (bestByItemId.size > 0) {
-                let enriched = 0
-                for (let i = 0; i < items.length; i++) {
-                    if (!isUnresolvedActivityName(items[i].name)) continue
-                    const best = bestByItemId.get(items[i].itemId)
-                    if (best) {
-                        items[i] = {
-                            ...items[i],
-                            name: best.name,
-                            poster: items[i].poster || best.poster || items[i].poster,
-                            genres: items[i].genres?.length ? items[i].genres : best.genres,
-                        }
-                        enriched++
-                    }
-                }
-                if (import.meta.env.DEV && enriched > 0) console.log('[ActivityPage] Cross-source name enrichment:', enriched, 'items')
-            }
-
-            return items
-        },
-        [watchHistory]
+        () => enrichActivityItemsByIdentity(mappedHistory.filter(item => !item.backfill || item.importedSavedState)),
+        [mappedHistory]
     )
+    // Raw watch rows for header hours: the same rows and runtime source Metrics uses.
+    const hoursSource = useMemo(() => mappedHistory.filter(item => !item.backfill), [mappedHistory])
     const history = useActivityMetadata(sourceHistory)
 
     // Split for presentation only: the dated chronology and day metrics see genuinely dated
@@ -322,10 +290,10 @@ export function ActivityPage() {
     const fetchActivity = useCallback(async (silent = false) => {
         if (!silent) {
             refreshMedia()
-            invalidate()
+            revalidate()
             await ensureLoaded(accounts)
         }
-    }, [accounts, ensureLoaded, invalidate, refreshMedia])
+    }, [accounts, ensureLoaded, revalidate, refreshMedia])
 
     const [searchInput, setSearchInput] = useState('')
     const [searchTerm, setSearchTerm] = useState('')
@@ -375,6 +343,23 @@ export function ActivityPage() {
         }
     }, [liveActivity, accounts, ensureLoaded])
 
+    // Returning to the page or focusing the tab re-checks the cache: ensureLoaded
+    // honours the existing TTL and coverage gates (a fresh cache is a cache hit and
+    // reads nothing), with no forced invalidation behind it (Sol R1 F6/F7).
+    useEffect(() => {
+        const refreshIfStale = () => {
+            if (document.visibilityState !== 'visible') return
+            void ensureLoaded(useAccountStore.getState().accounts)
+        }
+        refreshIfStale()
+        document.addEventListener('visibilitychange', refreshIfStale)
+        window.addEventListener('focus', refreshIfStale)
+        return () => {
+            document.removeEventListener('visibilitychange', refreshIfStale)
+            window.removeEventListener('focus', refreshIfStale)
+        }
+    }, [ensureLoaded])
+
     const [userFilter, setUserFilter] = useState(() => {
         try { return localStorage.getItem('aio-activity-user-filter') || 'all' } catch { return 'all' }
     })
@@ -394,9 +379,8 @@ export function ActivityPage() {
         } catch { return 'grid' }
     })
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
-    const [showDeleteDialog, setShowDeleteDialog] = useState(false)
-    const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null)
-    const [isDeletingPending, setIsDeletingPending] = useState(false)
+    const pendingUndoIds = usePendingUndoIds('activity')
+    const runDeleteRef = useRef<(items: ActivityItem[], ids: string[], success: { title: string; description: string }) => Promise<void>>(async () => {})
     const [pendingWholeShow, setPendingWholeShow] = useState<Array<{ accountId: string; itemId: string; id: string; sourceConnectionId?: string }> | null>(null)
     const [isDeletingWholeShow, setIsDeletingWholeShow] = useState(false)
     const [isBulkMode, setIsBulkMode] = useState(false)
@@ -459,6 +443,13 @@ export function ActivityPage() {
     }, [accounts, ensureLoaded, refreshFromCloud, syncIsAuthenticated, syncId, syncPassword, watchEventsInitialized])
 
     const accountById = useMemo(() => new Map(accounts.map(account => [account.id, account])), [accounts])
+    const mediaAccountName = useCallback((accountId: string) => {
+        const account = accountById.get(accountId)
+        if (!account) return 'Unknown account'
+        const raw = account.name && !account.name.includes('@') ? account.name : getAccountEmail(account) || account.name || 'Account'
+        return raw.includes('@') ? (maskEmailLevel(raw, emailPrivacyLevel) || raw) : maskNameLevel(raw, privacyLevel)
+    }, [accountById, privacyLevel, emailPrivacyLevel])
+    const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
 
     const accountOptions = useMemo(() => accounts.map((account, index) => ({
         id: account.id,
@@ -468,19 +459,12 @@ export function ActivityPage() {
         avatar: account.avatar,
     })), [accounts])
 
+    const searchNeedle = useMemo(() => searchTerm.toLowerCase(), [searchTerm])
     const matchesAccountAndSearch = useCallback((item: ActivityItem) => {
         if (userFilter !== 'all' && item.accountId !== userFilter) return false
         if (!searchTerm.trim()) return true
-        const haystack = [
-            item.name || '',
-            item.itemId || '',
-            item.source || '',
-            getCachedCinemetaName(item.itemId) || '',
-            item.season !== undefined ? `S${item.season}` : '',
-            item.episode !== undefined ? `E${item.episode}` : '',
-        ].join(' ').toLowerCase()
-        return haystack.includes(searchTerm.toLowerCase())
-    }, [userFilter, searchTerm])
+        return activitySearchHaystack(item, getCachedCinemetaName).includes(searchNeedle)
+    }, [userFilter, searchTerm, searchNeedle])
 
     const filteredHistory = useMemo(() => {
         const now = new Date().getTime()
@@ -489,8 +473,9 @@ export function ActivityPage() {
         const thirtyDays = 30 * oneDay
 
         return datedHistory.filter(item => {
+            if (pendingUndoIds.has(item.id)) return false
             if (!matchesAccountAndSearch(item)) return false
-            const itemTime = new Date(item.timestamp).getTime()
+            const itemTime = activityItemTimeMs(item)
             if (timeFilter === '24h' && now - itemTime > oneDay) return false
             if (timeFilter === '7d' && now - itemTime > sevenDays) return false
             if (timeFilter === '30d' && now - itemTime > thirtyDays) return false
@@ -501,14 +486,14 @@ export function ActivityPage() {
 
             return true
         })
-    }, [datedHistory, matchesAccountAndSearch, timeFilter, customStartDate])
+    }, [datedHistory, matchesAccountAndSearch, timeFilter, customStartDate, pendingUndoIds])
 
     // The imported group follows the same account/search filters, but never the time filters:
     // those describe watch dates, and saved state deliberately has none.
     const importedSummaryItems = useMemo(() => {
         if (timeFilter !== 'all') return []
-        return importedSummaries.filter(matchesAccountAndSearch)
-    }, [importedSummaries, matchesAccountAndSearch, timeFilter])
+        return importedSummaries.filter(item => !pendingUndoIds.has(item.id) && matchesAccountAndSearch(item))
+    }, [importedSummaries, matchesAccountAndSearch, timeFilter, pendingUndoIds])
 
     const handleUserFilterChange = useCallback((id: string) => {
         setUserFilter(id)
@@ -521,26 +506,16 @@ export function ActivityPage() {
         }
     }, [accountOptions, userFilter, handleUserFilterChange])
 
-    const sessionComparison = useMemo(() => {
-        const now = new Date().getTime()
-        const oneDay = 24 * 60 * 60 * 1000
+    const hoursScope = useMemo(
+        () => userFilter === 'all' && !searchTerm.trim() ? undefined : new Set(datedHistory.filter(matchesAccountAndSearch).map(item => item.id)),
+        [datedHistory, userFilter, searchTerm, matchesAccountAndSearch],
+    )
 
-        const watchedToday = datedHistory
-            .filter(item => now - new Date(item.timestamp).getTime() < oneDay)
-            .reduce((acc, item) => acc + (item.watched || 0), 0)
-
-        const watchedYesterday = datedHistory
-            .filter(item => {
-                const diff = now - new Date(item.timestamp).getTime()
-                return diff > oneDay && diff < 2 * oneDay
-            })
-            .reduce((acc, item) => acc + (item.watched || 0), 0)
-
-        return {
-            todayHrs: Math.round(watchedToday / 3600000 * 10) / 10,
-            isUp: watchedToday >= watchedYesterday,
-        }
-    }, [datedHistory])
+    const rollups = useWatchEventStore(s => s.rollups)
+    const headerRollupMinutes = useMemo(
+        () => (timeFilter === 'all' && !searchTerm.trim() ? rollupMinutes(rollups, userFilter) : 0),
+        [rollups, userFilter, timeFilter, searchTerm],
+    )
 
     const handleViewModeChange = useCallback((mode: 'grid' | 'list') => {
         setViewMode(mode)
@@ -578,34 +553,37 @@ export function ActivityPage() {
         setIsBulkMode(true)
     }, [handleToggleSelect])
 
+    const scheduleActivityDelete = useCallback((ids: string[], bulk: boolean) => {
+        const idSet = new Set(ids)
+        const items = history.filter(item => idSet.has(item.id))
+        if (items.length === 0) return
+        const count = items.length
+        const previousSelection = bulk ? new Set(selectedItems) : null
+        const summary = originTargetsSummary(items, accountById, privacyLevel, emailPrivacyLevel)
+        const mediaTargets = new Set(items.flatMap(item => (item.mediaTargets || []).map(target => `${item.accountId}|${target.connectionId}|${target.itemId}`))).size
+        const notes = [
+            summary ? `From ${summary.text}${summary.count > 1 ? ` (${summary.count} logins)` : ''}.` : '',
+            mediaTargets > 0 ? `Also clears watched state on ${mediaTargets} media-server ${mediaTargets === 1 ? 'target' : 'targets'}.` : '',
+            includesWholeShowSeriesDelete(items) ? 'Series deletes remove the whole show history.' : '',
+        ].filter(Boolean)
+        scheduleUndoable({
+            scope: 'activity',
+            ids,
+            title: count > 1 ? `Deleting ${count} items` : 'Deleting 1 item',
+            description: notes.join(' ') || undefined,
+            commit: () => runDeleteRef.current(items, ids, bulk
+                ? { title: 'Items Deleted', description: `${count} item(s) removed from history.` }
+                : { title: count > 1 ? 'Episodes Deleted' : 'Item Deleted', description: 'Removed from activity history.' }),
+            onUndo: () => { if (previousSelection) setSelectedItems(previousSelection) },
+        })
+    }, [history, selectedItems, accountById, privacyLevel, emailPrivacyLevel])
+
     const handleFeedDelete = useCallback((id: string | string[]) => {
         const ids = Array.isArray(id) ? id : [id]
         const mutable = new Set(history.filter(item => !isReadOnlyMediaActivity(item)).map(item => item.id))
         const allowed = ids.filter(itemId => mutable.has(itemId))
-        if (allowed.length) setPendingDeleteIds(allowed)
-    }, [history])
-
-    const pendingSources = useMemo(() => {
-        if (!pendingDeleteIds) return new Set<string>()
-        const idSet = new Set(pendingDeleteIds)
-        return new Set(history.filter(h => idSet.has(h.id)).flatMap(h => [h.source || 'stremio', ...(h.mediaTargets?.length ? ['jellyfin'] : [])]))
-    }, [pendingDeleteIds, history])
-
-    const selectedSources = useMemo(() => {
-        if (selectedItems.size === 0) return new Set<string>()
-        return new Set(history.filter(h => selectedItems.has(h.id)).flatMap(h => [h.source || 'stremio', ...(h.mediaTargets?.length ? ['jellyfin'] : [])]))
-    }, [selectedItems, history])
-
-    const selectedHasWholeShowSeries = useMemo(
-        () => includesWholeShowSeriesDelete(history.filter(h => selectedItems.has(h.id))),
-        [selectedItems, history]
-    )
-
-    const pendingHasWholeShowSeries = useMemo(() => {
-        if (!pendingDeleteIds) return false
-        const idSet = new Set(pendingDeleteIds)
-        return includesWholeShowSeriesDelete(history.filter(h => idSet.has(h.id)))
-    }, [pendingDeleteIds, history])
+        if (allowed.length) scheduleActivityDelete(allowed, false)
+    }, [history, scheduleActivityDelete])
 
     const handleOpenDetail = useCallback((item: ActivityItem) => {
         setDetailItem(item)
@@ -622,9 +600,17 @@ export function ActivityPage() {
     const [searchParams] = useSearchParams()
     const detailParamId = searchParams.get('detail')
 
+    // The modal writes ?detail= a couple of async effect rounds after the tap.
+    // Identity-only re-runs in that window (history refresh, unrelated param
+    // churn) still see no param; nulling detailItem there flipped open off
+    // mid-entrance and the sheet remounted with a second entrance animation.
+    // Only a real set -> null transition (browser Back removing ?detail) closes.
+    const prevDetailParamRef = useRef<string | null>(null)
     useEffect(() => {
+        const hadParam = prevDetailParamRef.current
+        prevDetailParamRef.current = detailParamId
         if (!detailParamId) {
-            setDetailItem(null)
+            if (hadParam !== null) setDetailItem(null)
             return
         }
         setDetailItem(prev => {
@@ -772,7 +758,7 @@ export function ActivityPage() {
                                         return
                                     }
                                     if (plan.kind === 'skip') {
-                                        trace('activityDelete', 'stremio.item.skip', { accountId, connectionId: group.connectionId, itemId: item.itemId, reason: 'no-row' })
+                                        trace('activityDelete', 'stremio.item.skip', { accountId, connectionId: group.connectionId, itemId: item.itemId, reason: 'nothing-remote' })
                                         return
                                     }
                                     if (plan.kind === 'remove-row') {
@@ -843,7 +829,6 @@ export function ActivityPage() {
         'no-videos': 'episode list unavailable',
         'no-bitfield': 'no per-episode data to edit',
         'anchor-mismatch': "the show's episode data changed since watching",
-        'episode-not-watched': 'not marked watched on the account',
         'non-tt': 'anime titles can only be deleted as a whole show',
         'rows-unavailable': 'watch history rows unavailable',
         'account-error': 'account sync error',
@@ -881,70 +866,34 @@ export function ActivityPage() {
         }
         removeItems(Array.from(liveIds))
         useWatchEventStore.getState().removeEvents(normalized)
-        refreshMedia()
-    }, [accountById, removeItems, refreshMedia])
+        for (const target of mediaDeleteTargets(items)) refreshJellyfinMedia(target.accountId, target.connectionId)
+    }, [accountById, removeItems])
 
-    const handleDeleteSelected = async () => {
-        if (selectedItems.size === 0) return
-        const count = selectedItems.size
-        const itemIds = Array.from(selectedItems)
-        setShowDeleteDialog(false)
-        setSelectedItems(new Set())
-
-        const itemIdSet = new Set(itemIds)
-        const itemsToDelete = history.filter(item => itemIdSet.has(item.id))
-        const { failed, keptIds, keptReasons, noVideos } = await deletePlatformItems(itemsToDelete)
-
-        purgeLocalActivity(itemsToDelete.filter(item => !keptIds.has(item.id)), itemIds.filter(id => !keptIds.has(id)))
+    const runActivityDelete = async (items: ActivityItem[], ids: string[], success: { title: string; description: string }) => {
+        const { failed, keptIds, keptReasons, noVideos } = await deletePlatformItems(items)
+        purgeLocalActivity(items.filter(item => !keptIds.has(item.id)), ids.filter(id => !keptIds.has(id)))
 
         if (noVideos.length > 0) {
             setPendingWholeShow(noVideos)
             return
         }
 
-        if (failed) {
-            toast({ variant: 'destructive', title: 'Partial Deletion', description: `Some items could not be fully removed from their source platforms and remain in your history. Retry to finish clearing them.${keptReasonSummary(keptReasons)}` })
+        if (hasPendingRemoteDelete({ failed, keptIds })) {
+            toast({ variant: 'destructive', title: 'Partial Deletion', description: `Some items could not be removed from their source platforms and are still in your history. Select them and delete again to retry.${keptReasonSummary(keptReasons)}` })
         } else {
-            toast({
-                title: 'Items Deleted',
-                description: `${count} item(s) removed from history.`
-            })
+            toast(success)
         }
     }
 
-    const handleConfirmPendingDelete = async () => {
-        const ids = pendingDeleteIds
-        if (!ids || ids.length === 0) {
-            setPendingDeleteIds(null)
-            return
-        }
+    useEffect(() => {
+        runDeleteRef.current = runActivityDelete
+    })
 
-        setIsDeletingPending(true)
-        try {
-            const idSet = new Set(ids)
-            const itemsToDelete = history.filter(item => idSet.has(item.id))
-
-            const { failed, keptIds, keptReasons, noVideos } = await deletePlatformItems(itemsToDelete)
-            purgeLocalActivity(itemsToDelete.filter(item => !keptIds.has(item.id)), ids.filter(id => !keptIds.has(id)))
-
-            if (noVideos.length > 0) {
-                setPendingDeleteIds(null)
-                setPendingWholeShow(noVideos)
-                return
-            }
-
-            if (failed) {
-                toast({ variant: 'destructive', title: 'Partial Deletion', description: `Some items could not be fully removed from their source platforms and remain in your history. Retry to finish clearing them.${keptReasonSummary(keptReasons)}` })
-            } else {
-                toast({
-                    title: ids.length > 1 ? 'Episodes Deleted' : 'Item Deleted',
-                    description: 'Removed from activity history.'
-                })
-            }
-            setPendingDeleteIds(null)
-        } finally {
-            setIsDeletingPending(false)
-        }
+    const handleDeleteSelected = () => {
+        if (selectedItems.size === 0) return
+        const ids = Array.from(selectedItems)
+        setSelectedItems(new Set())
+        scheduleActivityDelete(ids, true)
     }
 
     const handleDeleteWholeShows = async () => {
@@ -992,6 +941,7 @@ export function ActivityPage() {
 
     const isSelecting = selectedItems.size > 0 || isBulkMode
     const isLoading = loading || isRefreshingFromCloud
+    const historySettled = useSettledOnce(watchHistory, isLoading || !watchEventsInitialized)
     // Refresh the current feed in place. These are the live, scoped hook
     // results, so removals and account changes still take effect immediately.
     const showFeedSkeleton = isLoading && history.length === 0 && inProgress.length === 0
@@ -1047,7 +997,7 @@ export function ActivityPage() {
                         placeholder="Search history..."
                         value={searchInput}
                         onChange={(e) => handleSearchChange(e.target.value)}
-                        className="pl-9 pr-9 h-8 text-xs bg-muted/30 border border-border/40 focus:bg-muted/40 transition-colors w-full"
+                        className="pl-9 pr-9 h-8 py-0 text-xs bg-muted/30 border border-border/40 focus:bg-muted/40 transition-colors w-full"
                         data-search-focus
                     />
                     {searchInput && (
@@ -1193,8 +1143,8 @@ export function ActivityPage() {
             )}
 
             {/* Continue Watching Rail */}
+            <MediaReadBanner issues={mediaReadWarnings} accountName={mediaAccountName} onRetry={refreshMedia} />
             {[
-                { title: 'Some media updates are unavailable or incomplete', issues: mediaReadWarnings },
                 { title: 'Activity history limits', issues: mediaHistoryLimits },
             ].filter(group => group.issues.length > 0).map(group => (
                 <details key={group.title} data-theme-part="panel" className="rounded-xl border border-border/40 bg-card p-3 text-xs text-muted-foreground">
@@ -1207,112 +1157,41 @@ export function ActivityPage() {
                 </details>
             ))}
             {(() => {
-              const filteredInProgress = (userFilter === 'all' ? inProgress : inProgress.filter(item => item.accountId === userFilter))
-                // Per-origin dismissal: the key carries the connection scope so removing
-                // one login's copy never hides a sibling's copy of the same title.
-                .filter(item => !dismissedContinueWatching.includes(`${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`))
+              // Per-origin dismissal: the key carries the connection scope so removing
+              // one login's copy never hides a sibling's copy of the same title.
+              const filteredInProgress = continueWatchingRail(inProgress, userFilter,
+                item => dismissedContinueWatching.includes(`${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`))
               if (filteredInProgress.length === 0 || searchTerm) return null
+              const filterAccount = userFilter !== 'all' ? accountById.get(userFilter) : undefined
               return (
                 <ContentRail
                     title="Continue Watching"
+                    titleAccessory={filterAccount && (
+                        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
+                            <span aria-hidden>·</span>
+                            <AccountAvatar account={filterAccount} size="xs" showStatus={false} className="h-6 w-6 md:h-7 md:w-7" />
+                            <span className="truncate">{mediaAccountName(filterAccount.id)}</span>
+                        </span>
+                    )}
                     subtitle="Latest saved progress and reported playback from connected platforms."
-                    count={filteredInProgress.length}
-                    countLabel="in progress"
+                    scrollAmount={512}
+                    count={Math.min(filteredInProgress.length, CONTINUE_WATCHING_LIMIT)}
+                    countLabel={filteredInProgress.length > CONTINUE_WATCHING_LIMIT ? `of ${filteredInProgress.length} in progress` : 'in progress'}
                 >
-                            {filteredInProgress.slice(0, 24).map((item, i) => {
+                            {filteredInProgress.slice(0, CONTINUE_WATCHING_LIMIT).map((item, i) => {
                                 const account = accountById.get(item.accountId)
+                                const rawPeer = account ? peerLoginLabel(account, item.sourceConnectionId) : null
                                 return (
-                                    <motion.div
+                                    <UpNextCard
                                         key={item.id}
-                                        initial={{ opacity: 0, y: 8 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        transition={{ delay: i * 0.04, duration: 0.25, ease: 'easeOut' }}
-                                        className="relative w-28 shrink-0 cursor-pointer group"
-                                        onClick={() => setDetailItem(item)}
-                                    >
-                                        <button
-                                            type="button"
-                                            data-theme-part="button"
-                                            aria-label={`Remove ${item.name} from Continue Watching`}
-                                            className="absolute -top-1.5 -right-1.5 z-10 flex h-5.5 w-5.5 items-center justify-center rounded-full border border-border/60 bg-card text-muted-foreground opacity-0 shadow-sm transition-all hover:bg-destructive hover:text-destructive-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                                            onClick={(e) => {
-                                                e.stopPropagation()
-                                                useDiscoveryStore.getState().dismissItem(CONTINUE_WATCHING_CONTEXT, `${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`)
-                                            }}
-                                        >
-                                            <X className="h-3 w-3" />
-                                        </button>
-                                        <div className="relative aspect-[2/3] overflow-hidden rounded-2xl border border-border/40 shadow-sm transition-[transform,opacity,box-shadow] duration-200 group-hover:border-primary/50 group-hover:shadow-lg">
-                                            <Poster
-                                                src={item.poster}
-                                                itemId={item.itemId}
-                                                itemType={item.type}
-                                                alt={item.name}
-                                                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                                                loading="lazy"
-                                            />
-                                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
-                                            {item.source && <PlatformSourceBadge source={item.source} label={item.mediaObservation?.productName} mediaSources={item.mediaSources} className="top-1.5 right-1.5" />}
-                                            <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/50">
-                                                <div className="h-full bg-primary" style={{ width: `${item.progress}%` }} />
-                                            </div>
-                                            <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100">
-                                                <div className="rounded-full border border-white/25 bg-black/75 p-2 shadow-xl">
-                                                    <PlayCircle className="h-7 w-7 text-white" />
-                                                </div>
-                                            </div>
-                                            <div className="absolute bottom-2 right-1.5">
-                                                <span className="rounded-full bg-black/75 px-1.5 py-0.5 text-xs font-bold tabular-nums text-white/90">
-                                                    {Math.round(item.progress)}%
-                                                </span>
-                                            </div>
-                                            {item.mediaObservation?.kind === 'live' && (
-                                                <span className="absolute bottom-2 left-1.5 rounded-full bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white">
-                                                    {item.mediaObservation.isPaused ? 'Paused' : 'Playing'}
-                                                </span>
-                                            )}
-                                            {account && (
-                                                <div className="absolute top-1.5 left-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-white/20 bg-black/65 overflow-hidden">
-                                                    {account.avatar ? (
-                                                        <img src={account.avatar} alt="" className="h-full w-full object-cover" loading="lazy" />
-                                                    ) : account.emoji ? (
-                                                        <span className="text-xs font-bold leading-none text-white">{account.emoji}</span>
-                                                    ) : (
-                                                        <span className="text-xs font-bold leading-none text-white">{(account.name || getAccountEmail(account) || '?')[0].toUpperCase()}</span>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <p className="mt-1.5 truncate text-xs font-semibold leading-tight">{item.name}</p>
-                                        <div className="mt-0.5 flex items-center gap-1">
-                                            {(item.type === 'series' || item.type === 'anime') && item.episode !== undefined && (
-                                                <span className="font-mono text-xs text-muted-foreground">S{item.season ?? 1} E{item.episode}</span>
-                                            )}
-                                            {account && (
-                                                <>
-                                                    <span className="relative h-4 w-4 shrink-0 flex items-center justify-center overflow-hidden rounded-full">
-                                                        {account.avatar ? (
-                                                            <img src={account.avatar} alt="" className="absolute inset-0 h-full w-full object-cover" loading="lazy" />
-                                                        ) : account.emoji ? (
-                                                            <span className="text-xs font-bold leading-none text-muted-foreground">{account.emoji}</span>
-                                                        ) : null}
-                                                    </span>
-                                                    <span className="truncate text-xs text-muted-foreground/60">{account.name && !account.name.includes('@')
-                                                        ? maskNameLevel(account.name, privacyLevel)
-                                                        : (maskEmailLevel(getAccountEmail(account) || '', emailPrivacyLevel) || account.name)}
-                                                    </span>
-                                                    {(() => {
-                                                        // Same-account peer logins must be distinguishable on identical
-                                                        // cards: the masked origin label names the exact connection.
-                                                        const raw = peerLoginLabel(account, item.sourceConnectionId)
-                                                        if (!raw) return null
-                                                        const masked = raw.includes('@') ? maskEmailLevel(raw, emailPrivacyLevel) : maskNameLevel(raw, privacyLevel)
-                                                        return <span className="ml-0.5 shrink-0 truncate text-[10px] text-muted-foreground/80" title={`Watched on ${masked}`}>· {masked}</span>
-                                                    })()}
-                                                </>
-                                            )}
-                                        </div>
-                                    </motion.div>
+                                        item={item}
+                                        account={account}
+                                        index={i}
+                                        watcherName={account ? mediaAccountName(account.id) : undefined}
+                                        peerLabel={rawPeer ? (rawPeer.includes('@') ? maskEmailLevel(rawPeer, emailPrivacyLevel) : maskNameLevel(rawPeer, privacyLevel)) : null}
+                                        onOpen={() => setDetailItem(item)}
+                                        onDismiss={() => useDiscoveryStore.getState().dismissItem(CONTINUE_WATCHING_CONTEXT, `${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`)}
+                                    />
                                 )
                             })}
                 </ContentRail>
@@ -1329,87 +1208,30 @@ export function ActivityPage() {
                 <ActivityFeed
                     history={filteredHistory}
                     allHistory={history}
+                    hoursSource={hoursSource}
+                    rollupMinutes={headerRollupMinutes}
                     importedSummaries={importedSummaryItems}
+                    settling={!historySettled}
+                    refreshing={isLoading}
+                    filterKey={`${userFilter}|${timeFilter}|${customStartDate}|${searchTerm}`}
+                    canonicalConnections={canonicalConnections}
                     currentActivity={inProgress}
                     viewMode={viewMode}
-                    todayHours={sessionComparison.todayHrs}
-                    todayTrend={sessionComparison.isUp ? 'up' : 'down'}
+                    hoursScope={hoursScope}
                     selectedItems={selectedItems}
                     isBulkMode={isBulkMode}
                     onToggleSelect={handleFeedToggleSelect}
                     onDelete={handleFeedDelete}
                     onOpenDetail={handleOpenDetail}
+                    onRefresh={() => fetchActivity()}
                 />
             )}
-
-            <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-                <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Delete Selected Items?</AlertDialogTitle>
-                        <AlertDialogDescription asChild>
-                            <div className="space-y-3">
-                                <p>
-                                    This will permanently remove {selectedItems.size} item(s) from the selected connections' watch history{(() => {
-                                        const summary = originTargetsSummary(history.filter(item => selectedItems.has(item.id)), accountById, privacyLevel, emailPrivacyLevel)
-                                        return summary ? ` — ${summary.text}${summary.count > 1 ? ` (${summary.count} logins)` : ''}` : ''
-                                    })()}. This cannot be undone.
-                                </p>
-                                {selectedSources.has('jellyfin') && <MediaDeleteScope items={history.filter(item => selectedItems.has(item.id))} accountById={accountById} />}
-                                {selectedHasWholeShowSeries && (
-                                    <p className="text-sm text-destructive">
-                                        Deleting a series removes its entire watch history for the show.
-                                    </p>
-                                )}
-                            </div>
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                            onClick={handleDeleteSelected}
-                            className="bg-secondary text-destructive hover:bg-secondary/80 hover:text-destructive"
-                        >
-                            Delete
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
 
             <ActivityDetailModal
                 open={detailItem !== null}
                 onOpenChange={(open) => { if (!open) setDetailItem(null) }}
                 item={detailItem}
-            />
-
-            <ConfirmationDialog
-                open={pendingDeleteIds !== null}
-                onOpenChange={(open) => {
-                    if (!open && !isDeletingPending) setPendingDeleteIds(null)
-                }}
-                title={pendingDeleteIds && pendingDeleteIds.length > 1 ? 'Delete Episodes?' : 'Delete Activity Item?'}
-                description={(
-                    <>
-                        <p>
-                            This will permanently remove {pendingDeleteIds?.length ?? 1} item{(pendingDeleteIds?.length ?? 1) > 1 ? 's' : ''} from the selected connections' watch history{(() => {
-                                const summary = originTargetsSummary(history.filter(item => pendingDeleteIds?.includes(item.id)), accountById, privacyLevel, emailPrivacyLevel)
-                                return summary ? ` — ${summary.text}${summary.count > 1 ? ` (${summary.count} logins)` : ''}` : ''
-                            })()}.
-                        </p>
-                        {pendingSources.has('jellyfin') && <MediaDeleteScope items={history.filter(item => pendingDeleteIds?.includes(item.id))} accountById={accountById} />}
-                        {pendingHasWholeShowSeries && (
-                            <p className="text-sm text-destructive">
-                                Deleting a series removes its entire watch history for the show.
-                            </p>
-                        )}
-                        <p className="text-sm text-muted-foreground">
-                            This cannot be undone.
-                        </p>
-                    </>
-                )}
-                confirmText="Delete"
-                isDestructive
-                isLoading={isDeletingPending}
-                onConfirm={() => { void handleConfirmPendingDelete() }}
+                watchHistory={watchHistory}
             />
 
             <ConfirmationDialog
@@ -1440,7 +1262,7 @@ export function ActivityPage() {
                     },
                     {
                         label: 'Delete History',
-                        onClick: () => setShowDeleteDialog(true),
+                        onClick: handleDeleteSelected,
                         variant: 'destructive',
                         icon: <AnimatedTrashIcon className="h-4 w-4" />,
                         tooltip: 'Delete selected items',

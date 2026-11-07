@@ -1,10 +1,12 @@
-import { useRef, useState, memo, createContext, useContext, type ReactNode } from 'react'
+import { useEffect, useRef, useState, memo, createContext, useContext, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { ChevronLeft, ChevronRight, X, Heart, LayoutGrid, GalleryHorizontalEnd } from 'lucide-react'
 import { Poster } from '@/components/common/Poster'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
-import { cn } from '@/lib/utils'
+import { pressable, PRESSABLE_FOCUS } from '@/components/metrics/pressable'
+import { cn, maskedInitial } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
 
 const GridModeContext = createContext(false)
 
@@ -33,6 +35,7 @@ export interface ContentRailCardProps {
 
 export interface ContentRailProps {
     title: string
+    titleAccessory?: ReactNode
     subtitle?: string
     icon?: ReactNode
     count?: number
@@ -59,6 +62,7 @@ export const ContentRailCard = memo(function ContentRailCard({
     index = 0,
 }: ContentRailCardProps) {
     const isGrid = useContext(GridModeContext)
+    const privacyLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
 
     return (
         <motion.div
@@ -66,18 +70,21 @@ export const ContentRailCard = memo(function ContentRailCard({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: Math.min(index * 0.04, 0.4), duration: 0.3 }}
             className={cn(
-                'group relative cursor-pointer',
+                'group relative',
+                onClick && PRESSABLE_FOCUS,
+                onClick ? 'cursor-pointer' : '',
                 isGrid ? 'w-full' : 'w-32 shrink-0 sm:w-36'
             )}
-            onClick={onClick}
+            {...(onClick ? pressable(onClick, title) : {})}
         >
-            <div data-theme-part="card" className="relative aspect-[2/3] w-full overflow-hidden rounded-2xl border border-border/30 bg-muted shadow-md transition-all duration-200 group-hover:border-primary/40 group-hover:shadow-xl">
+            <div data-theme-part="card" className="relative aspect-[2/3] w-full overflow-hidden rounded-2xl border border-[color:var(--chrome-line)] bg-muted shadow-md transition-all duration-200 group-hover:border-primary/40 group-hover:shadow-xl">
                 <Poster
                     src={poster}
                     alt={title}
                     itemId={itemId}
                     itemType={itemType}
-                    className="h-full w-full transition-transform duration-300 group-hover:scale-105"
+                    sizes="(min-width: 640px) 152px, 135px"
+                    className="media-ring h-full w-full transition-transform duration-300 group-hover:scale-105"
                     loading="lazy"
                 />
 
@@ -113,7 +120,7 @@ export const ContentRailCard = memo(function ContentRailCard({
                                 ) : w.emoji ? (
                                     <span className="text-[9px]">{w.emoji}</span>
                                 ) : (
-                                    <span className="text-[8px] font-bold text-muted-foreground">{(w.name.charAt(0) || '?').toUpperCase()}</span>
+                                    <span className="text-[8px] font-bold text-muted-foreground">{maskedInitial(w.name, privacyLevel) || '?'}</span>
                                 )}
                             </div>
                         ))}
@@ -158,6 +165,7 @@ export const ContentRailCard = memo(function ContentRailCard({
 
 export function ContentRail({
     title,
+    titleAccessory,
     subtitle,
     icon,
     count,
@@ -169,6 +177,7 @@ export function ContentRail({
 }: ContentRailProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const [gridMode, setGridMode] = useState(false)
+    const [fades, setFades] = useState({ left: false, right: false })
 
     const scroll = (dir: 'left' | 'right') => {
         scrollRef.current?.scrollBy({
@@ -176,6 +185,33 @@ export function ContentRail({
             behavior: 'smooth',
         })
     }
+
+    // Edge fades: only the side with more content beyond it, live on scroll, none when the rail fits.
+    useEffect(() => {
+        if (gridMode) return
+        const row = scrollRef.current
+        if (!row) return
+        let frame = 0
+        const update = () => {
+            frame = 0
+            const max = row.scrollWidth - row.clientWidth
+            if (max <= 2) {
+                setFades({ left: false, right: false })
+                return
+            }
+            setFades({ left: row.scrollLeft > 2, right: row.scrollLeft < max - 2 })
+        }
+        const onScroll = () => { if (!frame) frame = requestAnimationFrame(update) }
+        update()
+        row.addEventListener('scroll', onScroll, { passive: true })
+        const ro = new ResizeObserver(onScroll)
+        ro.observe(row)
+        return () => {
+            row.removeEventListener('scroll', onScroll)
+            if (frame) cancelAnimationFrame(frame)
+            ro.disconnect()
+        }
+    }, [gridMode])
 
     return (
         <section data-theme-part="panel" className={cn(
@@ -186,8 +222,8 @@ export function ContentRail({
                 <div className="flex min-w-0 items-center gap-2">
                     {icon && <div className="shrink-0 text-primary">{icon}</div>}
                     <div className="min-w-0">
-                        <h3 className="text-sm font-semibold leading-tight tracking-tight text-foreground">{title}</h3>
-                        {subtitle && <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>}
+                        <h3 className="flex min-w-0 items-center gap-1.5 text-sm font-semibold leading-tight tracking-tight text-foreground"><span className="shrink-0">{title}</span>{titleAccessory}</h3>
+                        {subtitle && <p className="mt-0.5 hidden text-xs text-muted-foreground sm:block">{subtitle}</p>}
                     </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -233,7 +269,17 @@ export function ContentRail({
                     </div>
                 </GridModeContext.Provider>
             ) : (
-                <div ref={scrollRef} className="flex gap-4 overflow-x-auto pb-1 pt-3 scrollbar-hide scroll-smooth">
+                <div
+                    ref={scrollRef}
+                    data-rail-row=""
+                    className="rail-edge-fade flex gap-4 overflow-x-auto pb-1 pt-3 scrollbar-hide scroll-smooth"
+                    style={{
+                        '--fl': fades.left ? '32px' : '0px',
+                        '--fr': fades.right ? '32px' : '0px',
+                        maskImage: 'linear-gradient(to right, transparent 0, #000 var(--fl), #000 calc(100% - var(--fr)), transparent 100%)',
+                        WebkitMaskImage: 'linear-gradient(to right, transparent 0, #000 var(--fl), #000 calc(100% - var(--fr)), transparent 100%)',
+                    } as React.CSSProperties}
+                >
                     {children}
                 </div>
             )}

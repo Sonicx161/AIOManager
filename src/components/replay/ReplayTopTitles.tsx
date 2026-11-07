@@ -97,6 +97,7 @@ export function ReplayTopTitles({ data, allTimeData }: ReplayTopTitlesProps) {
                             <div className="relative w-52 md:w-72 aspect-[2/3] rounded-xl overflow-hidden shadow-2xl shadow-black/80 mt-auto transform group-hover:-translate-y-4 transition-transform duration-500 border border-white/10">
                                 <Poster
                                     src={hero.poster}
+                                    displayWidth={288}
                                     itemId={hero.itemId}
                                     itemType={hero.type}
                                     alt={hero.name}
@@ -133,6 +134,7 @@ export function ReplayTopTitles({ data, allTimeData }: ReplayTopTitlesProps) {
                                     <div className="relative w-14 h-20 shrink-0 rounded-xl overflow-hidden shadow-lg border border-white/5 bg-black/50 z-10">
                                         <Poster
                                             src={title.poster}
+                                            displayWidth={56}
                                             itemId={title.itemId}
                                             itemType={title.type}
                                             className="w-full h-full object-cover"

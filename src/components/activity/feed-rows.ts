@@ -1,9 +1,12 @@
 import type { ActivityItem } from '../../types/activity'
+import type { ActivityNowStatus } from '../../lib/jellyfin/activity'
 
 // Pure row-model helpers for the ActivityFeed long-history windowing.
 // The component layers @tanstack/react-virtual on top of this model.
 
 export type FeedViewMode = 'grid' | 'list'
+
+export type NowStatusMap = ReadonlyMap<string, ActivityNowStatus>
 
 /**
  * Presentation bucket for imported saved watch state (rows with `importedSavedState`):
@@ -35,6 +38,8 @@ export interface BuildFeedRowsOptions {
     /** Revealed-item budget above which the feed switches to windowed rendering, even
      *  when the row count is still small (wide grids pack many cards per row). Default 120. */
     virtualizeItemThreshold?: number
+    /** NOW statuses; within each calendar day, NOW items sort ahead of the rest. */
+    nowStatuses?: NowStatusMap
 }
 
 export interface FeedRowsResult {
@@ -51,19 +56,54 @@ export interface FeedRowsResult {
     visibleGroups: DateGroup[]
 }
 
-function compareNewestFirst(a: ActivityItem, b: ActivityItem): number {
+/** Returns `prev` while `next` holds the same id:status pairs, so memo dependencies stay put across ticks. */
+export function keepNowStatusIdentity<T extends NowStatusMap>(prev: T | undefined, next: T): T {
+    if (!prev || prev.size !== next.size) return next
+    for (const [id, status] of next) if (prev.get(id) !== status) return next
+    return prev
+}
+
+function nowTier(item: ActivityItem, nowStatuses?: NowStatusMap): number {
+    const status = nowStatuses?.get(item.id)
+    return status === 'playing' ? 0 : status === 'recent' ? 1 : 2
+}
+
+function dayStart(timestamp: ActivityItem['timestamp']): number {
+    const d = new Date(timestamp)
+    return isNaN(d.getTime()) ? -Infinity : new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
+
+function compareNewestFirst(a: ActivityItem, b: ActivityItem, nowStatuses?: NowStatusMap): number {
     // Undated saved state always sorts after dated rows (including invalid
     // timestamps) so it can only ever form the trailing group.
     const savedA = a.importedSavedState === true
     const savedB = b.importedSavedState === true
     if (savedA !== savedB) return savedA ? 1 : -1
+    if (nowStatuses && nowStatuses.size > 0) {
+        const dayA = dayStart(a.timestamp)
+        const dayB = dayStart(b.timestamp)
+        if (dayA !== dayB) return dayB > dayA ? 1 : -1
+        const tier = nowTier(a, nowStatuses) - nowTier(b, nowStatuses)
+        if (tier !== 0) return tier
+    }
     const ta = new Date(a.timestamp).getTime()
     const tb = new Date(b.timestamp).getTime()
     return (isNaN(tb) ? -Infinity : tb) - (isNaN(ta) ? -Infinity : ta)
 }
 
-export function sortFeedItems(items: ActivityItem[]): ActivityItem[] {
-    return [...items].sort(compareNewestFirst)
+// Sorting and grouping are pure per (items, nowStatuses) pair, and the feed asks
+// for both on every reveal increment while the inputs hold still. Caching by
+// input identity keeps repeated reveals O(slice) instead of O(n log n) Date-parsing
+// sorts. Callers never mutate the returned array.
+const sortedFeedCache = new WeakMap<ActivityItem[], { statuses: NowStatusMap | undefined; items: ActivityItem[] }>()
+const fullDayCountsCache = new WeakMap<ActivityItem[], { statuses: NowStatusMap | undefined; counts: Map<string, number> }>()
+
+export function sortFeedItems(items: ActivityItem[], nowStatuses?: NowStatusMap): ActivityItem[] {
+    const cached = sortedFeedCache.get(items)
+    if (cached && cached.statuses === nowStatuses) return cached.items
+    const sorted = [...items].sort((a, b) => compareNewestFirst(a, b, nowStatuses))
+    sortedFeedCache.set(items, { statuses: nowStatuses, items: sorted })
+    return sorted
 }
 
 function toDateId(dateStr: string): string {
@@ -74,11 +114,16 @@ function toDateId(dateStr: string): string {
 }
 
 /** Same grouping semantics the feed always had: newest-first, one bucket per calendar day, invalid timestamps last; undated saved state gets its own explicit trailing bucket instead of borrowing the observation-time day. */
-export function groupByDate(items: ActivityItem[]): DateGroup[] {
+export function groupByDate(items: ActivityItem[], nowStatuses?: NowStatusMap): DateGroup[] {
+    return groupSortedByDate(sortFeedItems(items, nowStatuses))
+}
+
+/** Group already-sorted items without re-sorting (a sorted prefix stays sorted). */
+function groupSortedByDate(sorted: ActivityItem[]): DateGroup[] {
     const dates: string[] = []
     const itemsByDate: Record<string, ActivityItem[]> = {}
 
-    for (const item of sortFeedItems(items)) {
+    for (const item of sorted) {
         let dateStr: string
         if (item.importedSavedState === true) {
             dateStr = SAVED_GROUP_DATE
@@ -111,12 +156,21 @@ export function buildFeedRows(items: ActivityItem[], visibleCount: number, optio
     const virtualizeThreshold = options.virtualizeThreshold ?? 60
     const virtualizeItemThreshold = options.virtualizeItemThreshold ?? 120
 
-    const sorted = sortFeedItems(items)
+    const nowStatuses = options.nowStatuses
+    const sorted = sortFeedItems(items, nowStatuses)
     const visibleItemCount = Math.max(0, Math.min(visibleCount, sorted.length))
     const sliced = visibleItemCount === sorted.length ? sorted : sorted.slice(0, visibleItemCount)
 
-    const groups = groupByDate(sliced)
-    const fullDayCounts = new Map(groupByDate(items).map(g => [g.date, g.watchCount]))
+    // A slice of the sorted array is already in feed order; group it without re-sorting.
+    const groups = groupSortedByDate(sliced)
+    const fullDayCountsCacheHit = fullDayCountsCache.get(items)
+    let fullDayCounts: Map<string, number>
+    if (fullDayCountsCacheHit && fullDayCountsCacheHit.statuses === undefined) {
+        fullDayCounts = fullDayCountsCacheHit.counts
+    } else {
+        fullDayCounts = new Map(groupByDate(items).map(g => [g.date, g.watchCount]))
+        fullDayCountsCache.set(items, { statuses: undefined, counts: fullDayCounts })
+    }
 
     const rows: FeedRow[] = []
     const groupAnchors: FeedRowsResult['groupAnchors'] = []

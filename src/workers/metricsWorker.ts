@@ -1,19 +1,26 @@
+import { computeWatchHours, msToHours, type RuntimeIndex, type WatchHoursRow } from '@/lib/watch-hours'
+
+// Mirrors MetricsWorkerItem in hooks/useMetricsWorker.ts.
 interface ActivityItem {
     id: string
     name: string
     type: string
     timestamp: Date
-    duration: number
     watched: number
     overallTimeWatched?: number
     accountId: string
     accountName: string
     progress: number
+    duration?: number
+    mediaServer?: boolean
+    mediaPlayed?: boolean
+    mediaPositionMs?: number
     itemId: string
     poster: string
     season?: number
     episode?: number
-    video_id?: string
+    /** Scope of the cumulative overallTimeWatched counter (account, platform, login, title). */
+    counterKey?: string
     /** No real watch date (bitfield recovery / undated external import); excluded from time-based stats. */
     backfill?: boolean
     /** Imported saved watch state; same exclusion as backfill. */
@@ -22,7 +29,6 @@ interface ActivityItem {
 const subDays = (d: Date, n: number) => new Date(d.getTime() - n * 864e5)
 const isSeriesType = (t: string) => t === 'series' || t === 'anime' || t === 'episode'
 const BINGE_GAP_MINUTES = 90
-const MAX_MINUTES_CAP = 50000 * 60
 
 function toLocalDayKey(ts: number): string {
     const d = new Date(ts)
@@ -132,6 +138,7 @@ interface EventRollupsPayload {
 interface MetricsResult {
     totalItems: number
     totalHours: number
+    estimatedHours: number
     leaderboard: UserStatsEntry[]
     bingeMasters: UserStatsEntry[]
     streakMasters: UserStatsEntry[]
@@ -167,18 +174,31 @@ interface MetricsResult {
     _message?: string
 }
 
-self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollupsPayload }>) => {
+self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; periodStart?: number | null; rollups?: EventRollupsPayload; runtimes?: RuntimeIndex }>) => {
+    // Every reply echoes the request id so the main thread can drop replies that
+    // no longer match a pending request (parked-worker stragglers, supersessions).
+    const reqId = typeof e.data?.reqId === 'number' ? e.data.reqId : -1
+    const reply = (result: MetricsResult | { _error: true; _message: string } | null) => self.postMessage({ reqId, result })
     try {
-    const { items, rollups } = e.data
-    if (!items || items.length === 0) {
-        self.postMessage(null)
+    const { items: allItems, periodStart, rollups, runtimes } = e.data
+    if (!allItems || allItems.length === 0) {
+        reply(null)
+        return
+    }
+    // Rows before periodStart are credit context only; every stat below counts in-period rows.
+    const hasPeriod = typeof periodStart === 'number' && Number.isFinite(periodStart)
+    const inPeriod = (value: Date | string | number) => {
+        const time = value instanceof Date ? value.getTime() : new Date(value).getTime()
+        return Number.isFinite(time) && time >= (periodStart as number)
+    }
+    const items = hasPeriod ? allItems.filter(h => inPeriod(h.timestamp)) : allItems
+    if (items.length === 0) {
+        reply(null)
         return
     }
 
     const now = new Date()
 
-    let totalDurationMinutes = 0
-    const seriesWithOverall = new Map<string, number>()
     const itemsByHour = new Array(24).fill(0)
     const typeCounts = { movie: 0, series: 0, other: 0 }
 
@@ -219,12 +239,43 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollup
     const franchiseCounts: Record<string, number> = {}
     franchises.forEach(f => franchiseCounts[f.name] = 0)
 
-    const normalizedItems = items.map((h: ActivityItem) => ({
+    const contextItems = allItems.map((h: ActivityItem) => ({
         ...h,
         timestamp: h.timestamp instanceof Date ? h.timestamp : new Date(h.timestamp)
     })).filter(h => !isNaN(h.timestamp.getTime()))
+    const periodStartMs = hasPeriod ? (periodStart as number) : -Infinity
+    const normalizedItems = hasPeriod ? contextItems.filter(h => h.timestamp.getTime() >= periodStartMs) : contextItems
 
-    normalizedItems.forEach((h: ActivityItem) => {
+    // One shared definition of watch hours (also used by Activity and Replay), credited over
+    // every row so a time window never re-seeds a cumulative counter.
+    const hoursRows: WatchHoursRow[] = contextItems.map(h => ({
+        itemId: h.itemId,
+        type: h.type,
+        timestamp: h.timestamp.getTime(),
+        watched: h.watched,
+        duration: h.duration,
+        progress: h.progress,
+        overallTimeWatched: h.overallTimeWatched,
+        counterKey: h.counterKey,
+        mediaServer: h.mediaServer,
+        mediaPlayed: h.mediaPlayed,
+        mediaPositionMs: h.mediaPositionMs,
+        mediaKey: h.mediaServer ? h.id : undefined,
+        excluded: !!h.backfill || !!h.importedSavedState,
+    }))
+    const hours = computeWatchHours(hoursRows, runtimes ?? { typical: new Map(), longest: new Map() })
+    const periodMs: number[] = []
+    let periodTotalMs = 0
+    let periodEstimatedMs = 0
+    contextItems.forEach((h, index) => {
+        if (hasPeriod && h.timestamp.getTime() < periodStartMs) return
+        periodMs.push(hours.rowMs[index])
+        periodTotalMs += hours.rowMs[index]
+        periodEstimatedMs += hours.rowEstimatedMs[index]
+    })
+    const minutesByRow = periodMs.map(ms => ms / 60000)
+
+    normalizedItems.forEach((h: ActivityItem, index: number) => {
         const timestamp = h.timestamp
 
         const hTime = timestamp.getTime()
@@ -233,24 +284,7 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollup
         const day = hDate.getDay()
 
         // 1. Totals
-        let minutes = 0
-
-        const isSeries = isSeriesType(h.type)
-        if (isSeries && h.overallTimeWatched && h.overallTimeWatched > 0) {
-            const prev = seriesWithOverall.get(h.itemId) || 0
-            if (h.overallTimeWatched > prev) {
-                minutes = (h.overallTimeWatched - prev) / 60000
-                seriesWithOverall.set(h.itemId, h.overallTimeWatched)
-            }
-        } else {
-            minutes = (h.watched || 0) / 60000
-        }
-
-        if (minutes > MAX_MINUTES_CAP) {
-            minutes = 0
-        }
-
-        totalDurationMinutes += minutes
+        const minutes = minutesByRow[index]
         itemsByHour[hour]++
 
         // 2. Types
@@ -362,7 +396,7 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollup
             if (monthStart < rollupEarliestMs) rollupEarliestMs = monthStart
         }
     }
-    totalDurationMinutes += rollupMinutesTotal
+    const totalMs = periodTotalMs + rollupMinutesTotal * 60000
 
     // Binge Logic. Rows without a real watch date (backfill/importedSavedState) are
     // excluded first: their synthetic timestamps cluster at sync time and would
@@ -618,7 +652,8 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollup
 
     const result: MetricsResult = {
         totalItems: items.length,
-        totalHours: Math.floor(totalDurationMinutes / 60),
+        totalHours: msToHours(totalMs),
+        estimatedHours: msToHours(periodEstimatedMs),
         leaderboard,
         bingeMasters,
         streakMasters,
@@ -677,8 +712,8 @@ self.onmessage = (e: MessageEvent<{ items: ActivityItem[]; rollups?: EventRollup
         dropOffAvg,
     }
 
-    self.postMessage(result)
+    reply(result)
     } catch (err) {
-        self.postMessage({ _error: true, _message: err instanceof Error ? err.message : String(err) })
+        reply({ _error: true, _message: err instanceof Error ? err.message : String(err) })
     }
 }

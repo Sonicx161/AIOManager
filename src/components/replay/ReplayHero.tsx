@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { motion, animate } from 'framer-motion'
+import { motion, animate, useReducedMotion } from 'framer-motion'
 import { Sparkles, Clock, Film, Flame } from 'lucide-react'
 import { ReplayData } from '@/types/ReplayTypes'
 import { useReplayDisplayMeta } from '@/hooks/useReplayDisplayMeta'
@@ -32,6 +32,7 @@ function AnimatedNumber({ target, duration, delay = 0 }: { target: number, durat
 
 export function ReplayHero({ data, userName }: ReplayHeroProps) {
     const { displayYear, displayMonth, isCurrentYear } = useReplayDisplayMeta(data.year)
+    const reduceMotion = useReducedMotion()
 
     const posters = (data.heroPosterArt || []).filter(Boolean).slice(0, 40); // Cap to 40 posters for optimal link size / visual balance
 
@@ -105,6 +106,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                         >
                             <Poster
                                 src={poster}
+                                displayWidth={100}
                                 loading="lazy"
                                 decoding="async"
                                 className="w-full h-full object-cover"
@@ -352,7 +354,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                     transition: 'opacity 1s ease'
                 }}
             >
-                <div style={{ animationName: 'scrollBob', animationDuration: '2s', animationIterationCount: 'infinite' }} className="flex flex-col items-center gap-3">
+                <div style={reduceMotion ? undefined : { animationName: 'scrollBob', animationDuration: '2s', animationIterationCount: 'infinite' }} className="flex flex-col items-center gap-3">
                     <div
                         style={{
                             fontFamily: '"Inter", monospace',
