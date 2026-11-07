@@ -38,9 +38,19 @@ export type * from './types.ts'
 const CLIENT_NAME = 'AIOManager'
 const CLIENT_VERSION = '2.1.0'
 const DEFAULT_TIMEOUT_MS = 15000
+
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) { reject(new JellyfinError('aborted', 'Played items read was aborted')); return }
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
+        const onAbort = () => { clearTimeout(timer); reject(new JellyfinError('aborted', 'Played items read was aborted')) }
+        signal?.addEventListener('abort', onAbort, { once: true })
+    })
+}
 const RESUME_PAGE_LIMIT = 50
 const PLAYED_MAX_ITEMS = 500
-const PLAYED_PAGE_SIZE = 250
+/** Head pages stay at 250 rows on every product; only archive windows grow on native Jellyfin. */
+export const PLAYED_PAGE_SIZE = 250
 const SESSION_FRESH_MS = 120000
 /** A check-in further than this into the future is clock skew or fabricated. */
 const SESSION_FUTURE_SKEW_MS = 5000
@@ -231,6 +241,9 @@ interface RequestSpec {
     method?: 'GET' | 'POST' | 'DELETE'
     token?: string
     body?: unknown
+    /** Pre-encoded body sent verbatim; contentType sets the header instead of application/json. */
+    rawBody?: string
+    contentType?: string
     signal?: AbortSignal
     /** Statuses that must be classified as auth failures for this endpoint (e.g. user 404s). */
     authStatuses?: readonly number[]
@@ -260,7 +273,29 @@ export interface JellyfinWatchClient extends JellyfinClient {
      * and no other item or user is ever addressed.
      */
     clearWatchState(accessToken: string, userId: string, itemId: string, signal?: AbortSignal): Promise<void>
-    writeUserData(accessToken: string, userId: string, itemId: string, update: JellyfinUserDataUpdate, signal?: AbortSignal): Promise<void>
+    /**
+     * Writes UserData. Servers without /Items/{id}/UserData (Jellyfin 10.8) answer 404/405; a
+     * played-only update then falls back to PlayedItems?datePlayed= and the result reports the
+     * route used. The capability is learned from the response and remembered for this client.
+     */
+    writeUserData(accessToken: string, userId: string, itemId: string, update: JellyfinUserDataUpdate, signal?: AbortSignal): Promise<{ via: 'userdata' | 'played-items' } | void>
+    /**
+     * Sets the user's Primary profile picture. The body must be the base64
+     * TEXT of the image bytes (Jellyfin base64-decodes it), never raw bytes.
+     * Route selection is the caller's (version-aware): 'user-image' posts
+     * /UserImage?userId= (12.x), 'legacy' posts /Users/{id}/Images/Primary
+     * (10.x and still served on 12.x). A 403 (user policy forbids preference
+     * edits) surfaces as JellyfinError kind 'auth' with status 403 so the
+     * caller can map it to a Can't change state.
+     */
+    setUserImage(accessToken: string, userId: string, image: { base64: string; contentType: string }, route: 'user-image' | 'legacy', signal?: AbortSignal): Promise<void>
+    /** Deletes the user's Primary image, restoring the server's default avatar. 404 counts as already-removed. */
+    deleteUserImage(accessToken: string, userId: string, route: 'user-image' | 'legacy', signal?: AbortSignal): Promise<void>
+}
+
+/** MediaBrowser authorization header value; shared with the scoped image helpers. */
+export function jellyfinAuthHeaderValue(deviceId: string, token: string): string {
+    return authorizationHeader(deviceId, token)
 }
 
 /**
@@ -284,23 +319,33 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
     async function request(spec: RequestSpec): Promise<unknown> {
         const controller = new AbortController()
         let timedOut = false
+        let timerStop: () => void = () => {}
         const timer = setTimeout(() => {
             timedOut = true
             controller.abort()
+            timerStop()
         }, timeoutMs)
         const external = spec.signal
         if (external?.aborted) {
             clearTimeout(timer)
             throw new JellyfinError('aborted', `Request to ${spec.label} was aborted before it was sent`)
         }
-        const onExternalAbort = () => controller.abort()
+        // A fetch that ignores its abort signal (wrapped or stalled transport) must
+        // still fail at the deadline, so the timer also rejects a race.
+        let stop: (reason: Error) => void = () => {}
+        const stopped = new Promise<never>((_, reject) => { stop = reject })
+        stopped.catch(() => {})
+        const onExternalAbort = () => { controller.abort(); stop(new Error('aborted')) }
         external?.addEventListener('abort', onExternalAbort, { once: true })
+        timerStop = () => stop(new Error('timeout'))
         const url = `${normalizedBase}${spec.path}`
         const headers: Record<string, string> = { Accept: 'application/json' }
         if (spec.token !== undefined || spec.method === 'POST') {
             headers.Authorization = authorizationHeader(deviceId, spec.token)
         }
-        if (spec.body !== undefined) headers['Content-Type'] = 'application/json'
+        if (spec.body !== undefined || spec.rawBody !== undefined) {
+            headers['Content-Type'] = spec.contentType ?? 'application/json'
+        }
         const init: RequestInit = {
             method: spec.method ?? 'GET',
             headers,
@@ -311,6 +356,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             signal: controller.signal,
         }
         if (spec.body !== undefined) init.body = JSON.stringify(spec.body)
+        else if (spec.rawBody !== undefined) init.body = spec.rawBody
         try {
             const fetchFn = injectedFetch ?? globalThis.fetch
             if (typeof fetchFn !== 'function') {
@@ -319,8 +365,16 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             let response: Response
             let text: string
             try {
-                response = await fetchFn(url, init)
-                text = await response.text()
+                let received: Response | undefined
+                let body = ''
+                const exchange = (async () => {
+                    received = await fetchFn(url, init)
+                    body = await received.text()
+                })()
+                exchange.catch(() => {})
+                await Promise.race([exchange, stopped])
+                response = received!
+                text = body
             } catch (err) {
                 if (timedOut) throw new JellyfinError('timeout', `Request to ${spec.label} timed out after ${timeoutMs} ms`)
                 if (external?.aborted) {
@@ -563,7 +617,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
      * it; a 400 on the sorted query downgrades to unsorted paging for the rest
      * of the read. Sorting is a preference — correctness never relies on it.
      */
-    async function readPlayed(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinItemResult> {
+    async function readPlayed(accessToken: string, userId: string, signal?: AbortSignal, onProgress?: JellyfinPagedReadOptions['onProgress'], parallelHeadPages?: boolean, pageRetries?: number): Promise<JellyfinItemResult> {
         const pages = new Map<string, unknown>()
         const result = await readItemPages(
             accessToken,
@@ -574,7 +628,11 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                 maxItems: PLAYED_MAX_ITEMS,
                 sorted: true,
                 stopOnTotal: true,
+                onProgress,
                 capturePages: pages,
+                windowConcurrency: parallelHeadPages ? 2 : 1,
+                fanOutFirst: parallelHeadPages === true,
+                pageRetries,
                 params: {
                     IsPlayed: 'true',
                     IncludeItemTypes: 'Movie,Episode',
@@ -618,9 +676,11 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         const retained = observedHead ? playedHeads.get(observedHead) : undefined
         if (observedHead) playedHeads.delete(observedHead)
         const age = retained ? Date.now() - retained.checkedAt : -1
+        // Captured head pages seed the walk at any window size: readItemPages
+        // replays them as a window prelude, then continues with the requested
+        // window from the raw offset where the prelude ends.
         const prefetchedPages = retained && retained.token === accessToken && retained.userId === userId
             && age >= 0 && age < 5_000
-            && (options?.pageSize ?? PLAYED_PAGE_SIZE) === PLAYED_PAGE_SIZE
             && (options?.maxItems ?? PLAYED_ALL_MAX_ITEMS) >= PLAYED_MAX_ITEMS
             ? retained.pages : undefined
         return readItemPages(
@@ -634,6 +694,9 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                 stopOnTotal: false,
                 onProgress: options?.onProgress,
                 prefetchedPages,
+                pageRetries: options?.pageRetries,
+                retryDelayMs: options?.retryDelayMs,
+                windowConcurrency: options?.windowConcurrency,
                 params: {
                     IsPlayed: 'true',
                     IncludeItemTypes: 'Movie,Episode',
@@ -644,6 +707,44 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             },
             signal
         )
+    }
+
+    /**
+     * Cheap freshness probe for the sorted played head (native Jellyfin only):
+     * the same sorted query as the head's first page, capped at 25 rows.
+     * Callers compare it against the previous head prefix to decide whether a
+     * full head read is worth its bytes. No completeness contract: total is
+     * the upstream TotalRecordCount when usable, null otherwise.
+     */
+    async function probePlayedHead(accessToken: string, userId: string, signal?: AbortSignal): Promise<{ items: JellyfinItem[]; total: number | null }> {
+        const query = new URLSearchParams({
+            StartIndex: '0',
+            Limit: '25',
+            IsPlayed: 'true',
+            IncludeItemTypes: 'Movie,Episode',
+            Recursive: 'true',
+            Fields: 'UserData,ProviderIds',
+            EnableImages: 'false',
+            SortBy: 'DatePlayed',
+            SortOrder: 'Descending',
+        })
+        const res = await request({
+            label: 'Users/{userId}/Items',
+            path: `/Users/${encodeURIComponent(userId)}/Items?${query.toString()}`,
+            token: accessToken,
+            signal,
+        })
+        let page: unknown[]
+        let total: number | null = null
+        if (Array.isArray(res)) {
+            page = res
+        } else if (isRecord(res) && Array.isArray(res.Items)) {
+            page = res.Items
+            total = parseTotalRecordCount(res.TotalRecordCount)
+        } else {
+            throw new JellyfinError('invalid-response', 'Users/{userId}/Items returned an unexpected shape')
+        }
+        return { items: page.map(entry => parseItem(entry, 'Played probe')), total }
     }
 
     async function readAllLibrary(
@@ -715,6 +816,10 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             onProgress?: (snapshot: JellyfinItemResult) => void | Promise<void>
             capturePages?: Map<string, unknown>
             prefetchedPages?: Map<string, unknown>
+            pageRetries?: number
+            retryDelayMs?: number
+            windowConcurrency?: number
+            fanOutFirst?: boolean
         },
         signal?: AbortSignal
     ): Promise<JellyfinItemResult> {
@@ -733,115 +838,216 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         let allowSort = spec.sorted
         let rawStart = 0
         let pages = 0
+        let pageRetriesLeft = spec.pageRetries ?? 0
+        let concurrency = Math.max(1, spec.windowConcurrency ?? 1)
         const maxPages = Math.ceil(spec.maxItems / spec.pageSize) * 2 + 4
-        for (;;) {
-            if (signal?.aborted) throw new JellyfinError('aborted', 'Played items read was aborted')
-            const remaining = spec.maxItems - items.length
-            if (remaining <= 0) {
-                stoppedByCap = true
-                break
+        // Captured head pages can be smaller than this walk's window. Replayed
+        // as a contiguous prelude they keep the head handoff at any window
+        // size; the raw space still tiles because every window advances by
+        // exactly its own requested limit.
+        const preludeWindows = new Map<number, number>()
+        if (spec.prefetchedPages) {
+            const windows = [...spec.prefetchedPages.keys()]
+                .flatMap(path => {
+                    const query = path.slice(path.indexOf('?') + 1)
+                    const start = Number(new URLSearchParams(query).get('StartIndex'))
+                    const limit = Number(new URLSearchParams(query).get('Limit'))
+                    return Number.isInteger(start) && start >= 0 && Number.isInteger(limit) && limit > 0 ? [{ start, limit }] : []
+                })
+                .sort((a, b) => a.start - b.start)
+            let expected = 0
+            for (const window of windows) {
+                if (window.start !== expected) break
+                preludeWindows.set(window.start, window.limit)
+                expected = window.start + window.limit
             }
-            if (pages >= maxPages) {
-                stoppedByPageBound = true
-                break
-            }
-            const limit = Math.min(spec.pageSize, remaining)
-            const query = new URLSearchParams({ ...spec.params, StartIndex: String(rawStart), Limit: String(limit) })
+        }
+        const windowPath = (start: number, limit: number): string => {
+            const query = new URLSearchParams({ ...spec.params, StartIndex: String(start), Limit: String(limit) })
             if (allowSort) {
                 query.set('SortBy', 'DatePlayed')
                 query.set('SortOrder', 'Descending')
             }
-            let res: unknown
-            const path = `${spec.basePath}?${query.toString()}`
-            try {
-                res = spec.prefetchedPages?.has(path) ? spec.prefetchedPages.get(path) : await request({
-                    label: spec.label,
-                    path,
-                    token: accessToken,
-                    signal,
-                })
-            } catch (err) {
-                // Sorting is a preference over the standard query, never a
-                // requirement: an upstream that rejects the sort key can still
-                // serve correct pages. Exactly one downgrade attempt per read.
-                if (allowSort && err instanceof JellyfinError && err.status === 400) {
-                    allowSort = false
-                    continue
+            return `${spec.basePath}?${query.toString()}`
+        }
+        // Windows are raw offsets, so any number can be in flight at once;
+        // results are still processed strictly in window order.
+        interface WalkWindow { start: number; limit: number; path: string; promise: Promise<unknown>; abort: () => void }
+        const pending: WalkWindow[] = []
+        let nextIssueStart = 0
+        const pendingLimit = () => pending.reduce((sum, window) => sum + window.limit, 0)
+        const startWindow = (start: number, limit: number): WalkWindow => {
+            const path = windowPath(start, limit)
+            if (spec.prefetchedPages?.has(path)) {
+                return { start, limit, path, promise: Promise.resolve(spec.prefetchedPages.get(path)), abort: () => {} }
+            }
+            const controller = new AbortController()
+            const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+            const promise = request({ label: spec.label, path, token: accessToken, signal: requestSignal })
+            // A window can fail before the walk reaches it; its rejection is still read in order.
+            promise.catch(() => {})
+            return {
+                start,
+                limit,
+                path,
+                promise,
+                abort: () => controller.abort(),
+            }
+        }
+        const discardPending = () => {
+            for (const window of pending.splice(0)) {
+                window.abort()
+                window.promise.catch(() => {})
+            }
+            nextIssueStart = rawStart
+        }
+        const fillPipeline = (current: number) => {
+            // The first window is always issued alone so a sort rejection is
+            // detected before any fan-out, unless the read opts in (head pages).
+            const allowed = (pages > 0 || spec.fanOutFirst === true || concurrency <= 1) ? concurrency : 1
+            while (pending.length < allowed - 1) {
+                if (nextIssueStart >= spec.maxItems) break
+                const prelude = preludeWindows.get(nextIssueStart)
+                const limit = prelude ?? spec.pageSize
+                // Speculation stays within one window of the claimed total:
+                // the sentinel window still gets issued (a lying small total
+                // keeps the walk going), but a truthful total pays no extra
+                // requests beyond it.
+                if (total !== null && nextIssueStart >= total + limit) break
+                // Never issue speculatively past the item cap: the last window
+                // is sized from the exact remaining count.
+                if (!prelude && items.length + current + pendingLimit() + limit > spec.maxItems) break
+                pending.push(startWindow(nextIssueStart, limit))
+                nextIssueStart += limit
+            }
+        }
+        try {
+            for (;;) {
+                if (signal?.aborted) {
+                    discardPending()
+                    throw new JellyfinError('aborted', 'Played items read was aborted')
                 }
-                throw err
-            }
-            if (rawStart < PLAYED_MAX_ITEMS) spec.capturePages?.set(path, res)
-            let page: unknown[]
-            if (Array.isArray(res)) {
-                page = res
-            } else if (isRecord(res) && Array.isArray(res.Items)) {
-                page = res.Items
-                const rawTotal = parseTotalRecordCount(res.TotalRecordCount)
-                if (rawTotal !== null) {
-                    if (total !== null && total !== rawTotal) totalMoved = true
-                    total = rawTotal
-                }
-            } else {
-                throw new JellyfinError('invalid-response', 'Users/{userId}/Items returned an unexpected shape')
-            }
-            if (page.length > limit) limitIgnored = true
-            const fresh: JellyfinItem[] = []
-            let pageHadDuplicate = false
-            for (const entry of page) {
-                const parsed = parseItem(entry, 'Played items')
-                if (seen.has(parsed.Id)) {
-                    pageHadDuplicate = true
-                    continue
-                }
-                seen.add(parsed.Id)
-                fresh.push(parsed)
-            }
-            if (pageHadDuplicate) sawDuplicates = true
-            if (fresh.length > remaining) {
-                fresh.length = remaining
-                truncatedByCap = true
-            }
-            items.push(...fresh)
-            pages++
-            // The cursor follows the requested window, not the items kept.
-            rawStart += limit
-            if (spec.onProgress && fresh.length > 0) {
-                // Partials are never provably complete; the snapshot is a copy
-                // so consumers cannot mutate the walk's live arrays.
-                await spec.onProgress({ items: items.slice(), total, complete: false, inProgress: true as const, limit: spec.maxItems })
-            }
-            if (fresh.length === 0) {
-                if (page.length > 0) {
-                    sawRepeatedPage = true
+                const remaining = spec.maxItems - items.length
+                if (remaining <= 0) {
+                    stoppedByCap = true
                     break
                 }
-                if (total !== null && rawStart < total) {
-                    // Empty page INSIDE the claimed raw space: the whole window
-                    // was filtered upstream while more raw entries remain. Keep
-                    // walking the raw offsets (bounded by the page bound); the
-                    // listing can never be proven complete after this.
-                    sawInteriorEmptyPage = true
-                    continue
+                if (pages >= maxPages) {
+                    stoppedByPageBound = true
+                    break
                 }
-                exhaustedNaturally = true
-                break
-            }
-            if (page.length < limit) {
-                // A short page proves exhaustion only when nothing claims more
-                // raw entries: no usable total, or (bounded reads only) the
-                // raw space is already covered. Fail-closed all-history reads
-                // never trust a total to stop, so they confirm via empty page.
-                if (total === null || (spec.stopOnTotal && rawStart >= total)) {
+                const limit = Math.min(preludeWindows.get(rawStart) ?? spec.pageSize, remaining)
+                const path = windowPath(rawStart, limit)
+                if (pending[0]?.start !== rawStart || pending[0].path !== path) {
+                    if (pending.length > 0) discardPending()
+                    pending.push(startWindow(rawStart, limit))
+                    nextIssueStart = rawStart + limit
+                }
+                const window = pending.shift()!
+                fillPipeline(window.limit)
+                let res: unknown
+                try {
+                    res = await window.promise
+                } catch (err) {
+                    // Sorting is a preference over the standard query, never a
+                    // requirement: an upstream that rejects the sort key can still
+                    // serve correct pages. Exactly one downgrade attempt per read.
+                    if (allowSort && err instanceof JellyfinError && err.status === 400) {
+                        allowSort = false
+                        discardPending()
+                        continue
+                    }
+                    // Opt-in resume of a stalled page: a transient failure retries the
+                    // same offset with backoff, keeping every page already read.
+                    const transient = err instanceof JellyfinError && (err.kind === 'timeout' || err.kind === 'network' || err.kind === 'server')
+                    if (transient && pageRetriesLeft > 0 && !signal?.aborted) {
+                        const delay = (spec.retryDelayMs ?? 500) * 2 ** ((spec.pageRetries ?? 0) - pageRetriesLeft) * (0.75 + Math.random() * 0.5)
+                        pageRetriesLeft--
+                        concurrency = 1
+                        await pause(delay, signal)
+                        pending.unshift(startWindow(rawStart, limit))
+                        continue
+                    }
+                    discardPending()
+                    throw err
+                }
+                pageRetriesLeft = spec.pageRetries ?? 0
+                if (window.start < PLAYED_MAX_ITEMS) spec.capturePages?.set(window.path, res)
+                let page: unknown[]
+                if (Array.isArray(res)) {
+                    page = res
+                } else if (isRecord(res) && Array.isArray(res.Items)) {
+                    page = res.Items
+                    const rawTotal = parseTotalRecordCount(res.TotalRecordCount)
+                    if (rawTotal !== null) {
+                        if (total !== null && total !== rawTotal) totalMoved = true
+                        total = rawTotal
+                    }
+                } else {
+                    discardPending()
+                    throw new JellyfinError('invalid-response', 'Users/{userId}/Items returned an unexpected shape')
+                }
+                if (page.length > limit) limitIgnored = true
+                const fresh: JellyfinItem[] = []
+                let pageHadDuplicate = false
+                for (const entry of page) {
+                    const parsed = parseItem(entry, 'Played items')
+                    if (seen.has(parsed.Id)) {
+                        pageHadDuplicate = true
+                        continue
+                    }
+                    seen.add(parsed.Id)
+                    fresh.push(parsed)
+                }
+                if (pageHadDuplicate) sawDuplicates = true
+                if (fresh.length > remaining) {
+                    fresh.length = remaining
+                    truncatedByCap = true
+                }
+                items.push(...fresh)
+                pages++
+                // The cursor follows the requested window, not the items kept.
+                rawStart += limit
+                if (spec.onProgress && fresh.length > 0) {
+                    // Partials are never provably complete; the snapshot is a copy
+                    // so consumers cannot mutate the walk's live arrays.
+                    await spec.onProgress({ items: items.slice(), total, complete: false, inProgress: true as const, limit: spec.maxItems })
+                }
+                if (fresh.length === 0) {
+                    if (page.length > 0) {
+                        sawRepeatedPage = true
+                        break
+                    }
+                    if (total !== null && rawStart < total) {
+                        // Empty page INSIDE the claimed raw space: the whole window
+                        // was filtered upstream while more raw entries remain. Keep
+                        // walking the raw offsets (bounded by the page bound); the
+                        // listing can never be proven complete after this.
+                        sawInteriorEmptyPage = true
+                        continue
+                    }
                     exhaustedNaturally = true
                     break
                 }
-                // Sparse facade window: keep walking the raw offsets.
-                continue
+                if (page.length < limit) {
+                    // A short page proves exhaustion only when nothing claims more
+                    // raw entries: no usable total, or (bounded reads only) the
+                    // raw space is already covered. Fail-closed all-history reads
+                    // never trust a total to stop, so they confirm via empty page.
+                    if (total === null || (spec.stopOnTotal && rawStart >= total)) {
+                        exhaustedNaturally = true
+                        break
+                    }
+                    // Sparse facade window: keep walking the raw offsets.
+                    continue
+                }
+                if (spec.stopOnTotal && total !== null && rawStart >= total) {
+                    exhaustedNaturally = true
+                    break
+                }
             }
-            if (spec.stopOnTotal && total !== null && rawStart >= total) {
-                exhaustedNaturally = true
-                break
-            }
+        } finally {
+            discardPending()
         }
         const contradicted =
             stoppedByCap || stoppedByPageBound || truncatedByCap || sawRepeatedPage || sawInteriorEmptyPage || sawDuplicates || totalMoved || limitIgnored
@@ -851,7 +1057,15 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         const limited = stoppedByCap && !stoppedByPageBound && !truncatedByCap && !sawRepeatedPage && !sawInteriorEmptyPage && !sawDuplicates && !totalMoved && !limitIgnored && (total === null || total > items.length)
         const paginationComplete = !spec.stopOnTotal && exhaustedNaturally && !stoppedByCap && !stoppedByPageBound
             && !truncatedByCap && !sawRepeatedPage && !totalMoved && !limitIgnored
-        return { items, total, complete: !contradicted && reached, limit: spec.maxItems, ...(limited ? { limited: true as const } : {}), ...(paginationComplete ? { paginationComplete: true as const } : {}) }
+        return {
+            items,
+            total,
+            complete: !contradicted && reached,
+            limit: spec.maxItems,
+            ...(limited ? { limited: true as const } : {}),
+            ...(paginationComplete ? { paginationComplete: true as const } : {}),
+            ...(spec.sorted ? { sortAccepted: allowSort } : {}),
+        }
     }
 
     async function readAllResume(
@@ -1007,7 +1221,9 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
      * never count, so callers cannot invent capabilities from them.
      */
     async function readSessions(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinSession[]> {
-        const res = await request({ label: 'Sessions', path: '/Sessions', token: accessToken, signal })
+        // ActiveWithinSeconds shrinks the answer on genuine Jellyfin servers;
+        // facades that ignore it are filtered client-side exactly as before.
+        const res = await request({ label: 'Sessions', path: '/Sessions?ActiveWithinSeconds=120', token: accessToken, signal })
         if (!Array.isArray(res)) throw new JellyfinError('invalid-response', 'Sessions returned an unexpected shape')
         const now = Date.now()
         const live: JellyfinSession[] = []
@@ -1086,13 +1302,15 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         }
     }
 
+    let userDataRoute: 'unknown' | 'userdata' | 'played-items' = 'unknown'
+
     async function writeUserData(
         accessToken: string,
         userId: string,
         itemId: string,
         update: JellyfinUserDataUpdate,
         signal?: AbortSignal
-    ): Promise<void> {
+    ): Promise<{ via: 'userdata' | 'played-items' }> {
         if (typeof userId !== 'string' || userId === '') {
             throw new JellyfinError('invalid-response', 'writeUserData requires a non-empty userId')
         }
@@ -1106,14 +1324,78 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         if (!Object.keys(body).length) {
             throw new JellyfinError('invalid-response', 'writeUserData requires at least one field')
         }
+        const playedItemsOnly = update.Played === true && update.PlaybackPositionTicks === undefined
+        const viaPlayedItems = async (cause?: unknown): Promise<{ via: 'played-items' }> => {
+            if (!playedItemsOnly) {
+                throw cause instanceof JellyfinError ? cause : new JellyfinError('unsupported', 'This server cannot store this watch state without the UserData endpoint')
+            }
+            const datePlayed = update.LastPlayedDate !== undefined ? `?datePlayed=${encodeURIComponent(update.LastPlayedDate)}` : ''
+            await request({
+                label: 'Users/{userId}/PlayedItems/{itemId}',
+                path: `/Users/${encodeURIComponent(userId)}/PlayedItems/${encodeURIComponent(itemId)}${datePlayed}`,
+                method: 'POST',
+                token: accessToken,
+                signal,
+            })
+            return { via: 'played-items' }
+        }
+        if (userDataRoute === 'played-items') return viaPlayedItems()
+        try {
+            await request({
+                label: 'Users/{userId}/Items/{itemId}/UserData',
+                path: `/Users/${encodeURIComponent(userId)}/Items/${encodeURIComponent(itemId)}/UserData`,
+                method: 'POST',
+                token: accessToken,
+                body,
+                signal,
+            })
+        } catch (err) {
+            if (err instanceof JellyfinError && err.kind === 'unsupported' && (err.status === 404 || err.status === 405) && playedItemsOnly) {
+                const result = await viaPlayedItems(err)
+                userDataRoute = 'played-items'
+                return result
+            }
+            throw err
+        }
+        userDataRoute = 'userdata'
+        return { via: 'userdata' }
+    }
+
+    async function setUserImage(accessToken: string, userId: string, image: { base64: string; contentType: string }, route: 'user-image' | 'legacy', signal?: AbortSignal): Promise<void> {
+        if (!userId) throw new JellyfinError('invalid-response', 'setUserImage requires a non-empty userId')
+        const path = route === 'user-image'
+            ? `/UserImage?userId=${encodeURIComponent(userId)}`
+            : `/Users/${encodeURIComponent(userId)}/Images/Primary`
         await request({
-            label: 'Users/{userId}/Items/{itemId}/UserData',
-            path: `/Users/${encodeURIComponent(userId)}/Items/${encodeURIComponent(itemId)}/UserData`,
+            label: route === 'user-image' ? 'UserImage' : 'Users/{userId}/Images/Primary',
+            path,
             method: 'POST',
             token: accessToken,
-            body,
+            rawBody: image.base64,
+            contentType: image.contentType,
             signal,
+            authStatuses: [401, 403, 404],
         })
+    }
+
+    async function deleteUserImage(accessToken: string, userId: string, route: 'user-image' | 'legacy', signal?: AbortSignal): Promise<void> {
+        if (!userId) throw new JellyfinError('invalid-response', 'deleteUserImage requires a non-empty userId')
+        const path = route === 'user-image'
+            ? `/UserImage?userId=${encodeURIComponent(userId)}`
+            : `/Users/${encodeURIComponent(userId)}/Images/Primary`
+        try {
+            await request({
+                label: route === 'user-image' ? 'UserImage delete' : 'Users/{userId}/Images/Primary delete',
+                path,
+                method: 'DELETE',
+                token: accessToken,
+                signal,
+                authStatuses: [401, 403],
+            })
+        } catch (err) {
+            if (err instanceof JellyfinError && err.status === 404) return
+            throw err
+        }
     }
 
     return {
@@ -1128,6 +1410,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         readWatchItem,
         readResume,
         readPlayed,
+        probePlayedHead,
         readAllPlayed,
         readAllResume,
         readAllLibrary,
@@ -1135,5 +1418,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         readSessions,
         clearWatchState,
         writeUserData,
+        setUserImage,
+        deleteUserImage,
     }
 }

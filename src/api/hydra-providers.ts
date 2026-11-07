@@ -1,6 +1,6 @@
 import { resilientFetch } from '@/lib/api-resilience'
 import { useSyncStore, getSyncApiPath } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import type { HydraStatus } from '@/types/provider'
 import type { AddonDescriptor } from '@/types/addon'
 
@@ -14,7 +14,7 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
     return {
         'Content-Type': 'application/json',
         'x-sync-user': auth.id,
-        'x-sync-password': await deriveSyncToken(auth.password),
+        'x-sync-password': await getSyncPasswordHeader(auth),
     }
 }
 
@@ -43,12 +43,13 @@ export async function storeConnectionCredential(
     connectionId: string,
     credential: string | Record<string, unknown>,
     credentialType?: string,
+    generation?: string,
 ): Promise<void> {
     const base = getSyncApiPath(useSyncStore.getState().serverUrl)
     const res = await resilientFetch(`${base}/providers/connections/${connectionId}/credentials`, {
         method: 'POST',
         headers: await getAuthHeaders(),
-        body: JSON.stringify({ accountId, credential, credentialType }),
+        body: JSON.stringify({ accountId, credential, credentialType, ...(generation ? { connectionGeneration: generation } : {}) }),
         timeout: 10000,
     })
     if (!res.ok) {
@@ -72,7 +73,7 @@ export async function nuvioAuth(
     })
     if (!res.ok) {
         const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Authentication failed (${res.status})`)
+        throw Object.assign(new Error(body.error || `Authentication failed (${res.status})`), { status: res.status })
     }
     return res.json()
 }
@@ -218,4 +219,37 @@ export async function deleteConnectionCredential(
         const body = await res.json().catch(() => ({ error: 'Unknown error' }))
         throw new Error(body.error || 'Failed to delete credentials')
     }
+}
+
+// The removal-time server cleanup for a connection: the Autopilot rules bound to it
+// (stored addon_list and priority chain included), their stats and history, and its
+// credential rows go in one owner-scoped operation. No in-call retries: a failure is
+// queued by the caller and retried after the next certified pull. The generation is
+// the removed incarnation's token; the server only claims rows of that generation.
+export async function deleteConnectionServerState(accountId: string, connectionId: string, generation?: string): Promise<void> {
+    if (!useSyncStore.getState().auth.isAuthenticated) return
+    const base = getSyncApiPath(useSyncStore.getState().serverUrl)
+    const query = generation ? `?generation=${encodeURIComponent(generation)}` : ''
+    const res = await resilientFetch(`${base}/accounts/${encodeURIComponent(accountId)}/server-state/connection/${encodeURIComponent(connectionId)}${query}`, {
+        method: 'DELETE',
+        retries: 0,
+        headers: await getAuthHeaders(),
+        timeout: 10000,
+    })
+    if (!res.ok) throw new Error(`Failed to delete connection server state (${res.status})`)
+}
+
+// Every Stremio credential row of the account written up to the removal, the account-level
+// canonical row included. Rows registered after removedAt are kept. No in-call retries:
+// a resent request would carry a stale sentAt, so the caller's queue retries instead.
+export async function deleteStremioCredentials(accountId: string, removedAt: number): Promise<void> {
+    if (!useSyncStore.getState().auth.isAuthenticated) return
+    const base = getSyncApiPath(useSyncStore.getState().serverUrl)
+    const res = await resilientFetch(`${base}/accounts/${encodeURIComponent(accountId)}/server-state/stremio-credentials?removedAt=${removedAt}&sentAt=${Date.now()}`, {
+        method: 'DELETE',
+        retries: 0,
+        headers: await getAuthHeaders(),
+        timeout: 10000,
+    })
+    if (!res.ok) throw new Error(`Failed to delete Stremio credentials (${res.status})`)
 }

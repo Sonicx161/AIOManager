@@ -61,9 +61,37 @@ export interface DiscoverQuery {
   limit?: number
 }
 
-// All stremio-addons.net network access is isolated here. The endpoint is
-// public, read-only, and CORS-open, so it is fetched directly from the client.
-// If that ever changes, route these two functions through the server proxy.
+// stremio-addons.net fetches go through the server's /api/discover-proxy when a sync session
+// exists (shared cache + single-flight upstream). Falls back to the direct fetch so responses,
+// statuses and error messages stay the same when the proxy is unavailable.
+async function fetchDiscover(path: string, signal?: AbortSignal): Promise<Response> {
+  let viaProxy: Promise<Response> | null = null
+  try {
+    const { useSyncStore } = await import('@/store/syncStore')
+    const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+    const { auth, serverUrl } = useSyncStore.getState()
+    if (auth.isAuthenticated) {
+      const syncToken = await getSyncPasswordHeader(auth)
+      const baseUrl = serverUrl || ''
+      const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+      viaProxy = fetch(`${apiPath}/discover-proxy?url=${encodeURIComponent(`${BASE_URL}${path}`)}`, {
+        headers: { 'x-sync-user': auth.id, 'x-sync-password': syncToken },
+        signal,
+      })
+    }
+  } catch { /* fall back to the direct fetch */ }
+  if (viaProxy) {
+    try {
+      const res = await viaProxy
+      // An empty 200 (an older server build, possibly still in the HTTP cache) falls through to the direct fetch.
+      if (res.ok && res.headers.get('content-length') !== '0') return res
+    } catch (err) {
+      if (signal?.aborted) throw err
+    }
+  }
+  return fetch(`${BASE_URL}${path}`, { signal })
+}
+
 export async function fetchDiscoverAddons(query: DiscoverQuery = {}, signal?: AbortSignal): Promise<DiscoverAddonsResponse> {
   const params = new URLSearchParams()
   if (query.search?.trim()) params.set('search', query.search.trim())
@@ -79,7 +107,7 @@ export async function fetchDiscoverAddons(query: DiscoverQuery = {}, signal?: Ab
   const cached = _cache.get(key)
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data as DiscoverAddonsResponse
 
-  const res = await fetch(`${BASE_URL}/addons?${params.toString()}`, { signal })
+  const res = await fetchDiscover(`/addons?${params.toString()}`, signal)
   if (!res.ok) throw new Error(`Discover request failed (${res.status})`)
   const data = (await res.json()) as DiscoverAddonsResponse
   const result = {
@@ -95,7 +123,7 @@ export async function fetchDiscoverCategories(signal?: AbortSignal): Promise<Dis
   const cached = _cache.get(key)
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data as DiscoverCategory[]
 
-  const res = await fetch(`${BASE_URL}/categories`, { signal })
+  const res = await fetchDiscover('/categories', signal)
   if (!res.ok) throw new Error(`Discover categories request failed (${res.status})`)
   const data = (await res.json()) as { categories?: DiscoverCategory[] }
   const result = Array.isArray(data.categories) ? data.categories : []
@@ -108,7 +136,7 @@ export async function fetchDiscoverAddon(slugOrUuid: string, signal?: AbortSigna
   const cached = _cache.get(key)
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data as DiscoverAddonDetail
 
-  const res = await fetch(`${BASE_URL}/addons/${encodeURIComponent(slugOrUuid)}`, { signal })
+  const res = await fetchDiscover(`/addons/${encodeURIComponent(slugOrUuid)}`, signal)
   if (!res.ok) throw new Error(`Discover detail request failed (${res.status})`)
   const result = (await res.json()) as DiscoverAddonDetail
   if (!signal?.aborted) _cache.set(key, { data: result, ts: Date.now() })

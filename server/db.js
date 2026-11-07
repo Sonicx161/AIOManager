@@ -8,6 +8,39 @@ let _sqliteTxQueue = Promise.resolve()
 
 const SQLITE_STMT_CACHE_MAX = 500
 
+// Connection settings shared with the boot preload (lib/settings-boot.js).
+export function pgConnectionConfig(env = process.env) {
+    const connectionString = env.DATABASE_URL
+    const isLocalDb = /localhost|127\.0\.0\.1|@db:|aiomanager-db/.test(String(connectionString || ''))
+    const rejectUnauthorized = String(env.DB_SSL_REJECT_UNAUTHORIZED || 'false').toLowerCase() !== 'false'
+    return {
+        connectionString,
+        isLocalDb,
+        rejectUnauthorized,
+        ssl: isLocalDb ? false : { rejectUnauthorized },
+        connectionTimeoutMillis: parseInt(env.DB_CONNECTION_TIMEOUT, 10) || 10000,
+        maxRetries: parseInt(env.DB_MAX_RETRIES, 10) || 5,
+    }
+}
+
+// Exponential backoff (1 s, 2 s, 4 s, ...) up to maxRetries attempts; throws the last error.
+export async function connectWithRetry(attempt, { maxRetries, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), onRetry = () => {} }) {
+    let lastError = null
+    for (let i = 1; i <= maxRetries; i++) {
+        try {
+            return await attempt()
+        } catch (err) {
+            lastError = err
+            if (i < maxRetries) {
+                const delay = Math.pow(2, i - 1) * 1000
+                onRetry(i, maxRetries, err, delay)
+                await sleep(delay)
+            }
+        }
+    }
+    throw lastError
+}
+
 class DB {
     constructor() {
         this.type = process.env.DB_TYPE || 'sqlite'
@@ -36,26 +69,22 @@ class DB {
             if (this.pool) return
 
             console.log('[Database] Connecting to PostgreSQL...')
-            const connectionString = process.env.DATABASE_URL
+            const conn = pgConnectionConfig(process.env)
+            const { connectionString, isLocalDb, rejectUnauthorized } = conn
             if (!connectionString) {
                 throw new Error('[Database] DATABASE_URL is missing in .env but DB_TYPE is set to postgres')
             }
 
-            const isLocalDb = connectionString.includes('localhost') ||
-                connectionString.includes('127.0.0.1') ||
-                connectionString.includes('@db:') ||
-                connectionString.includes('aiomanager-db')
-            const rejectUnauthorized = String(process.env.DB_SSL_REJECT_UNAUTHORIZED || 'false').toLowerCase() !== 'false'
             if (!isLocalDb && !rejectUnauthorized) {
                 console.warn('[Database] PostgreSQL SSL certificate verification is disabled by DB_SSL_REJECT_UNAUTHORIZED=false.')
             }
 
             this.pool = new Pool({
                 connectionString,
-                ssl: isLocalDb ? false : { rejectUnauthorized },
+                ssl: conn.ssl,
                 max: parseInt(process.env.DB_POOL_SIZE, 10) || 20,
                 idleTimeoutMillis: 30000,
-                connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT, 10) || 10000,
+                connectionTimeoutMillis: conn.connectionTimeoutMillis,
             })
 
             this.pool.on('error', (err) => {
@@ -63,32 +92,30 @@ class DB {
                 this.isHealthy = false
             })
 
-            const maxRetries = parseInt(process.env.DB_MAX_RETRIES, 10) || 5
-            let lastError = null
-
-            for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                try {
+            const maxRetries = conn.maxRetries
+            try {
+                await connectWithRetry(async () => {
                     const client = await this.pool.connect()
                     client.release()
-                    this.isHealthy = true
-                    console.log('[Database] Connected to PostgreSQL.')
-                    return
-                } catch (err) {
-                    lastError = err
-                    const delay = Math.pow(2, attempt - 1) * 1000
-                    console.warn(`[Database] Connection attempt ${attempt}/${maxRetries} failed: ${err.message}`)
-                    if (attempt < maxRetries) {
+                }, {
+                    maxRetries,
+                    onRetry: (attempt, max, err, delay) => {
+                        console.warn(`[Database] Connection attempt ${attempt}/${max} failed: ${err.message}`)
                         console.log(`[Database] Retrying in ${delay / 1000}s...`)
-                        await new Promise(resolve => setTimeout(resolve, delay))
-                    }
-                }
+                    },
+                })
+            } catch (lastError) {
+                console.warn(`[Database] Connection attempt ${maxRetries}/${maxRetries} failed: ${lastError?.message}`)
+                throw new Error(`[Database] Failed to connect after ${maxRetries} attempts: ${lastError?.message}`)
             }
-
-            throw new Error(`[Database] Failed to connect after ${maxRetries} attempts: ${lastError?.message}`)
+            this.isHealthy = true
+            console.log('[Database] Connected to PostgreSQL.')
+            return
         } else {
             console.log('[Database] Using SQLite.')
             const dbPath = process.env.SQLITE_DB_PATH || 'data/aio.db'
             this.client = new Database(dbPath)
+            this.dbPath = dbPath
             this.isHealthy = true
         }
     }
@@ -146,11 +173,14 @@ class DB {
         }
     }
 
-    async tx(fn) {
+    // opts.immediate gives sqlite BEGIN IMMEDIATE (an exclusive write section from the
+    // first statement); opts.isolation opens postgres at a raised isolation level, used
+    // by the bulk delete confirm with SERIALIZABLE plus a bounded retry.
+    async tx(fn, { immediate = false, isolation = null } = {}) {
         if (this.type === 'postgres') {
             const client = await this.pool.connect()
             try {
-                await client.query('BEGIN')
+                await client.query(isolation ? `BEGIN ISOLATION LEVEL ${isolation}` : 'BEGIN')
                 const result = await fn({
                     query: (sql, params) => client.query(sql, params).then(r => r.rows),
                     get: (sql, params) => client.query(sql, params).then(r => r.rows[0]),
@@ -166,7 +196,7 @@ class DB {
             }
         } else {
             const run = async () => {
-                this.client.exec('BEGIN')
+                this.client.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN')
                 try {
                     const sqliteFns = {
                         query: (sql, params = []) => this._prepare(sql).all(params),

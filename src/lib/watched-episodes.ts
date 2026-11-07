@@ -90,6 +90,19 @@ function writePersistedVideos(base: string, data: MetaVideo[]): void {
     localforage.setItem(PERSIST_PREFIX + base, { data, ts: Date.now() }).catch(() => { })
 }
 
+/** Episode list from memory or the persisted cache only; never fetches. */
+export async function getCachedSeriesVideos(seriesId: string): Promise<MetaVideo[] | null> {
+    const base = String(seriesId || '').split(':')[0]
+    if (!base.startsWith('tt')) return null
+    const cached = metaCache.get(base)
+    if (cached && Date.now() - cached.ts < META_TTL_MS) return cached.videos
+    const persisted = await readPersistedVideos(base)
+    if (!persisted) return null
+    const videos = sortMetaVideos(persisted)
+    metaCache.set(base, { videos, ts: Date.now() })
+    return videos
+}
+
 // Cinemeta is CORS-open, so fetch directly. tt... only (kitsu/other namespaces are indexed against a
 // different meta ordering and would mis-map; they fail closed). One retry after a short backoff so a
 // transient Cinemeta blip does not brick a per-episode delete.

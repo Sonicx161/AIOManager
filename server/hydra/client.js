@@ -1,5 +1,5 @@
 import { isSafeUrlResolved } from '../utils/ssrf.js'
-import { resilientFetch } from '../utils/api-resilience.js'
+import { guardedResilientFetch } from '../utils/safe-fetch.js'
 import { normalizeHydraAddonInput } from '../utils/addon-shape.js'
 
 const DEFAULT_TIMEOUT = 15000
@@ -7,17 +7,28 @@ const HEALTH_TIMEOUT = 8000
 
 // A remote Hydra instance cannot resolve another device's loopback/private addon URLs;
 // pushing them makes the whole collection write fail with 400.
-const isLocalHostname = (url) => {
+export const isLocalHostname = (url) => {
     try {
         const h = new URL(url).hostname
         return h === 'localhost' || h === '127.0.0.1' || h === '::1' || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)
     } catch { return true }
 }
 
+const UNSAFE_BASE_MESSAGE = 'Unsafe or private Hydra baseUrl'
+
+const resilientFetch = async (url, options) => {
+    try {
+        return await guardedResilientFetch(url, options)
+    } catch (err) {
+        if (err.code === 'ssrf-blocked') throw new Error(UNSAFE_BASE_MESSAGE)
+        throw err
+    }
+}
+
 export async function createHydraClient(config) {
     const base = (config.baseUrl || '').replace(/\/+$/, '')
     if (!base || !(await isSafeUrlResolved(base))) {
-        throw new Error('Unsafe or private Hydra baseUrl')
+        throw new Error(UNSAFE_BASE_MESSAGE)
     }
 
     const makeHeaders = () => {

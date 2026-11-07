@@ -98,13 +98,37 @@ const writeLine = (obj) => {
     }
 }
 
+const URL_IN_TEXT = /\b(?:https?|stremio):\/\/[^\s"'<>]+/gi
+
+export const hostOf = (url) => {
+    try {
+        return new URL(String(url).replace(/^stremio:/i, 'https:')).host || '[url]'
+    } catch {
+        return '[url]'
+    }
+}
+
+// Addon URLs carry config and keys in their path and query: trace lines keep the host only.
+// Keys are redacted like values; anything deeper than the limit or not plain data
+// becomes a marker rather than passing through unredacted.
+export function redactTraceValue(value, depth = 0) {
+    if (typeof value === 'string') return value.replace(URL_IN_TEXT, hostOf)
+    if (value === null || typeof value !== 'object') return typeof value === 'function' || typeof value === 'symbol' ? '[unsupported]' : value
+    if (depth > 8) return '[truncated]'
+    if (value instanceof Date) return value.toISOString()
+    if (value instanceof Error) return { name: value.name, message: redactTraceValue(value.message) }
+    if (Array.isArray(value)) return value.map(v => redactTraceValue(v, depth + 1))
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return '[unsupported]'
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactTraceValue(k), redactTraceValue(v, depth + 1)]))
+}
+
 export const traceEnabled = () => ENABLED
 
 export const keyTag = (s) => (s && typeof s === 'string' ? createHash('sha256').update(s).digest('hex').slice(0, 8) : 'none')
 
 export function trace(scope, event, data = {}) {
     if (!ENABLED) return
-    writeLine({ t: new Date().toISOString(), src: 'server', scope, event, ...data })
+    writeLine({ t: new Date().toISOString(), src: 'server', scope, event, ...redactTraceValue(data) })
 }
 
 export async function traced(scope, name, fields, fn) {    const start = Date.now()
@@ -122,6 +146,6 @@ export async function traced(scope, name, fields, fn) {    const start = Date.no
 export function traceClientBatch(entries) {
     if (!ENABLED || !Array.isArray(entries)) return
     for (const e of entries.slice(0, CLIENT_BATCH_MAX)) {
-        writeLine({ src: 'client', ...e })
+        writeLine({ src: 'client', ...redactTraceValue(e) })
     }
 }

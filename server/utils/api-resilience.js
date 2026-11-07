@@ -6,6 +6,7 @@ export async function resilientFetch(url, options = {}) {
         retries = 2,
         retryDelay = 1000,
         idempotent,
+        fetchImpl,
         ...fetchOptions
     } = options
 
@@ -31,7 +32,7 @@ export async function resilientFetch(url, options = {}) {
         }
 
         try {
-            const response = await fetch(url, {
+            const response = await (fetchImpl || fetch)(url, {
                 ...fetchOptions,
                 signal: combinedSignal,
             })

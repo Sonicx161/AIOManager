@@ -42,12 +42,22 @@ export interface NuvioWatchDestinationOptions {
     scope: string
     /** Returns a verified, profile-pinned transport; the runtime wrapper owns auth and identity re-checks. */
     open(signal: AbortSignal): Promise<NuvioWatchDestinationTransport>
+    /** Runs once before the first write of an import run (fresh token and identity check). */
+    beginRun?(signal: AbortSignal): Promise<void>
+    /**
+     * Off by default. When true, apply() may reuse the previous row's pull (its readback, or an early-exit pre-write pull
+     * with no write since) as this row's pre-write state if it is younger than reuseWindowMs. The readback after a write is never skipped.
+     */
+    reuseRecentPull?: boolean
+    reuseWindowMs?: number
+    now?: () => number
 }
 
 const CONTENT_ID = /^(?:tt\d{5,}|tmdb:\d+)$/
 const PAGE_SIZE = 1_000
 const MAX_ROWS = 5_000
 const MAX_PAGES = 100
+const DEFAULT_REUSE_WINDOW_MS = 2_000
 const READBACK_FAILED = 'The Nuvio write could not be verified by reading the profile back. Preview again to check whether it was saved.'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -323,6 +333,11 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
         return previewPull
     }
 
+    // Opt-in: the last pull of this run and when it finished. Cleared before any push and on begin.
+    let recentPull: { pull: NuvioPull; profileIndex: number; at: number } | null = null
+    const now = options.now ?? Date.now
+    const reuseWindowMs = options.reuseWindowMs ?? DEFAULT_REUSE_WINDOW_MS
+
     async function resolve(record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]> {
         signal.throwIfAborted()
         if (!record.identities.length) return []
@@ -357,7 +372,11 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
 
         const transport = await options.open(signal)
         signal.throwIfAborted()
-        const pull = await pullAll(transport.profileIndex, transport.rpc, signal)
+        const candidate = recentPull
+        recentPull = null
+        const reusable = options.reuseRecentPull === true && candidate !== null && candidate.profileIndex === transport.profileIndex && now() - candidate.at <= reuseWindowMs
+        const pull = reusable ? candidate.pull : await pullAll(transport.profileIndex, transport.rpc, signal)
+        if (options.reuseRecentPull === true) recentPull = { pull, profileIndex: transport.profileIndex, at: reusable ? candidate.at : now() }
         const historyRow = pull.history.get(target.identity)?.row ?? null
         const progressRow = pull.progress.get(target.identity)?.row ?? null
         let freshRecord: WatchStateRecord
@@ -440,6 +459,7 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
             return { status: 'unchanged', message: 'The destination already has the selected state. Nothing was written.', record: freshRecord }
         }
 
+        recentPull = null
         const contentType = target.type === 'movie' ? 'movie' : 'series'
         // Push the resume first: a completion dated at or after the resume makes the server
         // ignore the resume push, so the completion must land after the position.
@@ -481,8 +501,14 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
         if (wantsWatched && !(verified.watched === true && verifiedWatchedAt === completionTime)) throw new Error(READBACK_FAILED)
         if (wantsPosition && !((verified.positionMs as number) === patch.positionMs && verifiedLastWatched === resumeTime && verified.durationMs === durationMs)) throw new Error(READBACK_FAILED)
         if (autoWatchExpected && verified.watched !== true) throw new Error(READBACK_FAILED)
+        if (options.reuseRecentPull === true) recentPull = { pull: check, profileIndex: transport.profileIndex, at: now() }
         return { status: 'applied', message: 'Saved and verified by an exact readback.', record: verified }
     }
 
-    return { connectionId, label, subject, scope, capabilities, resolve, apply }
+    async function beginRun(signal: AbortSignal): Promise<void> {
+        recentPull = null
+        await options.beginRun?.(signal)
+    }
+
+    return { connectionId, label, subject, scope, capabilities, resolve, apply, beginRun }
 }

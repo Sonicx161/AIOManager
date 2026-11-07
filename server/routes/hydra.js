@@ -6,12 +6,15 @@ import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
 import { VERSION } from '../config.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
-import { resilientFetch } from '../utils/api-resilience.js'
+import { guardedResilientFetch, guardedWebFetch } from '../utils/safe-fetch.js'
 import { writeEncryptedIfChanged } from '../db-guards.js'
 import { normalizeAddonUrl } from '../utils/addon-url.js'
 import { normalizeHydraAddonInput } from '../utils/addon-shape.js'
 import { isExcludedFromDestinations } from '../utils/addon-destinations.js'
 import { getLatestStremioCredential, resolveStremioConnectionIdentity } from '../lib/stremio-credentials.js'
+import { invalidateCanonicalAddons, readCanonicalCached, rememberCanonicalAuthKey } from '../hydra/canonical-cache.js'
+import { isReadOnlyReplica } from '../config.js'
+import { assertAccountActive, assertWritablePrimary, ownerCanWriteOrFail, AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
 
 const HYDRA_SPEC_VERSION = '1.0.0'
 const MAX_ADDON_URL_LENGTH = 2048
@@ -47,8 +50,12 @@ async function lookupAccountByApiKey(request, reply) {
         return null
     }
 
+    // Account state gate: after the key resolves its owner, before any use of the row.
+    await assertAccountActive(row.sync_user)
+
     const now = Date.now()
-    if (!row.last_used_at || now - row.last_used_at >= LAST_USED_COALESCE_MS) {
+    // A replica never writes, not even best-effort telemetry, against the follower.
+    if (!isReadOnlyReplica() && (!row.last_used_at || now - row.last_used_at >= LAST_USED_COALESCE_MS)) {
         db.run(
             'UPDATE account_api_keys SET last_used_at = $1 WHERE api_key_hash = $2',
             [now, keyHash]
@@ -63,58 +70,36 @@ async function lookupAccountByApiKey(request, reply) {
 // client sync blob) resolves only to the key owner's own data -- never the victim's credentials,
 // canonical store, or autopilot rule.
 
-// Hydra consumers poll version/addons frequently; a live Stremio read per poll hammers the
-// upstream and adds 300-800ms latency. Short TTL cache, keyed by (account, owner); any local
-// write path that can change the result (sync push, canonical write, rule write) busts it.
-const CANONICAL_TTL_MS = 30_000
-const CANONICAL_CACHE_MAX = 2500
-const canonicalCache = new Map()
-const canonicalInFlight = new Map()
-const canonicalGeneration = new Map()
+// Hydra consumers poll version/addons frequently; GETs go through the in-memory cache in
+// server/hydra/canonical-cache.js. Local Stremio writes (sync push, canonical write, proxy,
+// reconciler, autopilot) bust it. Mutation routes always take a fresh read.
+export { invalidateCanonicalAddons }
 
-export function invalidateCanonicalAddons(accountId, syncUser) {
-    const key = `${syncUser}:${accountId}`
-    canonicalCache.delete(key)
-    canonicalGeneration.set(key, (canonicalGeneration.get(key) ?? 0) + 1)
-    if (canonicalGeneration.size > CANONICAL_CACHE_MAX * 2) {
-        const oldest = canonicalGeneration.keys().next().value
-        if (oldest !== undefined && !canonicalInFlight.has(oldest)) canonicalGeneration.delete(oldest)
+const STREMIO_READ_TIMEOUT_MS = 10_000
+
+function withTimeout(promise, ms, message) {
+    let timer
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms) })
+    ]).finally(() => clearTimeout(timer))
+}
+
+function getCanonicalAddonsCached(accountId, syncUser) {
+    return readCanonicalCached(accountId, syncUser, () => getCanonicalAddons(accountId, syncUser))
+}
+
+// Mutations build a full-replace from this, so a read failure must stop the write.
+async function readFreshCanonical(account, reply) {
+    try {
+        return await getCanonicalAddons(account.account_id, account.sync_user)
+    } catch {
+        reply.code(503).header('Retry-After', '30')
+        return null
     }
 }
 
-async function getCanonicalAddonsCached(accountId, syncUser) {
-    const key = `${syncUser}:${accountId}`
-    const cached = canonicalCache.get(key)
-    if (cached && Date.now() - cached.at < CANONICAL_TTL_MS) {
-        canonicalCache.delete(key)
-        canonicalCache.set(key, cached)
-        return cached.value
-    }
-    if (canonicalInFlight.has(key)) return canonicalInFlight.get(key)
-
-    const generation = canonicalGeneration.get(key) ?? 0
-    const p = (async () => {
-        try {
-            const value = await getCanonicalAddons(accountId, syncUser)
-            // A read that raced an invalidation is stale; serve it but don't cache it.
-            if ((canonicalGeneration.get(key) ?? 0) === generation) {
-                canonicalCache.set(key, { value, at: Date.now() })
-                if (canonicalCache.size > CANONICAL_CACHE_MAX) {
-                    const oldestKey = canonicalCache.keys().next().value
-                    if (oldestKey !== undefined) {
-                        canonicalCache.delete(oldestKey)
-                        canonicalGeneration.delete(oldestKey)
-                    }
-                }
-            }
-            return value
-        } finally {
-            canonicalInFlight.delete(key)
-        }
-    })()
-    canonicalInFlight.set(key, p)
-    return p
-}
+const UNAVAILABLE = { error: 'unavailable', message: 'Could not read the current addon collection. Try again shortly.' }
 
 async function getCanonicalAddons(accountId, syncUser) {
     // Stremio accounts are served Stremio-first (the most mature path). Filter to the Stremio
@@ -128,14 +113,16 @@ async function getCanonicalAddons(accountId, syncUser) {
         if (mixed) {
             logger.warn({ category: 'Hydra' }, `[${accountId}] Account has both Stremio and non-Stremio credentials; inbound reads prefer Stremio and may not reflect the non-Stremio setup.`)
         }
+        // Fail closed: a decrypt or read failure must never fall through to a stale
+        // canonical row, an autopilot snapshot or [].
         const authKey = decrypt(cred.auth_key, FALLBACK_KEYS)
-        if (authKey) {
-            try {
-                const { createStremioDriver } = await import('../providers/stremio-driver.js')
-                const driver = createStremioDriver()
-                return await driver.readAddons(authKey)
-            } catch {}
-        }
+        if (!authKey) throw new Error('Failed to decrypt credentials')
+        rememberCanonicalAuthKey(authKey, accountId, syncUser)
+        const { createStremioDriver } = await import('../providers/stremio-driver.js')
+        const driver = createStremioDriver()
+        const addons = await withTimeout(driver.readAddons(authKey), STREMIO_READ_TIMEOUT_MS, 'Stremio read timed out')
+        if (!Array.isArray(addons)) throw new Error('Stremio read returned no collection')
+        return addons
     }
 
     // Hub canonical: the inbound source for accounts the server can't read via Stremio
@@ -220,6 +207,39 @@ function graftStoredDestinations(addons, policyByUrl) {
     })
 }
 
+const addonUrlKey = (a) => normalizeAddonUrl(a?.transportUrl || a?.url || '').toLowerCase()
+
+function nonEmptyFields(obj) {
+    const out = {}
+    for (const [k, v] of Object.entries(obj || {})) {
+        if (v === '' || v == null || (Array.isArray(v) && v.length === 0)) continue
+        out[k] = v
+    }
+    return out
+}
+
+// Overlay a PUT row on the current row with the same URL. Only the manifest and the
+// enabled flag come from the request.
+function mergePutRows(addons, current) {
+    const currentByUrl = new Map()
+    for (const a of current || []) {
+        const key = addonUrlKey(a)
+        if (key && !currentByUrl.has(key)) currentByUrl.set(key, a)
+    }
+    return addons.map(raw => {
+        const n = normalizeHydraAddonInput(raw)
+        if (!n) return null
+        const base = currentByUrl.get(addonUrlKey(n))
+        const sentManifest = raw.manifest && typeof raw.manifest === 'object' && !Array.isArray(raw.manifest) ? raw.manifest : {}
+        return {
+            ...(base || {}),
+            transportUrl: n.transportUrl,
+            manifest: { ...(base?.manifest || n.manifest), ...sentManifest, ...nonEmptyFields(n.manifest) },
+            flags: { ...(base?.flags || {}), enabled: n.flags.enabled }
+        }
+    }).filter(Boolean)
+}
+
 async function stremioCredentialMode(accountId, syncUser) {
     const cred = await getLatestStremioCredential(accountId, syncUser)
     return cred?.auth_key ? 'stremio' : 'canonical'
@@ -234,6 +254,10 @@ function propagationFields(mode) {
 async function writeCanonicalAddons(account, addons) {
     const accountId = account.account_id
     const syncUser = account.sync_user || ''
+    // Write boundary gates: entry, immediately before the Stremio platform write and
+    // before the canonical store write, so a mid-request block performs neither.
+    await assertAccountActive(syncUser)
+    assertWritablePrimary()
     const cred = await getLatestStremioCredential(accountId, syncUser)
 
     // Stremio Hubs write through to Stremio (the mature path). Filter to the Stremio
@@ -279,14 +303,20 @@ async function writeCanonicalAddons(account, addons) {
             const { createStremioDriver } = await import('../providers/stremio-driver.js')
             const driver = createStremioDriver()
             // R9: the provider wire carries projected provider data only — strip the
-            // internal destination policy before the driver.
-            const wireRows = kept.map(a => {
+            // internal destination policy before the driver. Stremio has no disabled
+            // state, so a disabled row would land as installed.
+            const wireRows = kept.filter(a => (a?.flags?.enabled ?? a?.enabled) !== false).map(a => {
                 if (!a?.destinations) return a
                 const { destinations, ...rest } = a
                 return rest
             })
-            await driver.writeAddons(authKey, wireRows)
-            invalidateCanonicalAddons(accountId, syncUser)
+            try {
+                await assertAccountActive(syncUser)
+                await driver.writeAddons(authKey, wireRows)
+            } finally {
+                // A failed or timed-out Set may still have landed.
+                invalidateCanonicalAddons(accountId, syncUser)
+            }
             stremioWriteThrough = true
         }
     }
@@ -298,6 +328,7 @@ async function writeCanonicalAddons(account, addons) {
     // single merger (D2). Midnight-safe: writeEncryptedIfChanged compares plaintext
     // and no-ops when unchanged. The row is upserted first so an inbound write to an
     // account the client has synced at least once always lands.
+    await assertAccountActive(syncUser)
     const now = Date.now()
     await db.run(
         db.type === 'postgres'
@@ -320,15 +351,21 @@ async function writeCanonicalAddons(account, addons) {
     return 'canonical'
 }
 
-async function validateManifest(manifestUrl) {
-    if (!(await isSafeUrlResolved(manifestUrl))) {
+export async function validateManifest(manifestUrl) {
+    if (!isSafeUrl(manifestUrl)) {
         return { valid: false, errors: ['Unsafe or private manifest URL'] }
     }
-    const res = await enqueueProxyRequest(manifestUrl, () => resilientFetch(manifestUrl, {
-        headers: { 'Accept': 'application/json' },
-        timeout: 10000,
-        retries: 1
-    }))
+    let res
+    try {
+        res = await enqueueProxyRequest(manifestUrl, () => guardedResilientFetch(manifestUrl, {
+            headers: { 'Accept': 'application/json' },
+            timeout: 10000,
+            retries: 1
+        }))
+    } catch (err) {
+        if (err.code === 'ssrf-blocked') return { valid: false, errors: ['Unsafe or private manifest URL'] }
+        throw err
+    }
     if (!res.ok) {
         return { valid: false, errors: [`Manifest fetch returned HTTP ${res.status}`] }
     }
@@ -369,18 +406,27 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
 
         const name = String(request.body?.name || 'Unknown').slice(0, 64)
         const logo = isValidLogoUrl(request.body?.logo) ? request.body.logo : null
-        const id = `${account.account_id}:${name}`
+        const syncUser = account.sync_user || ''
         const now = Date.now()
 
-        await db.run(
-            `INSERT INTO hydra_subscribers (id, account_id, sync_user, name, logo, created_at, last_seen_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET logo = excluded.logo, last_seen_at = excluded.last_seen_at`,
-            [id, account.account_id, account.sync_user || '', name, logo, now, now]
+        // Scoped to the key owner: another user's row for the same accountId is never
+        // updated, and the owner-qualified id cannot collide with (or be squatted by) it.
+        const updated = await db.run(
+            'UPDATE hydra_subscribers SET logo = $1, last_seen_at = $2 WHERE account_id = $3 AND sync_user = $4 AND name = $5',
+            [logo, now, account.account_id, syncUser, name]
         )
+        if (!updated?.changes) {
+            await db.run(
+                `INSERT INTO hydra_subscribers (id, account_id, sync_user, name, logo, created_at, last_seen_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (id) DO NOTHING`,
+                [JSON.stringify([syncUser, account.account_id, name]), account.account_id, syncUser, name, logo, now, now]
+            )
+        }
         return { ok: true }
     })
 
@@ -394,8 +440,8 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             const addons = raw.map(toHydraAddon).filter(Boolean)
             return { version: computeAddonsVersion(addons) }
         } catch {
-            reply.code(500)
-            return { error: 'internal_error', message: 'Failed to read version' }
+            reply.code(503).header('Retry-After', '30')
+            return UNAVAILABLE
         }
     })
 
@@ -410,8 +456,8 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             const addons = raw.map(toHydraAddon).filter(Boolean)
             return { addons }
         } catch {
-            reply.code(500)
-            return { error: 'internal_error', message: 'Sync failed' }
+            reply.code(503).header('Retry-After', '30')
+            return UNAVAILABLE
         }
     })
 
@@ -421,6 +467,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
 
         const { url } = request.body || {}
         if (!url || !isValidAddonUrl(url)) {
@@ -428,8 +475,10 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid or missing addon URL' }
         }
 
+        const current = await readFreshCanonical(account, reply)
+        if (!current) return UNAVAILABLE
+
         try {
-            const current = await getCanonicalAddonsCached(account.account_id, account.sync_user)
             const norm = normalizeAddonUrl(url)
             if (current.some(a => normalizeAddonUrl(a.transportUrl || a.url || '') === norm)) {
                 const addons = current.map(toHydraAddon).filter(Boolean)
@@ -447,7 +496,8 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             const mode = await writeCanonicalAddons(account, updated)
 
             return { addons: updated.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
             return { error: 'internal_error', message: 'Failed to install addon' }
         }
@@ -458,6 +508,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
 
         const url = request.query.url
         if (!url || !isValidAddonUrl(url)) {
@@ -465,8 +516,10 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid or missing addon URL' }
         }
 
+        const current = await readFreshCanonical(account, reply)
+        if (!current) return UNAVAILABLE
+
         try {
-            const current = await getCanonicalAddonsCached(account.account_id, account.sync_user)
             const norm = normalizeAddonUrl(url)
             const filtered = current.filter(a => normalizeAddonUrl(a.transportUrl || a.url || '') !== norm)
 
@@ -477,7 +530,8 @@ export function registerHydraRoutes(fastify, reconciler = null) {
 
             const mode = await writeCanonicalAddons(account, filtered)
             return { addons: filtered.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
             return { error: 'internal_error', message: 'Failed to remove addon' }
         }
@@ -489,6 +543,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
 
         const { addons } = request.body || {}
         if (!Array.isArray(addons)) {
@@ -508,29 +563,34 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             }
         }
 
+        const current = await readFreshCanonical(account, reply)
+        if (!current) return UNAVAILABLE
+
         try {
+            // Tolerant of both wire shapes: spec-flat ({transportUrl, name, ...}) and the
+            // AIOManager descriptor shape ({transportUrl, manifest: {...}, flags: {...}}).
+            // Rows are rebuilt on the current row so a flat payload keeps catalogs,
+            // behaviorHints and config. Request destinations are ignored (no policy
+            // injection via the API); the STORED policy is grafted back so an external
+            // payload that omits it cannot erase it (R8).
+            const storedPolicyByUrl = await loadCanonicalDestinations(account.account_id, account.sync_user)
+            const normalized = graftStoredDestinations(mergePutRows(addons, current), storedPolicyByUrl)
+
             // Catastrophic-shrink guard (belt-and-suspenders; the client merge's
             // "inbound deletes don't shrink" policy is the real protection and self-heals
             // a bad replace on the next sync). Reject only the obvious wipe: clearing a
-            // non-trivial collection to empty, never a legitimate few-addon removal.
-            if (addons.length === 0) {
-                const current = await getCanonicalAddonsCached(account.account_id, account.sync_user)
-                if (current.length >= 3) {
-                    reply.code(409)
-                    return { error: 'conflict', message: 'Refusing to clear a non-empty addon collection. Remove addons individually.' }
-                }
+            // non-trivial collection to empty (or to only disabled rows, which Stremio
+            // drops), never a legitimate few-addon removal.
+            const enabledCount = normalized.filter(a => a.flags?.enabled !== false).length
+            if (enabledCount === 0 && current.length >= 3) {
+                reply.code(409)
+                return { error: 'conflict', message: 'Refusing to clear a non-empty addon collection. Remove addons individually.' }
             }
 
-            // Tolerant of both wire shapes: spec-flat ({transportUrl, name, ...}) and the
-            // AIOManager descriptor shape ({transportUrl, manifest: {...}, flags: {...}}).
-            // normalizeHydraAddonInput strips destinations (no policy injection via the
-            // API); graft the STORED policy back onto matching rows so an external
-            // payload that omits it cannot erase it (R8).
-            const storedPolicyByUrl = await loadCanonicalDestinations(account.account_id, account.sync_user)
-            const normalized = graftStoredDestinations(addons.map(normalizeHydraAddonInput), storedPolicyByUrl)
             const mode = await writeCanonicalAddons(account, normalized)
             return { addons: normalized.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
             return { error: 'internal_error', message: 'Failed to replace addon collection' }
         }
@@ -543,20 +603,24 @@ export function registerHydraRoutes(fastify, reconciler = null) {
         if (!account) return
 
         const rawUrl = decodeURIComponent(request.params.url)
-        if (!isValidAddonUrl(rawUrl) || !(await isSafeUrlResolved(rawUrl))) {
+        if (!isValidAddonUrl(rawUrl) || !isSafeUrl(rawUrl)) {
             reply.code(400)
             return { error: 'bad_request', message: 'Invalid or unsafe addon URL' }
         }
 
         try {
             const start = Date.now()
-            const res = await enqueueProxyRequest(rawUrl, () => resilientFetch(rawUrl, {
+            const res = await enqueueProxyRequest(rawUrl, () => guardedResilientFetch(rawUrl, {
                 timeout: 8000,
                 retries: 1
             }))
             const latencyMs = Date.now() - start
             return { healthy: res.ok, latencyMs }
-        } catch {
+        } catch (err) {
+            if (err.code === 'ssrf-blocked') {
+                reply.code(400)
+                return { error: 'bad_request', message: 'Invalid or unsafe addon URL' }
+            }
             return { healthy: false, latencyMs: -1 }
         }
     })
@@ -567,6 +631,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
 
         const { addonUrl, addonId } = request.body || {}
         if (!addonUrl && !addonId) {
@@ -578,9 +643,10 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid addon URL' }
         }
 
-        try {
-            const current = await getCanonicalAddonsCached(account.account_id, account.sync_user)
+        const current = await readFreshCanonical(account, reply)
+        if (!current) return UNAVAILABLE
 
+        try {
             let fetchUrl = addonUrl
             if (!fetchUrl) {
                 const existing = current.find(a => (a.manifest?.id || a.id) === addonId)
@@ -623,20 +689,24 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                     const connections = await reconciler.resolveConnections(account.account_id, account.sync_user)
                     const targets = connections.filter(c => c.enabled)
                     if (targets.length > 0) {
-                        // `updated` derives from getCanonicalAddonsCached — for Stremio-
+                        // `updated` derives from getCanonicalAddons — for Stremio-
                         // credentialed accounts that is a LIVE platform read carrying no
                         // destinations. Graft the stored policy so the per-connection
                         // projection in enforceAccount sees it (R8: no bypass on fan-out).
                         const enforced = graftStoredDestinations(updated, await loadCanonicalDestinations(account.account_id, account.sync_user))
-                        await reconciler.enforceAccount(account.account_id, targets, enforced)
+                        await reconciler.enforceAccount(account.account_id, targets, enforced, { canWrite: () => ownerCanWriteOrFail(account.sync_user) })
                     }
                 } catch (e) {
+                    // Typed account-state refusals must reach the route's error mapping,
+                    // not collapse into a propagation warning.
+                    if (e instanceof AuthStateError || e instanceof StateUnavailableError || e instanceof ReadOnlyReplicaError) throw e
                     logger.warn({ category: 'Hydra' }, `[${account.account_id}] Cross-platform propagation after reinstall failed: ${e.message}`)
                 }
             }
 
             return { addons: updated.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
             return { error: 'internal_error', message: 'Failed to reinstall addon' }
         }
@@ -647,12 +717,16 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
         if (!account) return
+        assertWritablePrimary()
+
+        const current = await readFreshCanonical(account, reply)
+        if (!current) return UNAVAILABLE
 
         try {
-            const current = await getCanonicalAddonsCached(account.account_id, account.sync_user)
             await writeCanonicalAddons(account, current)
             return { synced: true, addonCount: current.length }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
             return { error: 'internal_error', message: 'Sync failed' }
         }
@@ -718,7 +792,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                     signal: AbortSignal.timeout(10000)
                 }
                 if (body) opts.body = JSON.stringify(body)
-                const res = await fetch(`${parsedUrl.origin}${path}`, opts)
+                const res = await guardedWebFetch(`${parsedUrl.origin}${path}`, opts)
                 const elapsed = Date.now() - start
                 let resBody
                 try { resBody = await res.json() } catch { resBody = null }

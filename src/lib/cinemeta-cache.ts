@@ -1,5 +1,8 @@
 // Share metadata results and in-flight requests across episode rows.
 
+import { cinemetaMediaTypes } from './activity-artwork.ts'
+import type { SlimCinemeta, SlimLookup } from './cinemeta-slim-store.ts'
+
 export interface CinemetaCastMember {
     name?: string
     character?: string
@@ -77,11 +80,13 @@ export interface CinemetaMeta {
 }
 
 interface CinemetaCacheEntry {
-    meta: CinemetaMeta | null
+    meta: CinemetaMeta
     fetchedAt: number
 }
 
 const cinemetaCache = new Map<string, CinemetaCacheEntry>()
+// Misses are per endpoint: a series miss must never hide the movie answer for the same id.
+const cinemetaMisses = new Map<string, number>()
 const cinemetaInFlight = new Map<string, Promise<CinemetaMeta | null>>()
 const CINEMETA_TTL = 24 * 60 * 60 * 1000
 const CINEMETA_NULL_TTL = 5 * 60 * 1000
@@ -91,8 +96,51 @@ export function parseCinemetaGenres(meta: CinemetaMeta | undefined | null): stri
     return meta.genre.split(',').map(g => g.trim()).filter(Boolean)
 }
 
-const remember = (imdbId: string, meta: CinemetaMeta | null) => {
+const remember = (imdbId: string, meta: CinemetaMeta) => {
     cinemetaCache.set(imdbId, { meta, fetchedAt: Date.now() })
+}
+
+const miss = (imdbId: string, mediaType: string) => {
+    cinemetaMisses.set(`${mediaType}:${imdbId}`, Date.now())
+}
+
+export interface CinemetaSlimPersistence {
+    get(imdbId: string, mediaType: string): Promise<SlimLookup>
+    put(imdbId: string, value: SlimCinemeta): Promise<void>
+    putAbsent(imdbId: string, mediaType: string): Promise<void>
+}
+
+let slimPersistence: CinemetaSlimPersistence | null = null
+let slimPersistenceLoad: Promise<void> | null = null
+
+export function setCinemetaSlimPersistence(next: CinemetaSlimPersistence | null) {
+    slimPersistence = next
+}
+
+async function resolveSlimPersistence(): Promise<CinemetaSlimPersistence | null> {
+    if (slimPersistence) return slimPersistence
+    if (typeof window === 'undefined') return null
+    slimPersistenceLoad ??= import('./cinemeta-slim-persistence').then(module => {
+        slimPersistence ??= module.cinemetaSlimStore
+    }).catch(() => {})
+    await slimPersistenceLoad
+    return slimPersistence
+}
+
+export function toSlimCinemeta(meta: CinemetaMeta | null | undefined): SlimCinemeta | null {
+    const name = meta?.name?.trim()
+    if (!meta || !name) return null
+    const genres = parseCinemetaGenres(meta)
+    return { name, poster: meta.poster, genres: genres.length ? genres : undefined, type: meta.type }
+}
+
+const persistSlim = (imdbId: string, meta: CinemetaMeta) => {
+    const slim = toSlimCinemeta(meta)
+    if (slim) void resolveSlimPersistence().then(store => store?.put(imdbId, slim)).catch(() => {})
+}
+
+const persistAbsent = (imdbId: string, mediaType: string) => {
+    void resolveSlimPersistence().then(store => store?.putAbsent(imdbId, mediaType)).catch(() => {})
 }
 
 async function fetchCinemetaUncached(imdbId: string, mediaType: string): Promise<CinemetaMeta | null> {
@@ -100,13 +148,15 @@ async function fetchCinemetaUncached(imdbId: string, mediaType: string): Promise
         const res = await fetch(`https://cinemeta-live.strem.io/meta/${mediaType}/${imdbId}.json`, { signal: AbortSignal.timeout(8000) })
         if (!res.ok) {
             if (import.meta.env?.DEV) console.warn(`[Cinemeta] ${res.status} for ${imdbId} (${mediaType})`)
-            remember(imdbId, null)
+            miss(imdbId, mediaType)
+            if (res.status === 404) persistAbsent(imdbId, mediaType)
             return null
         }
         const data = await res.json()
         const raw: Record<string, unknown> | null = data?.meta ?? null
         if (!raw) {
-            remember(imdbId, null)
+            miss(imdbId, mediaType)
+            persistAbsent(imdbId, mediaType)
             return null
         }
 
@@ -193,9 +243,11 @@ async function fetchCinemetaUncached(imdbId: string, mediaType: string): Promise
         }
 
         remember(imdbId, meta)
+        if (meta.name?.trim()) persistSlim(imdbId, meta)
+        else persistAbsent(imdbId, mediaType)
         return meta
     } catch {
-        remember(imdbId, null)
+        miss(imdbId, mediaType)
         return null
     }
 }
@@ -203,26 +255,71 @@ async function fetchCinemetaUncached(imdbId: string, mediaType: string): Promise
 export async function fetchCinemetaDetail(imdbId: string, type?: string): Promise<CinemetaMeta | null> {
     if (!imdbId || !imdbId.startsWith('tt')) return null
     const cached = cinemetaCache.get(imdbId)
-    if (cached && Date.now() - cached.fetchedAt < (cached.meta ? CINEMETA_TTL : CINEMETA_NULL_TTL)) {
-        return cached.meta
+    if (cached && Date.now() - cached.fetchedAt < CINEMETA_TTL) return cached.meta
+    for (const mediaType of cinemetaMediaTypes(type)) {
+        const missedAt = cinemetaMisses.get(`${mediaType}:${imdbId}`)
+        if (missedAt !== undefined && Date.now() - missedAt < CINEMETA_NULL_TTL) continue
+        const flightKey = `${mediaType}:${imdbId}`
+        let flight = cinemetaInFlight.get(flightKey)
+        if (!flight) {
+            flight = fetchCinemetaUncached(imdbId, mediaType).finally(() => {
+                cinemetaInFlight.delete(flightKey)
+            })
+            cinemetaInFlight.set(flightKey, flight)
+        }
+        const meta = await flight
+        if (meta) return meta
     }
-    const mediaType = type === 'movie' ? 'movie' : 'series'
+    return null
+}
 
-    const flightKey = `${mediaType}:${imdbId}`
-    let flight = cinemetaInFlight.get(flightKey)
-    if (!flight) {
-        flight = fetchCinemetaUncached(imdbId, mediaType).finally(() => {
-            cinemetaInFlight.delete(flightKey)
-        })
-        cinemetaInFlight.set(flightKey, flight)
+/** Name, poster and genres only: memory, then the encrypted persisted record, then the network. */
+export async function fetchCinemetaSlim(imdbId: string, type?: string): Promise<SlimCinemeta | null> {
+    if (!imdbId || !imdbId.startsWith('tt')) return null
+    const cached = cinemetaCache.get(imdbId)
+    if (cached && Date.now() - cached.fetchedAt < CINEMETA_TTL) return toSlimCinemeta(cached.meta)
+    const mediaTypes = cinemetaMediaTypes(type)
+    try {
+        const store = await resolveSlimPersistence()
+        let absent = 0
+        for (const mediaType of mediaTypes) {
+            const persisted = await store?.get(imdbId, mediaType)
+            if (persisted?.kind === 'hit') return persisted.value
+            if (persisted?.kind === 'absent') absent++
+        }
+        if (absent === mediaTypes.length) return null
+    } catch {
+        // Persistence is an optimization: fall through to the network.
     }
-    return flight
+    return toSlimCinemeta(await fetchCinemetaDetail(imdbId, type))
 }
 
 export function getCachedCinemetaName(imdbId: string): string | null {
     if (!imdbId || !imdbId.startsWith('tt')) return null
     const cached = cinemetaCache.get(imdbId)
-    if (!cached || !cached.meta) return null
+    if (!cached) return null
     if (Date.now() - cached.fetchedAt > CINEMETA_TTL) return null
     return cached.meta.name?.trim() || null
+}
+
+/** TMDB id from the in-memory detail cache only; never fetches. */
+export function getCachedCinemetaTmdbId(imdbId: string): number | undefined {
+    if (!imdbId || !imdbId.startsWith('tt')) return undefined
+    const cached = cinemetaCache.get(imdbId)
+    if (!cached || Date.now() - cached.fetchedAt > CINEMETA_TTL) return undefined
+    return cached.meta.tmdbId
+}
+
+/** Runtime from the in-memory detail cache only (the slim store keeps none); never fetches. */
+export function getCachedCinemetaRuntimeMs(imdbId: string): number | undefined {
+    if (!imdbId || !imdbId.startsWith('tt')) return undefined
+    const cached = cinemetaCache.get(imdbId)
+    if (!cached || Date.now() - cached.fetchedAt > CINEMETA_TTL) return undefined
+    const runtime = cached.meta.runtime?.trim().toLowerCase()
+    if (!runtime) return undefined
+    const hours = runtime.match(/(\d+)\s*h/)
+    const minutes = runtime.match(/(\d+)\s*m/)
+    const bare = !hours && !minutes ? runtime.match(/^(\d+)$/) : null
+    const total = (hours ? Number(hours[1]) * 60 : 0) + (minutes ? Number(minutes[1]) : 0) + (bare ? Number(bare[1]) : 0)
+    return total > 0 ? total * 60000 : undefined
 }

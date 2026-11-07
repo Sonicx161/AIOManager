@@ -18,6 +18,7 @@ import {
     SelectValue,
 } from '@/components/ui/select'
 import { testHydraEndpoint } from '@/api/hydra-providers'
+import { friendlyError } from './friendly-error'
 import type { HydraDriverConfig, HydraStatus } from '@/types/provider'
 import {
     Check,
@@ -27,9 +28,9 @@ import {
     Shield,
     Plug,
 } from 'lucide-react'
-import { useState, useCallback } from 'react'
-import { cn } from '@/lib/utils'
-import { toast } from '@/hooks/use-toast'
+import { useState, useCallback, useRef } from 'react'
+import { cn, maskUrlLevel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
 
 type WizardStep = 'details' | 'test' | 'confirm'
 
@@ -37,6 +38,7 @@ interface ProviderSetupDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     onComplete: (config: HydraDriverConfig, credential: string) => void | Promise<void>
+    onBackToPicker?: () => void
 }
 
 const AUTH_TYPES = [
@@ -52,7 +54,7 @@ const STEP_INDICATORS = [
     { step: 'confirm' as const, label: 'Confirm' },
 ]
 
-export function ProviderSetupDialog({ open, onOpenChange, onComplete }: ProviderSetupDialogProps) {
+export function ProviderSetupDialog({ open, onOpenChange, onComplete, onBackToPicker }: ProviderSetupDialogProps) {
     const [step, setStep] = useState<WizardStep>('details')
     const [name, setName] = useState('')
     const [baseUrl, setBaseUrl] = useState('')
@@ -64,8 +66,14 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
     const [testError, setTestError] = useState<string | null>(null)
 
     const [submitting, setSubmitting] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const requestGeneration = useRef(0)
+    const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+    const privacyLevelUrls = useUIStore(s => s.privacyLevelUrls)
+    const urlPrivacyLevel = isPrivacyModeEnabled ? privacyLevelUrls : 0
 
     const reset = useCallback(() => {
+        requestGeneration.current += 1
         setStep('details')
         setName('')
         setBaseUrl('')
@@ -75,11 +83,18 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
         setTestError(null)
         setTesting(false)
         setSubmitting(false)
+        setError(null)
     }, [])
 
     const handleClose = (nextOpen: boolean) => {
         if (!nextOpen) reset()
         onOpenChange(nextOpen)
+    }
+
+    // A result from a previous URL or credential must not survive an edit.
+    const clearStaleTest = () => {
+        setTestResult(null)
+        setTestError(null)
     }
 
     const baseUrlValid = /^https?:\/\/.+/.test(baseUrl.trim())
@@ -89,6 +104,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
     const detailsValid = nameValid && baseUrlValid && authValid
 
     const handleTest = async () => {
+        const generation = requestGeneration.current
         setTesting(true)
         setTestError(null)
         setTestResult(null)
@@ -99,16 +115,19 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                 authType === 'api-key' ? 'x-api-key' : authType === 'bearer' ? 'Authorization' : 'Authorization',
                 authValue.trim(),
             )
-            setTestResult(result)
+            if (generation === requestGeneration.current) setTestResult(result)
         } catch (err) {
-            setTestError(err instanceof Error ? err.message : 'Connection test failed')
+            if (generation === requestGeneration.current) setTestError(friendlyError(err, 'Connection test failed', 'The test could not run because AIOManager could not reach its own server. Check that the server is running, then test again.'))
         } finally {
-            setTesting(false)
+            if (generation === requestGeneration.current) setTesting(false)
         }
     }
 
     const handleFinish = async () => {
+        if (submitting) return
+        const generation = requestGeneration.current
         setSubmitting(true)
+        setError(null)
         const config: HydraDriverConfig = {
             name: name.trim(),
             baseUrl: baseUrl.trim().replace(/\/+$/, ''),
@@ -117,10 +136,14 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
         }
         try {
             await onComplete(config, authValue.trim())
+            if (generation === requestGeneration.current) handleClose(false)
         } catch (e) {
-            toast({ title: 'Setup failed', description: e instanceof Error ? e.message : 'Failed to configure provider', variant: 'destructive' })
+            if (generation === requestGeneration.current) {
+                setError(e instanceof Error ? e.message : 'Failed to add connection')
+            }
+        } finally {
+            if (generation === requestGeneration.current) setSubmitting(false)
         }
-        handleClose(false)
     }
 
     const stepIndex = STEP_INDICATORS.findIndex(s => s.step === step)
@@ -188,7 +211,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                                     id="hydra-url"
                                     placeholder="https://example.com"
                                     value={baseUrl}
-                                    onChange={e => setBaseUrl(e.target.value)}
+                                    onChange={e => { setBaseUrl(e.target.value); clearStaleTest() }}
                                 />
                                 {baseUrl && !baseUrlValid && (
                                     <p className="text-xs text-destructive">Must start with http:// or https://</p>
@@ -197,7 +220,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
 
                             <div className="space-y-2">
                                 <Label>Authentication</Label>
-                                <Select value={authType} onValueChange={(v) => setAuthType(v as HydraDriverConfig['authType'])}>
+                                <Select value={authType} onValueChange={(v) => { setAuthType(v as HydraDriverConfig['authType']); clearStaleTest() }}>
                                     <SelectTrigger>
                                         <SelectValue />
                                     </SelectTrigger>
@@ -221,7 +244,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                                         type="password"
                                         placeholder={authType === 'api-key' ? 'Enter API key' : authType === 'bearer' ? 'Enter bearer token' : 'user:password'}
                                         value={authValue}
-                                        onChange={e => setAuthValue(e.target.value)}
+                                        onChange={e => { setAuthValue(e.target.value); clearStaleTest() }}
                                     />
                                 </div>
                             )}
@@ -235,7 +258,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                                     <Globe className="h-4 w-4 text-muted-foreground" />
                                     <span className="font-medium truncate">{name}</span>
                                 </div>
-                                <p className="text-xs text-muted-foreground truncate">{baseUrl}</p>
+                                <p className="text-xs text-muted-foreground truncate">{maskUrlLevel(baseUrl, urlPrivacyLevel)}</p>
                                 <div className="flex items-center gap-2">
                                     <Shield className="h-3.5 w-3.5 text-muted-foreground" />
                                     <span className="text-xs text-muted-foreground capitalize">{authType === 'api-key' ? 'API Key' : authType === 'bearer' ? 'Bearer' : authType === 'basic' ? 'Basic Auth' : 'No Auth'}</span>
@@ -304,7 +327,7 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                                     <span className="text-muted-foreground">Name</span>
                                     <span className="font-medium truncate">{name}</span>
                                     <span className="text-muted-foreground">URL</span>
-                                    <span className="font-medium truncate">{baseUrl}</span>
+                                    <span className="font-medium truncate">{maskUrlLevel(baseUrl, urlPrivacyLevel)}</span>
                                     <span className="text-muted-foreground">Auth</span>
                                     <span className="font-medium capitalize">{authType === 'api-key' ? 'API Key' : authType === 'bearer' ? 'Bearer Token' : authType === 'basic' ? 'Basic Auth' : 'None'}</span>
                                     {testResult && (
@@ -330,11 +353,19 @@ export function ProviderSetupDialog({ open, onOpenChange, onComplete }: Provider
                                 <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                                 <span>The credential is held on this device and stored encrypted on your sync server.</span>
                             </div>
+
+                            {error && (
+                                <div role="alert" data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/5 border border-destructive/20 px-3 py-2 text-xs text-destructive flex items-center gap-2">
+                                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                                    {error}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
 
                 <DialogFooter>
+                    {onBackToPicker && !testing && !submitting && <Button variant="outline" onClick={() => { reset(); onBackToPicker() }}>Back to connection picker</Button>}
                     {step !== 'details' && (
                         <Button
                             variant="subtle"

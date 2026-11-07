@@ -15,7 +15,6 @@ const DEFAULT_TTL_LONG_MS = 7 * 24 * 60 * 60 * 1000
 const DEFAULT_TTL_FIND_MS = 60 * 60 * 1000
 
 const RATE_LIMIT_PROXY = { max: 300, timeWindow: '1 minute' }
-const RATE_LIMIT_STATS = { max: 30, timeWindow: '1 minute' }
 
 const ErrorResponse = {
     type: 'object',
@@ -257,22 +256,6 @@ export function registerMetadataProxyRoutes(fastify) {
         }
 
         return (result && result.value !== undefined) ? result.value : null
-    })
-
-    fastify.get('/api/admin/cache-stats', {
-        config: { rateLimit: RATE_LIMIT_STATS },
-    }, async (request, reply) => {
-        const authUser = await verifyAuth(request)
-        if (!authUser) {
-            reply.status(401); return { error: 'Unauthorized' }
-        }
-        try {
-            const stats = await metadataCache.getStats()
-            return stats
-        } catch (err) {
-            fastify.log.error({ category: 'MetadataProxy' }, `Cache stats failed: ${_redactKey(err && err.message)}`)
-            reply.status(500); return { error: 'Failed to compute stats' }
-        }
     })
 
     fastify.get('/api/metadata/test', {

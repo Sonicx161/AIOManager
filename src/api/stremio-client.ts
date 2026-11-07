@@ -3,18 +3,20 @@ import { AddonDescriptor, AddonManifest } from '@/types/addon'
 import { LibraryItem } from '@/types/activity'
 import { resilientFetch } from '@/lib/api-resilience'
 import { useSyncStore } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { getHostnameIdentifier, identifyAddon } from '@/lib/addon-identifier'
 import { trace } from '@/lib/trace'
+import { restoreKnownManifests } from '@/lib/manifest-placeholder'
 import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
 import { exchangeFacebookLogin, exchangeAppleLogin, deleteStremioUser, type RelayLoginResult } from './stremio-relay'
+import { fetchStremioMetaBatch, validateStremioMetaRows } from '@/lib/stremio-meta-batch'
 
 async function getProxyAuthHeaders(): Promise<Record<string, string>> {
     const { auth } = useSyncStore.getState()
     if (!auth.isAuthenticated) return {}
     return {
         'x-sync-user': auth.id,
-        'x-sync-password': await deriveSyncToken(auth.password),
+        'x-sync-password': await getSyncPasswordHeader(auth),
     }
 }
 
@@ -40,6 +42,12 @@ interface SetAddonCollectionOptions {
 }
 
 const ADDON_REFRESH_ERROR_PATTERN = /AddonsPulledFromAPI|UserAddonsLocked|manifest.*missing field|upstream returned 403|forbidden|access denied|status\s*403|\b403\b/i
+
+// A server-served last-good collection is not a live read: never cache it or adopt removals from it.
+const recoveredCollections = new WeakSet<AddonDescriptor[]>()
+export function isRecoveredAddonCollection(addons: AddonDescriptor[] | null | undefined): boolean {
+  return Boolean(addons) && recoveredCollections.has(addons as AddonDescriptor[])
+}
 
 async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>) {
   const authHeaders = await getProxyAuthHeaders()
@@ -260,7 +268,7 @@ export class StremioClient {
         return []
       }
 
-       return (result.addons as Record<string, unknown>[]).map((addon: Record<string, unknown>) => {
+       const collection = (result.addons as Record<string, unknown>[]).map((addon: Record<string, unknown>) => {
          const transportUrl = (addon.transportUrl as string) || ''
          const manifest = (addon.manifest || {}) as Record<string, unknown>
          const rawManifest = (!manifest.name && addon.transportName)
@@ -280,6 +288,10 @@ export class StremioClient {
            }
          }
        })
+       // A manifest Stremio could not resolve stays unresolved: the stored real one wins.
+       const restored = restoreKnownManifests(collection)
+       if (data?.recoveredFromLastGood === true) recoveredCollections.add(restored)
+       return restored
     } catch (error) {
       if (error instanceof Error) {
         if (error.message.includes('401')) throw new Error('Invalid or expired auth key')
@@ -512,7 +524,9 @@ export class StremioClient {
 
       const result = data?.result as unknown
       if (Array.isArray(result)) {
-        return result as Array<[string, number]>
+        const validated = validateStremioMetaRows(result)
+        if (!validated) throw new Error('Invalid Stremio library metadata response')
+        return validated
       }
       return []
     } catch (error) {
@@ -524,33 +538,48 @@ export class StremioClient {
     }
   }
 
-  // Results preserve request order; null slots require a full per-account fetch.
+  // Results preserve request order; a failed chunk becomes null slots so successful
+  // chunks remain usable and only those accounts need the full per-account fetch.
   async getLibraryMetaBatch(entries: Array<{ authKey: string; accountContext?: string }>): Promise<Array<Array<[string, number]> | null>> {
-    const out: Array<Array<[string, number]> | null> = []
-    const CHUNK = 25
-    for (let i = 0; i < entries.length; i += CHUNK) {
-      const chunk = entries.slice(i, i + CHUNK)
+    const postChunk = async (chunk: Array<{ authKey: string; accountContext?: string }>): Promise<unknown> => {
       const start = Date.now()
-      const data = await serverPost('/api/stremio-meta-batch', {
-        requests: chunk.map(e => ({ authKey: e.authKey, accountContext: e.accountContext })),
-      })
-      trace('stremio', 'api-call', { method: 'DatastoreMetaBatch', timing: Date.now() - start, accounts: chunk.length })
-      if (data?.error) {
-        const e = data.error as Record<string, unknown>
-        throw new Error((e.message as string) || 'Failed to get library meta batch')
-      }
-      const result = data?.result as unknown
-      if (!Array.isArray(result) || result.length !== chunk.length) {
-        throw new Error('Malformed batch meta response')
-      }
-      for (const row of result) {
-        const valid = Array.isArray(row) && row.every(item =>
-          Array.isArray(item) && item.length === 2 && typeof item[0] === 'string'
-          && typeof item[1] === 'number' && Number.isFinite(item[1]))
-        out.push(valid ? (row as Array<[string, number]>) : null)
+      try {
+        const data = await serverPost('/api/stremio-meta-batch', {
+          requests: chunk.map(e => ({ authKey: e.authKey, accountContext: e.accountContext })),
+        })
+        trace('stremio', 'api-call', { method: 'DatastoreMetaBatch', timing: Date.now() - start, accounts: chunk.length })
+        return data
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const cap = message.match(/accepts at most (\d+) requests/i)?.[1]
+        const limit = cap ? Number(cap) : 0
+        if (!Number.isInteger(limit) || limit < 1 || limit >= chunk.length) throw error
+
+        // A deployment may run with DATASTORE_META_BATCH_MAX below the client's
+        // default. Split only after the server tells us its effective limit so
+        // the original result slots and per-account fallback semantics survive.
+        const rows: unknown[] = []
+        for (let i = 0; i < chunk.length; i += limit) {
+          const part = chunk.slice(i, i + limit)
+          let response: { result?: unknown } | null = null
+          try {
+            response = await postChunk(part) as { result?: unknown }
+          } catch {
+            response = null
+          }
+          if (!Array.isArray(response?.result) || response.result.length !== part.length) {
+            rows.push(...part.map(() => null))
+          } else {
+            rows.push(...response.result)
+          }
+        }
+        return { result: rows }
       }
     }
-    return out
+
+    return fetchStremioMetaBatch(entries, async (chunk) => {
+      return postChunk(chunk) as Promise<{ result?: unknown }>
+    })
   }
 
   async testCORS(): Promise<boolean> {

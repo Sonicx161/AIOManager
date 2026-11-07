@@ -132,6 +132,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     import('@/store/accountStore').then(({ clearAuthKeyCache }) => {
       clearAuthKeyCache()
     })
+    import('@/lib/display-read-cache').then(({ clearDisplayReadCache }) => clearDisplayReadCache()).catch(() => {})
     import('@/lib/pmdb-list-publisher').then(({ _invalidateAuthCache }) => _invalidateAuthCache()).catch(() => {})
     import('@/store/syncStore').then(({ useSyncStore }) => {
       const { auth } = useSyncStore.getState()

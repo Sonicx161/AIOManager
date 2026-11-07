@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import { promisify } from 'util'
+import { isReadOnlyReplica } from '../config.js'
 
 // Stored format is `${saltHex}:${scryptHex}`. Scrypt params must never change:
 // verification recomputes the hash, so a param change orphans every stored row.
@@ -25,8 +26,12 @@ export function isScryptHash(stored) {
 // Returns true/false for scrypt-formatted stored values, or null when the stored
 // value is not a scrypt hash, signaling the caller to fall back to the legacy
 // decrypt-and-compare path.
-export async function verifySyncPassword(password, stored) {
-    if (!isScryptHash(stored)) return null
+// Concurrent cold checks of the same (stored hash, presented password) pair share one scrypt.
+// The key hashes the presented password, so a different or wrong password never rides another
+// caller's result; entries live only while the scrypt is in flight.
+const verifyInflight = new Map()
+
+const verifyScrypt = async (password, stored) => {
     const [saltHex, hashHex] = stored.split(':')
     const computed = (await scryptAsync(String(password), Buffer.from(saltHex, 'hex'), 32, SCRYPT_PARAMS)).toString('hex')
     const computedBuf = Buffer.from(computed, 'utf8')
@@ -34,13 +39,28 @@ export async function verifySyncPassword(password, stored) {
     return computedBuf.length === storedBuf.length && crypto.timingSafeEqual(computedBuf, storedBuf)
 }
 
+export async function verifySyncPassword(password, stored) {
+    if (!isScryptHash(stored)) return null
+    const key = crypto.createHash('sha256').update(stored).update(String(password)).digest('hex')
+    let pending = verifyInflight.get(key)
+    if (!pending) {
+        pending = verifyScrypt(password, stored).finally(() => verifyInflight.delete(key))
+        verifyInflight.set(key, pending)
+    }
+    return pending
+}
+
 // Opportunistic upgrade after a successful legacy auth. Never throws: a failed
 // upgrade must not fail the enclosing request; the next successful auth retries.
 export async function upgradeLegacyPasswordHash(runner, id, password) {
+    // A read-only replica never writes; the primary upgrades on its next legacy auth.
+    if (isReadOnlyReplica()) return null
     try {
         const hashed = await hashSyncPassword(password)
         await runner.run('UPDATE kv_store SET password = $1 WHERE key = $2', [hashed, id])
+        return hashed
     } catch (err) {
         console.warn(`[SyncPassword] Legacy password hash upgrade failed for ${id}: ${err?.message}`)
+        return null
     }
 }

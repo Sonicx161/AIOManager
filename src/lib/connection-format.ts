@@ -49,9 +49,70 @@ export function canTestConnection(connection: Connection): boolean {
 
 export type DisplayStatus = ConnectionStatus | 'expiring'
 
+// The sync path stores raw browser error strings (TypeError messages) as lastError. Map the
+// generic network failure to a sentence that says what failed and what to try; anything already
+// readable passes through untouched.
+export function friendlyConnectionError(message: string | null | undefined): string {
+    const text = (message || '').trim()
+    if (/^failed to fetch$/i.test(text)) {
+        return 'Could not reach the server. Check that the server is online and reachable from this device, then sync again.'
+    }
+    return text
+}
+
 export function displayStatus(status: ConnectionStatus, expiry: TokenExpiry): DisplayStatus {
     if (status === 'expired') return 'expired'
     if (status === 'active' && expiry.state === 'expiring') return 'expiring'
     if (status === 'active' && expiry.state === 'expired') return 'expired'
     return status
+}
+
+export interface ConnectionStatusLineParts {
+    /** Row label; an identity identical to it is dropped instead of repeated. */
+    name: string
+    identity?: string
+    addonCount?: number
+    enabled: boolean
+    platform: string
+    lastSync?: number | null
+    mediaServerLastCheckedAt?: number | null
+}
+
+export interface ConnectionStatusParts {
+    identity?: string
+    /** Addon count plus sync freshness, joined for display. */
+    activity: string
+}
+
+/**
+ * The parts behind the one status line under a connection row, split so narrow
+ * layouts can wrap the identity away from the activity instead of truncating.
+ */
+export function connectionStatusParts({ name, identity, addonCount, enabled, platform, lastSync, mediaServerLastCheckedAt }: ConnectionStatusLineParts): ConnectionStatusParts {
+    const shownIdentity = identity && identity !== name ? identity : undefined
+    const syncedAt = platform === 'jellyfin' ? (mediaServerLastCheckedAt || lastSync) : lastSync
+    const syncLabel = !enabled
+        ? 'Sync paused'
+        : !syncedAt
+            ? 'Not synced yet'
+            : platform === 'jellyfin'
+                ? `Verified ${timeAgo(syncedAt)}`
+                : `Synced ${timeAgo(syncedAt)}`
+    return {
+        identity: shownIdentity,
+        activity: [
+            addonCount !== undefined ? `${addonCount} addons` : undefined,
+            syncLabel,
+        ].filter(Boolean).join(' \u00b7 '),
+    }
+}
+
+/**
+ * The ONE status line under a connection row: signed-in identity, addon count,
+ * sync freshness. Platform details (profiles, hints, expiry wording) live behind
+ * the chevron in the edit panel instead.
+ */
+export function connectionStatusLine(parts: ConnectionStatusLineParts): string {
+    const { identity, activity } = connectionStatusParts(parts)
+    return [identity, activity].filter(Boolean).join(' \u00b7 ')
 }

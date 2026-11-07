@@ -25,9 +25,9 @@ import {
     Lock,
     QrCode,
 } from 'lucide-react'
-import { useState, useCallback, useEffect } from 'react'
-import { cn } from '@/lib/utils'
-import { toast } from '@/hooks/use-toast'
+import { useState, useCallback, useEffect, useRef } from 'react'
+import { cn, maskEmailLevel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
 
 type WizardStep = 'login' | 'profile' | 'confirm'
 
@@ -49,6 +49,7 @@ interface NuvioSetupDialogProps {
     onOpenChange: (open: boolean) => void
     onComplete: (tokens: NuvioTokens, profileId: string | null, profiles: NuvioProfile[], email: string, backend: NuvioBackend) => void | Promise<void>
     initialBackend?: NuvioBackend
+    onBackToPicker?: () => void
 }
 
 interface NuvioTokens {
@@ -63,7 +64,7 @@ const STEP_INDICATORS = [
     { step: 'confirm' as const, label: 'Confirm' },
 ]
 
-export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBackend }: NuvioSetupDialogProps) {
+export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBackend, onBackToPicker }: NuvioSetupDialogProps) {
     const [step, setStep] = useState<WizardStep>('login')
     const [mode, setMode] = useState<'login' | 'signup'>('login')
     const [email, setEmail] = useState('')
@@ -81,9 +82,16 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
     const [profiles, setProfiles] = useState<NuvioProfile[]>([])
     const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
     const [qrOpen, setQrOpen] = useState(false)
+    const [submitting, setSubmitting] = useState(false)
+    const requestGeneration = useRef(0)
+    const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+    const privacyLevelEmail = useUIStore(s => s.privacyLevelEmail)
+    const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
 
     const reset = useCallback(() => {
+        requestGeneration.current += 1
         setStep('login')
+        setMode('login')
         setEmail('')
         setPassword('')
         setShowAdvanced(false)
@@ -96,6 +104,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
         setProfiles([])
         setSelectedProfileId(null)
         setQrOpen(false)
+        setSubmitting(false)
     }, [])
 
     const backend = (): NuvioBackend => ({
@@ -115,7 +124,8 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
 
     useEffect(() => {
         const trimmed = customBaseUrl.trim()
-        if (!trimmed) { setDiscovered(null); return }
+        setDiscovered(null)
+        if (!trimmed) return
         let cancelled = false
         const t = setTimeout(() => {
             discoverNuvioBackend(trimmed).then(d => { if (!cancelled) setDiscovered(d) })
@@ -130,6 +140,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
 
     const keyAutoDetected = !!(discovered?.publishableKey && discovered.publishableKey === customPublishableKey.trim())
     const passwordAuthUnavailable = discovered !== null && !discovered.capabilities.emailPasswordAuth
+    const tvLoginAvailable = !customBaseUrl.trim() || discovered?.capabilities.tvLogin === true
 
     const handleClose = (nextOpen: boolean) => {
         if (!nextOpen) reset()
@@ -137,6 +148,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
     }
 
     const handleLogin = async () => {
+        const generation = requestGeneration.current
         setLoading(true)
         setError(null)
         try {
@@ -144,6 +156,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
             const result = mode === 'signup'
                 ? await nuvioSignup(email, password, b.publishableKey, b.baseUrl)
                 : await nuvioAuth(email, password, b.publishableKey, b.baseUrl)
+            if (generation !== requestGeneration.current) return
             const t = result.tokens
             if (!t) {
                 setMode('login')
@@ -161,16 +174,20 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                 setStep('profile')
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Login failed')
+            if (generation === requestGeneration.current) {
+                setError(err instanceof Error ? err.message : 'Login failed')
+            }
         } finally {
-            setLoading(false)
+            if (generation === requestGeneration.current) setLoading(false)
         }
     }
 
     const handleQrClaimed = async (session: QRSession) => {
+        const generation = requestGeneration.current
         const b = backend()
         try {
             const result = await exchangeNuvioQr(session, b.publishableKey, b.baseUrl)
+            if (generation !== requestGeneration.current) return
             const t = result.tokens
             if (!t) throw new Error('QR sign-in did not return tokens. Try again.')
             setTokens(t)
@@ -185,20 +202,29 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                 setStep('profile')
             }
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'QR sign-in failed')
+            if (generation === requestGeneration.current) {
+                setError(err instanceof Error ? err.message : 'QR sign-in failed')
+            }
         } finally {
-            setQrOpen(false)
+            if (generation === requestGeneration.current) setQrOpen(false)
         }
     }
 
     const handleFinish = async () => {
-        if (!tokens) return
+        if (!tokens || submitting) return
+        const generation = requestGeneration.current
+        setSubmitting(true)
+        setError(null)
         try {
             await onComplete(tokens, selectedProfileId, profiles, email, backend())
+            if (generation === requestGeneration.current) handleClose(false)
         } catch (e) {
-            toast({ title: 'Setup failed', description: e instanceof Error ? e.message : 'Failed to configure provider', variant: 'destructive' })
+            if (generation === requestGeneration.current) {
+                setError(e instanceof Error ? e.message : 'Failed to add connection')
+            }
+        } finally {
+            if (generation === requestGeneration.current) setSubmitting(false)
         }
-        handleClose(false)
     }
 
     const stepIndex = STEP_INDICATORS.findIndex(s => s.step === step)
@@ -322,7 +348,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                         onChange={e => setPassword(e.target.value)}
                                         className="pl-10"
                                         onKeyDown={e => {
-                                            if (e.key === 'Enter' && emailValid && passwordValid) handleLogin()
+                                            if (e.key === 'Enter' && emailValid && passwordValid && !passwordAuthUnavailable && !loading) handleLogin()
                                         }}
                                     />
                                 </div>
@@ -333,7 +359,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                 <span className="text-[11px] uppercase tracking-wide text-muted-foreground">or</span>
                                 <div className="h-px flex-1 bg-border/60" />
                             </div>
-                            <Button
+                            {tvLoginAvailable && <Button
                                 variant="outline"
                                 size="sm"
                                 className="w-full gap-1.5 text-xs"
@@ -341,7 +367,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                             >
                                 <QrCode className="h-3.5 w-3.5" />
                                 Sign in with QR code
-                            </Button>
+                            </Button>}
 
                             <div className="pt-1">
                                 <button
@@ -392,13 +418,6 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                     )}
                                 </div>
                             )}
-
-                            {error && (
-                                <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/5 border border-destructive/20 px-3 py-2 text-xs text-destructive flex items-center gap-2">
-                                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                                    {error}
-                                </div>
-                            )}
                         </div>
                     )}
 
@@ -446,7 +465,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                             <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card p-4 space-y-3">
                                 <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
                                     <span className="text-muted-foreground">Account</span>
-                                    <span className="font-medium truncate">{email}</span>
+                                    <span className="font-medium truncate">{maskEmailLevel(email, emailPrivacyLevel)}</span>
                                     <span className="text-muted-foreground">Profile</span>
                                     <span className="font-medium truncate">
                                         {selectedProfileId
@@ -472,9 +491,16 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                             </div>
                         </div>
                     )}
+                    {error && (
+                        <div role="alert" data-theme-tone="status" data-theme-part="panel" className="mt-2 rounded-xl bg-destructive/5 border border-destructive/20 px-3 py-2 text-xs text-destructive flex items-center gap-2">
+                            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                            {error}
+                        </div>
+                    )}
                 </div>
 
                 <DialogFooter>
+                    {onBackToPicker && !loading && !submitting && <Button variant="outline" onClick={() => { reset(); onBackToPicker() }}>Back to connection picker</Button>}
                     {step !== 'login' && (
                         <Button
                             variant="subtle"
@@ -482,7 +508,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                 if (step === 'confirm') setStep(profiles.length > 1 ? 'profile' : 'login')
                                 else if (step === 'profile') setStep('login')
                             }}
-                            disabled={loading}
+                            disabled={loading || submitting}
                         >
                             Back
                         </Button>
@@ -495,7 +521,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                             <Button variant="subtle" onClick={() => handleClose(false)}>Cancel</Button>
                             <Button
                                 onClick={handleLogin}
-                                disabled={!emailValid || !passwordValid || loading}
+                                disabled={!emailValid || !passwordValid || loading || passwordAuthUnavailable}
                             >
                                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                                 {loading ? (mode === 'signup' ? 'Creating...' : 'Signing in...') : (mode === 'signup' ? 'Create Account' : 'Sign In')}
@@ -518,8 +544,10 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                     {step === 'confirm' && (
                         <Button
                             onClick={handleFinish}
+                            disabled={submitting}
                         >
-                            Add Connection
+                            {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                            {submitting ? 'Adding...' : 'Add Connection'}
                         </Button>
                     )}
                 </DialogFooter>

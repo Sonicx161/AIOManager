@@ -21,7 +21,7 @@ export interface WatcherItemIdentity {
 const seriesLike = (t?: string | null) => t === 'series' || t === 'anime' || t === 'episode'
 
 export function normalizeWatcherTitle(name: string | null | undefined): string {
-    return (name || '').normalize('NFC').toLowerCase().replace(/[^a-z0-9]/g, '')
+    return (name || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
 function ttIdOf(itemId: string | null | undefined): string | null {
@@ -43,6 +43,21 @@ export function watcherMatchesItem(item: WatcherItemIdentity, show: WatcherItemI
     return nameItem.length > 0 && nameItem === nameShow
 }
 
+/** Safe identity keys shared by display enrichment and watcher cross-linking. */
+export function watcherIdentityKeys(item: WatcherItemIdentity): string[] {
+    const keys: string[] = []
+    const tt = ttIdOf(item.itemId)
+    if (tt) keys.push(`tt:${tt}`)
+    // Episode names are usually episode titles ("Pilot", "Finale"), so they
+    // must never contribute a fuzzy title key. They can still receive metadata
+    // through an exact IMDb key or a series row's identity.
+    if (!seriesLike(item.type) || item.type === 'series' || item.type === 'anime') {
+        const title = normalizeWatcherTitle(item.name)
+        if (title) keys.push(`${seriesLike(item.type) ? 's' : 'm'}:${title}`)
+    }
+    return keys
+}
+
 /**
  * Cross-link an exact-key watcher index so keys that refer to the same show
  * (different source identities) share their watchers. Keys are left unchanged so
@@ -55,6 +70,7 @@ export function crossLinkWatcherIndex<W extends { id: string }>(
 ): void {
     if (map.size < 2) return
     const groups = new Map<string, string[]>()
+    const titleImdbs = new Map<string, Set<string>>()
     const groupKeyOf = (identity: WatcherItemIdentity): string | null => {
         const tt = ttIdOf(identity.itemId)
         if (tt) return `tt:${tt}`
@@ -63,6 +79,19 @@ export function crossLinkWatcherIndex<W extends { id: string }>(
         // Only fuzzy-match rows with a known type class; ambiguous rows stay exact-keyed.
         const cls = identity.type ? (seriesLike(identity.type) ? 's' : 'm') : ''
         return cls ? `${cls}:${name}` : null
+    }
+    // Collect IMDb identities for title groups before grouping. IMDb-keyed rows
+    // intentionally live in a separate exact group, but their title still
+    // makes a fuzzy tt-less row ambiguous.
+    for (const identity of identityByKey.values()) {
+        const title = normalizeWatcherTitle(identity.name)
+        const tt = ttIdOf(identity.itemId)
+        const cls = identity.type ? (seriesLike(identity.type) ? 's' : 'm') : ''
+        if (!title || !tt || !cls) continue
+        const key = `${cls}:${title}`
+        const ids = titleImdbs.get(key) || new Set<string>()
+        ids.add(tt)
+        titleImdbs.set(key, ids)
     }
     for (const key of map.keys()) {
         const identity = identityByKey.get(key)
@@ -73,8 +102,9 @@ export function crossLinkWatcherIndex<W extends { id: string }>(
         if (list) list.push(key)
         else groups.set(groupKey, [key])
     }
-    for (const groupKeys of groups.values()) {
+    for (const [groupKey, groupKeys] of groups) {
         if (groupKeys.length < 2) continue
+        if ((groupKey.startsWith('s:') || groupKey.startsWith('m:')) && (titleImdbs.get(groupKey)?.size || 0) > 1) continue
         const union: W[] = []
         for (const key of groupKeys) {
             for (const watcher of map.get(key) || []) {

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, Fragment } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -7,13 +7,15 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { CopyButton } from '@/components/ui/copy-button'
-import { StatusChip } from '@/components/ui/status-chip'
-import { Tooltip } from '@/components/ui/tooltip'
+import { TabsContent } from '@/components/ui/tabs'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import { EmptyState } from '@/components/common/EmptyState'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
-import { cn } from '@/lib/utils'
+import { cn, maskNameLevel, maskUrlLevel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
+import { useVaultStore } from '@/store/vaultStore'
+import { PopoverFacts, VaultLockedNotice, WorkspaceAction, WorkspaceError, WorkspaceHeader, WorkspaceStatusPill, WorkspaceTabs, type WorkspaceTabItem } from '@/components/providers/workspace'
 import { useAccountStore, getAccountEmail } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { normalizeUrl } from '@/lib/addon-storage'
@@ -36,12 +38,42 @@ import { extractAddonParams, buildTaggedUrl, NO_SELECTION } from '@/lib/addon-pa
 import { AIOMetadataSyncTab, type TargetOption, type MissingTargetAccount } from '@/components/addons/aiometadata/AIOMetadataSyncTab'
 import { AIOMetadataActionsTab } from '@/components/addons/aiometadata/AIOMetadataActionsTab'
 import { BulkAccountPicker } from '@/components/accounts/BulkAccountPicker'
+import { maskSecretUrl } from '@/lib/mask-secret-url'
 import {
     ArrowLeft, Loader2, AlertTriangle, ExternalLink, Eye, EyeOff, Lock, Shield,
-    ArrowRightLeft, RefreshCw, Wifi, Database, Image, KeyRound, LayoutGrid, Users, Tag,
+    ArrowRightLeft, RefreshCw, Database, Image, KeyRound, LayoutGrid, Users, Tag,
 } from 'lucide-react'
 
 type Section = 'overview' | 'config' | 'users' | 'sync'
+
+const SECRET_SETTING_KEY = /pass|secret|token|key|auth|cred/i
+
+function SettingRow({ sectionKey, label, data }: { sectionKey: string; label: string; data: unknown }) {
+    const [revealed, setRevealed] = useState(false)
+    const raw = typeof data === 'string' ? data : ''
+    const isUrl = /^https?:\/\//i.test(raw)
+    const isSecret = raw.length > 0 && !isUrl && SECRET_SETTING_KEY.test(sectionKey)
+    const sensitive = isUrl || isSecret
+    const display = !sensitive
+        ? getSectionSummary(sectionKey, data)
+        : revealed ? raw : isUrl ? maskSecretUrl(raw) : '•'.repeat(Math.min(raw.length, 12))
+    return (
+        <div data-theme-part="panel" className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-border/30 bg-muted/10">
+            <span className="text-xs font-medium shrink-0">{label}</span>
+            <span className="flex min-w-0 items-center gap-1">
+                <span className="text-xs text-muted-foreground truncate">{display}</span>
+                {sensitive && (
+                    <>
+                        <button type="button" onClick={() => setRevealed(v => !v)} aria-label={revealed ? `Hide ${label}` : `Show ${label}`} className="p-0.5 text-muted-foreground hover:text-foreground transition-colors">
+                            {revealed ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                        <CopyButton value={raw} variant="inline" aria-label={`Copy ${label}`} />
+                    </>
+                )}
+            </span>
+        </div>
+    )
+}
 
 export function AIOMetadataPage() {
     const { accountId, uuid } = useParams<{ accountId: string; uuid: string }>()
@@ -60,6 +92,7 @@ export function AIOMetadataPage() {
 
     const parsed = useMemo(() => addon ? parseAIOMetadataUrl(addon.transportUrl) : null, [addon])
     const baseUrl = parsed?.baseUrl ?? ''
+    const hasAddon = !!addon
     const shouldRedirect = !addon || !account || !uuid
 
     const [connected, setConnected] = useState(false)
@@ -74,6 +107,12 @@ export function AIOMetadataPage() {
     const [status, setStatus] = useState<AIOMetadataAddonInfo | null>(null)
     const [reachable, setReachable] = useState(true)
     const [trusted, setTrusted] = useState<boolean | null>(null)
+    const [refreshError, setRefreshError] = useState('')
+    const [refreshedAt, setRefreshedAt] = useState<number | null>(null)
+    const vaultLocked = useVaultStore(s => s.isLocked)
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const nameLevel = useUIStore(s => s.privacyLevelNames)
+    const urlLevel = useUIStore(s => s.privacyLevelUrls)
 
     const passwordRef = useRef<HTMLInputElement>(null)
 
@@ -117,10 +156,12 @@ export function AIOMetadataPage() {
         })), [accounts, accountId, baseUrl, uuid])
 
     useEffect(() => {
-        if (!addon) return
+        if (!hasAddon) return
         setConnected(false)
         setError('')
         setSourceConfig(null)
+        setRefreshError('')
+        setRefreshedAt(null)
         setActiveSection('overview')
         setStatus(null)
         setReachable(true)
@@ -132,7 +173,7 @@ export function AIOMetadataPage() {
         const stored = getStoredAIOMetadataPassword(baseUrl, uuid || '')
         if (stored) { setPassword(stored); setRememberPassword(true) }
         else { setPassword(''); setRememberPassword(false) }
-    }, [addon, baseUrl, uuid])
+    }, [hasAddon, baseUrl, uuid])
 
     useEffect(() => {
         if (!connected) setTimeout(() => passwordRef.current?.focus(), 100)
@@ -147,6 +188,7 @@ export function AIOMetadataPage() {
         try {
             const config = await fetchAIOMetadataConfig(baseUrl, uuid, password, addonPassword || undefined)
             setSourceConfig(config)
+            setRefreshedAt(Date.now())
             if (rememberPassword) {
                 try { await saveAIOMetadataPassword(baseUrl, uuid, password) } catch {}
             }
@@ -161,10 +203,12 @@ export function AIOMetadataPage() {
     const handleRefresh = useCallback(async () => {
         if (!password || !uuid) return
         setLoading(true)
+        setRefreshError('')
         try {
             setSourceConfig(await fetchAIOMetadataConfig(baseUrl, uuid, password, addonPassword || undefined))
+            setRefreshedAt(Date.now())
         } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : 'Failed to refresh')
+            setRefreshError(e instanceof Error ? e.message : 'Failed to refresh')
         } finally {
             setLoading(false)
         }
@@ -179,6 +223,13 @@ export function AIOMetadataPage() {
     const addonName = addon.manifest.name || 'AIOMetadata'
     const accountLabel = account.name || getAccountEmail(account) || accountId || 'Unknown account'
     const configureUrl = getAIOMetadataConfigureUrl(addon.transportUrl)
+    const headerStats = sourceConfig ? getConfigStats(sourceConfig) : null
+    const versionValue = status?.version || addon.manifest.version
+    const version = versionValue ? `v${versionValue}` : null
+    const maskedBase = maskUrlLevel(baseUrl, privacyOn ? urlLevel : 0)
+    const maskedAccount = maskNameLevel(accountLabel, privacyOn ? nameLevel : 0)
+    const pill = !reachable ? 'error' : refreshError ? 'degraded' : 'active'
+    const pillText = !reachable ? 'Unreachable' : refreshError ? 'Refresh failed' : 'Reachable'
 
     return (
         <div className="w-full mx-auto py-6 px-4 md:px-8 lg:px-12 xl:px-16 space-y-4 max-w-[1800px]">
@@ -190,6 +241,10 @@ export function AIOMetadataPage() {
             </ToolbarShell>
 
             {!connected ? (
+                <>
+                {vaultLocked && !password && (
+                    <div className="mx-auto max-w-md"><VaultLockedNotice>Unlock your vault to use a saved config password.</VaultLockedNotice></div>
+                )}
                 <CredentialsGate
                     password={password} setPassword={setPassword}
                     addonPassword={addonPassword} setAddonPassword={setAddonPassword}
@@ -199,140 +254,99 @@ export function AIOMetadataPage() {
                     loading={loading} error={error} passwordRef={passwordRef}
                     onConnect={handleConnect} configureUrl={configureUrl}
                 />
+                </>
             ) : (
-                <div className="flex flex-col md:flex-row gap-6 min-h-[calc(100vh-14rem)]">
-                    <div className="w-full md:w-56 lg:w-64 shrink-0 flex flex-col gap-3">
-                        <div data-theme-part="panel" className="hidden bg-card border border-border/40 rounded-2xl p-3 shadow-sm space-y-1 md:block">
-                            <div className="flex items-center justify-between px-2 py-1.5 mb-1 shrink-0">
-                                <Tooltip content="Metadata setup overview and quick stats" side="right">
-                                    <h2 className="text-xs font-medium uppercase tracking-[0.1em] text-muted-foreground cursor-help">Summary</h2>
-                                </Tooltip>
-                            </div>
-                            <DesktopSidebar activeSection={activeSection} onChange={setActiveSection} group="core" />
-                        </div>
-
-                        <div data-theme-part="panel" className="hidden bg-card border border-border/40 rounded-2xl p-3 shadow-sm space-y-1 md:block">
-                            <div className="flex items-center justify-between px-2 py-1.5 mb-1 shrink-0">
-                                <Tooltip content="Configure metadata orchestration" side="right">
-                                    <h2 className="text-xs font-medium uppercase tracking-[0.1em] text-muted-foreground cursor-help">Orchestration</h2>
-                                </Tooltip>
-                            </div>
-                            <DesktopSidebar activeSection={activeSection} onChange={setActiveSection} group="advanced" />
-                        </div>
-
-                        <div className="md:hidden px-4 pb-4">
-                            <MobileSectionBar activeSection={activeSection} onChange={setActiveSection} />
-                        </div>
-                    </div>
-
-                    <div data-theme-part="panel" className="flex-1 min-w-0 bg-card border border-border/40 rounded-2xl overflow-hidden shadow-sm flex flex-col">
-                        <div data-theme-part="panel" className="p-4 md:p-6 border-b border-border/40 bg-muted/5 shrink-0">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                <div className="flex items-center gap-3 min-w-0">
-                                    <AddonIcon name={addonName} logo={addon.metadata?.customLogo || addon.manifest.logo} alt={addonName} className="h-10 w-10" textClassName="text-sm" />
-                                    <div className="min-w-0">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <h1 className="text-lg font-bold tracking-tight truncate">{addonName}</h1>
-                                            <Tooltip content={reachable ? 'Instance is reachable and responding' : 'Instance could not be reached'} side="bottom">
-                                                <StatusChip variant={reachable ? 'success' : 'destructive'} icon={<Wifi className="w-3 h-3" />} className="rounded-lg">
-                                                    {reachable ? 'Connected' : 'Unreachable'}
-                                                </StatusChip>
-                                            </Tooltip>
-                                        </div>
-                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5 text-xs text-muted-foreground">
-                                            <span className="font-mono truncate">{baseUrl}</span>
-                                            {status?.version && <span className="shrink-0">v{status.version}</span>}
-                                        </div>
+                <WorkspaceTabs
+                    label={`${addonName} workspace`}
+                    tabs={SECTION_TABS}
+                    value={activeSection}
+                    onValueChange={value => setActiveSection(value as Section)}
+                    header={
+                        <WorkspaceHeader
+                            logo={<AddonIcon name={addonName} logo={addon.metadata?.customLogo || addon.manifest.logo} alt={addonName} className="h-12 w-12" textClassName="text-sm" />}
+                            title={addonName}
+                            pill={
+                                <WorkspaceStatusPill status={pill} label={pillText}>
+                                    <div className="space-y-1">
+                                        <p className="truncate text-sm font-semibold">{addonName}</p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {!reachable ? 'The instance did not answer its status check.' : refreshError ? 'The last refresh failed. Showing the config from the previous read.' : 'The instance is reachable and this user is signed in.'}
+                                        </p>
                                     </div>
-                                </div>
-                                <Button variant="ghost" className="gap-2 text-muted-foreground h-9" onClick={handleRefresh} disabled={loading} size="sm">
-                                    <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} /> Refresh
-                                </Button>
+                                    <PopoverFacts facts={[
+                                        { label: 'Instance', value: maskedBase },
+                                        ...(version ? [{ label: 'Version', value: version }] : []),
+                                        { label: 'Trusted user', value: trusted === true ? 'Yes' : trusted === false ? 'No' : 'Unknown' },
+                                        { label: 'Last read', value: refreshedAt ? new Date(refreshedAt).toLocaleTimeString() : 'Not yet' },
+                                        ...(refreshError ? [{ label: 'Last error', value: refreshError, tone: 'destructive' as const }] : []),
+                                    ]} />
+                                    <Button size="sm" variant="outline" className="h-9 w-full text-xs" data-close-popover onClick={handleRefresh} disabled={loading}>
+                                        <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+                                        Refresh
+                                    </Button>
+                                </WorkspaceStatusPill>
+                            }
+                            identity={[maskedBase, version, maskedAccount].filter(Boolean).join(' · ')}
+                            actions={<>
+                                <WorkspaceAction onClick={handleRefresh} disabled={loading}>
+                                    <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+                                    Refresh
+                                </WorkspaceAction>
+                                {configureUrl && (
+                                    <WorkspaceAction asChild>
+                                        <a href={configureUrl} target="_blank" rel="noopener noreferrer"><ExternalLink className="h-3.5 w-3.5" />Configure</a>
+                                    </WorkspaceAction>
+                                )}
+                            </>}
+                            notice={refreshError ? (
+                                <WorkspaceError title="Refresh failed" message={`${refreshError} Showing the config from the previous read.`} onRetry={loading ? undefined : handleRefresh} />
+                            ) : undefined}
+                            stats={headerStats ? [
+                                { label: 'Provider maps', value: String(headerStats.providers) },
+                                { label: 'Catalogs', value: String(headerStats.catalogs) },
+                                { label: 'API keys', value: String(headerStats.apiKeys) },
+                                { label: 'Features on', value: String(headerStats.toggles) },
+                            ] : undefined}
+                        />
+                    }
+                >
+                    <TabsContent value={activeSection}>
+                        {sourceConfig ? (
+                            <SectionContent
+                                activeSection={activeSection}
+                                sourceConfig={sourceConfig}
+                                baseUrl={baseUrl}
+                                uuid={uuid}
+                                transportUrl={addon.transportUrl}
+                                configureUrl={configureUrl}
+                                accountName={accountLabel}
+                                accountId={accountId!}
+                                status={status}
+                                version={version}
+                                trusted={trusted}
+                                targetOptions={targetOptions}
+                                missingAccounts={missingAccounts}
+                                sameUserAccounts={sameUserAccounts}
+                            />
+                        ) : (
+                            <div className="space-y-4">
+                                <Skeleton className="h-32 w-full rounded-xl" />
+                                <Skeleton className="h-64 w-full rounded-xl" />
                             </div>
-                        </div>
-
-                        <div className="p-4 md:p-8 flex-1 overflow-y-auto scrollbar-hide">
-                            {sourceConfig ? (
-                                <SectionContent
-                                    activeSection={activeSection}
-                                    sourceConfig={sourceConfig}
-                                    baseUrl={baseUrl}
-                                    uuid={uuid}
-                                    transportUrl={addon.transportUrl}
-                                    configureUrl={configureUrl}
-                                    accountName={accountLabel}
-                                    accountId={accountId!}
-                                    status={status}
-                                    targetOptions={targetOptions}
-                                    missingAccounts={missingAccounts}
-                                    sameUserAccounts={sameUserAccounts}
-                                />
-                            ) : (
-                                <div className="space-y-4">
-                                    <Skeleton className="h-32 w-full rounded-xl" />
-                                    <Skeleton className="h-64 w-full rounded-xl" />
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
+                        )}
+                    </TabsContent>
+                </WorkspaceTabs>
             )}
         </div>
     )
 }
 
-const SIDEBAR_ITEMS: { id: Section; label: string; icon: React.ReactNode; group: 'config' | 'actions' }[] = [
-    { id: 'overview', label: 'Overview', icon: <Eye className="w-4 h-4" />, group: 'config' },
-    { id: 'config', label: 'Configuration', icon: <Database className="w-4 h-4" />, group: 'config' },
-    { id: 'users', label: 'Users', icon: <Users className="w-4 h-4" />, group: 'actions' },
-    { id: 'sync', label: 'Sync', icon: <ArrowRightLeft className="w-4 h-4" />, group: 'actions' },
+const SECTION_TABS: (WorkspaceTabItem & { id: Section })[] = [
+    { id: 'overview', label: 'Overview', icon: <Eye className="h-3.5 w-3.5" /> },
+    { id: 'config', label: 'Configuration', icon: <Database className="h-3.5 w-3.5" />, readOnly: true },
+    { id: 'users', label: 'Users', icon: <Users className="h-3.5 w-3.5" /> },
+    { id: 'sync', label: 'Sync', icon: <ArrowRightLeft className="h-3.5 w-3.5" /> },
 ]
-
-function DesktopSidebar({ activeSection, onChange, group }: { activeSection: Section; onChange: (s: Section) => void; group: 'core' | 'advanced' }) {
-    const items = group === 'core' ? SIDEBAR_ITEMS.slice(0, 2) : SIDEBAR_ITEMS.slice(2)
-    return (
-        <nav className="flex flex-col gap-0.5">
-            {items.map(item => {
-                const isActive = activeSection === item.id
-                return (
-                    <button key={item.id} type="button" data-theme-part="nav-item" data-state={isActive ? 'active' : 'inactive'} onClick={() => onChange(item.id)}
-                        className={cn('relative flex items-center gap-2.5 px-2.5 py-2 rounded-xl border text-sm font-medium transition-[transform,opacity,box-shadow] text-left w-full',
-                            isActive ? 'border-border/40 bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50')}>
-                        <div className={cn('relative z-10 w-5 h-5 flex items-center justify-center shrink-0 transition-colors', isActive ? 'text-foreground' : 'text-muted-foreground/60')}>
-                            {item.icon}
-                        </div>
-                        <span className="relative z-10 flex-1 truncate">{item.label}</span>
-                    </button>
-                )
-            })}
-        </nav>
-    )
-}
-
-function MobileSectionBar({ activeSection, onChange }: { activeSection: Section; onChange: (s: Section) => void }) {
-    return (
-        <div className="md:hidden -mx-4 px-4 pb-1">
-            <div data-theme-part="tabs-list" className="flex flex-wrap gap-1.5 rounded-2xl border border-border/40 bg-card p-1.5 shadow-sm">
-                {SIDEBAR_ITEMS.map((item, i) => {
-                    const isActive = activeSection === item.id
-                    return (
-                        <Fragment key={item.id}>
-                            {i === 2 && <div className="w-full h-0" />}
-                            <button type="button" data-theme-part="tab" data-state={isActive ? 'active' : 'inactive'} onClick={() => onChange(item.id)}
-                                className={cn('flex items-center gap-2 rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-[transform,opacity,box-shadow]',
-                                    isActive ? 'border-border/40 bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:bg-muted/40 hover:text-foreground')}>
-                                <div className={cn('w-5 h-5 rounded flex items-center justify-center shrink-0', isActive ? 'text-foreground' : 'text-muted-foreground/60')}>
-                                    {item.icon}
-                                </div>
-                                {item.label}
-                            </button>
-                        </Fragment>
-                    )
-                })}
-            </div>
-        </div>
-    )
-}
 
 function CredentialsGate({
     password, setPassword, addonPassword, setAddonPassword, needsAddonPassword,
@@ -420,15 +434,6 @@ function SectionHeader({ title, description }: { title: string; description: str
     )
 }
 
-function StatCard({ value, label }: { value: number; label: string }) {
-    return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm">
-            <p className="text-xl font-semibold">{value}</p>
-            <p className="text-xs text-muted-foreground">{label}</p>
-        </div>
-    )
-}
-
 function resolveLinkedSavedAddonId(accountId: string, oldUrl: string): string | null {
     const { accountStates, library } = useAddonStore.getState()
     const viaAccountState = accountStates[accountId]?.installedAddons.find(
@@ -442,7 +447,7 @@ function resolveLinkedSavedAddonId(accountId: string, oldUrl: string): string | 
 }
 
 function SectionContent({
-    activeSection, sourceConfig, baseUrl, uuid, transportUrl, configureUrl, accountName, accountId, status, targetOptions, missingAccounts, sameUserAccounts,
+    activeSection, sourceConfig, baseUrl, uuid, transportUrl, configureUrl, accountName, accountId, status, version, trusted, targetOptions, missingAccounts, sameUserAccounts,
 }: {
     activeSection: Section
     sourceConfig: Record<string, unknown>
@@ -453,6 +458,8 @@ function SectionContent({
     accountName: string
     accountId: string
     status: AIOMetadataAddonInfo | null
+    version: string | null
+    trusted: boolean | null
     targetOptions: TargetOption[]
     missingAccounts: MissingTargetAccount[]
     sameUserAccounts: { id: string; name?: string; email?: string; emoji?: string }[]
@@ -461,7 +468,6 @@ function SectionContent({
     const [tagSwapping, setTagSwapping] = useState(false)
     const [bulkTagExpanded, setBulkTagExpanded] = useState(false)
     const [bulkTagSelected, setBulkTagSelected] = useState<Set<string>>(new Set())
-    const stats = useMemo(() => getConfigStats(sourceConfig), [sourceConfig])
     const sections = useMemo(() => getConfigSections(sourceConfig), [sourceConfig])
     const objectSections = useMemo(() => sections.filter(s => s.category === 'section'), [sections])
     const toggleSections = useMemo(() => sections.filter(s => s.category === 'toggle'), [sections])
@@ -547,13 +553,6 @@ function SectionContent({
         return (
             <div className="space-y-6">
                 <SectionHeader title="Overview" description="Metadata setup summary for this user" />
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <StatCard value={stats.providers} label="Provider Maps" />
-                    <StatCard value={stats.catalogs} label="Catalogs" />
-                    <StatCard value={stats.apiKeys} label="API Keys" />
-                    <StatCard value={stats.toggles} label="Features On" />
-                </div>
-
                 <div data-theme-part="panel" className="p-5 rounded-2xl border border-border/40 bg-card/50 shadow-sm space-y-3">
                     <h3 className="text-sm font-semibold">Instance Details</h3>
                     <div className="grid gap-3 text-sm">
@@ -565,14 +564,15 @@ function SectionContent({
                             </div>
                         </Detail>
                         <Detail label="Account"><span className="font-medium">{accountName}</span></Detail>
-                        <Detail label="Version"><span className="font-mono text-xs">{status?.version ? `v${status.version}` : 'Unknown'}</span></Detail>
+                        {version ? <Detail label="Version"><span className="font-mono text-xs">{version}</span></Detail> : null}
+                        <Detail label="Trusted user"><span className="text-xs">{trusted === true ? 'Yes' : trusted === false ? 'No' : 'Unknown'}</span></Detail>
                     </div>
                 </div>
 
                 <div data-theme-part="panel" className="p-4 rounded-2xl border border-border/40 bg-card/50 shadow-sm space-y-2">
                     <h3 className="text-sm font-semibold">Install URL</h3>
                     <div className="flex items-center gap-2">
-                        <code data-theme-part="field" className="flex-1 text-xs font-mono bg-muted/30 px-3 py-2 rounded-lg truncate">{transportUrl}</code>
+                        <code data-theme-part="field" className="flex-1 text-xs font-mono bg-muted/30 px-3 py-2 rounded-lg truncate">{maskSecretUrl(transportUrl)}</code>
                         <CopyButton value={transportUrl} variant="outline" className="h-9 w-9 shrink-0" iconSize={14} />
                     </div>
                 </div>
@@ -666,10 +666,7 @@ function SectionContent({
                         <h3 className="text-sm font-semibold">Settings</h3>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             {keySections.map(section => (
-                                <div key={section.key} data-theme-part="panel" className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-border/30 bg-muted/10">
-                                    <span className="text-xs font-medium shrink-0">{section.label}</span>
-                                    <span className="text-xs text-muted-foreground truncate">{getSectionSummary(section.key, section.data)}</span>
-                                </div>
+                                <SettingRow key={section.key} sectionKey={section.key} label={section.label} data={section.data} />
                             ))}
                         </div>
                     </div>

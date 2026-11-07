@@ -9,9 +9,10 @@ const REST_TIMEOUT_MS = 15000
 
 import { Buffer } from 'node:buffer'
 import { traced } from '../utils/trace.js'
-import { resilientFetch } from '../utils/api-resilience.js'
+import { guardedResilientFetch, guardedWebFetch } from '../utils/safe-fetch.js'
 
 const BACKUP_EXPORT_MAX_BYTES = 50 * 1024 * 1024
+const RPC_DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 
 // Hard size ceiling: abort oversized upstream bodies instead of materializing them.
 async function readJsonCapped(res, maxBytes) {
@@ -50,11 +51,12 @@ export function createNuvioDriver(options = {}) {
 
     const rpc = async (fn, body, accessToken, opts = {}) => {
         // idempotent:true on POST is load-bearing (preserves 5xx-retry semantics for upsert ops).
-        const res = await resilientFetch(`${baseUrl}${RPC_PATH}/${fn}`, {
+        const res = await guardedResilientFetch(`${baseUrl}${RPC_PATH}/${fn}`, {
             method: 'POST',
             headers: makeHeaders(accessToken),
             body: JSON.stringify(body),
             timeout: RPC_TIMEOUT_MS,
+            maxBytes: opts.maxBytes > 0 ? opts.maxBytes : RPC_DEFAULT_MAX_BYTES,
             retries: opts.retries ?? 2,
             idempotent: true
         })
@@ -134,7 +136,7 @@ export function createNuvioDriver(options = {}) {
 
         async authenticate(email, password) {
             return traced('nuvioServerDriver', 'authenticate', {}, async () => {
-                const res = await fetch(`${baseUrl}${TOKEN_GRANT_PATH}?grant_type=password`, {
+                const res = await guardedWebFetch(`${baseUrl}${TOKEN_GRANT_PATH}?grant_type=password`, {
                     method: 'POST',
                     headers: makeHeaders(null),
                     body: JSON.stringify({ email, password }),
@@ -157,7 +159,7 @@ export function createNuvioDriver(options = {}) {
         },
 
         async register(email, password) {
-            const res = await fetch(`${baseUrl}/auth/v1/signup`, {
+            const res = await guardedWebFetch(`${baseUrl}/auth/v1/signup`, {
                 method: 'POST',
                 headers: makeHeaders(null),
                 body: JSON.stringify({ email, password }),
@@ -188,7 +190,7 @@ export function createNuvioDriver(options = {}) {
 
         async refreshAccessToken(refreshToken) {
             return traced('nuvioServerDriver', 'refreshAccessToken', {}, async () => {
-                const res = await fetch(`${baseUrl}${TOKEN_GRANT_PATH}?grant_type=refresh_token`, {
+                const res = await guardedWebFetch(`${baseUrl}${TOKEN_GRANT_PATH}?grant_type=refresh_token`, {
                     method: 'POST',
                     headers: makeHeaders(null),
                     body: JSON.stringify({ refresh_token: refreshToken }),
@@ -213,7 +215,7 @@ export function createNuvioDriver(options = {}) {
             return traced('nuvioServerDriver', 'readAddons', {}, async () => {
                 const idx = await resolveProfileIndex(accessToken, profileId)
                 const query = `select=*&profile_id=eq.${idx}&order=sort_order`
-                const res = await fetch(`${baseUrl}${REST_PATH}/addons?${query}`, {
+                const res = await guardedWebFetch(`${baseUrl}${REST_PATH}/addons?${query}`, {
                     method: 'GET',
                     headers: makeHeaders(accessToken),
                     signal: AbortSignal.timeout(REST_TIMEOUT_MS)
@@ -271,7 +273,7 @@ export function createNuvioDriver(options = {}) {
         async readPlugins(accessToken, profileId) {
             const idx = await resolveProfileIndex(accessToken, profileId)
             const query = `select=*&profile_id=eq.${idx}&order=sort_order`
-            const res = await fetch(`${baseUrl}${REST_PATH}/plugins?${query}`, {
+            const res = await guardedWebFetch(`${baseUrl}${REST_PATH}/plugins?${query}`, {
                 method: 'GET',
                 headers: makeHeaders(accessToken),
                 signal: AbortSignal.timeout(REST_TIMEOUT_MS)
@@ -331,7 +333,7 @@ export function createNuvioDriver(options = {}) {
         // signup (Nuvio's own clients do the same). Reuse the token across polls (rate-limited).
         async getAnonymousToken() {
             return traced('nuvioServerDriver', 'getAnonymousToken', {}, async () => {
-                const res = await fetch(`${baseUrl}/auth/v1/signup`, {
+                const res = await guardedWebFetch(`${baseUrl}/auth/v1/signup`, {
                     method: 'POST',
                     headers: makeHeaders(null),
                     body: JSON.stringify({ data: { tv_client: 'aiomanager' } }),
@@ -375,7 +377,7 @@ export function createNuvioDriver(options = {}) {
         // Edge function, not an RPC: apikey-only auth, no rpc() retry wrapper.
         async exchangeTvLogin({ code, deviceNonce }) {
             return traced('nuvioServerDriver', 'exchangeTvLogin', {}, async () => {
-                const res = await fetch(`${baseUrl}/functions/v1/tv-logins-exchange`, {
+                const res = await guardedWebFetch(`${baseUrl}/functions/v1/tv-logins-exchange`, {
                     method: 'POST',
                     headers: makeHeaders(null),
                     body: JSON.stringify({ code, device_nonce: deviceNonce }),

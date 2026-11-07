@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Loader2, Lock, Mail, Key, QrCode, RefreshCw, Eye, EyeOff } from 'lucide-react'
 import { loginWithCredentials } from '@/api/auth'
@@ -28,6 +28,8 @@ interface StremioSetupDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     onComplete: (signIn: StremioSignIn) => Promise<void>
+    /** The caller unmounts this dialog on return, which discards all wizard state. */
+    onBackToPicker?: () => void
 }
 
 const errMsg = (e: unknown, fallback = 'Try again.') => (e instanceof Error ? e.message : fallback)
@@ -38,7 +40,7 @@ const errMsg = (e: unknown, fallback = 'Try again.') => (e instanceof Error ? e.
  * "needs sign-in" connection can no longer be created from here — and the same remote
  * login cannot be bound twice to one account.
  */
-export function StremioSetupDialog({ accountId, open, onOpenChange, onComplete }: StremioSetupDialogProps) {
+export function StremioSetupDialog({ accountId, open, onOpenChange, onComplete, onBackToPicker }: StremioSetupDialogProps) {
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
     const [showPassword, setShowPassword] = useState(false)
@@ -93,6 +95,7 @@ export function StremioSetupDialog({ accountId, open, onOpenChange, onComplete }
                 email: (typeof user.email === 'string' && user.email.trim()) || fallbackEmail,
                 userId: user._id,
             })
+            onOpenChange(false)
             setPassword('')
             setAuthKeyInput('')
             setEmail('')
@@ -249,6 +252,11 @@ export function StremioSetupDialog({ accountId, open, onOpenChange, onComplete }
                         <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/10 border border-destructive/20 px-3 py-2 text-xs text-destructive">
                             {error}
                         </div>
+                    )}
+                    {onBackToPicker && (
+                        <DialogFooter>
+                            <Button variant="outline" disabled={busy} onClick={onBackToPicker}>Back to connection picker</Button>
+                        </DialogFooter>
                     )}
                 </DialogContent>
             </Dialog>

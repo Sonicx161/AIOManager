@@ -3,7 +3,7 @@ import { createJellyfinClient, JellyfinError, normalizeJellyfinUrl } from '../je
 import type { JellyfinWatchClient } from '../jellyfin/client.ts'
 import { openJellyfinSecret } from '../jellyfin/connection-data.ts'
 import type { JellyfinSecret } from '../jellyfin/connection-data.ts'
-import type { JellyfinItem, JellyfinProduct, JellyfinServerDetails, JellyfinUser } from '../jellyfin/types.ts'
+import type { JellyfinItem, JellyfinProduct, JellyfinServerDetails, JellyfinUser, JellyfinUserDataUpdate } from '../jellyfin/types.ts'
 import { hasSavedWatchState, sameWatchTitle, sourceTime, watchFingerprint } from './records.ts'
 import type { MigrationProgress, MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
 import {
@@ -18,6 +18,7 @@ import {
     watchRecordFromItem,
 } from './jellyfin-records.ts'
 import type { ParsedWatchIdentity } from './jellyfin-records.ts'
+import { createWatchStateRequestGate } from './request-gate.ts'
 
 const SERIES_READ_WORKERS = 4
 const EPISODE_CHILDREN_PAGE = 500
@@ -86,10 +87,11 @@ function capabilitiesForProduct(product: JellyfinProduct): WatchStateDestination
     }
     const notes: string[] = [EPISODE_LIMIT_NOTE]
     if (product === 'aiostreams') {
-        notes.push('AIOStreams keeps watched flags and resume points but cannot store original watch dates or play counts.')
+        notes.push('AIOStreams keeps exact watch dates only for titles with a known runtime, and cannot store play counts.')
         notes.push('Watched marks may be forwarded to the watch-state sinks this AIOStreams server reports to.')
+        return { watched: true, resume: true, dates: true, counts: false, combined: false, notes }
     } else if (product === 'aiometadata') {
-        notes.push('AIOMetadata keeps watched flags and resume points but cannot store original watch dates or play counts.')
+        notes.push('AIOMetadata keeps watched flags and resume points but ignores original watch dates and cannot store play counts.')
         notes.push('Watched marks may be forwarded to the trackers this AIOMetadata profile reports to.')
     } else {
         notes.push('The server product could not be verified, so original watch dates and play counts are not copied.')
@@ -207,10 +209,21 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
     signal.throwIfAborted()
     const capabilities = capabilitiesForProduct(binding.details.product)
     const useNativeInventory = binding.details.product === 'jellyfin' || binding.details.product === 'compatible'
+    const facadeGate = useNativeInventory ? null : createWatchStateRequestGate()
+    const client = facadeGate === null ? binding.client : {
+        ...binding.client,
+        getUser: (accessToken: string, userId: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.getUser(accessToken, userId, requestSignal)),
+        inspect: (accessToken: string, user: JellyfinUser, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.inspect(accessToken, user, requestSignal)),
+        readWatchItem: (accessToken: string, userId: string, itemId: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.readWatchItem(accessToken, userId, itemId, requestSignal)),
+        queryUserItems: (accessToken: string, userId: string, query: Parameters<JellyfinWatchClient['queryUserItems']>[2], requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.queryUserItems(accessToken, userId, query, requestSignal)),
+        readSessions: (accessToken: string, userId: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.readSessions(accessToken, userId, requestSignal)),
+        writeUserData: (accessToken: string, userId: string, itemId: string, update: Parameters<JellyfinWatchClient['writeUserData']>[3], requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.writeUserData(accessToken, userId, itemId, update, requestSignal)),
+    }
+    const gatedBinding: JellyfinBinding = { ...binding, client }
     let indexPromise: Promise<JellyfinLibraryIndex> | null = null
     const ensureIndex = (indexSignal: AbortSignal): Promise<JellyfinLibraryIndex> => {
         if (indexPromise === null) {
-            const built = buildJellyfinLibraryIndex(binding, indexSignal)
+            const built = buildJellyfinLibraryIndex(gatedBinding, indexSignal)
             indexPromise = built
             built.catch(() => {
                 if (indexPromise === built) indexPromise = null
@@ -221,7 +234,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
     const parentProviders = new Map<string, unknown>()
     const loadParent = async (key: string, parentSignal: AbortSignal): Promise<unknown> => {
         if (!parentProviders.has(key)) {
-            const providers = await readVerifiedSeriesProviders(binding, key, parentSignal)
+            const providers = await readVerifiedSeriesProviders(gatedBinding, key, parentSignal)
             parentProviders.set(key, providers)
         }
         return parentProviders.get(key)
@@ -238,9 +251,9 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         let truncatedByCap = false
         let complete = false
         while (episodes.length < EPISODE_CHILDREN_MAX) {
-            const page = await binding.client.queryUserItems(
-                binding.secret.accessToken,
-                binding.secret.userId,
+            const page = await gatedBinding.client.queryUserItems(
+                gatedBinding.secret.accessToken,
+                gatedBinding.secret.userId,
                 { parentId: seriesId, includeItemTypes: 'Episode', recursive: true, limit: EPISODE_CHILDREN_PAGE, startIndex: cursor },
                 listSignal
             )
@@ -325,9 +338,9 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
             if (parsed.type === 'movie') {
                 const id = packedFacadeItemId(identity)
                 if (id === null) continue
-                const items = await binding.client.queryUserItems(
-                    binding.secret.accessToken,
-                    binding.secret.userId,
+                const items = await gatedBinding.client.queryUserItems(
+                    gatedBinding.secret.accessToken,
+                    gatedBinding.secret.userId,
                     { ids: [id], includeItemTypes: 'Movie' },
                     resolveSignal
                 )
@@ -351,14 +364,40 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         }
         return [...verified.values()]
     }
+    // Per-run state: the scope is verified once per run (re-verified after an auth failure) and a
+    // series' ProviderIds are read once per run; only successful reads are cached.
+    let scopeVerified = false
+    const applyParents = new Map<string, unknown>()
+    const applyParent = async (key: string, parentSignal: AbortSignal): Promise<unknown> => {
+        const cached = applyParents.get(key)
+        if (cached !== undefined) return cached
+        const providers = await readVerifiedSeriesProviders(gatedBinding, key, parentSignal)
+        if (providers !== undefined) applyParents.set(key, providers)
+        return providers
+    }
+    const beginRun = async (): Promise<void> => {
+        scopeVerified = false
+        applyParents.clear()
+    }
     const apply = async (expected: WatchStateRecord, patch: WatchStatePatch, applySignal: AbortSignal): Promise<MigrationWriteResult> => {
+        try {
+            return await applyOnce(expected, patch, applySignal)
+        } catch (error) {
+            if (error instanceof JellyfinError && error.kind === 'auth') scopeVerified = false
+            throw error
+        }
+    }
+    const applyOnce = async (expected: WatchStateRecord, patch: WatchStatePatch, applySignal: AbortSignal): Promise<MigrationWriteResult> => {
         assertCurrent()
-        await reverifyJellyfinScope(binding, applySignal)
+        if (!scopeVerified) {
+            await reverifyJellyfinScope(gatedBinding, applySignal)
+            scopeVerified = true
+        }
         applySignal.throwIfAborted()
-        const fresh = await binding.client.readWatchItem(binding.secret.accessToken, binding.secret.userId, expected.id, applySignal)
+        const fresh = await gatedBinding.client.readWatchItem(gatedBinding.secret.accessToken, gatedBinding.secret.userId, expected.id, applySignal)
         if (!isWatchableLeaf(fresh)) throw new Error('Only movie or episode items can receive imported watch state.')
         const freshKey = seriesKeyOf(fresh)
-        const freshRecord = await watchRecordFromItem(fresh, freshKey !== undefined ? await readVerifiedSeriesProviders(binding, freshKey, applySignal) : undefined)
+        const freshRecord = await watchRecordFromItem(fresh, freshKey !== undefined ? await applyParent(freshKey, applySignal) : undefined)
         const sameTitle = expected.type === freshRecord.type
             && sameWatchTitle(expected, freshRecord)
             && expected.season === freshRecord.season
@@ -380,11 +419,11 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         if (hasSavedWatchState(freshRecord)) {
             return { status: 'conflict', message: 'The destination item has watch state the preview did not show. It will be kept.', record: freshRecord }
         }
-        const sessions = await binding.client.readSessions(binding.secret.accessToken, binding.secret.userId, applySignal)
+        const sessions = await gatedBinding.client.readSessions(gatedBinding.secret.accessToken, gatedBinding.secret.userId, applySignal)
         if (sessions.some(session => session.NowPlayingItem?.Id === expected.id)) {
             return { status: 'conflict', message: 'This title is playing on the destination right now. Import it after playback stops.', record: freshRecord }
         }
-        const body: { Played?: true; PlaybackPositionTicks?: number; LastPlayedDate?: string; PlayCount?: number } = {}
+        const body: JellyfinUserDataUpdate = {}
         if (patch.watched === true) body.Played = true
         if (patch.positionMs !== undefined && patch.positionMs > 0) {
             const ticks = msToTicks(patch.positionMs)
@@ -399,23 +438,46 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         if (Object.keys(body).length === 0) {
             return { status: 'unchanged', message: 'Nothing was selected to import for this title.', record: freshRecord }
         }
+        // AIOStreams stores no played date, but a back-dated stop at the full runtime is turned
+        // into a played mark carrying that date. Without a known runtime the date is dropped.
+        const aioStreams = binding.details.product === 'aiostreams'
+        let backdatedStop = false
+        let runtimeUnknown = false
+        if (aioStreams && body.Played === true && body.LastPlayedDate !== undefined) {
+            const runtime = freshRecord.durationMs !== undefined ? msToTicks(freshRecord.durationMs) : null
+            if (runtime !== null && runtime > 0) {
+                delete body.Played
+                body.PlaybackPositionTicks = runtime
+                backdatedStop = true
+            } else {
+                delete body.LastPlayedDate
+                runtimeUnknown = true
+            }
+        }
         assertCurrent()
         applySignal.throwIfAborted()
-        await binding.client.writeUserData(binding.secret.accessToken, binding.secret.userId, expected.id, body, applySignal)
-        const check = await binding.client.readWatchItem(binding.secret.accessToken, binding.secret.userId, expected.id, applySignal)
+        const written = await gatedBinding.client.writeUserData(gatedBinding.secret.accessToken, gatedBinding.secret.userId, expected.id, body, applySignal)
+        const check = await gatedBinding.client.readWatchItem(gatedBinding.secret.accessToken, gatedBinding.secret.userId, expected.id, applySignal)
         if (!isWatchableLeaf(check)) throw new Error(READBACK_FAILED)
         const checkKey = seriesKeyOf(check)
-        const checkRecord = await watchRecordFromItem(check, checkKey !== undefined ? await readVerifiedSeriesProviders(binding, checkKey, applySignal) : undefined)
+        const checkRecord = await watchRecordFromItem(check, checkKey !== undefined ? await applyParent(checkKey, applySignal) : undefined)
         if (!sameWatchTitle(expected, checkRecord)) throw new Error(READBACK_FAILED)
         const userData = check.UserData
-        if (body.Played !== undefined && userData?.Played !== true) throw new Error(READBACK_FAILED)
-        if (body.PlaybackPositionTicks !== undefined) {
+        if ((body.Played !== undefined || backdatedStop) && userData?.Played !== true) throw new Error(READBACK_FAILED)
+        if (body.PlaybackPositionTicks !== undefined && !backdatedStop) {
             const ticks = userData?.PlaybackPositionTicks
             if (typeof ticks !== 'number' || !Number.isFinite(ticks) || ticks !== body.PlaybackPositionTicks) throw new Error(READBACK_FAILED)
         }
-        if (body.LastPlayedDate !== undefined && sourceTime(userData?.LastPlayedDate) !== patch.playedAt) throw new Error(READBACK_FAILED)
-        if (body.PlayCount !== undefined && userData?.PlayCount !== body.PlayCount) throw new Error(READBACK_FAILED)
-        return { status: 'applied', message: 'Saved and verified by an exact readback.', record: checkRecord }
+        let dateKept = true
+        if (body.LastPlayedDate !== undefined && sourceTime(userData?.LastPlayedDate) !== Date.parse(body.LastPlayedDate)) {
+            if (!aioStreams) throw new Error(READBACK_FAILED)
+            dateKept = false
+        }
+        if (body.PlayCount !== undefined && written?.via !== 'played-items' && userData?.PlayCount !== body.PlayCount) throw new Error(READBACK_FAILED)
+        const message = runtimeUnknown ? 'Saved and verified. The runtime was unknown, so no original date was sent.'
+            : !dateKept ? 'Saved and verified. The server kept its own watch date.'
+                : 'Saved and verified by an exact readback.'
+        return { status: 'applied', message, record: checkRecord }
     }
     return {
         connectionId: connection.id,
@@ -425,5 +487,6 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         capabilities,
         resolve: useNativeInventory ? resolveNative : resolveFacade,
         apply,
+        beginRun,
     }
 }

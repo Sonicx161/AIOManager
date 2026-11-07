@@ -61,6 +61,8 @@ export interface ActivityItem {
     isInProgress: boolean  // timeOffset > 0 && progress < 90
     season?: number
     episode?: number
+    /** Inferred episode bounds for a watch whose exact episode was never recorded. */
+    episodeRange?: { season: number; from: number; to: number }
     overallTimeWatched?: number
     genres?: string[]
     source?: string // platform the watch came from: 'stremio' | 'nuvio' | ... (absent = unknown)
@@ -68,6 +70,14 @@ export interface ActivityItem {
     backfill?: boolean // recovered from Stremio's watched-bitfield; no real per-episode time, so excluded from time-based Replay stats
     /** Imported saved watch state (bitfield aggregate series / flagged-only movie): no real watch dates, presented as saved state. */
     importedSavedState?: boolean
+    /** A real play whose time came from an import stamp, shown as approximate. */
+    timeApproximate?: boolean
+    /**
+     * Authoritative current resume position (ms) from the live overlay; present only
+     * when the current library state supplied one. Presence means `watched` is
+     * historical credit, not the current resume (Sol R2-10).
+     */
+    liveResume?: number
     /** Verified episode count/ranges recovered from the watched bitfield (series saved state only). */
     savedEpisodes?: SavedEpisodesSummary
     readOnly?: boolean
@@ -75,6 +85,8 @@ export interface ActivityItem {
     mediaSources?: string[]
     /** Exact user-scoped server items contributing to this observation. */
     mediaTargets?: Array<{ connectionId: string; itemId: string }>
+    /** Jellyfin ProviderIds.Tmdb, kept for artwork fallback only; never part of row identity. */
+    tmdbId?: number
 }
 
 // A detected watch event from snapshot diffing.
@@ -100,6 +112,8 @@ export interface WatchEvent {
     /** Frozen identity scope (canonical events carry attribution but keep the bare scope). */
     scopeKey?: string
     timesWatched?: number
+    /** Server rows only: Stremio's accumulated watch time when the row was recorded. */
+    overall_time_watched?: number
     backfill?: boolean // recovered from Stremio's watched-bitfield (no real per-episode timestamp)
     /**
      * Positive per-episode completion confirmation stamped by recordBackfillEpisodes when
@@ -119,4 +133,12 @@ export interface SnapshotItem {
     duration?: number
     season?: number
     episode?: number
+    /** Fingerprint of the saved watched marks (series bitfield, movie flag and count). */
+    watchMark?: string
+    /** Rebuilt from a server row: its times and resume position are unknown. */
+    fromServer?: boolean
+    /** Whether this episode's own bit was set in the watched bitfield (undefined = unknown). */
+    ownBit?: boolean
+    /** ownBit is unknown only because the series episode list was not cached; the bitfield itself is well formed. */
+    ownBitPending?: boolean
 }

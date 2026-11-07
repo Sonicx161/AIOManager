@@ -14,6 +14,10 @@ export interface WatchStateRecord {
     durationMs?: number
     playedAt: number | null
     resumePlayedAt?: number | null
+    /** 'estimated' dates are display-only and are never written to a destination; absent means a native exact date. */
+    dateConfidence?: 'exact' | 'estimated'
+    /** The one resume episode of a series whose item-level date is exact for this episode. */
+    resumeSlot?: true
     playCount?: number
     unmodified?: boolean
     notes?: string[]
@@ -45,6 +49,7 @@ export interface WatchStatePatch {
     durationMs?: number
     playedAt?: number
     resumePlayedAt?: number | null
+    resumeSlot?: true
     playCount?: number
 }
 
@@ -58,6 +63,8 @@ export interface WatchStateDestination extends WatchStateEndpoint {
     capabilities: { watched: boolean; resume: boolean; dates: boolean; counts?: boolean; combined?: boolean; requiresDates?: boolean; requiresDuration?: boolean; notes: string[] }
     resolve(record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]>
     apply(expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult>
+    /** Called once before the first write of an import run: drops per-run caches and re-verifies the session. */
+    beginRun?(signal: AbortSignal): Promise<void>
 }
 
 export interface MigrationOptions {
@@ -73,6 +80,8 @@ export interface MigrationRow {
     status: 'ready' | 'unchanged' | 'conflict' | 'skipped' | 'unsupported'
     reason: string
     notes: string[]
+    /** The write carries state but no exact watch time, so it is sent without a date. */
+    undated?: true
 }
 
 export interface WatchMigrationPlan {

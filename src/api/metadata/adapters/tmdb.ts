@@ -209,7 +209,7 @@ export function pickTmdbIdFromFind(
 async function getAuthHeaders(): Promise<Record<string, string>> {
     try {
         const { useSyncStore } = await import('@/store/syncStore')
-        const { deriveSyncToken } = await import('@/lib/crypto')
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
         const auth = useSyncStore.getState().auth
         if (!auth?.isAuthenticated) {
             if (import.meta.env?.DEV) console.warn('[TMDB] No auth session found')
@@ -217,7 +217,7 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
         }
         return {
             'x-sync-user': auth.id,
-            'x-sync-password': await deriveSyncToken(auth.password),
+            'x-sync-password': await getSyncPasswordHeader(auth),
         }
     } catch (err) {
         if (import.meta.env?.DEV) console.error('[TMDB] Failed to build auth headers:', err)
@@ -736,7 +736,7 @@ export interface SearchResult {
     voteAverage?: number
 }
 
-export async function searchCinemeta(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+export async function searchCinemeta(query: string, signal?: AbortSignal, mediaType?: 'movie' | 'series'): Promise<SearchResult[]> {
     if (!query.trim()) return []
     const q = encodeURIComponent(query.trim())
     const mapMeta = (m: Record<string, unknown>): SearchResult | null => {
@@ -764,11 +764,12 @@ export async function searchCinemeta(query: string, signal?: AbortSignal): Promi
                 return null
             } catch { return null }
         }
+        if (mediaType) return (await tryEndpoint(`https://v3-cinemeta.strem.io/catalog/${mediaType}/top/search=${q}.json`)) ?? []
         const [movies, series] = await Promise.all([
             tryEndpoint(`https://v3-cinemeta.strem.io/catalog/movie/top/search=${q}.json`),
             tryEndpoint(`https://v3-cinemeta.strem.io/catalog/series/top/search=${q}.json`),
         ])
-        return movies ?? series ?? []
+        return [...(movies ?? []), ...(series ?? [])]
     } catch {
         return []
     }

@@ -6,7 +6,7 @@
 // once a token has fully expired the user must re-authenticate.
 const DEFAULT_BASE_URL = 'https://realbase.fortheweak.cloud'
 
-import { resilientFetch } from '../utils/api-resilience.js'
+import { guardedResilientFetch } from '../utils/safe-fetch.js'
 
 const AUTH_PATH = '/api/collections/users/auth-with-password'
 const REFRESH_PATH = '/api/collections/users/auth-refresh'
@@ -28,6 +28,12 @@ const DEFAULT_TOKEN_TTL_MS = 14 * 24 * 60 * 60 * 1000
 const USER_FIELD = 'user'
 const ADDON_TYPE = 'stremio'
 
+// R2-08: the authorized empty clear is removed for this beta (same reason as the
+// client driver: duplicate records and guest-shaped reads make emptiness
+// unverifiable), so an empty projection skips with this plain reason instead of
+// a false success.
+const REALSTREAM_CLEAR_UNSUPPORTED = "RealStream can't be cleared from AIOManager yet; remove the addons in RealStream"
+
 function decodeJwtExpMs(token) {
     try {
         const payload = token.split('.')[1]
@@ -36,6 +42,23 @@ function decodeJwtExpMs(token) {
     } catch {
         return null
     }
+}
+
+function decodeJwtId(token) {
+    try {
+        const payload = token.split('.')[1]
+        const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+        return typeof json.id === 'string' && json.id ? json.id : null
+    } catch {
+        return null
+    }
+}
+
+// PocketBase scopes addon records to the authenticated user; a stale stored userId both
+// hides records from reads and makes record creation a 400 invalid relation (burner r04),
+// so the token's own identity wins whenever it can be read.
+export function resolveRealStreamUserId(accessToken, storedUserId) {
+    return decodeJwtId(accessToken) || storedUserId
 }
 
 function deriveAddonName(url) {
@@ -111,7 +134,7 @@ export function createRealStreamDriver(options = {}) {
     })
 
     const request = async (method, path, accessToken, body) => {
-        const res = await resilientFetch(`${baseUrl}${path}`, {
+        const res = await guardedResilientFetch(`${baseUrl}${path}`, {
             method,
             headers: makeHeaders(accessToken),
             timeout: 15000,
@@ -151,7 +174,7 @@ export function createRealStreamDriver(options = {}) {
         capabilities: ['addons'],
 
         async authenticate(email, password) {
-            const res = await resilientFetch(`${baseUrl}${AUTH_PATH}`, {
+            const res = await guardedResilientFetch(`${baseUrl}${AUTH_PATH}`, {
                 method: 'POST',
                 headers: makeHeaders(null),
                 body: JSON.stringify({ identity: email, password }),
@@ -169,7 +192,7 @@ export function createRealStreamDriver(options = {}) {
         },
 
         async register(email, password, name) {
-            const res = await resilientFetch(`${baseUrl}/api/collections/users/records`, {
+            const res = await guardedResilientFetch(`${baseUrl}/api/collections/users/records`, {
                 method: 'POST',
                 headers: makeHeaders(null),
                 body: JSON.stringify({ email, password, passwordConfirm: password, name: name || email.split('@')[0] }),
@@ -195,7 +218,7 @@ export function createRealStreamDriver(options = {}) {
         // PocketBase extends the current token; it does NOT use a separate refresh token, so
         // the still-valid access token is what's passed in. A 401/403 here means re-login.
         async refreshAccessToken(accessToken) {
-            const res = await resilientFetch(`${baseUrl}${REFRESH_PATH}`, {
+            const res = await guardedResilientFetch(`${baseUrl}${REFRESH_PATH}`, {
                 method: 'POST',
                 headers: makeHeaders(accessToken),
                 timeout: AUTH_TIMEOUT_MS,
@@ -212,14 +235,17 @@ export function createRealStreamDriver(options = {}) {
 
         async readAddons(accessToken, userId) {
             if (!userId) throw new Error('RealStream readAddons requires a userId')
-            const records = await listRecords(accessToken, userId)
+            const records = await listRecords(accessToken, resolveRealStreamUserId(accessToken, userId))
             const data = records[0]?.data
             return Array.isArray(data) ? data.map(toDescriptor) : []
         },
 
         // The whole collection is a single record's `data` array, so a push is a full replace:
         // PATCH the existing record, or POST one if the user has none yet. The reconciler hands
-        // us the already enabled-filtered canonical list.
+        // us the already enabled-filtered canonical list. R2-08: an empty projection is never
+        // a confirmed write (the authorized clear is removed for this beta: duplicate records
+        // and guest-shaped reads make emptiness unverifiable), so it skips with a plain
+        // reason and zero mutating requests.
         async writeAddons(accessToken, addons, userId) {
             if (!userId) throw new Error('RealStream writeAddons requires a userId')
 
@@ -228,16 +254,17 @@ export function createRealStreamDriver(options = {}) {
                 .map(toRecordAddon)
 
             if (data.length === 0) {
-                // Don't wipe the collection on an empty push (matches Nuvio's skip-on-empty guard).
-                return { skipped: true, reason: 'No valid addons to push' }
+                const reason = (addons || []).length === 0 ? REALSTREAM_CLEAR_UNSUPPORTED : 'No valid addons to push'
+                return { skipped: true, reason }
             }
 
-            const records = await listRecords(accessToken, userId)
+            const uid = resolveRealStreamUserId(accessToken, userId)
+            const records = await listRecords(accessToken, uid)
             const existing = records[0]
             if (existing) {
                 return request('PATCH', `${ADDONS_PATH}/${existing.id}`, accessToken, { data })
             }
-            return request('POST', ADDONS_PATH, accessToken, { [USER_FIELD]: userId, data })
+            return request('POST', ADDONS_PATH, accessToken, { [USER_FIELD]: uid, data })
         }
     }
 }

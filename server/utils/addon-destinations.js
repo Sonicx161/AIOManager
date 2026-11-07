@@ -88,7 +88,37 @@ export function chainGuardFailureWithExclusions(preList, postList, managedChains
     const byDesign = deliberatelyAbsentUrls instanceof Set && deliberatelyAbsentUrls.size > 0 ? deliberatelyAbsentUrls : null
     const urlOf = (a) => normalizeAddonUrl(a?.transportUrl || '')
     const pre = new Set((preList || []).map(urlOf).filter(Boolean))
-    const post = new Set((postList || []).map(urlOf).filter(Boolean))
+    const post = new Set((postList || []).filter(row => row?.flags?.enabled !== false && row?.enabled !== false).map(urlOf).filter(Boolean))
+    // A provider can return a chain member under a swapped transport URL while
+    // retaining its unique manifest id. Treat that as the same member as the
+    // one-active derivation does. Duplicate ids remain deliberately ambiguous.
+    const preIdCounts = new Map()
+    const postIdCounts = new Map()
+    for (const row of preList || []) {
+        const id = row?.manifest?.id
+        if (id) preIdCounts.set(id, (preIdCounts.get(id) || 0) + 1)
+    }
+    for (const row of postList || []) {
+        if (row?.flags?.enabled === false || row?.enabled === false) continue
+        const id = row?.manifest?.id
+        if (id) postIdCounts.set(id, (postIdCounts.get(id) || 0) + 1)
+    }
+    const uniqueChainIds = new Map()
+    for (const chain of managedChains || []) {
+        const members = new Set((chain?.urls || []).map((u) => normalizeAddonUrl(u)).filter(Boolean))
+        for (const row of preList || []) {
+            const id = row?.manifest?.id
+            const url = urlOf(row)
+            if (!id || preIdCounts.get(id) !== 1 || !members.has(url)) continue
+            uniqueChainIds.set(id, url)
+        }
+    }
+    const postEffective = new Set(post)
+    for (const row of postList || []) {
+        const id = row?.manifest?.id
+        const mapped = id && postIdCounts.get(id) === 1 ? uniqueChainIds.get(id) : null
+        if (mapped) postEffective.add(mapped)
+    }
     for (const chain of managedChains || []) {
         const members = (chain?.urls || []).map((u) => normalizeAddonUrl(u)).filter(Boolean)
         if (members.length === 0) continue
@@ -97,19 +127,19 @@ export function chainGuardFailureWithExclusions(preList, postList, managedChains
         const carriedDeliberatelyExcluded = carried.length > 0 && carried.every((u) => excluded.has(u))
         if (!carriedDeliberatelyExcluded) {
             // Parity floor: the write may not leave the chain with no members at all.
-            const survivors = members.filter((u) => post.has(u))
+            const survivors = members.filter((u) => postEffective.has(u))
             if (survivors.length === 0) {
-                return `${members.length} member(s), survivors 0, active present ${target ? post.has(target) : 'n/a'}`
+                return `${members.length} member(s), survivors 0, active present ${target ? postEffective.has(target) : 'n/a'}`
             }
-            if (target && !excluded.has(target) && !post.has(target)) {
+            if (target && !excluded.has(target) && !postEffective.has(target)) {
                 return `${members.length} member(s), active tier ${target} missing`
             }
         }
         for (const u of carried) {
             if (excluded.has(u)) continue
             if (byDesign && byDesign.has(u)) continue
-            if (!post.has(u)) {
-                return `${members.length} member(s), dropped ${u}, active present ${target ? post.has(target) : 'n/a'}`
+            if (!postEffective.has(u)) {
+                return `${members.length} member(s), dropped ${u}, active present ${target ? postEffective.has(target) : 'n/a'}`
             }
         }
     }

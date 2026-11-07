@@ -39,3 +39,14 @@ export async function deleteJellyfinWatchItems(
     })
     return kept
 }
+
+/** Media connections whose server history an Activity delete changed. */
+export function mediaDeleteTargets(items: ActivityItem[]): Array<{ accountId: string; connectionId: string }> {
+    const seen = new Map<string, { accountId: string; connectionId: string }>()
+    for (const item of items) {
+        if (item.source !== 'jellyfin' && !item.mediaTargets?.length) continue
+        const ids = item.mediaTargets?.length ? item.mediaTargets.map(target => target.connectionId) : [item.sourceConnectionId || '']
+        for (const connectionId of ids) seen.set(JSON.stringify([item.accountId, connectionId]), { accountId: item.accountId, connectionId })
+    }
+    return [...seen.values()]
+}

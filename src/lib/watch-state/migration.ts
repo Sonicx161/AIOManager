@@ -1,6 +1,13 @@
-import { hasSavedWatchState, matchesWatchPatch, sameWatchTitle } from './records.ts'
+import { hasSavedWatchState, matchesWatchPatch, sameWatchTitle, undatedRowCount } from './records.ts'
 import { migrationFailure, migrationFailureMessage, WatchMigrationError } from './failures.ts'
-import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateSnapshot, WatchStateSource } from './types.ts'
+import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
+
+function isTransientMatchFailure(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false
+    const candidate = error as { kind?: unknown; status?: unknown }
+    return candidate.kind === 'server' || candidate.kind === 'network' || candidate.kind === 'timeout'
+        || candidate.status === 429 || candidate.status === 503
+}
 
 export async function planWatchMigration(source: WatchStateSnapshot, destination: WatchStateDestination, options: MigrationOptions, signal: AbortSignal, progress?: MigrationProgress): Promise<WatchMigrationPlan> {
     if (source.scope === destination.scope) throw new Error('Choose a different remote user or server for the destination.')
@@ -35,9 +42,12 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
                 continue
             }
             const patch: NonNullable<MigrationRow['patch']> = {}
-            const resumeDate = record.resumePlayedAt !== undefined ? record.resumePlayedAt : record.playedAt
+            const exactDates = record.dateConfidence !== 'estimated'
+            const playedAt = exactDates ? record.playedAt : null
+            const resumePlayedAt = record.resumePlayedAt === undefined ? undefined : exactDates ? record.resumePlayedAt : null
+            const resumeDate = resumePlayedAt !== undefined ? resumePlayedAt : playedAt
             if (options.watched && record.watched === true) {
-                if (destination.capabilities.requiresDates && record.playedAt === null) row.notes.push('This destination requires an original completion date. The undated watched flag cannot be copied.')
+                if (destination.capabilities.requiresDates && playedAt === null) row.notes.push('This destination requires an original completion date. The undated watched flag cannot be copied.')
                 else if (destination.capabilities.watched) patch.watched = true
                 else row.notes.push('The destination cannot import watched flags.')
             }
@@ -57,16 +67,32 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
                 finish()
                 continue
             }
-            const selectedDate = patch.watched ? record.playedAt : resumeDate
+            const selectedDate = patch.watched ? playedAt : resumeDate
             if (selectedDate !== null && destination.capabilities.dates) patch.playedAt = selectedDate
-            if (patch.positionMs !== undefined && destination.capabilities.dates && record.resumePlayedAt !== undefined) patch.resumePlayedAt = record.resumePlayedAt
+            if (patch.positionMs !== undefined && destination.capabilities.dates && resumePlayedAt !== undefined) patch.resumePlayedAt = resumePlayedAt
+            if (record.resumeSlot === true && destination.capabilities.dates) patch.resumeSlot = true
+            if (selectedDate === null) row.undated = true
             if (!destination.capabilities.dates) row.notes.push('Original watch dates cannot be preserved by this destination.')
-            else if (record.playedAt === null) row.notes.push('The source has no reliable watch date. No original date can be copied.')
+            else if (selectedDate === null) row.notes.push('The source has no exact watch date. No original date can be copied.')
             if (patch.watched && record.playCount !== undefined && record.playCount > 0) {
                 if (destination.capabilities.counts && Number.isSafeInteger(record.playCount)) patch.playCount = record.playCount
                 else row.notes.push('Historical play counts cannot be preserved by this destination.')
             }
-            const matches = await destination.resolve(record, matchingSignal)
+            let matches: WatchStateRecord[]
+            try {
+                matches = await destination.resolve(record, matchingSignal)
+            } catch (error) {
+                // A facade can rate-limit or briefly lose upstream metadata while
+                // matching a large source. Keep the preview useful and retryable:
+                // one bad match must not discard every row already resolved.
+                if (isTransientMatchFailure(error)) {
+                    row.status = 'skipped'
+                    row.reason = 'The destination temporarily limited matching for this title. Preview again to retry it.'
+                    finish()
+                    continue
+                }
+                throw error
+            }
             matchingSignal.throwIfAborted()
             const verified = matches.filter(item => sameWatchTitle(record, item))
             if (verified.length !== 1 || matches.length !== 1) {
@@ -122,6 +148,8 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
     const fresh = await source.read(signal, progress)
     signal.throwIfAborted()
     if (fresh.scope !== plan.source.scope || fresh.connectionId !== plan.source.connectionId) throw new Error('The source user or profile changed. Preview again before importing.')
+    await destination.beginRun?.(signal)
+    signal.throwIfAborted()
     const byId = new Map<string, typeof fresh.records>()
     for (const record of fresh.records) byId.set(record.id, [...(byId.get(record.id) || []), record])
     for (let index = 0; index < rows.length; index++) {
@@ -158,13 +186,15 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
 
 export function migrationReport(plan: WatchMigrationPlan, results: MigrationResult[]) {
     const byId = new Map(results.map(result => [result.rowId, result]))
+    const undated = undatedRowCount(plan.rows)
     return {
         version: 1, createdAt: new Date(plan.createdAt).toISOString(), exportedAt: new Date().toISOString(),
         source: { label: plan.source.label, subject: plan.source.subject, complete: plan.source.complete, count: plan.source.records.length },
         destination: { label: plan.destination.label, subject: plan.destination.subject }, options: plan.options, notes: plan.notes,
+        summary: { undated },
         rows: plan.rows.map(row => ({
             title: row.source.title, seriesTitle: row.source.seriesTitle, episodeTitle: row.source.episodeTitle, type: row.source.type, season: row.source.season, episode: row.source.episode, identities: row.source.identities,
-            sourceItemId: row.source.id, destinationItemId: row.target?.id, sourceWatchDate: row.source.playedAt === null ? null : new Date(row.source.playedAt).toISOString(),
+            sourceItemId: row.source.id, destinationItemId: row.target?.id, sourceWatchDate: row.source.playedAt === null ? null : new Date(row.source.playedAt).toISOString(), dateConfidence: row.source.playedAt === null ? null : row.source.dateConfidence ?? 'exact', undated: row.undated === true,
             before: row.target ? { watched: row.target.watched, positionMs: row.target.positionMs, playedAt: row.target.playedAt, playCount: row.target.playCount } : null,
             requested: row.patch, previewStatus: row.status, reason: row.reason, notes: row.notes, result: byId.get(row.id),
         })),

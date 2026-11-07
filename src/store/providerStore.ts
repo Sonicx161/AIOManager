@@ -49,9 +49,10 @@ interface ProviderStore extends ProviderState {
     refreshProvider: (id: string) => Promise<void>
 }
 
-const getDaysRemaining = (dateString: string | null) => {
-    if (!dateString) return 0
+export const getDaysRemaining = (dateString: string | null): number | null => {
+    if (!dateString) return null
     const expirationDate = new Date(dateString)
+    if (Number.isNaN(expirationDate.getTime())) return null
     const today = new Date()
     const timeDiff = expirationDate.getTime() - today.getTime()
     const days = Math.ceil(timeDiff / (1000 * 3600 * 24))
@@ -107,7 +108,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                         ...state.health,
                         [id]: {
                             ...state.health[id],
-                            status: daysRemaining > 0 ? 'active' : 'expired',
+                            status: (daysRemaining ?? 0) > 0 ? 'active' : 'expired',
                             daysRemaining,
                             expiresAt,
                             loading: false,
@@ -139,16 +140,16 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
             const { auth: syncAuth } = useSyncStore.getState()
             const proxyAuthHeaders: Record<string, string> = {}
             if (syncAuth.isAuthenticated) {
-                const { deriveSyncToken } = await import('@/lib/crypto')
+                const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
                 proxyAuthHeaders['x-sync-user'] = syncAuth.id
-                proxyAuthHeaders['x-sync-password'] = await deriveSyncToken(syncAuth.password)
+                proxyAuthHeaders['x-sync-password'] = await getSyncPasswordHeader(syncAuth)
             }
 
             if (!proxyAuthHeaders['x-sync-user']) {
                 throw new Error('Sync login required for health checks')
             }
 
-            let daysRemaining = 0
+            let daysRemaining: number | null = 0
             let expiresAt: string | null = null
             let status: ProviderHealth['status'] = 'active'
 
@@ -250,7 +251,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                 return
             }
 
-            if (daysRemaining <= 0) status = 'expired'
+            if ((daysRemaining ?? 0) <= 0) status = 'expired'
 
             set((state) => ({
                 health: {

@@ -1,15 +1,19 @@
 import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
+import { registerCacheLayer } from '../lib/ops-metrics.js'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { AIOSTREAMS_USER_API_THROTTLE_MS, DATASTORE_META_BATCH_CONCURRENCY, DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS, DATASTORE_META_BATCH_MAX, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, STREMIO_API, VERSION } from '../config.js'
 import { requireProxyAuth, verifyAuth } from '../auth.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
-import { isSafeUrlResolved } from '../utils/ssrf.js'
+import { isSafeUrl, isSafeUrlResolved } from '../utils/ssrf.js'
+import { guardedWebFetch } from '../utils/safe-fetch.js'
 import { deriveAddonName, maskContext, truncateUrl } from '../utils/log-helpers.js'
-import { trace, keyTag } from '../utils/trace.js'
+import { trace, keyTag, traceEnabled, hostOf } from '../utils/trace.js'
 import { getAddonUrlKey } from '../utils/addon-url.js'
+import { invalidateCanonicalAddons, invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
 import { PRIMARY_KEY } from '../keys.js'
+import { AVATAR_ALLOWED_TYPES, AVATAR_BUDGET_BYTES, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_SIGN_BATCH_MAX, IMMUTABLE_CACHE_CONTROL, clampImageWidth, createByteBudget, declaredTypeConflicts, detectImageType, metahubVariantUrl, signAvatarUrl, verifyAvatarSignature } from '../utils/image-variants.js'
 
-const briefAddons = (addons) => (Array.isArray(addons) ? addons.map(a => ({ id: a?.manifest?.id || a?.id || '?', url: truncateUrl(a?.transportUrl || '') })) : [])
+export const briefAddons = (addons) => (Array.isArray(addons) ? addons.map(a => ({ id: a?.manifest?.id || a?.id || '?', host: a?.transportUrl ? hostOf(a.transportUrl) : '' })) : [])
 
 const SHRINK_GUARD_RATIO = 0.25
 const isSuspiciousShrink = (previousCount, nextCount) => (
@@ -17,13 +21,81 @@ const isSuspiciousShrink = (previousCount, nextCount) => (
 )
 export { isSuspiciousShrink }
 
+// DatastoreMeta is used both by the normal proxy route and by the batch route.
+// One process-wide permit pool keeps the two paths from multiplying upstream
+// fan-out, and a fixed per-owner cap keeps one owner from holding every permit.
+// Waiters are cancellable: a disconnected request is removed before it can
+// consume a permit.
+const META_UPSTREAM_GLOBAL = Math.max(8, DATASTORE_META_BATCH_CONCURRENCY * 2)
+const META_UPSTREAM_PER_OWNER = 8
+const META_QUEUE_WAIT_MS = 10000
+const metaUpstreamWaiters = []
+const activeMetaByOwner = new Map()
+let activeMetaUpstream = 0
+const acquireMetaUpstream = (owner, signal) => new Promise((resolve) => {
+    let settled = false
+    const waiter = () => {
+        if (settled) return
+        if (signal?.aborted) {
+            settled = true
+            signal.removeEventListener('abort', onAbort)
+            resolve(null)
+            return
+        }
+        if (activeMetaUpstream >= META_UPSTREAM_GLOBAL || (activeMetaByOwner.get(owner) || 0) >= META_UPSTREAM_PER_OWNER) {
+            metaUpstreamWaiters.push(waiter)
+            return
+        }
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        activeMetaUpstream++
+        activeMetaByOwner.set(owner, (activeMetaByOwner.get(owner) || 0) + 1)
+        let released = false
+        resolve(() => {
+            if (released) return
+            released = true
+            activeMetaUpstream = Math.max(0, activeMetaUpstream - 1)
+            const left = (activeMetaByOwner.get(owner) || 1) - 1
+            if (left > 0) activeMetaByOwner.set(owner, left)
+            else activeMetaByOwner.delete(owner)
+            for (const next of metaUpstreamWaiters.splice(0)) next()
+        })
+    }
+    const onAbort = () => {
+        if (settled) return
+        settled = true
+        const index = metaUpstreamWaiters.indexOf(waiter)
+        if (index >= 0) metaUpstreamWaiters.splice(index, 1)
+        signal?.removeEventListener('abort', onAbort)
+        resolve(null)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    waiter()
+})
+
+const isValidMetaRows = (rows) => {
+    if (!Array.isArray(rows)) return false
+    const ids = new Set()
+    return rows.every(row => {
+        if (!Array.isArray(row) || row.length !== 2) return false
+        const [id, mtime] = row
+        if (typeof id !== 'string' || id.length === 0 || ids.has(id)) return false
+        if (!Number.isSafeInteger(mtime) || mtime < 0) return false
+        ids.add(id)
+        return true
+    })
+}
+
 export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     const manifestCache = new Map()
     const MANIFEST_CACHE_TTL = 600000 // 10 minutes
+    const MANIFEST_NEGATIVE_TTL = 60000
+    const MANIFEST_NEGATIVE_MAX = 1000
 
     const imageCache = new Map()
     const imageInflight = new Map()
     let imageCacheBytes = 0
+    const imageCacheStats = { hits: 0, misses: 0, evictions: 0 }
 
     const normalizeImageKey = (rawUrl) => {
         try {
@@ -39,12 +111,14 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
     const imageCacheGet = (key) => {
         const hit = imageCache.get(key)
-        if (!hit) return null
+        if (!hit) { imageCacheStats.misses++; return null }
         if (hit.expires <= Date.now()) {
             imageCache.delete(key)
             imageCacheBytes -= hit.bytes
+            imageCacheStats.misses++
             return null
         }
+        imageCacheStats.hits++
         imageCache.delete(key)
         imageCache.set(key, hit)
         return hit
@@ -62,10 +136,15 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             const oldest = imageCache.get(oldestKey)
             imageCache.delete(oldestKey)
             imageCacheBytes -= oldest.bytes
+            imageCacheStats.evictions++
         }
     }
+    registerCacheLayer('image', { label: 'Poster image cache', stats: () => ({ ...imageCacheStats, entries: imageCache.size, bytes: imageCacheBytes, maxBytes: IMAGE_CACHE_MAX_BYTES, inflight: imageInflight.size }) })
+    registerCacheLayer('manifest', { label: 'Addon manifest cache', stats: () => ({ entries: manifestCache.size }) })
     const lastGoodAddonCollections = new Map()
     const MAX_TRACKED_COLLECTIONS = 2500
+    const STREMIO_PROXY_CLIENT_BUDGET_MS = 30000
+    const STREMIO_PROXY_MIN_ATTEMPT_MS = 2000
     const MAX_ADDON_COLLECTION_SIZE = 250
     const PROFILE_SWAP_CONTEXT = 'Profile Swap'
     const ADDON_REFRESH_ERROR_PATTERN = /AddonsPulledFromAPI|UserAddonsLocked|manifest.*missing field|upstream returned 403|forbidden|access denied|status\s*403|\b403\b/i
@@ -108,7 +187,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 const controller = new AbortController()
                 const timeout = setTimeout(() => controller.abort(), 10000)
                 try {
-                    return await fetch(url, {
+                    return await guardedWebFetch(url, {
                         ...fetchOptions,
                         signal: controller.signal,
                         redirect: 'manual',
@@ -195,18 +274,20 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         return createHash('sha256').update(authKey).digest('hex')
     }
 
-    const returnLastGoodCollection = (authKey, reason) => {
+    const returnLastGoodCollection = (authKey, reason, acct = null) => {
         const lastGood = getLastGoodCollection(authKey)
         if (!lastGood?.length) return null
-        fastify.log.warn({ category: 'Sync' }, `[Proxy] Returning last-good addon collection after ${reason}`)
-        trace('proxy.get', 'served-last-good', { key: keyTag(authKey), reason, count: lastGood.length, addons: briefAddons(lastGood) })
+        fastify.log.warn({ category: 'Sync', fmt: 'sync.last_good', acct, reason: 'upstream-error' }, `[Proxy] Returning last-good addon collection after ${reason}`)
+        trace('proxy.get', 'served-last-good', { key: keyTag(authKey), reason, count: lastGood.length, addons: traceEnabled() ? briefAddons(lastGood) : undefined })
         return { result: { addons: lastGood, lastModified: Date.now() }, recoveredFromLastGood: true }
     }
 
     const rememberGoodCollection = (authKey, addons, { allowEmpty = false } = {}) => {
         const key = getAuthCollectionKey(authKey)
         if (!key || !Array.isArray(addons) || (addons.length === 0 && !allowEmpty)) return
-        if (lastGoodAddonCollections.size >= MAX_TRACKED_COLLECTIONS) {
+        if (lastGoodAddonCollections.has(key)) {
+            lastGoodAddonCollections.delete(key)
+        } else if (lastGoodAddonCollections.size >= MAX_TRACKED_COLLECTIONS) {
             const oldest = lastGoodAddonCollections.keys().next().value
             if (oldest) lastGoodAddonCollections.delete(oldest)
         }
@@ -240,6 +321,143 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         return null
     }
 
+    const manifestNegative = new Map()
+    const manifestInflight = new Map()
+    const discoverInflight = new Map()
+
+    const manifestCacheGet = (url) => {
+        const cached = manifestCache.get(url)
+        return cached && Date.now() - cached.ts < MANIFEST_CACHE_TTL ? cached : null
+    }
+
+    const manifestNegativeGet = (url) => {
+        const hit = manifestNegative.get(url)
+        if (!hit) return null
+        if (hit.expires <= Date.now()) {
+            manifestNegative.delete(url)
+            return null
+        }
+        return hit.result
+    }
+
+    const manifestNegativeSet = (url, result) => {
+        manifestNegative.delete(url)
+        manifestNegative.set(url, { result, expires: Date.now() + MANIFEST_NEGATIVE_TTL })
+        while (manifestNegative.size > MANIFEST_NEGATIVE_MAX) {
+            const oldestKey = manifestNegative.keys().next().value
+            if (oldestKey === undefined) break
+            manifestNegative.delete(oldestKey)
+        }
+    }
+
+    // Resolves to { status, body, contentType? } so one upstream fetch can answer many replies.
+    const fetchManifestUpstream = (url, authorization, shareable) => enqueueProxyRequest(url, async () => {
+        if (shareable) {
+            const cached = manifestCacheGet(url)
+            if (cached) return { status: 200, body: cached.buffer, contentType: cached.contentType }
+            const negative = manifestNegativeGet(url)
+            if (negative) return negative
+        }
+        const failed = (result) => {
+            if (shareable) manifestNegativeSet(url, result)
+            return result
+        }
+        let redirected = false
+        try {
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), 6000)
+
+            const MAX_REDIRECTS = 3
+            const originOf = (u) => { try { return new URL(u).origin } catch { return '' } }
+            const startOrigin = originOf(url)
+            let currentUrl = url
+            let response
+            try {
+                for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+                    response = await guardedWebFetch(currentUrl, {
+                        signal: controller.signal,
+                        redirect: 'manual',
+                        maxBytes: 5 * 1024 * 1024,
+                        headers: {
+                            'User-Agent': `AIOManager/${VERSION} (Internal Proxy; Hardened)`,
+                            'Accept': 'application/json, text/plain, */*',
+                            ...(authorization && originOf(currentUrl) === startOrigin ? { 'Authorization': authorization } : {})
+                        }
+                    })
+
+                    if (response.status >= 300 && response.status < 400) {
+                        const location = response.headers.get('location')
+                        if (!location) break
+                        const resolvedUrl = new URL(location, currentUrl).href
+                        if (!isSafeUrl(resolvedUrl)) {
+                            return { status: 403, body: { error: 'Access Denied: Unsafe redirect target' } }
+                        }
+                        currentUrl = resolvedUrl
+                        redirected = true
+                        continue
+                    }
+                    break
+                }
+            } finally {
+                clearTimeout(timeout)
+            }
+
+            if (!response.ok) {
+                if (response.status === 404 || response.status === 410) manifestCache.delete(url)
+                return failed({ status: response.status, body: { error: `Upstream returned ${response.status}` } })
+            }
+
+            const contentType = response.headers.get('content-type') || ''
+            if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
+                return { status: 415, body: { error: 'Unsupported Media Type' } }
+            }
+
+            const contentLength = parseInt(response.headers.get('content-length') || '0')
+            if (contentLength > 5 * 1024 * 1024) {
+                return { status: 413, body: { error: 'Payload Too Large (>5MB)' } }
+            }
+
+            // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
+            const arrayBuffer = await response.arrayBuffer()
+            const buffer = Buffer.from(arrayBuffer)
+
+            if (buffer.length > 5 * 1024 * 1024) {
+                return { status: 413, body: { error: 'Payload Too Large (>5MB)' } }
+            }
+
+            if (manifestCache.size > 5000) {
+                const now = Date.now()
+                for (const [k, v] of manifestCache) {
+                    if (now - v.ts > MANIFEST_CACHE_TTL) manifestCache.delete(k)
+                }
+                while (manifestCache.size > 4000) {
+                    const oldestKey = manifestCache.keys().next().value
+                    if (oldestKey === undefined) break
+                    manifestCache.delete(oldestKey)
+                }
+            }
+            if (shareable) {
+                manifestCache.set(url, { buffer, contentType: contentType || null, ts: Date.now() })
+                manifestNegative.delete(url)
+            }
+
+            return { status: 200, body: buffer, contentType: contentType || null }
+        } catch (err) {
+            if (err.code === 'ssrf-blocked') {
+                return { status: 403, body: { error: redirected ? 'Access Denied: Unsafe redirect target' : 'Access Denied: Unsafe URL' } }
+            }
+            if (err.code === 'too-large') {
+                return { status: 413, body: { error: 'Payload Too Large (>5MB)' } }
+            }
+            if (err.name === 'AbortError') {
+                fastify.log.error({ category: 'MetaProxy' }, `Timeout after 6s: ${truncateUrl(url)}`)
+                return failed({ status: 504, body: { error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>6s)' } })
+            }
+            fastify.log.error({ category: 'MetaProxy' }, `Failed to fetch ${truncateUrl(url)}: ${err.message}`)
+            return failed({ status: 500, body: { error: 'Internal Proxy Error', details: 'Internal error' } })
+        }
+    })
+
     fastify.get('/api/meta-proxy', {
         config: { rateLimit: { max: 1200, timeWindow: '1 minute' } },
         schema: {
@@ -257,124 +475,77 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
         const { url } = request.query
         const accountContext = request.headers['x-account-context'] || 'Unknown'
-        fastify.log.info({ category: 'MetaProxy' }, `[${maskContext(accountContext)}] Proxying request to: ${truncateUrl(url)}`)
 
-        if (!(await isSafeUrlResolved(url))) {
+        if (!isSafeUrl(url)) {
             fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request: ${truncateUrl(url)}`)
             reply.status(403);
             return { error: 'Access Denied: Unsafe URL' }
         }
 
-        // The shared manifestCache is keyed by url only, so an authenticated upstream response
+        // The shared caches are keyed by url only, so an authenticated upstream response
         // (caller forwards a provider Bearer key for provider-config endpoints) must never be
-        // cached or served cross-user. Bypass the cache entirely when Authorization is present;
-        // public manifests still cache and stay shareable.
-        const hasUpstreamAuth = Boolean(request.headers['authorization'])
-        const skipCache = request.query.nocache === '1'
+        // cached, shared in flight, or negative-cached cross-user. Bypass all of them when
+        // Authorization is present; public manifests still cache and stay shareable.
+        const authorization = request.headers['authorization']
+        const shareable = !authorization && request.query.nocache !== '1'
 
-        if (!hasUpstreamAuth && !skipCache) {
-            const cached = manifestCache.get(url)
-            if (cached && Date.now() - cached.ts < MANIFEST_CACHE_TTL) {
+        if (shareable) {
+            const cached = manifestCacheGet(url)
+            if (cached) {
                 if (cached.contentType) reply.type(cached.contentType)
                 reply.header('Cache-Control', 'public, max-age=300')
                 return cached.buffer
             }
+            const negative = manifestNegativeGet(url)
+            if (negative) {
+                reply.status(negative.status)
+                return negative.body
+            }
         }
 
-        return enqueueProxyRequest(url, async () => {
-            try {
-                const controller = new AbortController()
-                const timeout = setTimeout(() => controller.abort(), 6000)
-
-                const MAX_REDIRECTS = 3
-                const originOf = (u) => { try { return new URL(u).origin } catch { return '' } }
-                const startOrigin = originOf(url)
-                let currentUrl = url
-                let response
-                for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-                    response = await fetch(currentUrl, {
-                        signal: controller.signal,
-                        redirect: 'manual',
-                        headers: {
-                            'User-Agent': `AIOManager/${VERSION} (Internal Proxy; Hardened)`,
-                            'Accept': 'application/json, text/plain, */*',
-                            ...(request.headers['authorization'] && originOf(currentUrl) === startOrigin ? { 'Authorization': request.headers['authorization'] } : {})
-                        }
-                    })
-
-                    if (response.status >= 300 && response.status < 400) {
-                        const location = response.headers.get('location')
-                        if (!location) break
-                        const resolvedUrl = new URL(location, currentUrl).href
-                        if (!(await isSafeUrlResolved(resolvedUrl))) {
-                            clearTimeout(timeout)
-                            reply.status(403)
-                            return { error: 'Access Denied: Unsafe redirect target' }
-                        }
-                        currentUrl = resolvedUrl
-                        continue
-                    }
-                    break
-                }
-
-                clearTimeout(timeout)
-
-                if (!response.ok) {
-                    if (response.status === 404 || response.status === 410) manifestCache.delete(url)
-                    reply.status(response.status);
-                    return { error: `Upstream returned ${response.status}` }
-                }
-
-                const contentType = response.headers.get('content-type') || ''
-                if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
-                    reply.status(415);
-                    return { error: 'Unsupported Media Type' }
-                }
-                if (contentType) reply.type(contentType)
-
-                const contentLength = parseInt(response.headers.get('content-length') || '0')
-                if (contentLength > 5 * 1024 * 1024) {
-                    reply.status(413);
-                    return { error: 'Payload Too Large (>5MB)' }
-                }
-
-                // FIX: Fastify/Compress doesn't handle Web ReadableStream well, convert to Buffer
-                const arrayBuffer = await response.arrayBuffer()
-                const buffer = Buffer.from(arrayBuffer)
-
-                if (buffer.length > 5 * 1024 * 1024) {
-                    reply.status(413);
-                    return { error: 'Payload Too Large (>5MB)' }
-                }
-
-                if (manifestCache.size > 5000) {
-                    const now = Date.now()
-                    for (const [k, v] of manifestCache) {
-                        if (now - v.ts > MANIFEST_CACHE_TTL) manifestCache.delete(k)
-                    }
-                    while (manifestCache.size > 4000) {
-                        const oldestKey = manifestCache.keys().next().value
-                        if (oldestKey === undefined) break
-                        manifestCache.delete(oldestKey)
-                    }
-                }
-                if (!hasUpstreamAuth && !skipCache) {
-                    manifestCache.set(url, { buffer, contentType: contentType || null, ts: Date.now() })
-                    reply.header('Cache-Control', 'public, max-age=300')
-                }
-
-                return buffer
-            } catch (err) {
-                if (err.name === 'AbortError') {
-                    fastify.log.error({ category: 'MetaProxy' }, `Timeout after 6s: ${truncateUrl(url)}`)
-                    reply.status(504);
-                    return { error: 'Gateway Timeout', details: 'Upstream addon took too long to respond (>6s)' }
-                }
-                fastify.log.error({ category: 'MetaProxy' }, `Failed to fetch ${truncateUrl(url)}: ${err.message}`)
-                reply.status(500);
-                return { error: 'Internal Proxy Error', details: 'Internal error' }
+        let pending = shareable ? manifestInflight.get(url) : undefined
+        if (!pending) {
+            fastify.log.info({ category: 'MetaProxy' }, `[${maskContext(accountContext)}] Proxying request to: ${truncateUrl(url)}`)
+            pending = fetchManifestUpstream(url, authorization, shareable)
+            if (shareable) {
+                pending = pending.finally(() => manifestInflight.delete(url))
+                manifestInflight.set(url, pending)
             }
+        }
+
+        const result = await pending
+        if (result.status !== 200) {
+            reply.status(result.status)
+            return result.body
+        }
+        if (result.contentType) reply.type(result.contentType)
+        if (shareable) reply.header('Cache-Control', 'public, max-age=300')
+        return result.body
+    })
+
+    const avatarBudget = createByteBudget({ limit: Number(process.env.AIOM_AVATAR_BUDGET_BYTES) || AVATAR_BUDGET_BYTES })
+
+    fastify.post('/api/proxy-image/sign', {
+        bodyLimit: 256 * 1024,
+        config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+        schema: {
+            body: {
+                type: 'object',
+                required: ['urls'],
+                properties: {
+                    urls: { type: 'array', maxItems: AVATAR_SIGN_BATCH_MAX, items: { type: 'string', maxLength: 2048 } }
+                }
+            }
+        }
+    }, async (request, reply) => {
+        const authResult = await requireProxyAuth(request, reply)
+        if (authResult) return authResult
+        const userId = request.deviceAuth?.accountUuid || request.headers['x-sync-user']
+        const items = request.body.urls.map((raw) => {
+            if (!isSafeUrl(raw)) return null
+            return signAvatarUrl(PRIMARY_KEY, userId, raw)
         })
+        return { items }
     })
 
     fastify.get('/api/proxy-image', {
@@ -384,25 +555,39 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 type: 'object',
                 required: ['url'],
                 properties: {
-                    url: { type: 'string' }
+                    url: { type: 'string' },
+                    w: { type: 'string', maxLength: 8 },
+                    kind: { type: 'string', enum: ['avatar'] },
+                    u: { type: 'string', maxLength: 32 },
+                    exp: { type: 'string', maxLength: 16 },
+                    sig: { type: 'string', maxLength: 64 }
                 }
             }
         }
     }, async (request, reply) => {
         const ALLOWED_IMAGE_DOMAINS = ['metahub.space', 'strem.io']
-        const { url: rawUrl } = request.query
+        const { url: queryUrl, w, kind, u: userTag, exp, sig } = request.query
+        const isAvatar = kind === 'avatar'
+        if (isAvatar && !verifyAvatarSignature(PRIMARY_KEY, { url: queryUrl, u: userTag, exp, sig, w })) {
+            reply.status(401)
+            return { error: 'Signed avatar URL required' }
+        }
+        const maxImageBytes = isAvatar ? AVATAR_MAX_BYTES : 10 * 1024 * 1024
+        const rawUrl = isAvatar ? queryUrl : metahubVariantUrl(queryUrl, clampImageWidth(w))
 
         const isAllowedImageHost = (host) => ALLOWED_IMAGE_DOMAINS.some(domain => host === domain || host.endsWith('.' + domain))
 
         let parsedHost
         try {
-            parsedHost = new URL(rawUrl).hostname
+            const parsed = new URL(rawUrl)
+            if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error('protocol')
+            parsedHost = parsed.hostname
         } catch {
             reply.status(403)
             return { error: 'Invalid URL' }
         }
 
-        if (!isAllowedImageHost(parsedHost)) {
+        if (!isAvatar && !isAllowedImageHost(parsedHost)) {
             reply.status(403)
             return { error: 'Domain not allowed' }
         }
@@ -414,28 +599,48 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             candidates = [primary.href, secondary.href]
         }
 
-        const fetchImage = async (startUrl) => {
+        const fetchImage = async (startUrl, chain) => {
             const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), IMAGE_PROXY_TIMEOUT_MS)
+            // The budget covers the upstream exchange only: time spent waiting in the shared
+            // queue must not abort a poster that never got a turn.
+            let timeout = null
+            // The queue wait itself is capped too, so a poster cannot sit in a backed-up queue indefinitely.
+            const queueDeadline = Date.now() + IMAGE_PROXY_TIMEOUT_MS * 3
             try {
                 let currentUrl = startUrl
                 let response
                 const MAX_REDIRECTS = 3
+                let body = null
 
                 for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-                    if (!(await isSafeUrlResolved(currentUrl))) {
+                    if (!isSafeUrl(currentUrl)) {
                         return { error: 'Access Denied: Unsafe URL', status: 403 }
                     }
-                    response = await enqueueProxyRequest(currentUrl, async () => {
-                        return fetch(currentUrl, {
-                            signal: controller.signal,
-                            redirect: 'manual',
-                            headers: {
-                                'User-Agent': `AIOManager/${VERSION} (Image Proxy)`,
-                                'Accept': 'image/*'
-                            }
-                        })
-                    }, { queueKey: 'image-proxy', maxPerKey: IMAGE_PROXY_QUEUE_LIMIT, throttleMs: IMAGE_PROXY_THROTTLE_MS })
+                    if (chain.remaining <= 0) return { error: 'Payload Too Large', status: 413 }
+                    try {
+                        response = await enqueueProxyRequest(currentUrl, async () => {
+                            if (Date.now() > queueDeadline) throw Object.assign(new Error('Image proxy queue wait exceeded'), { code: 'queue-timeout' })
+                            if (!timeout) timeout = setTimeout(() => controller.abort(), IMAGE_PROXY_TIMEOUT_MS)
+                            return guardedWebFetch(currentUrl, {
+                                signal: controller.signal,
+                                redirect: 'manual',
+                                maxBytes: chain.remaining,
+                                headers: {
+                                    'User-Agent': `AIOManager/${VERSION} (Image Proxy)`,
+                                    'Accept': 'image/*'
+                                }
+                            })
+                        }, { queueKey: 'image-proxy', maxPerKey: IMAGE_PROXY_QUEUE_LIMIT, throttleMs: IMAGE_PROXY_THROTTLE_MS, deadline: queueDeadline })
+                    } catch (err) {
+                        if (err.code === 'ssrf-blocked') return { error: 'Access Denied: Unsafe URL', status: 403 }
+                        if (err.code === 'queue-timeout') return { error: 'Upstream timeout', status: 504 }
+                        if (err.code === 'too-large') { chain.used += chain.remaining; chain.remaining = 0; return { error: 'Payload Too Large', status: 413 } }
+                        throw err
+                    }
+
+                    body = Buffer.from(await response.arrayBuffer())
+                    chain.used += body.length
+                    chain.remaining -= body.length
 
                     if (response.status >= 300 && response.status < 400) {
                         const location = response.headers.get('location')
@@ -450,30 +655,31 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     return { error: `Upstream returned ${response.status}`, status: 502 }
                 }
 
-                const contentType = response.headers.get('content-type') || ''
-                if (!contentType.startsWith('image/')) {
-                    return { error: 'Not an image', status: 415 }
+                const buffer = body
+                if (buffer.length > maxImageBytes) {
+                    return { error: 'Payload Too Large', status: 413 }
                 }
 
-                const contentLength = parseInt(response.headers.get('content-length') || '0')
-                if (contentLength > 10 * 1024 * 1024) {
-                    return { error: 'Payload Too Large (>10MB)', status: 413 }
+                const detected = detectImageType(buffer)
+                if (!detected || declaredTypeConflicts(response.headers.get('content-type'), detected)) {
+                    return { error: 'Unsupported image type', status: 415 }
+                }
+                if (isAvatar && !AVATAR_ALLOWED_TYPES.has(detected)) {
+                    return { error: 'Unsupported image type', status: 415 }
                 }
 
-                const buffer = Buffer.from(await response.arrayBuffer())
-                if (buffer.length > 10 * 1024 * 1024) {
-                    return { error: 'Payload Too Large (>10MB)', status: 413 }
-                }
-
-                return { buffer, contentType }
+                return { buffer, contentType: detected }
             } finally {
-                clearTimeout(timeout)
+                if (timeout) clearTimeout(timeout)
             }
         }
 
-        const cacheKey = normalizeImageKey(rawUrl)
+        const cacheKey = (isAvatar ? 'avatar:' : '') + normalizeImageKey(rawUrl)
         const sendImage = (contentType, buffer, cacheState) => {
-            reply.header('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400')
+            reply.header('Cache-Control', isAvatar ? AVATAR_CACHE_CONTROL : IMMUTABLE_CACHE_CONTROL)
+            reply.header('X-Content-Type-Options', 'nosniff')
+            reply.header('Content-Disposition', 'inline')
+            reply.header('Content-Security-Policy', "default-src 'none'; sandbox")
             reply.header('X-Image-Cache', cacheState)
             reply.type(contentType)
             return buffer
@@ -484,24 +690,34 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
         let resolution = imageInflight.get(cacheKey)
         if (!resolution) {
+            const budgetReserve = isAvatar ? Math.min(maxImageBytes, Math.ceil(avatarBudget.limit / 10)) : 0
+            if (isAvatar && !avatarBudget.reserve(userTag, budgetReserve)) {
+                reply.status(429)
+                return { error: 'Avatar fetch budget exceeded' }
+            }
             resolution = (async () => {
-                let lastFailure = { error: 'Image Proxy Error', status: 502 }
-                for (const candidate of candidates) {
-                    let result
-                    try {
-                        result = await fetchImage(candidate)
-                    } catch (err) {
-                        fastify.log.warn({ category: 'Proxy' }, `Image proxy attempt failed for ${truncateUrl(candidate)}: ${err.message}`)
-                        lastFailure = { error: 'Image Proxy Error', status: 502 }
-                        continue
+                const chain = { remaining: maxImageBytes, used: 0 }
+                try {
+                    let lastFailure = { error: 'Image Proxy Error', status: 502 }
+                    for (const candidate of candidates) {
+                        let result
+                        try {
+                            result = await fetchImage(candidate, chain)
+                        } catch (err) {
+                            fastify.log.warn({ category: 'Proxy' }, `Image proxy attempt failed for ${isAvatar ? 'avatar' : truncateUrl(candidate)}: ${err.message}`)
+                            lastFailure = { error: 'Image Proxy Error', status: 502 }
+                            continue
+                        }
+                        if (result.buffer) {
+                            imageCacheSet(cacheKey, result.buffer, result.contentType)
+                            return result
+                        }
+                        lastFailure = result
                     }
-                    if (result.buffer) {
-                        imageCacheSet(cacheKey, result.buffer, result.contentType)
-                        return result
-                    }
-                    lastFailure = result
+                    return lastFailure
+                } finally {
+                    if (isAvatar) avatarBudget.settle(userTag, budgetReserve, chain.used)
                 }
-                return lastFailure
             })()
             imageInflight.set(cacheKey, resolution)
             resolution.finally(() => imageInflight.delete(cacheKey))
@@ -531,6 +747,10 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         const { type, ...payload } = request.body
         const accountContext = request.headers['x-account-context'] || 'Unknown'
         const masked = maskContext(accountContext)
+        // Ring-bound account id: the authenticated device or sync user, never the client-typed
+        // x-account-context header. The ring hashes it; maskContext stays stdout-only.
+        const syncUserHeader = request.headers['x-sync-user']
+        const ringAcct = request.deviceAuth?.accountUuid || (typeof syncUserHeader === 'string' && syncUserHeader ? syncUserHeader : null)
         // Client writes land on Stremio before their E2E sync blob; the reconciler must not re-assert the stale hub over them.
         if (type === 'AddonCollectionSet') {
             if (!fastify.clientCollectionWrites) fastify.clientCollectionWrites = new Map()
@@ -554,11 +774,21 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         }
 
         const friendlyAction = actionMap[type] || `Operation: ${type}`
+        const SYNC_ACTIONS = {
+            'AddonCollectionGet': 'pull',
+            'AddonCollectionSet': 'push',
+            'DatastoreGet': 'library-get',
+            'DatastorePut': 'library-put',
+            'DatastoreMeta': 'library-meta',
+            'GetUser': 'user-get',
+            'GetProfilesAddons': 'profile-get',
+            'SetProfileAddons': 'profile-set',
+        }
         const allowCollectionShrink = type === 'AddonCollectionSet' && payload.allowCollectionShrink === true && (accountContext === 'Profile Swap' || accountContext === 'Bulk Op' || accountContext === 'Clear All')
         delete payload.allowCollectionShrink
 
         if (type === 'AddonCollectionGet' || type === 'AddonCollectionSet' || type === 'DatastoreGet' || type === 'DatastorePut' || type === 'DatastoreMeta' || type === 'GetUser' || type === 'GetProfilesAddons' || type === 'SetProfileAddons') {
-            fastify.log.info({ category: 'Sync' }, `[${masked}] ${friendlyAction}...`)
+            fastify.log.info({ category: 'Sync', fmt: 'sync.action', action: SYNC_ACTIONS[type], acct: ringAcct, platform: 'stremio' }, `[${masked}] ${friendlyAction}...`)
         } else {
             // Strict Whitelist: Block unknown methods to prevent abuse
             fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked unauthorized Stremio API call: ${type}`)
@@ -579,7 +809,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
             const lastGood = getLastGoodCollection(payload.authKey)
             const wouldBlock = !allowCollectionShrink && isSuspiciousShrink(lastGood?.length || 0, payload.addons.length)
-            trace('proxy.set', 'incoming', { key: keyTag(payload.authKey), context: String(accountContext), allowCollectionShrink, lastGood: lastGood?.length || 0, pushing: payload.addons.length, blocked: wouldBlock, addons: briefAddons(payload.addons) })
+            trace('proxy.set', 'incoming', { key: keyTag(payload.authKey), context: String(accountContext), allowCollectionShrink, lastGood: lastGood?.length || 0, pushing: payload.addons.length, blocked: wouldBlock, addons: traceEnabled() ? briefAddons(payload.addons) : undefined })
             if (wouldBlock) {
                 fastify.log.warn({ category: 'Security' }, `[Proxy] Blocked suspicious AddonCollectionSet shrink: ${lastGood.length} -> ${payload.addons.length}`)
                 trace('proxy.set', 'blocked-shrink', { context: String(accountContext), lastGood: lastGood?.length || 0, pushing: payload.addons.length })
@@ -603,32 +833,84 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             })
         }
 
-        // A library replacement may have landed before a timeout or upstream error.
-        // Its caller must read back the saved row before deciding whether to retry.
-        const MAX_RETRIES = type === 'DatastorePut' ? 0 : 2
+        // A full-replace write may have landed before a timeout or upstream error.
+        // Its caller must read back before deciding whether to retry.
+        const MAX_RETRIES = (type === 'DatastorePut' || type === 'AddonCollectionSet') ? 0 : 2
         let lastError = null
+        const requestStart = Date.now()
+        let clientGone = Boolean(request.raw.aborted)
+        let activeController = null
+        const onClientGone = () => { clientGone = true; activeController?.abort() }
+        request.raw.once('aborted', onClientGone)
+        const onReplyClose = () => { if (!reply.raw.writableEnded) onClientGone() }
+        reply.raw.once('close', onReplyClose)
+        const withinClientBudget = (nextAttempt) => Date.now() - requestStart + 1000 * nextAttempt + STREMIO_PROXY_MIN_ATTEMPT_MS <= STREMIO_PROXY_CLIENT_BUDGET_MS
+        // update:true re-fetches every manifest; when that refresh is rejected, the stored collection is still readable.
+        let storedFallback = false
+        let skipBackoff = false
+        const canFallBackToStored = (attempt) => type === 'AddonCollectionGet' && !storedFallback && payload.update !== false && attempt < MAX_RETRIES && !clientGone
+        const bustHydraCache = () => {
+            invalidateCanonicalByAuthKey(payload.authKey)
+            const syncUser = request.deviceAuth?.accountUuid || request.headers['x-sync-user']
+            const accountId = String(accountContext).replace(/: rollback$/, '')
+            if (syncUser && accountId && accountId !== 'Unknown') invalidateCanonicalAddons(accountId, String(syncUser))
+        }
 
+        try {
         for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            if (attempt > 0 && clientGone) break
             const controller = new AbortController()
+            activeController = controller
             const timeoutId = setTimeout(() => controller.abort(), 30000)
+            const onRequestAborted = () => controller.abort()
+            if (request.raw.aborted || clientGone) controller.abort()
+            else request.raw.once('aborted', onRequestAborted)
 
             try {
-                if (attempt > 0) {
+                if (attempt > 0 && !skipBackoff) {
                     fastify.log.warn({ category: 'Sync' }, `[Proxy] Retrying Stremio API ${type} (Attempt ${attempt + 1}/${MAX_RETRIES + 1})...`)
                     await new Promise(r => setTimeout(r, 1000 * attempt))
+                    // The client may have left during the backoff; never fetch upstream for it.
+                    if (clientGone) { clearTimeout(timeoutId); break }
                 }
+                skipBackoff = false
+                const upstreamPayload = storedFallback ? { ...payload, update: false } : payload
 
                 const apiPath = PREMIUM_PREFS_PATHS[type] || (type.charAt(0).toLowerCase() + type.slice(1))
-                if (type === 'AddonCollectionSet') {
+                if (type === 'AddonCollectionSet' && traceEnabled()) {
                     fastify.log.warn({ category: 'DebugTrace' }, `[DebugTrace] Set forward: apiPath=${apiPath} addons=${Array.isArray(payload.addons) ? payload.addons.length : 'none'} urls=${Array.isArray(payload.addons) ? payload.addons.slice(0, 3).map(a => (a.transportUrl || '').slice(0, 40)).join(' | ') : '-'}`)
                 }
-                const response = await fetch('https://api.strem.io/api/' + apiPath, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                    signal: controller.signal
-                })
-                if (type === 'AddonCollectionSet') {
+                let releaseMeta = null
+                let metaTimeoutId = null
+                if (type === 'DatastoreMeta') {
+                    // Queue time has its own deadline; the upstream timer starts once a permit is held.
+                    clearTimeout(timeoutId)
+                    const owner = String(request.deviceAuth?.accountUuid || request.headers['x-sync-user'] || '')
+                    releaseMeta = await acquireMetaUpstream(owner, AbortSignal.any([controller.signal, AbortSignal.timeout(META_QUEUE_WAIT_MS)]))
+                    if (!releaseMeta) {
+                        if (controller.signal.aborted) {
+                            reply.status(499)
+                            return { error: 'Stremio metadata request cancelled' }
+                        }
+                        reply.header('Retry-After', '2')
+                        reply.status(503)
+                        return { error: 'Stremio metadata queue is busy, try again shortly' }
+                    }
+                    metaTimeoutId = setTimeout(() => controller.abort(), 30000)
+                }
+                let response
+                try {
+                    response = await fetch('https://api.strem.io/api/' + apiPath, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(upstreamPayload),
+                        signal: controller.signal
+                    })
+                } finally {
+                    releaseMeta?.()
+                    clearTimeout(metaTimeoutId)
+                }
+                if (type === 'AddonCollectionSet' && traceEnabled()) {
                     let respHead = ''
                     try { respHead = (await response.clone().text()).slice(0, 120) } catch {}
                     fastify.log.warn({ category: 'DebugTrace' }, `[DebugTrace] Set response: status=${response.status} body=${respHead}`)
@@ -636,7 +918,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
                 clearTimeout(timeoutId)
 
-                if (!response.ok && response.status >= 500 && attempt < MAX_RETRIES) {
+                if (!response.ok && response.status >= 500 && attempt < MAX_RETRIES && !clientGone && withinClientBudget(attempt + 1)) {
                     await response.body?.cancel().catch(() => {})
                     continue
                 }
@@ -655,14 +937,25 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     data = responseText ? JSON.parse(responseText) : {}
                 } catch (parseError) {
                     if (type === 'AddonCollectionGet' && response.status === 403) {
-                        const recovered = returnLastGoodCollection(payload.authKey, `HTTP ${response.status} refresh response`)
+                        if (canFallBackToStored(attempt)) {
+                            storedFallback = true
+                            skipBackoff = true
+                            continue
+                        }
+                        const recovered = returnLastGoodCollection(payload.authKey, `HTTP ${response.status} refresh response`, ringAcct)
                         if (recovered) return recovered
                     }
                     throw parseError
                 }
 
                 if (type === 'AddonCollectionGet' && response.status === 403) {
-                    const recovered = returnLastGoodCollection(payload.authKey, `HTTP ${response.status} refresh response`)
+                    if (canFallBackToStored(attempt)) {
+                        trace('proxy.get', 'stored-fallback', { key: keyTag(payload.authKey), reason: 'http-403' })
+                        storedFallback = true
+                        skipBackoff = true
+                        continue
+                    }
+                    const recovered = returnLastGoodCollection(payload.authKey, `HTTP ${response.status} refresh response`, ringAcct)
                     if (recovered) return recovered
                     if (!data?.error) {
                         data.error = `Upstream returned ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`
@@ -671,7 +964,8 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
                 if (type === 'DatastorePut' && payload.collection === 'libraryItem') {
                     const sample = payload.changes?.[0]
-                    fastify.log.info({ category: 'Sync' }, `[Proxy] DatastorePut response: result=${JSON.stringify(data?.result)}, error=${JSON.stringify(data?.error)}, itemCount=${payload.changes?.length}, sampleId=${sample?._id}, sampleMtime=${sample?._mtime}, sampleRemoved=${sample?.removed}`)
+                    // Ring keeps only counts and the result flag; sampleId/sampleMtime (watch history) stay stdout-only.
+                    fastify.log.info({ category: 'Sync', fmt: 'sync.library_put', n: payload.changes?.length, acct: ringAcct, result: data?.error ? 'error' : 'ok', removed: Array.isArray(payload.changes) ? payload.changes.filter(c => c?.removed).length : 0 }, `[Proxy] DatastorePut response: result=${JSON.stringify(data?.result)}, error=${JSON.stringify(data?.error)}, itemCount=${payload.changes?.length}, sampleId=${sample?._id}, sampleMtime=${sample?._mtime}, sampleRemoved=${sample?.removed}`)
                 }
 
                 if (type === 'AddonCollectionGet') {
@@ -681,12 +975,12 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                         const lastGood = getLastGoodCollection(payload.authKey)
                         if (isSuspiciousShrink(lastGood?.length || 0, sanitizedAddons.length)) {
                             if (attempt < MAX_RETRIES) {
-                                fastify.log.warn({ category: 'Sync' }, `[Proxy] Suspicious refresh shrink (${lastGood.length} -> ${sanitizedAddons.length}); re-reading to confirm before trusting it.`)
+                                fastify.log.warn({ category: 'Sync', fmt: 'sync.shrink_guard', acct: ringAcct, before: lastGood.length, after: sanitizedAddons.length, attempt: attempt + 1, max: MAX_RETRIES + 1 }, `[Proxy] Suspicious refresh shrink (${lastGood.length} -> ${sanitizedAddons.length}); re-reading to confirm before trusting it.`)
                                 trace('proxy.get', 'shrink-retry', { lastGood: lastGood?.length || 0, got: sanitizedAddons.length, attempt })
                                 continue
                             }
                             if (sanitizedAddons.length === 0) {
-                                fastify.log.warn({ category: 'Sync' }, `[Proxy] Persistent empty refresh after ${MAX_RETRIES} retries; keeping last-good (likely transient/auth glitch, not a real wipe): ${lastGood.length} -> 0`)
+                                fastify.log.warn({ category: 'Sync', fmt: 'sync.shrink_guard', acct: ringAcct, before: lastGood.length, after: 0, attempt: MAX_RETRIES + 1, max: MAX_RETRIES + 1 }, `[Proxy] Persistent empty refresh after ${MAX_RETRIES} retries; keeping last-good (likely transient/auth glitch, not a real wipe): ${lastGood.length} -> 0`)
                                 trace('proxy.get', 'served-last-good-empty', { lastGood: lastGood?.length || 0 })
                                 return { result: { addons: lastGood, lastModified: Date.now() }, recoveredFromLastGood: true }
                             }
@@ -695,16 +989,22 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                         }
                         const validationError = validateAddonCollection(sanitizedAddons)
                         if (validationError && lastGood) {
-                            fastify.log.warn({ category: 'Sync' }, `[Proxy] Returning last-good addon collection after invalid refresh result: ${validationError}`)
+                            fastify.log.warn({ category: 'Sync', fmt: 'sync.last_good', acct: ringAcct, reason: 'invalid-refresh' }, `[Proxy] Returning last-good addon collection after invalid refresh result: ${validationError}`)
                             return { result: { addons: lastGood, lastModified: Date.now() }, recoveredFromLastGood: true }
                         }
                         data.result.addons = sanitizedAddons
-                        trace('proxy.get', 'fresh', { key: keyTag(payload.authKey), context: String(accountContext), lastGood: lastGood?.length || 0, returned: sanitizedAddons.length, addons: briefAddons(sanitizedAddons) })
+                        trace('proxy.get', 'fresh', { key: keyTag(payload.authKey), context: String(accountContext), lastGood: lastGood?.length || 0, returned: sanitizedAddons.length, addons: traceEnabled() ? briefAddons(sanitizedAddons) : undefined })
                         rememberGoodCollection(payload.authKey, data.result.addons, { allowEmpty: true })
                     } else if (data?.error) {
                         const errorText = typeof data.error === 'string' ? data.error : JSON.stringify(data.error)
                         if (ADDON_REFRESH_ERROR_PATTERN.test(errorText)) {
-                            const recovered = returnLastGoodCollection(payload.authKey, `Stremio refresh error: ${errorText}`)
+                            if (canFallBackToStored(attempt)) {
+                                trace('proxy.get', 'stored-fallback', { key: keyTag(payload.authKey), reason: 'refresh-error' })
+                                storedFallback = true
+                                skipBackoff = true
+                                continue
+                            }
+                            const recovered = returnLastGoodCollection(payload.authKey, `Stremio refresh error: ${errorText}`, ringAcct)
                             if (recovered) return recovered
                         }
                     }
@@ -713,6 +1013,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 if (type === 'AddonCollectionSet' && !data?.error && Array.isArray(payload.addons) && (payload.addons.length > 0 || allowCollectionShrink)) {
                     rememberGoodCollection(payload.authKey, payload.addons, { allowEmpty: allowCollectionShrink })
                 }
+                if (type === 'AddonCollectionSet') bustHydraCache()
 
                 if (type === 'DatastoreGet') {
                     const lib = Array.isArray(data?.result) ? data.result : (data?.result?.library && Array.isArray(data.result.library) ? data.result.library : null)
@@ -742,11 +1043,24 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 const isTimeout = err.name === 'AbortError'
                 const isRetryable = isTimeout || ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN'].includes(err.code)
 
-                if (isRetryable && attempt < MAX_RETRIES) {
+                if (isRetryable && attempt < MAX_RETRIES && !clientGone && withinClientBudget(attempt + 1)) {
                     continue
                 }
                 break
+            } finally {
+                if (activeController === controller) activeController = null
+                request.raw.removeListener('aborted', onRequestAborted)
             }
+        }
+        } finally {
+            request.raw.removeListener('aborted', onClientGone)
+            reply.raw.removeListener('close', onReplyClose)
+        }
+
+        if (type === 'AddonCollectionSet') bustHydraCache()
+        if (storedFallback) {
+            const recovered = returnLastGoodCollection(payload.authKey, 'stored collection read failure', ringAcct)
+            if (recovered) return recovered
         }
 
         fastify.log.error({ category: 'Server' }, `Stremio Proxy Final Failure (${type}): ${lastError?.message ?? 'Unknown'}`)
@@ -784,15 +1098,29 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         }
 
         fastify.log.info({ category: 'Sync' }, `[${masked}] Batch Checking Library Changes (${requests.length} accounts)...`)
+        const batchStartedAt = Date.now()
         const results = new Array(requests.length).fill(null)
+        let nullSlots = 0
+        let validSlots = 0
+        let abortedSlots = 0
         let nextIndex = 0
+        const metaOwner = String(request.deviceAuth?.accountUuid || request.headers['x-sync-user'] || '')
+        const requestAbort = new AbortController()
+        const onRequestAborted = () => requestAbort.abort()
+        if (request.raw.aborted) requestAbort.abort()
+        else request.raw.once('aborted', onRequestAborted)
         const workers = Array.from({ length: Math.min(DATASTORE_META_BATCH_CONCURRENCY, requests.length) }, async () => {
             while (nextIndex < requests.length) {
                 const i = nextIndex++
                 const entry = requests[i]
                 const authKey = entry && typeof entry === 'object' ? entry.authKey : entry
                 if (typeof authKey !== 'string' || !authKey) continue
+                const release = await acquireMetaUpstream(metaOwner, requestAbort.signal)
+                if (!release) { nullSlots++; abortedSlots++; continue }
                 const controller = new AbortController()
+                const onRequestAbort = () => controller.abort()
+                if (request.raw.aborted) controller.abort()
+                else request.raw.once('aborted', onRequestAbort)
                 const timeout = setTimeout(() => controller.abort(), DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS)
                 try {
                     const res = await fetch(`${STREMIO_API}/datastoreMeta`, {
@@ -801,19 +1129,38 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                         body: JSON.stringify({ type: 'DatastoreMeta', authKey, collection: 'libraryItem' }),
                         signal: controller.signal
                     })
-                    if (!res.ok) continue
+                    if (!res.ok) { nullSlots++; continue }
                     const data = await res.json()
-                    if (Array.isArray(data?.result)) results[i] = data.result
+                    if (isValidMetaRows(data?.result)) {
+                        results[i] = data.result
+                        validSlots++
+                    } else {
+                        nullSlots++
+                    }
                 } catch {
                     // Leave failed slots null so callers can fall back.
+                    nullSlots++
                 } finally {
                     // Abort unread response bodies before releasing the worker slot.
                     controller.abort()
                     clearTimeout(timeout)
+                    request.raw.removeListener('aborted', onRequestAbort)
+                    release()
                 }
             }
         })
-        await Promise.all(workers)
+        try {
+            await Promise.all(workers)
+        } finally {
+            request.raw.removeListener('aborted', onRequestAborted)
+        }
+        trace('proxy.meta-batch', 'complete', {
+            accounts: requests.length,
+            validSlots,
+            nullSlots,
+            abortedSlots,
+            timing: Date.now() - batchStartedAt,
+        })
         return { result: results }
     })
 
@@ -1023,7 +1370,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             let currentUrl = url
             let response
             for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-                response = await fetch(currentUrl, { method: 'HEAD', signal: controller.signal, redirect: 'manual' })
+                response = await guardedWebFetch(currentUrl, { method: 'HEAD', signal: controller.signal, redirect: 'manual' })
                 if (response.status >= 300 && response.status < 400) {
                     const location = response.headers.get('location')
                     if (!location) {
@@ -1031,7 +1378,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                         reply.status(403); return { success: false, error: { message: 'Unsafe redirect' } }
                     }
                     const resolvedUrl = new URL(location, currentUrl).href
-                    if (!(await isSafeUrlResolved(resolvedUrl))) {
+                    if (!isSafeUrl(resolvedUrl)) {
                         clearTimeout(timeout)
                         reply.status(403); return { success: false, error: { message: 'Unsafe redirect target' } }
                     }
@@ -1044,6 +1391,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             reply.status(200)
             return { success: true, exists: response.ok }
         } catch (e) {
+            if (e.code === 'ssrf-blocked') { reply.status(403); return { success: false, error: { message: 'Unsafe redirect target' } } }
             fastify.log.error({ category: 'AIOStreamsProxy' }, `Check failed: ${e.message}`)
             reply.status(502)
             return { success: false, error: { message: 'Failed to reach AIOStreams instance' } }
@@ -1077,7 +1425,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             let currentUrl = url
             let response
             for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-                response = await fetch(currentUrl, { signal: controller.signal, redirect: 'manual' })
+                response = await guardedWebFetch(currentUrl, { signal: controller.signal, redirect: 'manual' })
                 if (response.status >= 300 && response.status < 400) {
                     const location = response.headers.get('location')
                     if (!location) {
@@ -1085,7 +1433,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                         reply.status(403); return { success: false, error: { message: 'Unsafe redirect' } }
                     }
                     const resolvedUrl = new URL(location, currentUrl).href
-                    if (!(await isSafeUrlResolved(resolvedUrl))) {
+                    if (!isSafeUrl(resolvedUrl)) {
                         clearTimeout(timeout)
                         reply.status(403); return { success: false, error: { message: 'Unsafe redirect target' } }
                     }
@@ -1095,6 +1443,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 break
             }
             clearTimeout(timeout)
+            if (!response.ok) { reply.status(502); return { success: false, error: { message: 'Instance returned an error' } } }
             const data = await response.json()
             return { success: true, data: data.data || data }
         } catch (e) {
@@ -1355,7 +1704,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             return { error: 'Token Expired' }
         }
 
-        if (!(await isSafeUrlResolved(originalUrl))) {
+        if (!isSafeUrl(originalUrl)) {
             fastify.log.warn({ category: 'Security' }, `blocked unsafe proxy request (Manifest Rewriter): ${truncateUrl(originalUrl)}`)
             reply.status(403);
             return { error: 'Access Denied: Unsafe URL' }
@@ -1393,9 +1742,10 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 const fetchTimeout = setTimeout(() => fetchController.abort(), 10000)
                 let response
                 try {
-                    response = await fetch(targetUrl, {
+                    response = await guardedWebFetch(targetUrl, {
                         method: request.method,
                         redirect: 'manual',
+                        maxBytes: 5 * 1024 * 1024,
                         signal: fetchController.signal,
                         headers: {
                             'User-Agent': 'AIOManager-ManifestRewriter/1.0'
@@ -1430,6 +1780,14 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 return buffer
 
             } catch (err) {
+                if (err.code === 'ssrf-blocked') {
+                    reply.status(403)
+                    return { error: 'Access Denied: Unsafe URL' }
+                }
+                if (err.code === 'too-large') {
+                    reply.status(413)
+                    return { error: 'Payload Too Large (>5MB)' }
+                }
                 // PROXY RESILIENCE: If upstream is dead (offline), we MUST return a valid manifest
                 // so Stremio doesn't delete the addon or show garbage.
                 if ((pathSuffix === 'manifest.json' || pathSuffix === '') && customName) {
@@ -1508,29 +1866,43 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             return reply.send(cached.data)
         }
 
+        const negative = manifestNegativeGet(cacheKey)
+        if (negative) {
+            if (cached) {
+                reply.header('X-Cache', 'STALE')
+                return reply.send(cached.data)
+            }
+            reply.header('X-Cache', 'NEGATIVE')
+            return reply.code(negative.status).send(negative.data)
+        }
+
         try {
-            const data = await enqueueProxyRequest(targetUrl, async () => {
-                const controller = new AbortController()
-                const timeout = setTimeout(() => controller.abort(), 15000)
-                try {
-                    const res = await fetch(targetUrl, {
-                        signal: controller.signal,
-                        headers: { 'Accept': 'application/json' }
-                    })
-                    if (!res.ok) {
-                        reply.code(res.status)
-                        return { error: `Upstream returned ${res.status}` }
+            let pending = discoverInflight.get(cacheKey)
+            if (!pending) {
+                pending = enqueueProxyRequest(targetUrl, async () => {
+                    const controller = new AbortController()
+                    const timeout = setTimeout(() => controller.abort(), 15000)
+                    try {
+                        const res = await fetch(targetUrl, {
+                            signal: controller.signal,
+                            headers: { 'Accept': 'application/json' }
+                        })
+                        if (!res.ok) return { status: res.status, data: { error: `Upstream returned ${res.status}` } }
+                        return { status: 200, data: await res.json() }
+                    } finally {
+                        clearTimeout(timeout)
                     }
-                    return await res.json()
-                } finally {
-                    clearTimeout(timeout)
-                }
-            })
+                }).finally(() => discoverInflight.delete(cacheKey))
+                discoverInflight.set(cacheKey, pending)
+            }
+            const { status, data } = await pending
+            if (status !== 200) reply.code(status)
 
             if (data.error) {
+                manifestNegativeSet(cacheKey, { status, data })
                 reply.header('X-Cache', 'MISS')
                 trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, error: true, timing: Date.now() - start })
-                reply.send(data)
+                return reply.send(data)
             } else {
                 manifestCache.set(cacheKey, { data, ts: Date.now() })
                 if (manifestCache.size > 5000) {
@@ -1547,9 +1919,10 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 reply.header('X-Cache', 'MISS')
                 reply.header('Cache-Control', 'public, max-age=600')
                 trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, timing: Date.now() - start })
-                reply.send(data)
+                return reply.send(data)
             }
         } catch (err) {
+            manifestNegativeSet(cacheKey, { status: 502, data: { error: 'Failed to fetch from stremio-addons.net' } })
             const cachedStale = manifestCache.get(cacheKey)
             if (cachedStale) {
                 reply.header('X-Cache', 'STALE')
@@ -1557,7 +1930,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                 return reply.send(cachedStale.data)
             }
             trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, error: true, timing: Date.now() - start })
-            reply.code(502).send({ error: 'Failed to fetch from stremio-addons.net' })
+            return reply.code(502).send({ error: 'Failed to fetch from stremio-addons.net' })
         }
     })
 }

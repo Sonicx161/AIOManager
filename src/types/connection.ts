@@ -35,6 +35,8 @@ export interface Connection {
     driverConfig?: HydraDriverConfig
     displayName?: string
     mediaServer?: MediaServerIdentity
+    /** Incarnation token: minted per add, carried on bound server rules and credentials so a delayed cleanup of a removed incarnation never claims the re-added one's rows. */
+    generation?: string
 }
 
 export interface NuvioPluginDescriptor {
@@ -66,5 +68,6 @@ export function isAddonConnection(c: Pick<Connection, 'platform' | 'connectionTy
 }
 
 export function isSyncEligibleConnection(c: Connection): boolean {
+    if (c.connectionType === 'hydra-inbound') return false
     return isAddonConnection(c) && (c.connectionType === 'hydra-outbound' || c.platform !== 'stremio')
 }

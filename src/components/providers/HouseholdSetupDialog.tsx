@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Check, Eye, EyeOff, KeyRound, Loader2, Users } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Eye, EyeOff, KeyRound, Loader2, Users } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Progress } from '@/components/ui/progress'
+import { StatusChip } from '@/components/ui/status-chip'
 import { OperationProgress } from '@/components/ui/operation-progress'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -14,7 +15,7 @@ import { getAccountEmail, useAccountStore } from '@/store/accountStore'
 import { useAuthStore } from '@/store/authStore'
 import { useVaultStore } from '@/store/vaultStore'
 import { useUIStore } from '@/store/uiStore'
-import { maskEmailLevel, maskNameLevel, maskUrlLevel } from '@/lib/utils'
+import { cn, maskEmailLevel, maskNameLevel, maskUrlLevel } from '@/lib/utils'
 import { useConnectionStore } from '@/store/connectionStore'
 import { captureSyncOwnership, type SyncOwnership } from '@/store/sync-store-helpers'
 import { decrypt, encrypt } from '@/lib/crypto'
@@ -26,6 +27,9 @@ import { openJellyfinSecret, sealJellyfinSecret } from '@/lib/jellyfin/connectio
 import { normalizeJellyfinUrl, type JellyfinSession } from '@/lib/jellyfin/session'
 import type { Account } from '@/types/account'
 import { JellyfinSetupDialog } from './JellyfinSetupDialog'
+import { friendlyError } from './friendly-error'
+
+const UNREACHABLE = 'Could not reach the AIOStreams or AIOMetadata server. Check its address and your connection, then try again.'
 
 interface ConfigOption { key: string; accountId: string; accountName: string; baseUrl: string; uuid: string; installUrl: string; name: string; logo?: string }
 function configOptions(accounts: Account[], service: 'aiostreams' | 'aiometadata'): ConfigOption[] {
@@ -84,7 +88,7 @@ function SetupPasswordField({ id, label, value, onChange, saved, vaultLocked, va
                     {automatic && <KeyRound aria-hidden="true" className="h-3 w-3 shrink-0 text-primary" />}{status}
                 </p>
             </div>
-            {saved && !vaultLocked && <Button type="button" variant="ghost" size="sm" className="h-7 shrink-0 px-2 text-xs" onClick={() => {
+            {saved && !vaultLocked && <Button type="button" variant="outline" size="sm" className="h-7 shrink-0 px-2.5 text-xs" onClick={() => {
                 if (automatic) setOverride(true)
                 else { onChange(''); setOverride(false) }
             }}>{automatic ? 'Override for this setup' : 'Use Vault password'}</Button>}
@@ -95,6 +99,10 @@ function SetupPasswordField({ id, label, value, onChange, saved, vaultLocked, va
 
 function SetupPanelEyebrow({ children }: { children: ReactNode }) {
     return <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{children}</p>
+}
+
+function SetupPanelHeader({ eyebrow, requirement, requirementVariant = 'muted' }: { eyebrow: string; requirement: string; requirementVariant?: 'muted' | 'primary' }) {
+    return <div className="flex items-center justify-between gap-2"><SetupPanelEyebrow>{eyebrow}</SetupPanelEyebrow><StatusChip size="sm" variant={requirementVariant}>{requirement}</StatusChip></div>
 }
 
 function SetupRouteLine({ icon, children }: { icon: ReactNode; children: ReactNode }) {
@@ -191,7 +199,7 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
             setLinkAccountId(accountId)
             setMemberId(''); setMetadataMemberId(''); setPlan(null); setResults([])
             setDestinationPassword(''); setMetadataPassword(''); setAccessKey(''); setAddonPassword('')
-        } catch (err) { if (generation.current === token) setError(err instanceof Error ? err.message : 'Could not load these configurations.') }
+        } catch (err) { if (generation.current === token) setError(friendlyError(err, 'Could not load these configurations.', UNREACHABLE)) }
         finally { running.current = false; if (generation.current === token) setBusy(false) }
     }
 
@@ -205,7 +213,7 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
                 memberId: memberId || undefined, metadataMemberId: metadataMemberId || undefined, installUrl: loaded.to.installUrl,
                 ...loaded.capabilities, reservedVariantIds: loaded.reservedVariantIds }))
             setResults([])
-        } catch (err) { setError(err instanceof Error ? err.message : 'Could not build this preview.') }
+        } catch (err) { setError(friendlyError(err, 'Could not build this preview.', UNREACHABLE)) }
     }
 
     const save = async () => {
@@ -231,7 +239,7 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
                     },
                 } : undefined,
             }, result => { loaded.ownership.assert(); setResults(previous => [...previous.filter(p => p.service !== result.service), result]) })
-        } catch (err) { setError(err instanceof Error ? err.message : 'Setup could not be completed.') }
+        } catch (err) { setError(friendlyError(err, 'Setup could not be completed.', UNREACHABLE)) }
         finally { running.current = false; writing.current = false; setBusy(false); onSavingChange?.(false) }
     }
 
@@ -283,52 +291,66 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
 
     return <>
         <HouseholdSetupFrame embedded={embedded} open={open} onOpenChange={close}>
-                <DialogHeader>
+                {embedded ? <div className="min-w-0">
+                    <h3 className="sr-only">Set up a person</h3>
+                    <p className="text-xs leading-relaxed text-muted-foreground">{destinations.length} AIOStreams {destinations.length === 1 ? 'configuration' : 'configurations'}. Set up a person’s Jellyfin sign-in without switching between AIOStreams and AIOMetadata. Choose or create their user, optionally pair AIOMetadata, then attach the sign-in to a local account you manage.</p>
+                </div> : <DialogHeader>
                     <DialogTitle className="flex items-center gap-2"><Users aria-hidden="true" className="h-4 w-4 text-primary" />Set up a person</DialogTitle>
                     <DialogDescription className="max-w-3xl leading-relaxed">Set up a person’s Jellyfin sign-in here, without switching between AIOStreams and AIOMetadata. Create or choose their user, optionally connect AIOMetadata for the library, then attach their sign-in to a local account you manage.</DialogDescription>
-                </DialogHeader>
-                <ol aria-label="Household setup progress" className="grid shrink-0 grid-cols-3 gap-2 border-y border-border/40 py-3">
-                    {['Configurations', 'Person', 'Review & save'].map((step, index) => <li key={step} aria-current={index === currentStep && !completed ? 'step' : undefined} className={`flex min-w-0 flex-col items-center gap-1.5 text-center text-[11px] leading-snug sm:flex-row sm:gap-2 sm:text-left ${index === currentStep ? 'font-medium text-foreground' : 'text-muted-foreground'}`}>
-                        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[10px] ${completed || index < currentStep ? 'border-success/30 bg-success/10 text-success' : index === currentStep ? 'border-primary bg-primary text-primary-foreground' : 'border-border/60'}`}>{completed || index < currentStep ? <Check aria-hidden="true" className="h-3 w-3" /> : index + 1}</span><span>{step}</span>
-                    </li>)}
+                </DialogHeader>}
+                <ol aria-label="Household setup progress" className="flex shrink-0 flex-wrap items-center gap-x-1 gap-y-1.5">
+                    {['Configurations', 'Person', 'Review & save'].map((step, index) => {
+                        const done = completed || index < currentStep
+                        return <li key={step} aria-current={index === currentStep && !completed ? 'step' : undefined} className="flex items-center gap-1">
+                            <span className={cn('inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs', done ? 'border-success/25 bg-success/10 text-success' : index === currentStep ? 'border-primary/25 bg-primary/10 font-medium text-foreground' : 'border-border/40 bg-muted/30 text-muted-foreground')}>
+                                <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] tabular-nums', done ? 'bg-success/20' : index === currentStep ? 'bg-primary text-primary-foreground' : 'bg-muted')}>{done ? <Check aria-hidden="true" className="h-2.5 w-2.5" /> : index + 1}</span>{step}
+                            </span>
+                            {index < 2 && <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />}
+                        </li>
+                    })}
                 </ol>
-                <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+                <div className="-mx-1 min-h-0 flex-1 space-y-4 overflow-y-auto px-1 pb-1 text-sm">
                     {!loaded ? <fieldset disabled={busy} className="@container space-y-4"><div className="grid min-w-0 gap-3 @3xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
-                        <div data-theme-part="panel" className="min-w-0 space-y-3 rounded-xl border border-primary/40 bg-card/50 p-4"><div className="space-y-1"><SetupPanelEyebrow>Playback base · required</SetupPanelEyebrow><Label htmlFor="household-destination">AIOStreams configuration</Label><p className="text-xs leading-relaxed text-muted-foreground">Choose the configuration this person will use for playback.</p></div><Select disabled={busy} value={destinationKey} onValueChange={setDestinationKey}><SelectTrigger id="household-destination" className="h-auto min-h-14 gap-3 py-2.5 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:text-left [&>span]:line-clamp-none"><SelectValue placeholder="Choose an AIOStreams configuration" /></SelectTrigger><SelectContent className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]">{destinations.map(option => <SelectItem key={option.key} value={option.key} textValue={label(option)} className="py-2.5 [&>span:last-child]:block [&>span:last-child]:min-w-0 [&>span:last-child]:w-full">{configChoice(option)}</SelectItem>)}</SelectContent></Select>{selectedDestination ? <SetupRouteLine icon={<AddonIcon name={selectedDestination.name} logo={selectedDestination.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" />}>Playback for this person comes from the selected AIOStreams configuration.</SetupRouteLine> : destinations.length === 0 ? <p className="text-xs leading-relaxed text-muted-foreground">This account has no AIOStreams configurations yet.</p> : null}</div>
-                        <div data-theme-part="panel" className={`min-w-0 space-y-3 rounded-xl border p-4 ${metadataPaired ? 'border-border/40 bg-card/50' : 'border-dashed border-border/50 bg-muted/15'}`}><div className="space-y-1"><SetupPanelEyebrow>Library pairing · optional</SetupPanelEyebrow><Label htmlFor="household-metadata">Connect AIOMetadata</Label><p className="max-w-3xl text-xs leading-relaxed text-muted-foreground">Use AIOMetadata for their library with AIOStreams for playback. Choose a configuration you manage, or supply their existing install URL. We’ll create or choose a user there and set that user’s playback source.</p></div><Select disabled={busy} value={metadataKey || '@none'} onValueChange={value => setMetadataKey(value === '@none' ? '' : value)}><SelectTrigger id="household-metadata" className="h-auto min-h-14 gap-3 py-2.5 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:text-left [&>span]:line-clamp-none"><SelectValue /></SelectTrigger><SelectContent className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"><SelectItem value="@none" className="py-2">Use AIOStreams on its own</SelectItem>{metadataOptions.map(option => <SelectItem key={option.key} value={option.key} textValue={label(option)} className="py-2.5 [&>span:last-child]:block [&>span:last-child]:min-w-0 [&>span:last-child]:w-full">{configChoice(option)}</SelectItem>)}<SelectItem value="@custom" className="py-2">Use another AIOMetadata configuration…</SelectItem></SelectContent></Select>{metadataKey === '@custom' && <div className="space-y-2 border-t border-border/40 pt-3"><Label htmlFor="household-metadata-url">AIOMetadata install URL</Label><Input id="household-metadata-url" type="url" autoComplete="off" spellCheck={false} placeholder="https://your-instance/stremio/config-id/manifest.json" value={metadataUrl} onChange={event => setMetadataUrl(event.target.value)} /><p className="text-xs leading-relaxed text-muted-foreground">Use an existing configuration you have permission to edit. Its password is read from your Vault when available, or you can enter it below.</p></div>}<SetupRouteLine icon={metadataOption ? <AddonIcon name={metadataOption.name} logo={metadataOption.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /> : metadataPaired ? <AddonIcon name="AIOMetadata" className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /> : <AddonIcon name={selectedDestination?.name || 'AIOStreams'} logo={selectedDestination?.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" />}>{metadataPaired ? 'Library pairs with AIOMetadata; playback still comes from AIOStreams.' : 'No pairing yet. The person uses AIOStreams on its own.'}</SetupRouteLine></div>
+                        <div data-theme-part="panel" className="min-w-0 space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm"><div className="space-y-1.5"><SetupPanelHeader eyebrow="Playback base" requirement="Required" /><Label htmlFor="household-destination" className="block font-semibold">AIOStreams configuration</Label><p className="text-xs leading-relaxed text-muted-foreground">Choose the configuration this person will use for playback.</p></div><Select disabled={busy} value={destinationKey} onValueChange={setDestinationKey}><SelectTrigger id="household-destination" className="h-auto min-h-14 gap-3 py-2.5 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:text-left [&>span]:line-clamp-none"><SelectValue placeholder="Choose an AIOStreams configuration" /></SelectTrigger><SelectContent className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]">{destinations.map(option => <SelectItem key={option.key} value={option.key} textValue={label(option)} className="py-2.5 [&>span:last-child]:block [&>span:last-child]:min-w-0 [&>span:last-child]:w-full">{configChoice(option)}</SelectItem>)}</SelectContent></Select>{selectedDestination ? <SetupRouteLine icon={<AddonIcon name={selectedDestination.name} logo={selectedDestination.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" />}>Playback for this person comes from the selected AIOStreams configuration.</SetupRouteLine> : destinations.length === 0 ? <p className="text-xs leading-relaxed text-muted-foreground">This account has no AIOStreams configurations yet.</p> : null}</div>
+                        <div data-theme-part="panel" className="min-w-0 space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm"><div className="space-y-1.5"><SetupPanelHeader eyebrow="Library pairing" requirement="Optional" /><Label htmlFor="household-metadata" className="block font-semibold">Connect AIOMetadata</Label><p className="max-w-prose text-xs leading-relaxed text-muted-foreground">Use AIOMetadata for their library with AIOStreams for playback. Choose a configuration you manage, or supply their existing install URL. We’ll create or choose a user there and set that user’s playback source.</p></div><Select disabled={busy} value={metadataKey || '@none'} onValueChange={value => setMetadataKey(value === '@none' ? '' : value)}><SelectTrigger id="household-metadata" className="h-auto min-h-14 gap-3 py-2.5 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:text-left [&>span]:line-clamp-none"><SelectValue /></SelectTrigger><SelectContent className="w-[var(--radix-select-trigger-width)] max-w-[calc(100vw-2rem)]"><SelectItem value="@none" className="py-2">Use AIOStreams on its own</SelectItem>{metadataOptions.map(option => <SelectItem key={option.key} value={option.key} textValue={label(option)} className="py-2.5 [&>span:last-child]:block [&>span:last-child]:min-w-0 [&>span:last-child]:w-full">{configChoice(option)}</SelectItem>)}<SelectItem value="@custom" className="py-2">Use another AIOMetadata configuration…</SelectItem></SelectContent></Select>{metadataKey === '@custom' && <div className="space-y-2 border-t border-border/40 pt-3"><Label htmlFor="household-metadata-url" className="block">AIOMetadata install URL</Label><Input id="household-metadata-url" type="url" autoComplete="off" spellCheck={false} placeholder="https://your-instance/stremio/config-id/manifest.json" value={metadataUrl} onChange={event => setMetadataUrl(event.target.value)} /><p className="text-xs leading-relaxed text-muted-foreground">Use an existing configuration you have permission to edit. Its password is read from your Vault when available, or you can enter it below.</p></div>}<SetupRouteLine icon={metadataOption ? <AddonIcon name={metadataOption.name} logo={metadataOption.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /> : metadataPaired ? <AddonIcon name="AIOMetadata" className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /> : <AddonIcon name={selectedDestination?.name || 'AIOStreams'} logo={selectedDestination?.logo} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" />}>{metadataPaired ? 'Library pairs with AIOMetadata; playback still comes from AIOStreams.' : 'No pairing yet. The person uses AIOStreams on its own.'}</SetupRouteLine></div>
                     </div>
-                        <details open={showCredentials} onToggle={event => setShowCredentials(event.currentTarget.open)} className="rounded-xl border border-border/40 p-4">
-                            <summary className="cursor-pointer text-xs font-medium">Passwords &amp; instance access <span className="ml-1 font-normal text-muted-foreground">· uses your Vault</span></summary>
-                            <div className="mt-4 space-y-4">
-                                <p className="text-xs leading-relaxed text-muted-foreground">Saved configuration passwords are used automatically while your Vault is unlocked. Overrides apply only to this setup and are not saved to the Vault.</p>
+                        <details open={showCredentials} onToggle={event => setShowCredentials(event.currentTarget.open)} data-theme-part="panel" className="group overflow-hidden rounded-2xl border border-border/40 bg-card shadow-sm">
+                            <summary className="flex cursor-pointer list-none items-center gap-3 rounded-2xl px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/40 bg-muted/30 text-muted-foreground"><KeyRound aria-hidden="true" className="h-4 w-4" /></span>
+                                <span className="min-w-0 flex-1 text-sm font-semibold">Passwords &amp; instance access</span>
+                                <StatusChip size="sm">Uses your Vault</StatusChip>
+                                <ChevronDown aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground/60 transition-transform group-open:rotate-180" />
+                            </summary>
+                            <div className="space-y-4 border-t border-border/40 px-4 py-4">
+                                <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">Saved configuration passwords are used automatically while your Vault is unlocked. Overrides apply only to this setup and are not saved to the Vault.</p>
                                 <SetupPasswordField key={`destination:${destinationKey}`} id="household-destination-password" label="Shared configuration password" value={destinationPassword} onChange={setDestinationPassword} saved={savedPasswords.destination} vaultLocked={vaultLocked} vaultLoading={vaultLoading} />
-                                <div className="space-y-2 border-t border-border/40 pt-4"><Label htmlFor="household-instance-access">AIOStreams instance access key <span className="font-normal text-muted-foreground">· if required</span></Label><SetupSecretInput id="household-instance-access" label="AIOStreams instance access key" value={accessKey} onChange={setAccessKey} placeholder="Enter the instance access key" /></div>
+                                <div className="space-y-2 border-t border-border/40 pt-4"><Label htmlFor="household-instance-access" className="block">AIOStreams instance access key <span className="font-normal text-muted-foreground">· if required</span></Label><SetupSecretInput id="household-instance-access" label="AIOStreams instance access key" value={accessKey} onChange={setAccessKey} placeholder="Enter the instance access key" /></div>
                                 {metadataKey && <>
                                     <SetupPasswordField key={`metadata:${metadataKey}:${metadataUrl}`} id="household-metadata-password" label="AIOMetadata configuration password" value={metadataPassword} onChange={setMetadataPassword} saved={savedPasswords.metadata} vaultLocked={vaultLocked} vaultLoading={vaultLoading} />
-                                    <div className="space-y-2"><Label htmlFor="household-metadata-instance-password">AIOMetadata instance password <span className="font-normal text-muted-foreground">· if required</span></Label><SetupSecretInput id="household-metadata-instance-password" label="AIOMetadata instance password" value={addonPassword} onChange={setAddonPassword} placeholder="Enter the instance password" /></div>
+                                    <div className="space-y-2"><Label htmlFor="household-metadata-instance-password" className="block">AIOMetadata instance password <span className="font-normal text-muted-foreground">· if required</span></Label><SetupSecretInput id="household-metadata-instance-password" label="AIOMetadata instance password" value={addonPassword} onChange={setAddonPassword} placeholder="Enter the instance password" /></div>
                                 </>}
                             </div>
                         </details>
-                        <p className="text-xs leading-relaxed text-muted-foreground">Users share this configuration’s playback settings and services. Choose a configuration you’re comfortable sharing.</p>
+                        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">Users share this configuration’s playback settings and services. Choose a configuration you’re comfortable sharing.</p>
                     </fieldset> : !plan ? <fieldset disabled={busy} className="space-y-4">
-                        <div className="min-w-0 rounded-xl border border-border/40 bg-card/50 p-3">{configChoice(loaded.to)}</div>
+                        <div data-theme-part="panel" className="min-w-0 rounded-2xl border border-border/40 bg-card p-3 shadow-sm">{configChoice(loaded.to)}</div>
                         <div className="space-y-1.5"><Label htmlFor="household-name">Person’s name</Label><Input id="household-name" value={personName} maxLength={32} onChange={e => { if (variantName === personName) setVariantName(e.target.value); setPersonName(e.target.value) }} /></div>
                         <div className="space-y-1.5"><Label htmlFor="household-member">AIOStreams user</Label><Select disabled={busy} value={memberId || '@new'} onValueChange={value => setMemberId(value === '@new' ? '' : value)}><SelectTrigger id="household-member"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="@new">Create a separate user</SelectItem>{typeof primaryName === 'string' && primaryName.trim() && <SelectItem value="@primary">{privateName(primaryName)} · primary user</SelectItem>}{personas.map(person => <SelectItem key={String(person.id)} value={String(person.id)}>{privateName(String(person.name))}</SelectItem>)}</SelectContent></Select></div>
                         {loaded.metadata && <div className="space-y-1.5"><Label htmlFor="household-metadata-member">AIOMetadata user</Label><Select disabled={busy} value={metadataMemberId || '@new'} onValueChange={value => setMetadataMemberId(value === '@new' ? '' : value)}><SelectTrigger id="household-metadata-member"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="@new">Create a separate user</SelectItem>{metadataMembers.map(person => <SelectItem key={String(person.id)} value={String(person.id)}>{privateName(String(person.name))}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">This user belongs to {loaded.metadataTo ? label(loaded.metadataTo) : 'the selected configuration'}. Only this user’s playback source will be set.</p></div>}
-                        <div className="space-y-3 rounded-xl border border-border/40 p-4">
+                        <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
                             <div className="flex items-start gap-3"><Checkbox id="household-create-variant" checked={createVariant} disabled={busy || !loaded.capabilities.variantsAvailable} onCheckedChange={checked => setCreateVariant(checked === true)} className="mt-0.5 shrink-0" /><div className="min-w-0 space-y-1"><Label htmlFor="household-create-variant">Create a variant for this person <span className="font-normal text-muted-foreground">· optional, advanced</span></Label><p className="text-xs leading-relaxed text-muted-foreground">Use different playback filters, sorting or formatting. You can finish user setup without a new variant.</p></div></div>
                             {!loaded.capabilities.variantsAvailable && <p className="text-xs leading-relaxed text-muted-foreground">{loaded.capabilities.variantUnavailableReason} User setup is still available.</p>}
                             {createVariant && <div className="space-y-3 border-t border-border/40 pt-3">
                                 <div className="space-y-1.5"><Label htmlFor="household-variant">Variant name</Label><Input id="household-variant" value={variantName} maxLength={64} onChange={e => setVariantName(e.target.value)} /></div>
-                                <div className="space-y-1.5"><Label htmlFor="household-variant-script">Variant rules (CEL)</Label><Textarea id="household-variant-script" aria-describedby="household-variant-help" value={variantScript} onChange={e => setVariantScript(e.target.value)} spellCheck={false} autoComplete="off" rows={5} className="resize-y font-mono text-xs" placeholder={'set resultLimits.global = 10\nset excludedResolutions = ["2160p"]'} /><p id="household-variant-help" className="text-xs leading-relaxed text-muted-foreground">These rules apply when this user signs in. Use the <a href="https://docs.aiostreams.viren070.me/reference/config-expressions/#quick-start" target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">CEL reference</a> and AIOStreams’ variant preview to check their effect.</p></div>
+                                <div className="space-y-1.5 text-xs"><Label htmlFor="household-variant-script">Variant rules (CEL)</Label><Textarea id="household-variant-script" aria-describedby="household-variant-help" value={variantScript} onChange={e => setVariantScript(e.target.value)} spellCheck={false} autoComplete="off" rows={5} className="resize-y font-mono text-xs" placeholder={'set resultLimits.global = 10\nset excludedResolutions = ["2160p"]'} /><p id="household-variant-help" className="text-xs leading-relaxed text-muted-foreground">These rules apply when this user signs in. Use the <a href="https://docs.aiostreams.viren070.me/reference/config-expressions/#quick-start" target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">CEL reference</a> and AIOStreams’ variant preview to check their effect.</p></div>
                             </div>}
                         </div>
                     </fieldset> : <div className="space-y-4">
                         <div className="flex items-center gap-3"><Users className="h-7 w-7 shrink-0 text-muted-foreground" /><div className="min-w-0"><p className="break-words font-semibold">{privateName(plan.personName)}</p><p className="text-sm text-muted-foreground">{completed ? 'Setup verified' : hasFailure ? 'Setup needs attention' : 'Review this setup'}</p></div></div>
-                        <div className="space-y-3 rounded-xl border border-border/40 bg-card/50 p-3">{configChoice(loaded.to)}{loaded.metadataTo && <div className="border-t border-border/40 pt-3">{configChoice(loaded.metadataTo)}</div>}</div>
+                        <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-3 shadow-sm">{configChoice(loaded.to)}{loaded.metadataTo && <div className="border-t border-border/40 pt-3">{configChoice(loaded.metadataTo)}</div>}</div>
                         <dl className="space-y-2 text-sm"><div className="flex justify-between gap-4"><dt className="shrink-0 text-muted-foreground">AIOStreams user</dt><dd className="min-w-0 break-words text-right">{privateName(plan.memberName)}</dd></div>{plan.metadataMemberName && <div className="flex justify-between gap-4"><dt className="shrink-0 text-muted-foreground">AIOMetadata user</dt><dd className="min-w-0 break-words text-right">{privateName(plan.metadataMemberName)}</dd></div>}<div className="flex justify-between gap-4"><dt className="shrink-0 text-muted-foreground">New variant</dt><dd className="min-w-0 break-words text-right">{plan.variantName ? privateName(plan.variantName) : 'None'}</dd></div>{plan.playbackVariantIds.length > 0 && <div className="flex justify-between gap-4"><dt className="shrink-0 text-muted-foreground">Playback variants</dt><dd className="min-w-0 break-words text-right">{plan.playbackVariantIds.map(privateName).join(', ')}</dd></div>}</dl>
                         {!completed && <p className="text-xs leading-relaxed text-muted-foreground">{plan.aiometadata ? 'The selected AIOMetadata user will use AIOStreams for playback. ' : ''}{memberId ? 'The existing user keeps their history and sign-in settings.' : 'The new AIOStreams user gets separate history and starts without tracker connections.'}</p>}
-                        {(busy || results.length > 0) && <section aria-label="Setup progress" className="space-y-3 rounded-xl border border-border/40 bg-card/50 p-4">
+                        {(busy || results.length > 0) && <section aria-label="Setup progress" data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
                             <div className="flex flex-wrap items-center justify-between gap-2 text-sm" role="status">
                                 <p className="flex items-center gap-2 font-medium">{busy && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}{completed ? 'Setup saved and verified' : hasFailure && !busy ? 'Setup needs attention' : 'Saving and verifying setup'}</p>
                                 <span className="text-xs tabular-nums text-muted-foreground">{verifiedServices} of {totalServices} services verified</span>

@@ -171,7 +171,7 @@ export function NuvioPluginsPanel({ accountId, connection }: { accountId: string
                                 <p className={cn('text-sm font-medium truncate', !p.enabled && 'text-muted-foreground line-through')}>
                                     {p.name || p.url}
                                 </p>
-                                <p className="text-[11px] text-muted-foreground/70 truncate mt-0.5">{p.url}</p>
+                                {p.name && <p className="text-[11px] text-muted-foreground/70 truncate mt-0.5">{p.url}</p>}
                             </div>
                             <Switch
                                 checked={p.enabled}

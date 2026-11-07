@@ -1,4 +1,4 @@
-import type { WatchMediaType, WatchStateRecord } from './types.ts'
+import type { MigrationRow, WatchMediaType, WatchStateRecord } from './types.ts'
 
 export function canonicalWatchIdentity(type: WatchMediaType, providerId: string, season?: number, episode?: number): string | null {
     const match = providerId.match(/^(?:(imdb):)?(tt\d{5,})$/) || providerId.match(/^(tmdb|tvdb):(\d+)$/)
@@ -71,4 +71,8 @@ export function watchRecordSubtitle(record: WatchStateRecord): string {
     const episodeTitle = record.episodeTitle || (record.seriesTitle && record.title !== record.seriesTitle ? record.title : '')
     const coordinates = `Season ${record.season ?? '?'} · Episode ${record.episode ?? '?'}`
     return episodeTitle && episodeTitle !== watchRecordTitle(record) ? `${episodeTitle} · ${coordinates}` : coordinates
+}
+
+export function undatedRowCount(rows: readonly MigrationRow[], selected?: ReadonlySet<string>): number {
+    return rows.filter(row => row.undated === true && row.status === 'ready' && (selected === undefined || selected.has(row.id))).length
 }

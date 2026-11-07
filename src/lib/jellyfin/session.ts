@@ -51,6 +51,11 @@ export class JellyfinClient {
         this.client = createJellyfinClient(this.baseUrl, { deviceId, fetch: fetcher })
     }
 
+    /** Public, read-only discovery used to prefill the Add Connection picker. */
+    async listPublicUsers(signal?: AbortSignal) {
+        return this.client.listPublicUsers(signal)
+    }
+
     async signIn(login: JellyfinLogin, signal?: AbortSignal): Promise<JellyfinSession> {
         let signedIn
         if (login.method === 'password') {

@@ -8,11 +8,14 @@ import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
 import { addNuvioProfiles } from '@/store/account/profileQuickAdd'
+import { nuvioAuth } from '@/api/hydra-providers'
 import type { ProfileQuickAddEntry, ProfileQuickAddResult } from '@/store/account/profileQuickAdd'
 import type { Account } from '@/types/account'
 import { cn, maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils'
 
 type Phase = 'review' | 'done'
+
+const BAD_NUVIO_PASSWORD = 'That password did not work for this Nuvio login.'
 
 interface ProfileQuickAddReviewProps {
     open: boolean
@@ -47,6 +50,7 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
     const [passwordVisible, setPasswordVisible] = useState(false)
     const [manualEmail, setManualEmail] = useState('')
     const [submitting, setSubmitting] = useState(false)
+    const [authError, setAuthError] = useState<string | null>(null)
     const [added, setAdded] = useState<ProfileQuickAddResult[]>([])
     const [failed, setFailed] = useState<ProfileQuickAddResult[]>([])
     const [skipped, setSkipped] = useState<ProfileQuickAddResult[]>([])
@@ -69,6 +73,7 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
         setFailed([])
         setSkipped([])
         setSubmitting(false)
+        setAuthError(null)
     }, [open, entries])
 
     const effectiveEmail = (email || manualEmail).trim()
@@ -83,7 +88,20 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
     ), [added, accounts])
     const runBatch = async (batch: ProfileQuickAddEntry[]) => {
         setSubmitting(true)
+        setAuthError(null)
         try {
+            // Check the credentials once before the loop: a wrong password must not
+            // become one failure row per profile with an unrecoverable Retry.
+            const source = useAccountStore.getState().accounts.find(a => a.id === sourceAccountId)
+            const nuvioConnections = (source?.connections || []).filter(c => c.platform === 'nuvio')
+            const connection = sourceConnectionId ? nuvioConnections.find(c => c.id === sourceConnectionId) : nuvioConnections[0]
+            if (!source || !connection) throw new Error('Could not find the Nuvio login for this account.')
+            try {
+                await nuvioAuth(effectiveEmail, password, connection.credentials?.publishableKey || undefined, connection.credentials?.baseUrl || undefined)
+            } catch (err) {
+                const status = (err as { status?: number }).status
+                throw status === 400 || status === 401 || status === 403 ? new Error(BAD_NUVIO_PASSWORD) : err
+            }
             const outcome = await addNuvioProfiles(
                 sourceAccountId,
                 effectiveEmail,
@@ -103,6 +121,10 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
                 setFailed(outcome.results.filter(r => !r.ok && !r.skipped))
                 setPhase('done')
             }
+        } catch (err) {
+            setPhase('review')
+            setPassword('')
+            setAuthError(err instanceof Error ? err.message : 'Could not add these profiles.')
         } finally {
             setSubmitting(false)
         }
@@ -184,7 +206,7 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
                                         <Input
                                             id="quick-add-password"
                                             value={password}
-                                            onChange={e => setPassword(e.target.value)}
+                                            onChange={e => { setPassword(e.target.value); setAuthError(null) }}
                                             type={passwordVisible ? 'text' : 'password'}
                                             autoComplete="new-password"
                                             className="h-8 pr-10 text-xs"
@@ -195,6 +217,9 @@ export function ProfileQuickAddReview({ open, sourceAccountId, email, sourceConn
                                         </Button>
                                     </div>
                                     <p className="text-[11px] text-muted-foreground">Used once now, never stored.</p>
+                                    {authError && (
+                                        <p role="alert" className="text-[11px] text-destructive">{authError}</p>
+                                    )}
                                 </div>
                             </div>
 

@@ -23,8 +23,8 @@ export function MigrationProgressPanel({ mode, message, progress }: {
     mode: 'preview' | 'import'; message: string; progress: ImportProgress | null
 }) {
     const percent = progress ? Math.round(progress.completed / Math.max(1, progress.total) * 100) : undefined
-    return <section aria-label={mode === 'import' ? 'Import progress' : 'Preview progress'} data-theme-part="panel" className="space-y-4 rounded-2xl border border-primary/25 bg-primary/5 p-5">
-        <h3 className="flex items-center gap-2 text-base font-semibold"><Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-primary" />{mode === 'import' ? 'Importing your watch information' : 'Preparing your preview'}</h3>
+    return <section aria-label={mode === 'import' ? 'Import progress' : 'Preview progress'} data-theme-part="panel" className="space-y-3 rounded-2xl border border-primary/25 bg-primary/5 p-4">
+        <h3 className="flex items-center gap-2 text-sm font-semibold"><Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-primary" />{mode === 'import' ? 'Importing your watch information' : 'Preparing your preview'}</h3>
         <p role="status" className="sr-only">{mode === 'import' ? 'Saving and confirming the selected titles.' : 'Reading connections and checking matches. Nothing is being saved.'}</p>
         <p className="text-sm text-muted-foreground">{message}</p>
         <div role="progressbar" aria-label={mode === 'import' ? 'Import progress' : 'Preview progress'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={progress ? `${progress.completed.toLocaleString()} of ${progress.total.toLocaleString()} titles checked` : undefined} data-theme-part="progress" className="h-2 overflow-hidden rounded-full bg-muted">
@@ -40,7 +40,7 @@ const resultLabels = { applied: 'Imported', unchanged: 'Already saved', conflict
 export function MigrationImportLog({ plan, results }: { plan: WatchMigrationPlan; results: MigrationResult[] }) {
     const rows = useMemo(() => new Map(plan.rows.map(row => [row.id, row])), [plan])
     const recent = results.slice(-6)
-    return <section aria-label="Import log" className="overflow-hidden rounded-xl border border-border/50 bg-card">
+    return <section aria-label="Import log" className="overflow-hidden rounded-2xl border border-border/40 bg-card shadow-sm">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/40 px-4 py-3">
             <h4 className="text-sm font-semibold">Import log</h4>
             <span className="text-xs tabular-nums text-muted-foreground">{results.length > 6 ? `Latest 6 of ${results.length.toLocaleString()} checked` : `${results.length.toLocaleString()} checked`}</span>
@@ -95,6 +95,7 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
     const alreadySaved = plan.rows.filter(row => row.status === 'unchanged').length
     const previewKept = plan.rows.filter(row => row.status === 'conflict').length
     const unmatched = plan.rows.filter(row => row.status === 'skipped' || row.status === 'unsupported').length
+    const undated = results.filter(result => result.status === 'applied' && rows.get(result.rowId)?.undated === true).length
     const datesNotCopied = results.some(result => result.status === 'applied' && rows.get(result.rowId)?.notes.includes('Original watch dates cannot be preserved by this destination.'))
     const visible = results.filter(result => filter === 'all' || (filter === 'attention' ? result.status === 'failed' : filter === 'kept' ? result.status === 'unchanged' || result.status === 'conflict' : result.status === 'applied'))
     const pageCount = Math.max(1, Math.ceil(visible.length / 50))
@@ -150,10 +151,11 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
             })}</ul> : <p className="rounded-xl border border-dashed border-border/50 px-4 py-6 text-center text-sm text-muted-foreground">No titles in this result filter.</p>}
             {pageCount > 1 && <div className="flex items-center justify-between gap-2 pt-1 text-xs text-muted-foreground"><Button size="sm" variant="outline" disabled={shownPage === 0} onClick={() => setPage(shownPage - 1)}>Previous</Button><span>Page {shownPage + 1} of {pageCount}</span><Button size="sm" variant="outline" disabled={shownPage + 1 === pageCount} onClick={() => setPage(shownPage + 1)}>Next</Button></div>}
         </div> : <p className="text-sm text-muted-foreground">No titles were confirmed in this run.</p>}
-        <details data-theme-part="panel" className="rounded-xl border border-border/40 bg-muted/20">
-            <summary className="cursor-pointer select-none px-4 py-2.5 text-xs font-medium text-muted-foreground">Import details &amp; report</summary>
+        <details data-theme-part="panel" className="rounded-2xl border border-border/40 bg-muted/20">
+            <summary className="cursor-pointer select-none rounded-2xl px-4 py-2.5 text-xs font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Import details &amp; report</summary>
             <div className="space-y-2 border-t border-border/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
                 {outcome === 'stopped' && <p>Confirmed titles stay saved. Titles that weren’t reached can be reviewed and retried after a fresh preview.</p>}
+                {undated > 0 && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{undated.toLocaleString()} {undated === 1 ? 'title had' : 'titles had'} no exact watch time and {undated === 1 ? 'was' : 'were'} sent without a date.</span></p>}
                 {datesNotCopied && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>Original watch dates weren’t copied. This server may show when the import ran instead.</span></p>}
                 {!plan.source.complete && <p className="flex items-start gap-2"><CircleAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>The source returned an incomplete history. Only titles found in this preview were considered.</span></p>}
                 {(otherReady > 0 || alreadySaved > 0 || unmatched > 0 || previewKept > 0) && <div className="space-y-1 border-l-2 border-border pl-3">

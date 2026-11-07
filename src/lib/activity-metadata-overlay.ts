@@ -1,13 +1,15 @@
 // Shared display-metadata overlay for Activity rows whose source only provided a
 // raw provider identifier as the title (e.g. a second connection reporting
-// "kitsu:43248" while its sibling already shows the real name). Pure helpers —
-// the fetching itself lives in cinemeta-cache.ts / kitsu-meta.ts.
+// "kitsu:43248" while its sibling already shows the real name). Id fetching
+// lives in cinemeta-cache.ts / kitsu-meta.ts; the title search is injected.
 //
 // Leaf module by design: only type-only imports, so the local node --test suite
 // can execute it directly.
 
 import type { ActivityItem } from '../types/activity.ts'
+import { isImdbId, metahubPosterUrl } from './activity-artwork.ts'
 import { parseKitsuId } from './kitsu-meta.ts'
+import { normalizeWatcherTitle, watcherIdentityKeys } from './watcher-identity.ts'
 
 // Same shape as the inline regex kept in useWatchHistory.ts / ActivityPage.tsx:
 // an anchored, full-match raw provider id is a placeholder, not a title.
@@ -26,27 +28,41 @@ export function isUnresolvedActivityName(name: string | undefined | null): boole
 }
 
 export type PendingMetadataTarget =
-    | { kind: 'imdb'; itemId: string }
+    | { kind: 'imdb'; itemId: string; type?: string }
+    | { kind: 'tmdb'; itemId: string; tmdbId: string; type: 'movie' | 'series'; name: string }
     | { kind: 'kitsu'; itemId: string; kitsuId: string }
+    | { kind: 'title'; itemId: string; identity: string; name: string; type: string }
+
+/** Bookkeeping key for a target: title targets by identity, id targets by itemId. */
+export function metadataTargetKey(target: PendingMetadataTarget): string {
+    return target.kind === 'title' ? target.identity : target.itemId
+}
 
 /**
  * Collect the unresolved rows a resolver pass should work on, in feed order,
- * deduped by itemId (two connections watching the same id resolve once).
+ * deduped by itemId (two connections watching the same id resolve once) and,
+ * for title targets, by identity. `resolved` is keyed by metadataTargetKey.
  * Rows with configured names are never collected: resolution only ever fills
- * blank/identifier titles — it never overrides real metadata.
+ * blank/identifier titles and never overrides real metadata.
  */
 export function collectUnresolvedMetadataTargets(
-    history: Array<Pick<ActivityItem, 'itemId' | 'uniqueItemId' | 'name'>>,
+    history: Array<Pick<ActivityItem, 'itemId' | 'uniqueItemId' | 'name' | 'poster' | 'type'>>,
     resolved: { has(itemId: string): boolean },
 ): PendingMetadataTarget[] {
     const targets: PendingMetadataTarget[] = []
     const seen = new Set<string>()
     for (const item of history) {
         if (!item?.itemId || seen.has(item.itemId) || resolved.has(item.itemId)) continue
-        if (!isUnresolvedActivityName(item.name)) continue
+        if (!isUnresolvedActivityName(item.name) && item.poster) continue
         if (item.itemId.startsWith('tt')) {
             seen.add(item.itemId)
-            targets.push({ kind: 'imdb', itemId: item.itemId })
+            targets.push(item.type ? { kind: 'imdb', itemId: item.itemId, type: item.type } : { kind: 'imdb', itemId: item.itemId })
+            continue
+        }
+        const tmdbId = /^tmdb:(\d+)$/i.exec(item.itemId)?.[1]
+        if (tmdbId && (item.type === 'movie' || item.type === 'series' || item.type === 'anime' || item.type === 'episode')) {
+            seen.add(item.itemId)
+            targets.push({ kind: 'tmdb', itemId: item.itemId, tmdbId, type: item.type === 'movie' ? 'movie' : 'series', name: item.name })
             continue
         }
         // Episode rows can carry the provider id on the episode-aware unique id
@@ -55,9 +71,86 @@ export function collectUnresolvedMetadataTargets(
         if (kitsuId) {
             seen.add(item.itemId)
             targets.push({ kind: 'kitsu', itemId: item.itemId, kitsuId })
+            continue
+        }
+        if (!isUnresolvedActivityName(item.name)
+            && !item.poster
+            && (item.type === 'movie' || item.type === 'series' || item.type === 'anime')) {
+            const identity = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
+            if (identity && !seen.has(identity) && !resolved.has(identity)) {
+                seen.add(identity)
+                targets.push({ kind: 'title', itemId: item.itemId, identity, name: item.name, type: item.type })
+            }
         }
     }
     return targets
+}
+
+/** Next resolver batch, skipping targets whose last failed attempt is within retryMs. */
+export function selectMetadataBatch(
+    history: Array<Pick<ActivityItem, 'itemId' | 'uniqueItemId' | 'name' | 'poster' | 'type'>>,
+    resolved: { has(key: string): boolean },
+    failedAt: ReadonlyMap<string, number>,
+    now: number,
+    retryMs: number,
+    limit: number,
+): PendingMetadataTarget[] {
+    return collectUnresolvedMetadataTargets(history, resolved)
+        .filter(target => now - (failedAt.get(metadataTargetKey(target)) ?? -Infinity) >= retryMs)
+        .slice(0, limit)
+}
+
+export interface TitleSearchCandidate {
+    id: string
+    type: string
+    name: string
+    poster?: string
+}
+
+/**
+ * Cached, in-flight-deduped title search that only accepts a single exact
+ * same-type match, so ambiguous same-title remakes resolve to nothing.
+ * Misses are cached for ttlMs only.
+ */
+export function createTitleMetadataSearch(
+    search: (name: string, mediaType: 'movie' | 'series') => Promise<TitleSearchCandidate[]>,
+    { ttlMs, max }: { ttlMs: number; max: number },
+): (name: string, type: string) => Promise<ResolvedMetadata | null> {
+    const cache = new Map<string, { at: number; value: ResolvedMetadata | null }>()
+    const inflight = new Map<string, Promise<ResolvedMetadata | null>>()
+    return async (name, type) => {
+        const mediaType = type === 'series' || type === 'anime' ? 'series' : 'movie'
+        const normalized = normalizeWatcherTitle(name)
+        const key = `${mediaType}:${normalized}`
+        const cached = cache.get(key)
+        if (cached && Date.now() - cached.at < ttlMs) return cached.value
+        const existing = inflight.get(key)
+        if (existing) return existing
+        const request = (async () => {
+            try {
+                const results = await search(name, mediaType)
+                const matches = results.filter(candidate => candidate.type === mediaType && normalizeWatcherTitle(candidate.name) === normalized)
+                const ids = new Set(matches.map(candidate => candidate.id).filter(Boolean))
+                if (ids.size !== 1) return null
+                const match = matches[0]
+                // Metahub by IMDb id is the canonical, proxied, key-free source; the catalog poster is a third-party host.
+                const poster = isImdbId(match?.id) ? metahubPosterUrl(match.id) : match?.poster
+                return match?.name ? { name: match.name, poster } : null
+            } catch {
+                return null
+            }
+        })()
+        inflight.set(key, request)
+        try {
+            const value = await request
+            cache.delete(key)
+            cache.set(key, { at: Date.now(), value })
+            while (cache.size > max) cache.delete(cache.keys().next().value!)
+            return value
+        } finally {
+            inflight.delete(key)
+        }
+    }
 }
 
 /**
@@ -72,16 +165,32 @@ export function applyResolvedMetadataOverlay(
 ): ActivityItem[] {
     if (resolved.size === 0) return items
     let changed = false
+    const titleIds = new Map<string, Set<string>>()
+    for (const item of items) {
+        const titleKey = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
+        const tt = /^tt\d+/i.exec(item.itemId || '')?.[0].toLowerCase()
+        if (!titleKey || !tt) continue
+        const ids = titleIds.get(titleKey) || new Set<string>()
+        ids.add(tt)
+        titleIds.set(titleKey, ids)
+    }
+    const conflictingTitles = new Set([...titleIds].filter(([, ids]) => ids.size > 1).map(([key]) => key))
     const next = items.map(item => {
-        if (!isUnresolvedActivityName(item.name)) return item
-        const entry = resolved.get(item.itemId)
+        const keys = watcherIdentityKeys(item)
+        const titleKey = keys.find(key => key.startsWith('m:') || key.startsWith('s:'))
+        const safeKeys = titleKey && conflictingTitles.has(titleKey) ? keys.filter(key => key.startsWith('tt:')) : keys
+        const entry = resolved.get(item.itemId) || safeKeys.map(key => resolved.get(key)).find(Boolean)
         if (!entry) return item
+        const name = isUnresolvedActivityName(item.name) ? entry.name || item.name : item.name
+        const poster = item.poster || entry.poster
+        const genres = item.genres?.length ? item.genres : entry.genres
+        if (name === item.name && poster === item.poster && genres === item.genres) return item
         changed = true
         return {
             ...item,
-            name: entry.name,
-            poster: item.poster || entry.poster || item.poster,
-            genres: item.genres?.length ? item.genres : entry.genres,
+            name,
+            ...(poster ? { poster } : {}),
+            ...(genres ? { genres } : {}),
         }
     })
     return changed ? next : items

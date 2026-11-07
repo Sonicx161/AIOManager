@@ -16,14 +16,15 @@ import { captureSyncOwnership, type SyncOwnership } from '@/store/sync-store-hel
 import { subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
 import { maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils'
 import { createWatchMigrationDestination } from '@/lib/watch-state/destinations'
-import { createWatchMigrationSource, migrationConnectionLabel, migrationSourceLabel, watchMigrationSources } from '@/lib/watch-state/sources'
+import { createWatchMigrationSource, migrationSourceLabel, watchMigrationSources } from '@/lib/watch-state/sources'
+import { watchConnectionLabel } from './watch-migration-labels'
 import { executeWatchMigration, migrationReport, planWatchMigration } from '@/lib/watch-state/migration'
 import { migrationFailureMessage, WatchMigrationError } from '@/lib/watch-state/failures'
-import { watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
+import { undatedRowCount, watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
 import type { MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateSource } from '@/lib/watch-state/types'
 import { refreshJellyfinMedia } from './useJellyfinMedia'
 import { useLibraryCache } from '@/store/libraryCache'
-import { PlatformLogo } from './ConnectionPrimitives'
+import { PlatformLogo, connectionLogoProduct } from './ConnectionPrimitives'
 import { MigrationArtwork } from './MigrationArtwork'
 import { MigrationTitleDetails } from './MigrationTitleDetails'
 import { MigrationProgressPanel, MigrationImportLog, MigrationResultsPanel, migrationStateLabel, type ImportProgress, type MigrationOutcome } from './WatchMigrationFeedback'
@@ -59,7 +60,7 @@ function MigrationEndpoint({ label, connection, name, user, userId, compact = fa
     return <div data-theme-part="panel" className={`min-w-0 rounded-2xl border border-border/40 bg-card/50 shadow-sm ${compact ? 'p-3' : 'p-4'}`}>
         {!compact && <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>}
         <div className="flex items-center gap-3">
-            <PlatformLogo platform={connection.platform} isHydra={connection.connectionType === 'hydra-outbound'} className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0`} />
+            <PlatformLogo platform={connection.platform} product={connectionLogoProduct(connection)} isHydra={connection.connectionType === 'hydra-outbound'} className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0`} />
             <div className={`min-w-0 flex-1 ${compact ? 'space-y-0.5' : 'space-y-1'}`}>
                 {compact && <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>}
                 <p className="break-words text-sm font-semibold">{name}</p>
@@ -110,7 +111,7 @@ function rowExplanation(row: MigrationRow, result?: MigrationResult): string {
 
 function readableNote(note: string): string {
     if (note === 'Stremio keeps one resume point per series: resume points for different episodes of the same series cannot be combined or replaced.') return 'Stremio keeps one resume point per series. Conflicting progress for another episode is kept.'
-    if (note === 'Stremio stores no per-episode watch dates or play counts, so original dates and counts cannot be copied.') return 'Stremio can receive watched marks and playback positions, but cannot preserve original watch dates or play counts.'
+    if (note === 'Stremio stores no per-episode watch dates or play counts: it keeps one last-watched date per title, only ever moved forward, and exact dates are copied only for movies and the resume episode.') return 'Stremio keeps one watch date per title. Exact dates are copied for movies and the resume episode, and play counts are not copied.'
     if (note === 'Stremio offers no compare-and-swap: every write re-reads the row immediately before saving and verifies it by reading it back.') return 'Each title is checked again before saving and read back afterward. Stremio cannot lock out simultaneous changes from another client.'
     if (note === 'Series longer than 2,500 listed episodes cannot be verified episode by episode on this destination.') return 'Series with more than 2,500 episodes are too large to check completely for this import.'
     if (note === 'This source is pinned to one Nuvio profile; other profiles of the account are not read.') return 'Only the selected Nuvio profile is included. Other profiles stay separate.'
@@ -129,7 +130,9 @@ function migrationErrorMessage(error: unknown, fallback: string): string {
         'The source user or profile changed. Preview again before importing.',
         'The write could not be verified. Preview again before continuing.',
     ]
-    return error instanceof Error && messages.includes(error.message) ? error.message : fallback
+    if (error instanceof Error && messages.includes(error.message)) return error.message
+    const code = error instanceof Error ? /\bHTTP (\d{3})\b|\((\d{3})\)/.exec(error.message) : null
+    return code ? `${fallback} (the server answered ${code[1] ?? code[2]})` : fallback
 }
 
 export function WatchMigrationDialog({ open, onOpenChange, accountId, connection }: Props) {
@@ -278,7 +281,10 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
             setProgress('Preview ready. Choose the titles to import.')
         } catch (cause) {
             if (controller.signal.aborted) setProgress('Preview stopped. Preview again when ready.')
-            else setError(migrationErrorMessage(cause, 'Could not build the preview. Test both connections, verify the selected user or profile, then try again.'))
+            else {
+                setProgress('')
+                setError(migrationErrorMessage(cause, 'Could not build the preview. Test both connections, verify the selected user or profile, then try again.'))
+            }
             session.current = null
         } finally {
             controller.abort()
@@ -368,7 +374,17 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
     // "Remaining" mixes rows that failed verification with rows the run never reached; the
     // result state reports them separately so retry copy never claims the wrong population.
     const unattemptedCount = remaining.filter(row => !byResult.has(row.id)).length
+    const undatedCount = plan ? undatedRowCount(plan.rows) : 0
     const alreadySavedCount = plan?.rows.filter(row => row.status === 'unchanged' || byResult.get(row.id)?.status === 'unchanged').length || 0
+    const skippedBreakdown = useMemo(() => {
+        if (!plan) return null
+        const skipped = plan.rows.filter(row => row.status === 'skipped' || row.status === 'unsupported')
+        if (!skipped.length) return null
+        const removed = skipped.filter(row => row.notes.some(note => note === 'This item was removed from the Stremio library. Its retained watch state is listed for review and will not be imported.')).length
+        const alignment = skipped.filter(row => row.notes.some(note => /episode|alignment|order/i.test(note)) && row.reason.includes('No matching title')).length
+        const destinationMissing = skipped.filter(row => row.reason === 'No matching title is available to this destination user.' && !row.notes.some(note => /episode|alignment|order/i.test(note))).length
+        return { total: skipped.length, removed, destinationMissing, alignment, other: Math.max(0, skipped.length - removed - destinationMissing - alignment) }
+    }, [plan])
     const showingResults = !!plan && !!outcome && showResults && !busy
     const summaryNotes = plan?.notes.filter(note => /keeps one resume point|stores no per-episode watch dates|Original watch dates cannot|may be forwarded/.test(note)) || []
     const detailNotes = plan?.notes.filter(note => !summaryNotes.includes(note)
@@ -416,6 +432,8 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                         source: { name: migrationSourceLabel(selectedSource, displayName), user: displayName(plan.source.subject), logo: <PlatformLogo platform={selectedSource.platform} isHydra={selectedSource.connectionType === 'hydra-outbound'} className="h-4 w-4" /> },
                         destination: { name: migrationSourceLabel(connection, displayName), user: displayName(plan.destination.subject), logo: <PlatformLogo platform={connection.platform} className="h-4 w-4" /> },
                     }} /> : !plan ? <div className="space-y-4">
+                        <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
+                        <div className="flex items-center justify-between gap-2"><p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Source</p><StatusChip size="sm" variant={sourceId ? 'primary' : 'muted'}>Required</StatusChip></div>
                         <div className="grid gap-3 sm:grid-cols-2">
                             <div className="space-y-2">
                                 <Label htmlFor="migration-source-account">Source account</Label>
@@ -435,30 +453,39 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                                 <Label htmlFor="migration-source-connection">Source connection</Label>
                                 <Select value={sourceId} onValueChange={setSourceId} disabled={!!busy || !sources.length}>
                                     <SelectTrigger id="migration-source-connection"><SelectValue placeholder={sources.length ? 'Choose a connection' : 'No enabled source connections'} /></SelectTrigger>
-                                    <SelectContent>{sources.map(source => <SelectItem key={source.id} value={source.id} textValue={migrationConnectionLabel(source, watchMigrationSources(sourceAccount!), displayName, identifier)} className="py-2">
+                                    <SelectContent>{sources.map(source => <SelectItem key={source.id} value={source.id} textValue={watchConnectionLabel(source, watchMigrationSources(sourceAccount!), sourceAccount, displayName, identifier)} className="py-2">
                                         <span className="flex min-w-0 items-center gap-2">
                                             <span aria-hidden="true"><PlatformLogo platform={source.platform} isHydra={source.connectionType === 'hydra-outbound'} className="h-6 w-6 shrink-0" /></span>
-                                            <span className="min-w-0 truncate">{migrationConnectionLabel(source, watchMigrationSources(sourceAccount!), displayName, identifier)}</span>
+                                            <span className="min-w-0 truncate">{watchConnectionLabel(source, watchMigrationSources(sourceAccount!), sourceAccount, displayName, identifier)}</span>
                                         </span>
                                     </SelectItem>)}</SelectContent>
                                 </Select>
                             </div>
                         </div>
-                        <div className="flex flex-wrap gap-4">
+                        </div>
+                        <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
+                        <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">What to copy</p>
+                        <div className="flex flex-wrap gap-x-5 gap-y-2">
                             <div className="flex items-center gap-2"><Checkbox id="migration-watched" checked={watched} onCheckedChange={value => setWatched(value === true)} disabled={!!busy || connection.platform === 'realstream'} /><Label htmlFor="migration-watched">Watched titles</Label></div>
                             <div className="flex items-center gap-2"><Checkbox id="migration-resume" checked={resume} onCheckedChange={value => setResume(value === true)} disabled={!!busy} /><Label htmlFor="migration-resume">Continue watching</Label></div>
                         </div>
                         {connection.platform === 'realstream' && <p className="text-xs leading-relaxed text-muted-foreground">RealStream accepts supported playback positions. Its API does not provide a verified watched-title import.</p>}
-                        <p className="text-sm leading-relaxed text-muted-foreground">Review the titles before copying. We’ll show what can be added and what’s already saved. Some services don’t share original watch dates or a full viewing history.</p>
+                        </div>
+                        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">Review the titles before copying. We’ll show what can be added and what’s already saved. Some services don’t share original watch dates or a full viewing history.</p>
                     </div> : <div className="space-y-4">
                         <h3 ref={previewHeading} tabIndex={-1} className="text-base font-semibold outline-none">Review your import</h3>
-                        <div aria-label="Import preview counts" className="flex flex-wrap items-baseline gap-x-5 gap-y-2 rounded-xl border border-border/40 bg-card px-4 py-3 text-xs text-muted-foreground">
+                        <div aria-label="Import preview counts" className="flex flex-wrap items-baseline gap-x-5 gap-y-2 rounded-2xl border border-border/40 bg-card px-4 py-3 text-xs text-muted-foreground shadow-sm">
                             <p><span className="mr-1 text-base font-semibold tabular-nums text-foreground">{plan.source.records.length.toLocaleString()}</span> titles found</p>
                             <p><span className="mr-1 text-base font-semibold tabular-nums text-foreground">{pendingReadyCount.toLocaleString()}</span> ready to import</p>
                             {verifiedCount > 0 && <p><span className="mr-1 text-base font-semibold tabular-nums text-foreground">{verifiedCount.toLocaleString()}</span> confirmed</p>}
                         </div>
+                        {skippedBreakdown && <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-muted/20 p-3 text-xs leading-relaxed text-muted-foreground">
+                            <p className="font-medium text-foreground">{skippedBreakdown.total.toLocaleString()} records are skipped safely</p>
+                            <p>Nothing will be written for these records. {skippedBreakdown.removed > 0 && <>{skippedBreakdown.removed.toLocaleString()} were removed from the Stremio library. </>}{skippedBreakdown.destinationMissing > 0 && <>{skippedBreakdown.destinationMissing.toLocaleString()} could not be found in the destination library. </>}{skippedBreakdown.alignment > 0 && <>{skippedBreakdown.alignment.toLocaleString()} episode {skippedBreakdown.alignment === 1 ? 'mapping could' : 'mappings could'} not be verified. </>}{skippedBreakdown.other > 0 && <>{skippedBreakdown.other.toLocaleString()} need review. </>}</p>
+                        </div>}
+                        {undatedCount > 0 && <p className="flex items-start gap-2 text-xs text-muted-foreground"><Info aria-hidden="true" className="h-4 w-4 shrink-0" />{undatedCount.toLocaleString()} {undatedCount === 1 ? 'title has' : 'titles have'} no exact watch time and will be sent without a date.</p>}
                         {alreadySavedCount > 0 && <p className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck aria-hidden="true" className="h-4 w-4 shrink-0" />{alreadySavedCount.toLocaleString()} {alreadySavedCount === 1 ? 'title is' : 'titles are'} already saved here and won’t be copied again.</p>}
-                        <div data-theme-part="panel" className="rounded-xl border border-border/40 bg-muted/20 p-3 space-y-2">
+                        <div data-theme-part="panel" className="space-y-2 rounded-2xl border border-border/40 bg-muted/20 p-3">
                             <p className="flex items-center gap-2 text-xs font-medium"><Info aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />Import details and limits</p>
                             {!plan.source.complete && <p className="text-xs leading-relaxed text-warning">Some source history could not be verified as complete. Only the titles in this preview can be copied; existing destination history is kept.</p>}
                             {summaryNotes.length > 0 && <ul className="space-y-1.5 text-xs leading-relaxed text-muted-foreground">{summaryNotes.map(note => <li key={note}>{readableNote(note)}</li>)}</ul>}
@@ -498,7 +525,7 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                             </li>
                         })}</ul> : <EmptyState title="No matching records" description="Choose another filter or source to review more saved state." />}
                         {pageCount > 1 && <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground"><Button size="sm" variant="outline" disabled={shownPage === 0} onClick={() => setPage(shownPage - 1)}>Previous</Button><span>Page {shownPage + 1} of {pageCount}</span><Button size="sm" variant="outline" disabled={shownPage + 1 === pageCount} onClick={() => setPage(shownPage + 1)}>Next</Button></div>}
-                        <p className="text-xs leading-relaxed text-muted-foreground">We check each title before copying and confirm it was saved afterward. This connection may also update its linked tracking services. Closing this window, locking the vault or leaving the tab stops the import. You can preview again later; saved titles won’t be copied twice.</p>
+                        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">We check each title before copying and confirm it was saved afterward. This connection may also update its linked tracking services. Closing this window, locking the vault or leaving the tab stops the import. You can preview again later; saved titles won’t be copied twice.</p>
                     </div>}
                     <div aria-live="polite" className="text-sm text-muted-foreground">{!busy && !showingResults && progress}</div>
                     {error && !showingResults && <p role="alert" className="text-sm text-destructive">{error}</p>}

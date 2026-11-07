@@ -3,7 +3,10 @@ import db from '../db.js'
 import { initializeEncryptionKeys } from '../keys.js'
 import { encrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
+import { ensureDataDirectory } from '../config.js'
 import { globalHealthCache, healthCheckInFlight, authCache, proxyQueue, domainLastRequestTime } from '../state.js'
+import { ensureAdminSchema } from '../admin/schema.js'
+import { resetAccountAdminStateForTest, loadAccountAdminStateNow } from '../admin/account-state.js'
 
 const CORE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv_store (
@@ -34,6 +37,7 @@ CREATE TABLE IF NOT EXISTS autopilot_rules (
   addon_list TEXT,
   active_url TEXT,
   webhook_url TEXT,
+  notify_enabled INTEGER,
   stabilization TEXT,
   is_active INTEGER DEFAULT 1,
   is_automatic INTEGER DEFAULT 1,
@@ -44,7 +48,11 @@ CREATE TABLE IF NOT EXISTS autopilot_rules (
   cooldown_ms INTEGER,
   message_template TEXT,
   owner_sync_user TEXT,
-  custom_check_urls TEXT DEFAULT NULL
+  custom_check_urls TEXT DEFAULT NULL,
+  platform TEXT DEFAULT 'stremio',
+  connection_id TEXT,
+  connection_generation TEXT,
+  edited_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS failover_history (
@@ -121,6 +129,7 @@ CREATE TABLE IF NOT EXISTS activity_snapshots (
   is_in_progress INTEGER,
   overall_time_watched BIGINT,
   mtime BIGINT,
+  time_watched BIGINT,
   PRIMARY KEY (sync_user, account_id, item_id)
 );
 
@@ -140,7 +149,16 @@ CREATE TABLE IF NOT EXISTS server_credentials (
   auth_key TEXT,
   connection_id TEXT,
   credential_type TEXT DEFAULT 'stremio',
+  canonical_connection_id TEXT,
+  connection_generation TEXT,
   updated_at BIGINT
+);
+
+CREATE TABLE IF NOT EXISTS account_server_tombstones (
+  sync_user TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  deleted_at BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (sync_user, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS account_canonical_addons (
@@ -186,6 +204,20 @@ CREATE TABLE IF NOT EXISTS device_credentials (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_device_credentials_account_device ON device_credentials (account_uuid, device_id);
 CREATE INDEX IF NOT EXISTS idx_device_credentials_account ON device_credentials (account_uuid);
+
+CREATE TABLE IF NOT EXISTS commands (
+  id TEXT PRIMARY KEY,
+  sync_user TEXT NOT NULL,
+  command TEXT NOT NULL,
+  account_ids TEXT NOT NULL,
+  status TEXT NOT NULL,
+  results TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_commands_user_updated ON commands (sync_user, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_commands_status ON commands (status);
 `
 
 export async function setupTestEnv() {
@@ -200,9 +232,16 @@ export async function setupTestEnv() {
     process.env.ENCRYPTION_KEY = 'test-encryption-key-32bytes-long!!'
 
     await db.init()
+    db._stmtCache.clear()
     await db.exec(CORE_SCHEMA)
+    // Dashboard tables (account_admin_state included: the enforcement gate and the
+    // scheduler anti-join read it), plus a fresh loaded snapshot for the new DB.
+    await ensureAdminSchema(db)
+    resetAccountAdminStateForTest()
+    await loadAccountAdminStateNow().catch(() => {})
 
     const app = Fastify({ logger: false })
+    ensureDataDirectory(app)
     await initializeEncryptionKeys(app)
     return app
 }
@@ -215,6 +254,7 @@ export function cleanupTestEnv() {
     db.type = 'sqlite'
     db.pool = null
     db.isHealthy = false
+    resetAccountAdminStateForTest()
     globalHealthCache.clear()
     healthCheckInFlight.clear()
     authCache.clear()

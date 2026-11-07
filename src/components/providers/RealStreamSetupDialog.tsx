@@ -18,8 +18,9 @@ import {
     Mail,
     Lock,
 } from 'lucide-react'
-import { useState, useCallback } from 'react'
-import { cn } from '@/lib/utils'
+import { useState, useCallback, useRef } from 'react'
+import { cn, maskEmailLevel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
 
 type WizardStep = 'login' | 'confirm'
 
@@ -33,6 +34,7 @@ interface RealStreamSetupDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     onComplete: (tokens: RealStreamTokens, email: string, password: string) => void | Promise<void>
+    onBackToPicker?: () => void
 }
 
 const STEP_INDICATORS = [
@@ -40,7 +42,7 @@ const STEP_INDICATORS = [
     { step: 'confirm' as const, label: 'Confirm' },
 ]
 
-export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealStreamSetupDialogProps) {
+export function RealStreamSetupDialog({ open, onOpenChange, onComplete, onBackToPicker }: RealStreamSetupDialogProps) {
     const [step, setStep] = useState<WizardStep>('login')
     const [mode, setMode] = useState<'login' | 'signup'>('login')
     const [email, setEmail] = useState('')
@@ -48,8 +50,14 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [tokens, setTokens] = useState<RealStreamTokens | null>(null)
+    const [submitting, setSubmitting] = useState(false)
+    const requestGeneration = useRef(0)
+    const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+    const privacyLevelEmail = useUIStore(s => s.privacyLevelEmail)
+    const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
 
     const reset = useCallback(() => {
+        requestGeneration.current += 1
         setStep('login')
         setMode('login')
         setEmail('')
@@ -57,6 +65,7 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
         setLoading(false)
         setError(null)
         setTokens(null)
+        setSubmitting(false)
     }, [])
 
     const handleClose = (nextOpen: boolean) => {
@@ -65,10 +74,12 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
     }
 
     const handleLogin = async () => {
+        const generation = requestGeneration.current
         setLoading(true)
         setError(null)
         try {
             const result = mode === 'signup' ? await realstreamSignup(email, password) : await realstreamAuth(email, password)
+            if (generation !== requestGeneration.current) return
             if (!result.tokens) {
                 setMode('login')
                 setError('Check your email to confirm your RealStream account, then sign in.')
@@ -77,18 +88,29 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
             setTokens(result.tokens)
             setStep('confirm')
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Login failed')
+            if (generation === requestGeneration.current) {
+                setError(err instanceof Error ? err.message : 'Login failed')
+            }
         } finally {
-            setLoading(false)
+            if (generation === requestGeneration.current) setLoading(false)
         }
     }
 
     const handleFinish = async () => {
-        if (!tokens) return
+        if (!tokens || submitting) return
+        const generation = requestGeneration.current
+        setSubmitting(true)
+        setError(null)
         try {
             await onComplete(tokens, email, password)
-        } catch {}
-        handleClose(false)
+            if (generation === requestGeneration.current) handleClose(false)
+        } catch (e) {
+            if (generation === requestGeneration.current) {
+                setError(e instanceof Error ? e.message : 'Failed to add connection')
+            }
+        } finally {
+            if (generation === requestGeneration.current) setSubmitting(false)
+        }
     }
 
     const stepIndex = STEP_INDICATORS.findIndex(s => s.step === step)
@@ -216,13 +238,6 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
                                     />
                                 </div>
                             </div>
-
-                            {error && (
-                                <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/5 border border-destructive/20 px-3 py-2 text-xs text-destructive flex items-center gap-2">
-                                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                                    {error}
-                                </div>
-                            )}
                         </div>
                     )}
 
@@ -233,7 +248,7 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
                             <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card p-4 space-y-3">
                                 <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
                                     <span className="text-muted-foreground">Account</span>
-                                    <span className="font-medium truncate">{email}</span>
+                                    <span className="font-medium truncate">{maskEmailLevel(email, emailPrivacyLevel)}</span>
                                 </div>
                             </div>
 
@@ -245,12 +260,20 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
                     )}
                 </div>
 
+                {error && (
+                    <div role="alert" data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/5 border border-destructive/20 px-3 py-2 text-xs text-destructive flex items-center gap-2">
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                        {error}
+                    </div>
+                )}
+
                 <DialogFooter>
+                    {onBackToPicker && !loading && !submitting && <Button variant="outline" onClick={() => { reset(); onBackToPicker() }}>Back to connection picker</Button>}
                     {step !== 'login' && (
                         <Button
                             variant="subtle"
                             onClick={() => setStep('login')}
-                            disabled={loading}
+                            disabled={loading || submitting}
                         >
                             Back
                         </Button>
@@ -272,8 +295,9 @@ export function RealStreamSetupDialog({ open, onOpenChange, onComplete }: RealSt
                     )}
 
                     {step === 'confirm' && (
-                        <Button onClick={handleFinish}>
-                            Add Connection
+                        <Button onClick={handleFinish} disabled={submitting}>
+                            {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                            {submitting ? 'Adding...' : 'Add Connection'}
                         </Button>
                     )}
                 </DialogFooter>

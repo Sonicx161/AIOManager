@@ -10,8 +10,12 @@ import { cn, maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils
 import { Poster } from '@/components/common/Poster'
 import { EmptyState } from '@/components/common/EmptyState'
 import { NuvioPluginsPanel } from './NuvioPluginsTab'
-import { readNuvioLibrary, readNuvioCollections, readNuvioProfiles, renameNuvioProfile, createNuvioProfile, deleteNuvioProfile } from '@/lib/nuvio-data'
+import { cachedRead, isDisplayCacheFresh, peekDisplayCache } from '@/lib/display-read-cache'
+import { readNuvioLibrary, readNuvioCollections, readNuvioProfiles, readNuvioAvatars, renameNuvioProfile, createNuvioProfile, deleteNuvioProfile, holdForReadIdentity } from '@/lib/nuvio-data'
 import type { NuvioLibraryItem, NuvioCollection, NuvioProfileRow } from '@/lib/nuvio-data'
+import { ReadOnlyBadge, WorkspaceError, WorkspaceLoading } from './workspace/SectionCard'
+import { nuvioReadErrorMessage } from './workspace/workspace-model'
+import type { NuvioAvatar } from '@/lib/nuvio-avatars'
 import type { Connection, ConnectionStatus } from '@/types/connection'
 import { downloadNuvioBackup } from '@/api/nuvio-backup'
 import { NUVIO_BACKUP_COPY } from './nuvio-backup-copy'
@@ -27,11 +31,7 @@ import type { ProfileQuickAddEntry as NuvioQuickAddEntry } from '@/store/account
 
 const errMsg = (e: unknown, fallback = 'Try again.') => (e instanceof Error ? e.message : fallback)
 
-const ReadOnlyBadge = () => (
-    <span data-theme-part="badge" className="inline-flex items-center rounded-full border border-border/40 bg-muted/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        Read-only - manage in Nuvio
-    </span>
-)
+const NuvioReadOnly = () => <ReadOnlyBadge label="Read-only. Manage in Nuvio" />
 
 // Identity-keyed resource loader. A boolean `cancelled` flag cannot tell two
 // in-flight requests apart: after an identity switch the flag is false again,
@@ -39,15 +39,26 @@ const ReadOnlyBadge = () => (
 // generation counter discards any response that is not from the newest
 // request. Data is reset only when the identity (or eligibility) changes :
 // a same-scope retry keeps the last successful data underneath the reload.
-function useNuvioResource<T>(load: () => Promise<T>, identity: string, enabled = true) {
+// Display-only reads are backed by the module SWR cache (nuvio-5): a remount
+// or tab switch inside the TTL paints the last result with 0 requests, and a
+// stale entry paints immediately while one background read revalidates. The
+// caller keeps `revalidating` true until that re-read succeeds so roster
+// actions never authorize against an unverified list. Plugins is excluded:
+// its panel holds staged edits and never routes through this hook.
+export function useNuvioResource<T>(load: () => Promise<T>, identity: string, enabled = true, kind = '') {
     const [data, setData] = useState<T | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [revalidating, setRevalidating] = useState(false)
     const generation = useRef(0)
     const loadRef = useRef(load)
     const enabledRef = useRef(enabled)
+    const keyRef = useRef('')
     loadRef.current = load
     enabledRef.current = enabled
+    keyRef.current = `nuvio:${kind}:${identity}`
+
+    const invalidate = useCallback(() => { generation.current++ }, [])
 
     const reload = useCallback(async () => {
         if (!enabledRef.current) return
@@ -55,36 +66,53 @@ function useNuvioResource<T>(load: () => Promise<T>, identity: string, enabled =
         setLoading(true)
         setError(null)
         try {
-            const result = await loadRef.current()
+            // Manual reloads bypass the cache and refresh the stored entry.
+            const result = await cachedRead(keyRef.current, () => loadRef.current(), { force: true })
             if (gen !== generation.current) return
             setData(result)
         } catch (err) {
             if (gen !== generation.current) return
-            setError(err instanceof Error ? err.message : 'Could not load. Try re-authenticating this connection.')
+            setError(nuvioReadErrorMessage(err))
         } finally {
             if (gen === generation.current) setLoading(false)
         }
     }, [])
-
-    const invalidate = useCallback(() => { generation.current++ }, [])
 
     useEffect(() => {
         // Invalidate anything still in flight for the previous scope: React runs
         // this before the previous effect's requests can be accepted, and every
         // scope start bumps past every previously issued generation.
         invalidate()
-        setData(null)
         setError(null)
+        setRevalidating(false)
         if (!enabled) {
+            setData(null)
             setLoading(false)
             return invalidate
         }
+        const key = keyRef.current
+        const cached = peekDisplayCache<T>(key)
+        if (cached) {
+            setData(cached.value)
+            setLoading(false)
+            // The profile roster backs index-addressed writes, so it always re-reads before unlocking.
+            if (kind !== 'profiles' && isDisplayCacheFresh(cached)) return invalidate
+            // Stale: keep the last result on screen while one background read refreshes it.
+            setRevalidating(true)
+            const gen = ++generation.current
+            cachedRead(key, () => loadRef.current(), { force: kind === 'profiles' })
+                .then(result => { if (gen === generation.current) setData(result) })
+                .catch(err => { if (gen === generation.current) setError(nuvioReadErrorMessage(err)) })
+                .finally(() => { if (gen === generation.current) { setRevalidating(false); setLoading(false) } })
+            return invalidate
+        }
+        setData(null)
         setLoading(true)
         void reload()
         return invalidate
-    }, [identity, enabled, reload, invalidate])
+    }, [identity, enabled, kind, reload, invalidate])
 
-    return { data, loading, error, reload }
+    return { data, loading, error, revalidating, reload }
 }
 
 export function TabToolbar({ label, count, loading, onReload, icon, badge }: {
@@ -126,32 +154,17 @@ export function TabToolbar({ label, count, loading, onReload, icon, badge }: {
     )
 }
 
-function TabLoading() {
-    return (
-        <div className="flex items-center justify-center gap-2 py-16 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Loading…
-        </div>
-    )
-}
+const TabLoading = () => <WorkspaceLoading />
 
 function TabError({ message, onRetry }: { message: string; onRetry: () => void }) {
-    return (
-        <div className="space-y-3">
-            <div data-theme-tone="status" data-theme-part="panel" className="rounded-2xl bg-destructive/10 border border-destructive/20 px-3 py-2.5 text-xs text-destructive shadow-sm">{message}</div>
-            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" onClick={onRetry}>
-                <RefreshCw className="h-3.5 w-3.5" />
-                Retry
-            </Button>
-        </div>
-    )
+    return <WorkspaceError message={message} onRetry={onRetry} />
 }
 
 // The read path (lib/nuvio-data withNuvio) keys off the connection id, the
 // backend credentials and the stored profile scope. so those fields, not the
 // whole connection object, form the resource identity. Unrelated connection
 // churn (status/lastSync updates during a sync) must not re-issue reads.
-function nuvioReadIdentity(accountId: string, connection: Connection, includeScope: boolean): string {
+export function nuvioReadIdentity(accountId: string, connection: Connection, includeScope: boolean): string {
     const creds = connection.credentials
     return [
         accountId,
@@ -165,19 +178,21 @@ function nuvioReadIdentity(accountId: string, connection: Connection, includeSco
 function LibrarySection({ accountId, connection }: { accountId: string; connection: Connection }) {
     const identity = nuvioReadIdentity(accountId, connection, true)
     const load = useCallback(() => readNuvioLibrary(accountId, connection), [accountId, connection])
-    const { data, loading, error, reload } = useNuvioResource<NuvioLibraryItem[]>(load, identity)
+    const { data, loading, error, revalidating, reload } = useNuvioResource<NuvioLibraryItem[]>(load, identity, true, 'library')
     const items = data || []
 
     return (
         <div>
-            <TabToolbar label="Library" count={data ? items.length : undefined} loading={loading} onReload={reload} badge={<ReadOnlyBadge />} />
-            {error ? <TabError message={error} onRetry={reload} /> : loading ? <TabLoading /> : items.length === 0 ? (
+            <TabToolbar label="Library" count={data ? items.length : undefined} loading={loading || revalidating} onReload={reload} badge={<NuvioReadOnly />} />
+            {error && !data ? <TabError message={error} onRetry={reload} /> : loading ? <TabLoading /> : items.length === 0 ? (
                 <EmptyState
                     icon={<BookOpen className="h-5 w-5" />}
                     title="Library is empty"
                     description="Content you save on Nuvio will appear here."
                 />
             ) : (
+                <>
+                {items.length >= 500 && <p className="mb-3 text-xs text-warning" role="status">Showing the first 500 library items. More may exist on Nuvio.</p>}
                 <div className="grid grid-cols-3 gap-3 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7">
                     {items.map((item, i) => (
                         <div key={`${item.content_id}-${i}`} className="group space-y-1.5">
@@ -199,6 +214,7 @@ function LibrarySection({ accountId, connection }: { accountId: string; connecti
                         </div>
                     ))}
                 </div>
+                </>
             )}
         </div>
     )
@@ -207,13 +223,13 @@ function LibrarySection({ accountId, connection }: { accountId: string; connecti
 function CollectionsSection({ accountId, connection }: { accountId: string; connection: Connection }) {
     const identity = nuvioReadIdentity(accountId, connection, true)
     const load = useCallback(() => readNuvioCollections(accountId, connection), [accountId, connection])
-    const { data, loading, error, reload } = useNuvioResource<NuvioCollection[]>(load, identity)
+    const { data, loading, error, revalidating, reload } = useNuvioResource<NuvioCollection[]>(load, identity, true, 'collections')
     const collections = data || []
 
     return (
         <div>
-            <TabToolbar label="Collections" count={data ? collections.length : undefined} loading={loading} onReload={reload} badge={<ReadOnlyBadge />} />
-            {error ? <TabError message={error} onRetry={reload} /> : loading ? <TabLoading /> : collections.length === 0 ? (
+            <TabToolbar label="Collections" count={data ? collections.length : undefined} loading={loading || revalidating} onReload={reload} badge={<NuvioReadOnly />} />
+            {error && !data ? <TabError message={error} onRetry={reload} /> : loading ? <TabLoading /> : collections.length === 0 ? (
                 <EmptyState
                     icon={<Layers className="h-5 w-5" />}
                     title="No collections"
@@ -248,13 +264,14 @@ function CollectionsSection({ accountId, connection }: { accountId: string; conn
 // states its role and ownership in words, and every occasional or destructive
 // action lives in the row menu. There is no second list that a create, delete,
 // rename, or switch could leave stale.
-function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, profiles, loading, error, reload }: {
+function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, profiles, loading, revalidating, error, reload }: {
     accountId: string
     connection: Connection
     status?: ConnectionStatus
     activeProfileId?: string | null
     profiles: NuvioProfileRow[]
     loading: boolean
+    revalidating: boolean
     error: string | null
     reload: () => Promise<void>
 }) {
@@ -276,6 +293,18 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
     const [quickAddEntries, setQuickAddEntries] = useState<NuvioQuickAddEntry[] | null>(null)
     const [switching, setSwitching] = useState(false)
     const [pending, setPending] = useState<NuvioTargetProfile | null>(null)
+    const [avatars, setAvatars] = useState<NuvioAvatar[]>([])
+    const [newAvatarId, setNewAvatarId] = useState('')
+    const [editAvatarId, setEditAvatarId] = useState('')
+    const avatarConnection = useMemo(() => ({ credentials: connection.credentials }), [connection.credentials])
+
+    useEffect(() => {
+        let cancelled = false
+        void readNuvioAvatars(accountId, avatarConnection)
+            .then(rows => { if (!cancelled) setAvatars(rows) })
+            .catch(() => {})
+        return () => { cancelled = true }
+    }, [accountId, avatarConnection])
 
     // Account-level subscription: deleting an account must release its claim chip.
     const claims = useMemo(() => getProfileClaims(accounts, {
@@ -286,9 +315,11 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
     const stale = !!error || status === 'expired'
     // Destructive actions stay off while the list is refreshing or unverified:
     // a rename/create/delete against a stale list is a write we can't stand behind.
-    const actionsDisabled = stale || busy || loading
+    // A cached roster stays locked while its background revalidation runs and
+    // after it fails: actions unlock only once the re-read succeeds.
+    const actionsDisabled = stale || busy || loading || revalidating
     // A stale or still-loading list cannot back a target switch either.
-    const switchDisabled = switching || loading || !!error
+    const switchDisabled = switching || loading || revalidating || !!error
 
     const openClaimedAccount = useCallback((claimAccountId: string) => {
         const owner = accounts.find(a => a.id === claimAccountId)
@@ -346,6 +377,10 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
         try {
             const { setConnectionProfile } = await import('@/api/connection')
             await setConnectionProfile(connection.id, profileKey)
+            const { invalidateNuvioToken } = await import('@/lib/nuvio-token-cache')
+            const { invalidateNuvioProfileCache } = await import('@/lib/nuvio-profile-cache')
+            invalidateNuvioToken(connection.id)
+            invalidateNuvioProfileCache()
             const { updateConnection, syncConnections } = (await import('@/store/connectionStore')).useConnectionStore.getState()
             // The writer's credential fallback reads profileIndex BEFORE
             // profileId, so both fields must point at the chosen profile or
@@ -376,9 +411,9 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
         // Keyboard (Enter) path must respect the same gate as the buttons.
         if (actionsDisabled) return
         const name = editName.trim()
-        if (!name || name === p.name) { setEditId(null); return }
+        if (!name || (name === p.name && editAvatarId === (p.avatar_id || ''))) { setEditId(null); return }
         setBusy(true)
-        try { await renameNuvioProfile(accountId, connection, p.id, name); setEditId(null); await reload(); toast({ title: 'Profile renamed' }) }
+        try { await renameNuvioProfile(accountId, connection, p.id, name, editAvatarId || undefined); setEditId(null); await reload(); toast({ title: 'Profile renamed' }) }
         catch (e) { toast({ title: 'Rename failed', description: errMsg(e), variant: 'destructive' }) }
         finally { setBusy(false) }
     }
@@ -392,7 +427,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
         const name = newName.trim()
         if (!name || !canCreate) return
         setBusy(true)
-        try { await createNuvioProfile(accountId, connection, { profileIndex: nextIdx, name }); setNewName(''); await reload(); toast({ title: 'Profile created' }) }
+        try { await createNuvioProfile(accountId, connection, { profileIndex: nextIdx, name, avatarId: newAvatarId || undefined }); setNewName(''); setNewAvatarId(''); await reload(); toast({ title: 'Profile created' }) }
         catch (e) { toast({ title: 'Create failed', description: errMsg(e), variant: 'destructive' }) }
         finally { setBusy(false) }
     }
@@ -421,7 +456,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
 
     return (
         <div>
-            <TabToolbar label="Profiles" count={loading ? undefined : profiles.length} loading={loading} onReload={reload} icon={<Users className="h-3.5 w-3.5" />} />
+            <TabToolbar label="Profiles" count={loading ? undefined : profiles.length} loading={loading || revalidating} onReload={reload} icon={<Users className="h-3.5 w-3.5" />} />
             <p className="-mt-2.5 mb-1 text-xs text-muted-foreground">Choose the Nuvio profile that receives this account's addons. Each profile can also have its own AIOManager account.</p>
             <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground/80">
                 Adding a profile as an account makes it a full account, just like the ones you already manage: its own addons, its own watch history. It stays on the same Nuvio login and nothing changes on Nuvio. You can delete the account anytime.
@@ -430,11 +465,11 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                 <TabError message={error} onRetry={reload} />
             ) : loading && profiles.length === 0 ? <TabLoading /> : (
                 <div className="space-y-1.5">
-                    {stale && (
+                    {(stale || revalidating) && (
                         <div data-theme-tone="status" data-theme-part="panel" role="status" data-nuvio="stale-banner" className="mb-1.5 flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/8 px-3 py-2 text-[11px] text-muted-foreground">
                             <RefreshCw className="h-3 w-3 shrink-0" />
                             <span className="flex-1">Showing last known profiles. Switching and profile changes are off until this list refreshes.</span>
-                            <Button variant="ghost" size="sm" className="h-6 shrink-0 px-2 text-[11px]" onClick={() => reload()}>Retry</Button>
+                            {!revalidating && <Button variant="ghost" size="sm" className="h-6 shrink-0 px-2 text-[11px]" onClick={() => reload()}>Retry</Button>}
                         </div>
                     )}
 
@@ -499,6 +534,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                                                     autoFocus
                                                     aria-label="New profile name"
                                                 />
+                                                {avatars.length > 0 && <select aria-label="Profile avatar" value={editAvatarId} onChange={e => setEditAvatarId(e.target.value)} className="h-7 max-w-32 rounded-md border border-border/50 bg-background px-1.5 text-xs"><option value="">Avatar</option>{avatars.map(a => <option key={a.id} value={a.id}>{a.displayName || `Avatar ${a.id}`}</option>)}</select>}
                                                 <Button variant="ghost" size="icon" className="h-7 w-7 flex items-center justify-center shrink-0 text-primary hover:text-primary hover:bg-primary/10" onClick={() => doRename(p)} disabled={busy} aria-label="Save name">
                                                     <Check className="h-3.5 w-3.5" />
                                                 </Button>
@@ -511,7 +547,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                                                 <div className="min-w-0 flex-1">
                                                     <p className="truncate text-sm font-medium">{profileLabel(p.name)}</p>
                                                     <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80">
-                                                        <span className="font-mono">slot {p.profile_index}</span>
+                                                        <span className="font-mono">profile {p.profile_index}</span>
                                                         {isTarget && (
                                                             <>
                                                                 <span aria-hidden="true">·</span>
@@ -597,7 +633,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                                                                 <Plus className="h-3.5 w-3.5" /> Add as account…
                                                             </DropdownMenuItem>
                                                         )}
-                                                        <DropdownMenuItem className="gap-2 text-xs" disabled={actionsDisabled} onClick={() => { setEditId(p.id); setEditName(p.name) }} data-nuvio="menu-rename">
+                                                        <DropdownMenuItem className="gap-2 text-xs" disabled={actionsDisabled} onClick={() => { setEditId(p.id); setEditName(p.name); setEditAvatarId(p.avatar_id || '') }} data-nuvio="menu-rename">
                                                             <Pencil className="h-3.5 w-3.5" /> Rename…
                                                         </DropdownMenuItem>
                                                         <DropdownMenuSeparator />
@@ -665,6 +701,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); doCreate() } }}
                                 aria-label="New profile name"
                             />
+                            {avatars.length > 0 && <select aria-label="New profile avatar" value={newAvatarId} onChange={e => setNewAvatarId(e.target.value)} className="h-8 max-w-36 rounded-md border border-border/50 bg-background px-1.5 text-xs"><option value="">Avatar</option>{avatars.map(a => <option key={a.id} value={a.id}>{a.displayName || `Avatar ${a.id}`}</option>)}</select>}
                             <Button size="sm" variant="outline" className="h-8 shrink-0 gap-1.5 text-xs" onClick={doCreate} disabled={actionsDisabled || !newName.trim()}>
                                 <Plus className="h-3.5 w-3.5" /> Add
                             </Button>
@@ -714,9 +751,14 @@ export function NuvioBackupButton({ accountId, connectionId }: { accountId: stri
 }
 
 export function NuvioPluginsTab({ accountId, connection }: { accountId: string; connection: Connection }) {
+    // Status and plugin-list rewrites must not re-run the panel's load and discard staged edits.
+    const identity = nuvioReadIdentity(accountId, connection, true)
+    const [held, setHeld] = useState(() => ({ identity, value: connection }))
+    const next = holdForReadIdentity(held, identity, connection)
+    if (next !== held) setHeld(next)
     return (
         <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm">
-            <NuvioPluginsPanel accountId={accountId} connection={connection} />
+            <NuvioPluginsPanel accountId={accountId} connection={next.value} />
         </div>
     )
 }
@@ -733,8 +775,9 @@ export function NuvioProfilesTab({ accountId, connection, status }: {
     // target can never linger. The read is gated on the tab's own eligibility:
     // an expired or incapable connection must not issue profile reads at all.
     const identity = nuvioReadIdentity(accountId, connection, false)
-    const load = useCallback(() => readNuvioProfiles(accountId, connection), [accountId, connection])
-    const { data, loading, error, reload } = useNuvioResource<NuvioProfileRow[]>(load, identity, canSwitchProfile)
+    // Rename, create and delete address profiles by index, so the roster always reads Nuvio, never a cached list.
+    const load = useCallback(() => readNuvioProfiles(accountId, connection, { fresh: true }), [accountId, connection])
+    const { data, loading, error, revalidating, reload } = useNuvioResource<NuvioProfileRow[]>(load, identity, canSwitchProfile, 'profiles')
     const profiles = data || []
 
     if (!canSwitchProfile) {
@@ -759,6 +802,7 @@ export function NuvioProfilesTab({ accountId, connection, status }: {
                 activeProfileId={activeProfileId}
                 profiles={profiles}
                 loading={loading}
+                revalidating={revalidating}
                 error={error}
                 reload={reload}
             />

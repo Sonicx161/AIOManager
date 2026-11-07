@@ -1,14 +1,23 @@
 const DEFAULT_BASE_URL = 'https://realbase.fortheweak.cloud'
+export { DEFAULT_BASE_URL }
 const REFRESH_PATH = '/api/collections/users/auth-refresh'
 const ADDONS_PATH = '/api/collections/addons/records'
 const PROGRESS_PATH = '/api/collections/progress/records'
 const AUTH_TIMEOUT_MS = 30000
+const REQUEST_TIMEOUT_MS = 15000
 const DEFAULT_TOKEN_TTL_MS = 14 * 24 * 60 * 60 * 1000
 
 import { trace } from '../trace.ts'
+import { sourceTime } from '../watch-state/records.ts'
 
 const USER_FIELD = 'user'
 const ADDON_TYPE = 'stremio'
+
+// R2-08: the authorized empty clear is removed for this beta. PocketBase semantics
+// (per-page record lists, guest-shaped reads on revoked tokens) make an empty
+// projection impossible to confirm as cleared, so it is surfaced as a skip with
+// this plain reason instead of a false success.
+export const REALSTREAM_CLEAR_UNSUPPORTED = "RealStream can't be cleared from AIOManager yet; remove the addons in RealStream"
 
 export interface RealStreamTokens {
     accessToken: string
@@ -48,6 +57,17 @@ function decodeJwtExpMs(token: string): number | null {
     }
 }
 
+function decodeJwtId(token: string): string | null {
+    try {
+        let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+        while (payload.length % 4) payload += '='
+        const json = JSON.parse(atob(payload))
+        return typeof json.id === 'string' && json.id ? json.id : null
+    } catch {
+        return null
+    }
+}
+
 function deriveAddonName(url?: string): string {
     if (!url) return 'Untitled Addon'
     try {
@@ -72,6 +92,17 @@ type RsRecord = Record<string, any>
 //   tmdbId                      — JSON number exceeding Number.MAX_SAFE_INTEGER; precision-lossy
 //                                 after parsing, so it must never be used to build identifiers
 //                                 (the true value survives only inside the uniqueId string).
+/** First usable epoch-ms watch time among the candidates (epoch number, numeric string or ISO); undefined means undated, never now. */
+export function realStreamWatchTime(...candidates: unknown[]): number | undefined {
+    for (const value of candidates) {
+        if (value === null || value === undefined || value === '') continue
+        const numeric = typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value) : value
+        const time = sourceTime(numeric)
+        if (time !== null) return time
+    }
+    return undefined
+}
+
 export function mapProgressRecord(r: RsRecord): RealStreamProgressItem {
     const rawType = r.mediaType ?? r.media_type ?? r.type
     const t = rawType != null ? String(rawType).toLowerCase() : ''
@@ -112,7 +143,7 @@ export function mapProgressRecord(r: RsRecord): RealStreamProgressItem {
         position: percentOnly ? 0 : Math.round((Number(r.currentTime ?? r.current_time ?? r.progress ?? r.position ?? 0) || 0) * 1000),
         duration: percentOnly ? 0 : Math.round((Number(r.duration ?? r.total_duration ?? r.runtime ?? 0) || 0) * 1000),
         ...(percentOnly ? { progressPercent } : {}),
-        last_watched: Number(r.lastWatched ?? r.last_watched ?? r.timestamp ?? r.updated ?? r.created ?? Date.now()) || Date.now(),
+        last_watched: realStreamWatchTime(r.lastWatched, r.last_watched, r.timestamp, r.updated, r.created),
         title: title || undefined,
         posterPath: posterPath || undefined,
     }
@@ -154,12 +185,26 @@ export function createRealStreamDriver(options: { baseUrl?: string } = {}) {
         ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
     })
 
+    // PocketBase scopes addon records to the authenticated user; a stale stored userId
+    // both hides records from reads and makes record creation a 400 invalid relation
+    // (burner r04), so the token's own identity wins whenever it can be read.
+    const resolveUserId = (accessToken: string, userId: string): string => decodeJwtId(accessToken) || userId
+
     const request = async (method: string, path: string, accessToken?: string, body?: unknown) => {
-        const res = await fetch(`${baseUrl}${path}`, {
-            method,
-            headers: makeHeaders(accessToken),
-            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        })
+        let res: Response
+        try {
+            res = await fetch(`${baseUrl}${path}`, {
+                method,
+                headers: makeHeaders(accessToken),
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+            })
+        } catch (cause) {
+            if ((cause as Error)?.name !== 'TimeoutError') throw cause
+            const err: RealStreamError = new Error(`RealStream ${method} ${path.split('?')[0]} timed out after ${REQUEST_TIMEOUT_MS / 1000}s`)
+            err.isAuthError = false
+            throw err
+        }
         if (!res.ok) {
             let data: RsRecord | null = null
             try { data = await res.json() } catch {}
@@ -229,7 +274,7 @@ export function createRealStreamDriver(options: { baseUrl?: string } = {}) {
             trace('realstreamDriver', 'readAddons.start', { userId })
             try {
                 if (!userId) throw new Error('RealStream readAddons requires a userId')
-                const records = await listRecords(accessToken, userId)
+                const records = await listRecords(accessToken, resolveUserId(accessToken, userId))
                 const data = records[0]?.data
                 const result = Array.isArray(data) ? data : []
                 trace('realstreamDriver', 'readAddons.success', { userId, count: result.length, timing: Date.now() - start })
@@ -292,6 +337,8 @@ export function createRealStreamDriver(options: { baseUrl?: string } = {}) {
                     removed += record.data.length - kept.length
                     await request('PATCH', `${PROGRESS_PATH}/${record.id}`, accessToken, { data: kept })
                 }
+                // A revoked token reads as a guest with no records, so nothing removed is never a success.
+                if (removed === 0) throw new Error('RealStream found none of these entries to delete; nothing was removed')
                 trace('realstreamDriver', 'deleteWatchProgress.success', { userId, removed, timing: Date.now() - start })
                 return { removed }
             } catch (err) {
@@ -300,6 +347,11 @@ export function createRealStreamDriver(options: { baseUrl?: string } = {}) {
             }
         },
 
+        // R2-08: an empty projection is never a confirmed write. The authorized clear
+        // (record DELETE) is removed for this beta: duplicate records and guest-shaped
+        // reads make emptiness unverifiable, so the push skips with a plain reason and
+        // makes zero mutating requests, authorized or not. Non-empty pushes are
+        // unchanged (PATCH the existing record, or POST one).
         async writeAddons(accessToken: string, addons: Array<RsRecord>, userId: string) {
             const start = Date.now()
             trace('realstreamDriver', 'writeAddons.start', { userId, count: addons.length })
@@ -307,13 +359,15 @@ export function createRealStreamDriver(options: { baseUrl?: string } = {}) {
                 if (!userId) throw new Error('RealStream writeAddons requires a userId')
                 const data = (addons || []).filter(a => (a.transportUrl || a.url)).map(toRecordAddon)
                 if (data.length === 0) {
-                    trace('realstreamDriver', 'writeAddons.success', { userId, count: 0, skipped: true, timing: Date.now() - start })
-                    return { skipped: true, reason: 'No valid addons to push' }
+                    const reason = (addons || []).length === 0 ? REALSTREAM_CLEAR_UNSUPPORTED : 'No valid addons to push'
+                    trace('realstreamDriver', 'writeAddons.success', { userId, count: 0, skipped: true, reason, timing: Date.now() - start })
+                    return { skipped: true, reason }
                 }
-                const records = await listRecords(accessToken, userId)
+                const uid = resolveUserId(accessToken, userId)
+                const records = await listRecords(accessToken, uid)
                 const existing = records[0]
                 const result = existing ? await request('PATCH', `${ADDONS_PATH}/${existing.id}`, accessToken, { data })
-                    : await request('POST', ADDONS_PATH, accessToken, { [USER_FIELD]: userId, data })
+                    : await request('POST', ADDONS_PATH, accessToken, { [USER_FIELD]: uid, data })
                 trace('realstreamDriver', 'writeAddons.success', { userId, count: data.length, mode: existing ? 'patch' : 'post', timing: Date.now() - start })
                 return result
             } catch (err) {

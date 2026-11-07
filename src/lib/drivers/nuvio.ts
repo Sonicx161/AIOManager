@@ -5,11 +5,61 @@ const RPC_PATH = `${REST_PATH}/rpc`
 export { DEFAULT_BASE_URL, DEFAULT_PUBLISHABLE_KEY }
 const RPC_TIMEOUT_MS = 30000
 const REST_TIMEOUT_MS = 15000
+const NUVIO_SNAPSHOT_LIMIT = 100000
 
-import { trace } from '../trace'
+import { trace } from '../trace.ts'
 import { mapAvatarRows } from '../nuvio-avatars.ts'
 import { resolveProfileIndexWith } from './nuvio-profile.ts'
+import { getNuvioProfiles, invalidateNuvioProfileCache } from '../nuvio-profile-cache.ts'
+import { validateNuvioRows } from '../nuvio-read-validation.ts'
+import { pullNuvioWatchedPages } from '../nuvio-pagination.ts'
 import type { NuvioAvatar } from '../nuvio-avatars.ts'
+
+export interface NuvioWatchedRow {
+    content_id: string
+    content_type?: string
+    title?: string
+    season?: number | null
+    episode?: number | null
+    watched_at?: number
+}
+
+export interface NuvioProgressRow {
+    content_id: string
+    content_type?: string
+    video_id?: string
+    season?: number | null
+    episode?: number | null
+    position?: number
+    duration?: number
+    progressPercent?: number
+    last_watched?: number
+}
+
+// Keep the profile cache outside createNuvioDriver because the factory intentionally
+// creates a new driver for each surface (library, activity, workspace). A pending
+// promise also coalesces the two history RPCs issued in parallel.
+const PROFILE_TTL_MS = 60 * 1000
+const MAX_PROFILE_EPOCHS = 64
+const profileEpochs = new Map<string, { epoch: number; at: number }>()
+
+// Rosters change in the Nuvio app, so a cached list expires after the TTL or on a fresh read.
+function profileCacheKey(accessToken: string, fresh: boolean): string {
+    const now = Date.now()
+    const prev = profileEpochs.get(accessToken)
+    let entry = prev
+    if (!entry || fresh || now - entry.at >= PROFILE_TTL_MS) {
+        entry = { epoch: prev ? prev.epoch + 1 : 0, at: now }
+        profileEpochs.delete(accessToken)
+        profileEpochs.set(accessToken, entry)
+        while (profileEpochs.size > MAX_PROFILE_EPOCHS) {
+            const oldest = profileEpochs.keys().next().value
+            if (oldest === undefined) break
+            profileEpochs.delete(oldest)
+        }
+    }
+    return `${accessToken}#${entry.epoch}`
+}
 
 interface NuvioError extends Error {
     status?: number
@@ -72,9 +122,12 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
         throw lastErr
     }
 
+    const getProfiles = async (accessToken: string, fresh = false) =>
+        getNuvioProfiles(profileCacheKey(accessToken, fresh), () => rpc('sync_pull_profiles', {}, accessToken))
+
     const resolveProfileIndex = async (accessToken: string, profileId?: string | number, opts: { strict?: boolean } = {}): Promise<number> => {
         const { index } = await resolveProfileIndexWith(
-            () => rpc('sync_pull_profiles', {}, accessToken),
+            () => getProfiles(accessToken),
             profileId,
             opts,
         )
@@ -82,12 +135,11 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
     }
 
     return {
-        async pullProfiles(accessToken: string): Promise<Array<Record<string, unknown>>> {
+        async pullProfiles(accessToken: string, opts: { fresh?: boolean } = {}): Promise<Array<Record<string, unknown>>> {
             const start = Date.now()
             trace('nuvioDriver', 'pullProfiles.start', {})
             try {
-                const profiles = await rpc('sync_pull_profiles', {}, accessToken)
-                const result = Array.isArray(profiles) ? profiles : []
+                const result = await getProfiles(accessToken, opts.fresh === true)
                 trace('nuvioDriver', 'pullProfiles.success', { count: result.length, timing: Date.now() - start })
                 return result
             } catch (err) {
@@ -150,12 +202,15 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
             trace('nuvioDriver', 'readWatchHistory.start', {})
             try {
                 const idx = await resolveProfileIndex(accessToken, profileId)
-                const rows = await rpc('sync_pull_watched_items', {
-                    p_profile_id: idx,
-                    p_page: opts.page ?? 1,
-                    p_page_size: opts.pageSize ?? 100000,
-                }, accessToken)
-                const result = Array.isArray(rows) ? rows : []
+                const result = opts.page !== undefined || opts.pageSize !== undefined
+                    ? validateNuvioRows<NuvioWatchedRow>(await rpc('sync_pull_watched_items', {
+                        p_profile_id: idx,
+                        p_page: opts.page ?? 1,
+                        p_page_size: opts.pageSize ?? NUVIO_SNAPSHOT_LIMIT,
+                    }, accessToken), 'sync_pull_watched_items', opts.pageSize === undefined ? NUVIO_SNAPSHOT_LIMIT : Number.POSITIVE_INFINITY)
+                    : await pullNuvioWatchedPages<NuvioWatchedRow>(
+                        (page, pageSize) => rpc('sync_pull_watched_items', { p_profile_id: idx, p_page: page, p_page_size: pageSize }, accessToken),
+                    )
                 trace('nuvioDriver', 'readWatchHistory.success', { count: result.length, profileIndex: idx, timing: Date.now() - start })
                 return result
             } catch (err) {
@@ -169,9 +224,9 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
             const rows = await rpc('sync_pull_watch_progress', {
                 p_profile_id: idx,
                 p_since_last_watched: 0,
-                p_limit: 100000,
+                p_limit: NUVIO_SNAPSHOT_LIMIT,
             }, accessToken)
-            return Array.isArray(rows) ? rows : []
+            return validateNuvioRows<NuvioProgressRow>(rows, 'sync_pull_watch_progress', NUVIO_SNAPSHOT_LIMIT)
         },
 
         async readPlugins(accessToken: string, profileId?: string | number) {
@@ -244,6 +299,7 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
                 err.isAuthError = res.status === 401
                 throw err
             }
+            invalidateNuvioProfileCache()
             return null
         },
 
@@ -268,12 +324,16 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
                 uses_primary_plugins: false,
                 avatar_id: params.avatarId ?? null,
             })
-            return rpc('sync_push_profiles', { p_profiles, p_client_max_profiles: 5 }, accessToken, { retries: 0 })
+            const result = await rpc('sync_push_profiles', { p_profiles, p_client_max_profiles: 5 }, accessToken, { retries: 0 })
+            invalidateNuvioProfileCache()
+            return result
         },
 
         async deleteProfile(accessToken: string, profileId: string | number) {
             const idx = await resolveProfileIndex(accessToken, profileId, { strict: true })
-            return rpc('sync_delete_profile_data', { p_profile_id: idx }, accessToken, { retries: 0 })
+            const result = await rpc('sync_delete_profile_data', { p_profile_id: idx }, accessToken, { retries: 0 })
+            invalidateNuvioProfileCache()
+            return result
         },
 
         async deleteWatchHistory(accessToken: string, keys: Array<{ content_id: string; season?: number; episode?: number }>, profileId?: string | number) {

@@ -134,6 +134,26 @@
                         },
                         "running": {
                           "type": "boolean"
+                        },
+                        "safeMode": {
+                          "type": [
+                            "null",
+                            "object"
+                          ],
+                          "properties": {
+                            "since": {
+                              "type": "number"
+                            },
+                            "reason": {
+                              "type": "string"
+                            },
+                            "statements": {
+                              "type": "number"
+                            },
+                            "bytes": {
+                              "type": "number"
+                            }
+                          }
                         }
                       }
                     }
@@ -315,6 +335,38 @@
         }
       }
     },
+    "/api/proxy-image/sign": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "urls"
+                ],
+                "properties": {
+                  "urls": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/proxy-image": {
       "get": {
         "parameters": [
@@ -325,6 +377,53 @@
             "in": "query",
             "name": "url",
             "required": true
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 8
+            },
+            "in": "query",
+            "name": "w",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "avatar"
+              ]
+            },
+            "in": "query",
+            "name": "kind",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "in": "query",
+            "name": "u",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 16
+            },
+            "in": "query",
+            "name": "exp",
+            "required": false
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "in": "query",
+            "name": "sig",
+            "required": false
           }
         ],
         "responses": {
@@ -954,6 +1053,31 @@
             "description": "Default Response"
           }
         }
+      },
+      "query": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "token",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "*",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
       }
     },
     "/api/addon-health": {
@@ -1090,6 +1214,44 @@
         }
       }
     },
+    "/api/autopilot/{id}/pause": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/autopilot/{id}/retry-conflict": {
+      "post": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/autopilot/{id}": {
       "delete": {
         "parameters": [
@@ -1128,6 +1290,99 @@
         }
       }
     },
+    "/api/accounts/server-residue": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/accounts/{accountId}/server-state": {
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "accountId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/accounts/{accountId}/server-tombstone": {
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "accountId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/accounts/{accountId}/server-state/stremio-credentials": {
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "accountId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/api/accounts/{accountId}/server-state/connection/{connectionId}": {
+      "delete": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "accountId",
+            "required": true
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "connectionId",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/autopilot/pulse": {
       "get": {
         "responses": {
@@ -1139,15 +1394,6 @@
     },
     "/api/autopilot/states": {
       "post": {
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/admin/queue-stats": {
-      "get": {
         "responses": {
           "200": {
             "description": "Default Response"
@@ -2124,15 +2370,6 @@
             "required": true
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/admin/cache-stats": {
-      "get": {
         "responses": {
           "200": {
             "description": "Default Response"

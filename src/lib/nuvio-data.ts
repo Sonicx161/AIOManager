@@ -1,6 +1,7 @@
 import type { Connection } from '@/types/connection'
 import type { createNuvioDriver } from '@/lib/drivers/nuvio'
 import type { NuvioAvatar } from './nuvio-avatars.ts'
+import { readAvatarCatalogCached } from './nuvio-avatar-catalog-cache.ts'
 
 type NuvioDriver = ReturnType<typeof createNuvioDriver>
 
@@ -29,16 +30,34 @@ export interface NuvioCollection {
     folders?: Array<Record<string, unknown>>
 }
 
+// Keeps the first value seen for a read identity, so a rewrite of the same target reuses it.
+export function holdForReadIdentity<T>(held: { identity: string; value: T } | null, identity: string, value: T): { identity: string; value: T } {
+    return held && held.identity === identity ? held : { identity, value }
+}
+
 async function withNuvio<T>(
     accountId: string,
     conn: Connection,
     fn: (driver: NuvioDriver, accessToken: string, profileId?: string | number) => Promise<T>,
 ): Promise<T> {
-    const { fetchConnectionToken } = await import('@/api/connection')
+    const { fetchConnectionToken, hashRejectedToken, isNuvioJwtAuthError } = await import('@/api/connection')
     const { nuvioDriverFor } = await import('@/lib/drivers/factory')
-    const token = await fetchConnectionToken(accountId, conn.id, 'nuvio', conn.credentials?.baseUrl)
-    const profileId = token.profileId ?? conn.credentials?.profileId
-    return fn(nuvioDriverFor(conn), token.accessToken, profileId)
+    const { getOrFetchNuvioToken } = await import('@/lib/nuvio-token-cache')
+    const scope = { accountId, baseUrl: conn.credentials?.baseUrl }
+    let token = await getOrFetchNuvioToken(conn.id, () => fetchConnectionToken(accountId, conn.id, 'nuvio', conn.credentials?.baseUrl), scope)
+    const driver = nuvioDriverFor(conn)
+    try {
+        return await fn(driver, token.accessToken, token.profileId ?? conn.credentials?.profileId)
+    } catch (error) {
+        const { isAuthError } = await import('@/store/accountStore')
+        if (!isAuthError(error)) throw error
+        // A JWT-type 401 names the exact rejected token by hash so the server force-revalidates it.
+        const forcedHash = isNuvioJwtAuthError(error) ? await hashRejectedToken(token.accessToken) : undefined
+        const { invalidateNuvioToken } = await import('@/lib/nuvio-token-cache')
+        invalidateNuvioToken(conn.id, scope)
+        token = await getOrFetchNuvioToken(conn.id, () => fetchConnectionToken(accountId, conn.id, 'nuvio', conn.credentials?.baseUrl, forcedHash ? { rejectedTokenHash: forcedHash } : undefined), scope)
+        return fn(driver, token.accessToken, token.profileId ?? conn.credentials?.profileId)
+    }
 }
 
 export function readNuvioLibrary(accountId: string, conn: Connection): Promise<NuvioLibraryItem[]> {
@@ -57,9 +76,9 @@ export interface NuvioProfileRow {
     avatar_id?: string
 }
 
-export function readNuvioProfiles(accountId: string, conn: Connection): Promise<NuvioProfileRow[]> {
+export function readNuvioProfiles(accountId: string, conn: Connection, opts: { fresh?: boolean } = {}): Promise<NuvioProfileRow[]> {
     return withNuvio(accountId, conn, async (d, t) => {
-        const rows = await d.pullProfiles(t)
+        const rows = await d.pullProfiles(t, { fresh: opts.fresh })
         return rows.map(r => ({
             id: String(r.id ?? ''),
             profile_index: Number(r.profile_index ?? r.profileIndex ?? 0),
@@ -79,10 +98,16 @@ export function createNuvioProfile(accountId: string, conn: Connection, params: 
 }
 
 // The avatar catalog is a key-only public RPC, so no connection token is needed.
+// Memoized per backend baseUrl with single-flight; failures are not cached.
 export function readNuvioAvatars(_accountId: string, conn: Pick<Connection, 'credentials'>): Promise<NuvioAvatar[]> {
-    return import('@/lib/drivers/factory').then(({ nuvioDriverFor }) => nuvioDriverFor(conn).getAvatarCatalog())
+    return readAvatarCatalogCached(conn.credentials?.baseUrl, () =>
+        import('@/lib/drivers/factory').then(({ nuvioDriverFor }) => nuvioDriverFor(conn).getAvatarCatalog()))
 }
 
 export function deleteNuvioProfile(accountId: string, conn: Connection, profileId: string | number): Promise<unknown> {
     return withNuvio(accountId, conn, (d, t) => d.deleteProfile(t, profileId))
+}
+
+export function readNuvioMemberAccess(accountId: string, conn: Connection): Promise<unknown> {
+    return withNuvio(accountId, conn, (d, t) => d.getMemberAccess(t))
 }

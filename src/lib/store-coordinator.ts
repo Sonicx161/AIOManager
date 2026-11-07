@@ -17,6 +17,9 @@ export async function resetAllStores(options: { includeSync?: boolean } = {}): P
     import('@/store/failoverStore').then(({ useFailoverStore }) => useFailoverStore.getState().reset()),
     import('@/store/profileStore').then(({ useProfileStore }) => useProfileStore.getState().reset()),
     import('@/store/libraryCache').then(({ useLibraryCache }) => useLibraryCache.getState().clear()),
+    // Display-only read caches (Nuvio tabs, grid membership, avatar catalog,
+    // Stremio GetUser): a second user on a shared browser must never see them.
+    import('@/lib/display-read-cache').then(({ clearDisplayReadCache }) => clearDisplayReadCache()),
   ]
 
   if (includeSync) {

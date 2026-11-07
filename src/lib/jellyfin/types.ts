@@ -111,6 +111,13 @@ export interface JellyfinItemResult {
      * Never set on final client results and never persisted.
      */
     inProgress?: true
+    /**
+     * Present only on reads requested with DatePlayed sorting: true when the
+     * server accepted the sort, false when a 400 downgraded the read to
+     * unsorted paging. Consumers that rely on recency order (head-only card
+     * reads) must fall back to the archive walk when this is false.
+     */
+    sortAccepted?: boolean
     /** The bound this read applied: 50 for resume, 500 for played. */
     limit: number
 }
@@ -118,6 +125,12 @@ export interface JellyfinItemResult {
 export interface JellyfinPagedReadOptions {
     maxItems?: number
     pageSize?: number
+    /** Windows kept in flight during a walk (results still process in window order); default 1. */
+    windowConcurrency?: number
+    /** Retries per page for transient failures (timeout, network, server); default 0. */
+    pageRetries?: number
+    /** First retry delay in ms; doubles per retry. */
+    retryDelayMs?: number
     /** Same-client, single-use head observation for the initial archive walk only. */
     prefetchedHead?: JellyfinItemResult
     /**
@@ -218,7 +231,9 @@ export interface JellyfinClient {
     readItem(accessToken: string, userId: string, itemId: string, signal?: AbortSignal): Promise<JellyfinItem>
     readWatchItem(accessToken: string, userId: string, itemId: string, signal?: AbortSignal): Promise<JellyfinItem>
     readResume(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinItemResult>
-    readPlayed(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinItemResult>
+    readPlayed(accessToken: string, userId: string, signal?: AbortSignal, onProgress?: JellyfinPagedReadOptions['onProgress'], parallelHeadPages?: boolean, pageRetries?: number): Promise<JellyfinItemResult>
+    /** One sorted 25-row probe of the played head prefix for cheap freshness checks. */
+    probePlayedHead(accessToken: string, userId: string, signal?: AbortSignal): Promise<{ items: JellyfinItem[]; total: number | null }>
     readAllPlayed(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     readAllResume(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     readAllLibrary(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>

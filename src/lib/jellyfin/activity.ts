@@ -2,7 +2,8 @@ import type { ActivityItem } from '../../types/activity.ts'
 import type { Connection } from '../../types/connection.ts'
 import type { JellyfinMediaReads } from './reads.ts'
 import type { JellyfinItem, JellyfinNowPlayingItem, JellyfinSession } from './types.ts'
-import { jellyfinImdbId } from './metadata.ts'
+import { metahubPosterUrl } from '../activity-artwork.ts'
+import { jellyfinCanonicalId, jellyfinTmdbId } from './metadata.ts'
 
 export interface MediaAccount { id: string; name: string }
 export interface MediaPlayback {
@@ -30,22 +31,31 @@ function playedDate(value: unknown, now: number): Date | undefined {
     return Number.isFinite(time) && time >= Date.UTC(1995, 0, 1) && time <= now + 60_000 ? new Date(time) : undefined
 }
 
+/** A projected item may remember the connection-scoped id it carried before its series resolved. */
+export type JellyfinActivityItem = ActivityItem & { legacyItemId?: string }
+
 function identifiers(item: JellyfinItem | JellyfinNowPlayingItem, connectionId: string) {
     const episode = item.Type === 'Episode'
     // An episode's IMDb/TMDB ID identifies the episode, not its parent series.
     // Resolve the parent's provider IDs, or an explicit canonical SeriesId.
-    const imdb = episode ? jellyfinImdbId(item.SeriesProviderIds) || item.SeriesId : jellyfinImdbId(item.ProviderIds)
-    const canonical = typeof imdb === 'string' && /^tt\d+$/.test(imdb) ? imdb : undefined
-    const base = canonical || `jellyfin:${encodeURIComponent(connectionId)}:${encodeURIComponent(episode ? item.SeriesId || item.Id || '' : item.Id || '')}`
+    const canonical = episode
+        ? jellyfinCanonicalId(item.SeriesProviderIds) || (typeof item.SeriesId === 'string' && /^tt\d+$/.test(item.SeriesId) ? item.SeriesId : undefined)
+        : jellyfinCanonicalId(item.ProviderIds)
+    // Artwork fallback only: the row's TMDB id never enters base/unique/legacy identity.
+    const tmdbId = jellyfinTmdbId(episode ? item.SeriesProviderIds : item.ProviderIds)
+    const scoped = `jellyfin:${encodeURIComponent(connectionId)}:${encodeURIComponent(episode ? item.SeriesId || item.Id || '' : item.Id || '')}`
+    const base = canonical || scoped
     const season = index(item.ParentIndexNumber)
     const episodeNumber = index(item.IndexNumber)
-    const unique = episode && season !== undefined && episodeNumber !== undefined
-        ? `${base}:${season}:${episodeNumber}`
+    // An episode stays episode-scoped even when its series resolves.
+    const unique = episode
+        ? season !== undefined && episodeNumber !== undefined ? `${base}:${season}:${episodeNumber}` : `jellyfin:${encodeURIComponent(connectionId)}:${encodeURIComponent(item.Id || '')}`
         : canonical || `jellyfin:${encodeURIComponent(connectionId)}:${encodeURIComponent(item.Id || '')}`
-    return { base, unique, season, episode: episodeNumber, canonical }
+    const legacy = episode && canonical && canonical !== scoped && !(typeof item.SeriesId === 'string' && /^tt\d+$/.test(item.SeriesId)) ? scoped : undefined
+    return { base, unique, season, episode: episodeNumber, canonical, legacy, tmdbId }
 }
 
-function activityItem(account: MediaAccount, colorIndex: number, connection: Connection, item: JellyfinItem | JellyfinNowPlayingItem, kind: 'resume' | 'played' | 'live', checkedAt: number, now: number, positionTicks?: number): ActivityItem | undefined {
+function activityItem(account: MediaAccount, colorIndex: number, connection: Connection, item: JellyfinItem | JellyfinNowPlayingItem, kind: 'resume' | 'played' | 'live', checkedAt: number, now: number, positionTicks?: number): JellyfinActivityItem | undefined {
     if (typeof item.Id !== 'string' || !item.Id || typeof item.Name !== 'string' || !item.Name.trim()) return undefined
     if (item.Type !== 'Movie' && item.Type !== 'Episode' && !(kind === 'live' && item.Type === undefined)) return undefined
     const ids = identifiers(item, connection.id)
@@ -60,17 +70,73 @@ function activityItem(account: MediaAccount, colorIndex: number, connection: Con
         itemId: ids.base, uniqueItemId: ids.unique,
         name: item.Type === 'Episode' && typeof item.SeriesName === 'string' ? item.SeriesName || item.Name : item.Name,
         type: item.Type === 'Episode' ? 'series' : item.Type === 'Movie' ? 'movie' : 'video',
-        poster: ids.canonical ? `https://images.metahub.space/poster/medium/${ids.canonical}/img` : '',
+        poster: ids.canonical && /^tt\d+$/.test(ids.canonical) ? metahubPosterUrl(ids.canonical) : '',
         // Undated resume points are useful in Continue Watching, never a dated event.
         timestamp: timestamp || new Date(0),
-        // A seek position is not elapsed viewing time; keep it out of watch-hour totals.
+        // The resume position rides on mediaObservation.positionMs; watch hours credit it from there, not from watched.
         duration, watched: 0, progress,
         isInProgress: kind === 'live' || (kind !== 'played' && position > 0 && !played),
         season: ids.season, episode: ids.episode,
         source: 'jellyfin',
         mediaObservation: { connectionId: connection.id, productName: connection.mediaServer?.productName || 'Jellyfin', kind, checkedAt, hasPlayedDate: !!timestamp, positionMs: position },
         mediaTargets: [{ connectionId: connection.id, itemId: item.Id }],
+        ...(ids.tmdbId ? { tmdbId: ids.tmdbId } : {}),
+        ...(ids.legacy ? { legacyItemId: ids.legacy } : {}),
     }
+}
+
+const BURST_MIN_ITEMS = 10
+const BURST_MIN_TITLES = 3
+const BURST_UNKNOWN_RUNTIME_GAP_MS = 60_000
+
+/** Marks a row stamped inside an import burst; cleared once the row is resolved as a copy or a real play. */
+export type BurstKind = 'multi' | 'series'
+export type BurstItem = ActivityItem & { importBurst?: BurstKind }
+
+/** A real play whose clock time is only approximate (marked together with others). */
+export const isTimeApproximate = (item: ActivityItem): boolean => item.timeApproximate === true
+
+/**
+ * A server that stamps many plays at ingest time reports them closer together
+ * than they could have been watched. Runs of BURST_MIN_ITEMS or more such
+ * plays on one connection are tentatively saved state until collapseImportedCopies
+ * resolves them: a multi-title run is a migration (copies of other platforms'
+ * plays), a single-series run is a binge marked together (real plays).
+ */
+export function flagImportBursts(items: ActivityItem[]): void {
+    const dated = items.filter(item => item.mediaObservation?.kind === 'played' && item.timestamp.getTime() > 0)
+        .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+    let run: ActivityItem[] = []
+    const close = () => {
+        if (run.length >= BURST_MIN_ITEMS) {
+            const kind: BurstKind = new Set(run.map(item => item.itemId)).size >= BURST_MIN_TITLES ? 'multi' : 'series'
+            for (const item of run) { item.backfill = true; item.importedSavedState = true; (item as BurstItem).importBurst = kind }
+        }
+        run = []
+    }
+    for (const item of dated) {
+        const previous = run[run.length - 1]
+        if (previous) {
+            const known = [previous.duration, item.duration].filter(value => value > 0)
+            const limit = known.length ? Math.min(...known) / 2 : BURST_UNKNOWN_RUNTIME_GAP_MS
+            if (item.timestamp.getTime() - previous.timestamp.getTime() >= limit) close()
+        }
+        run.push(item)
+    }
+    close()
+}
+
+/** The identity string an old-form row of this episode was tombstoned under. */
+export function legacyEpisodeIdentity(item: Pick<JellyfinActivityItem, 'legacyItemId' | 'season' | 'episode'>): string | undefined {
+    return item.legacyItemId && item.episode !== undefined ? `${item.legacyItemId}:s${item.season ?? 1}:e${item.episode}` : undefined
+}
+
+/** Latest deletion tombstone for an item under its current or pre-resolution identity. */
+export function mediaDeletedAt(deleted: Record<string, number>, scope: string, current: string, item: Pick<JellyfinActivityItem, 'legacyItemId' | 'season' | 'episode'>): number | undefined {
+    const legacy = legacyEpisodeIdentity(item)
+    const a = deleted[`${scope}:${current}`]
+    const b = legacy ? deleted[`${scope}:${legacy}`] : undefined
+    return a === undefined ? b : b === undefined ? a : Math.max(a, b)
 }
 
 function fresh(session: JellyfinSession, userId: string, now: number) {
@@ -96,6 +162,7 @@ function libraryActivity(account: MediaAccount, colorIndex: number, connection: 
             }
         }
     }
+    flagImportBursts(result.history)
     return result
 }
 
@@ -202,49 +269,88 @@ function mergeCurrentState(prior: ActivityItem, item: ActivityItem): ActivityIte
     return { ...preferred, mediaSources: labels, mediaTargets: targets }
 }
 
+/** The identity key a resolved episode carried before its series id was known. */
+function legacyKeyOf(item: ActivityItem): string | undefined {
+    const legacyItemId = (item as JellyfinActivityItem).legacyItemId
+    return legacyItemId ? identity({ ...item, itemId: legacyItemId }) : undefined
+}
+
+/** Keeps the resolved identity when one side is its old connection-scoped form. */
+function adoptResolved(merged: ActivityItem, prior: ActivityItem, item: ActivityItem): ActivityItem {
+    const resolved = (item as JellyfinActivityItem).legacyItemId ? item : (prior as JellyfinActivityItem).legacyItemId ? prior : undefined
+    if (!resolved || (merged.itemId === resolved.itemId && merged.uniqueItemId === resolved.uniqueItemId)) return merged
+    return { ...merged, itemId: resolved.itemId, uniqueItemId: resolved.uniqueItemId, poster: resolved.poster || merged.poster, legacyItemId: (resolved as JellyfinActivityItem).legacyItemId } as ActivityItem
+}
+
 /** One current state per title/episode; a newer media observation can replace old native state. */
 export function mergeMediaItems(existing: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
     const merged = new Map<string, ActivityItem>()
+    const aliases = new Map<string, string>()
     for (const item of [...existing, ...incoming]) {
-        const key = identity(item)
+        const own = identity(item)
+        const legacy = legacyKeyOf(item)
+        let key = own
+        if (!merged.has(own)) {
+            const aliased = aliases.get(own)
+            if (aliased && merged.has(aliased)) key = aliased
+            else if (legacy && merged.has(legacy)) {
+                merged.set(own, merged.get(legacy)!)
+                merged.delete(legacy)
+            }
+        }
+        if (legacy) aliases.set(legacy, key)
         const prior = merged.get(key)
-        merged.set(key, prior ? mergeCurrentState(prior, item) : item)
+        merged.set(key, prior ? adoptResolved(mergeCurrentState(prior, item), prior, item) : item)
     }
     return [...merged.values()]
 }
 
-/** Preserve watch events on different days; snapshots can only augment the same reported watch day. */
+const CROSS_SOURCE_WINDOW_MS = 36 * 3_600_000
+const sourceOf = (item: Pick<ActivityItem, 'source'>) => item.source || 'stremio'
+
+/** Preserve watch events on different days; snapshots can only augment the same reported watch day (or, across sources, the same play within a UTC window). */
 export function mergeMediaHistory(existing: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
     const history = [...existing]
     if (incoming.length === 0) return history
-    // Only an identical title/episode, owner and local watch day can merge.
-    // Index that candidate set once rather than rescanning the whole history
-    // for every media-server item on each live-session poll.
-    const candidates = new Map<string, Map<string, number[]>>()
-    const addCandidate = (key: string, day: string, index: number) => {
-        let days = candidates.get(key)
-        if (!days) { days = new Map(); candidates.set(key, days) }
-        const indices = days.get(day)
+    // Only an identical title/episode and owner can merge. Index that candidate
+    // set once rather than rescanning the whole history for every media-server
+    // item on each live-session poll.
+    const candidates = new Map<string, number[]>()
+    const addCandidate = (key: string, index: number) => {
+        const indices = candidates.get(key)
         if (indices) indices.push(index)
-        else days.set(day, [index])
+        else candidates.set(key, [index])
     }
+    // A resolved episode and its old connection-scoped form are one title.
+    const aliases = new Map<string, string>()
     for (let index = 0; index < history.length; index++) {
         const item = history[index]
-        addCandidate(identity(item), item.timestamp.toDateString(), index)
+        const key = identity(item)
+        addCandidate(key, index)
+        const legacy = legacyKeyOf(item)
+        if (legacy) aliases.set(legacy, key)
     }
     for (const item of incoming) {
         const key = identity(item)
         const day = item.timestamp.toDateString()
         const time = item.timestamp.getTime()
+        const origin = sourceOf(item)
+        const legacy = legacyKeyOf(item)
+        const keys = [key, legacy, aliases.get(key)].filter((value, at, all): value is string => !!value && all.indexOf(value) === at)
         let match = -1
         let distance = Infinity
-        for (const index of candidates.get(key)?.get(day) || []) {
-            const prior = history[index]
-            const difference = Math.abs(prior.timestamp.getTime() - time)
-            if (difference < distance) { match = index; distance = difference }
+        for (const candidate of keys) {
+            for (const index of candidates.get(candidate) || []) {
+                const prior = history[index]
+                const difference = Math.abs(prior.timestamp.getTime() - time)
+                // Another platform's record of one play can straddle a local-day or timezone boundary.
+                const same = prior.timestamp.toDateString() === day || (sourceOf(prior) !== origin && difference <= CROSS_SOURCE_WINDOW_MS)
+                if (same && difference < distance) { match = index; distance = difference }
+            }
         }
         if (match === -1) {
-            addCandidate(key, day, history.length)
+            addCandidate(key, history.length)
+            if (legacy) aliases.set(legacy, key)
             history.push(item)
             continue
         }
@@ -252,9 +358,118 @@ export function mergeMediaHistory(existing: ActivityItem[], incoming: ActivityIt
         const merged = mergeCurrentState(prior, item)
         history[match] = prior.source !== 'jellyfin'
             ? { ...prior, mediaSources: merged.mediaSources, mediaTargets: merged.mediaTargets }
-            : merged
+            : adoptResolved(merged, prior, item)
     }
     return history
+}
+
+const COPY_SOURCE_LABELS: Record<string, string> = { nuvio: 'Nuvio', realstream: 'RealStream', jellyfin: 'Jellyfin' }
+const COPY_ID_PATTERN = /^(tt\d+)/i
+
+function copyShape(item: ActivityItem): { cls: 's' | 'm'; episode: string } | undefined {
+    if (item.type === 'movie') return { cls: 'm', episode: '' }
+    if (item.type !== 'series' && item.type !== 'anime' && item.type !== 'episode') return undefined
+    return item.episode === undefined ? undefined : { cls: 's', episode: `${item.season ?? 1}:${item.episode}` }
+}
+
+function copyTitle(name: string): string {
+    return name.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+const isUndated = (item: ActivityItem) => !!item.backfill || !!item.importedSavedState || !(item.timestamp.getTime() > 0)
+
+/** Burst rows no original claimed are real plays at their stamp time, flagged as approximate. */
+function settleBursts(items: ActivityItem[]): ActivityItem[] {
+    if (!items.some(item => (item as BurstItem).importBurst)) return items
+    return items.map(item => {
+        if (!(item as BurstItem).importBurst) return item
+        const { importBurst: _burst, backfill: _backfill, importedSavedState: _saved, ...rest } = item as BurstItem
+        return { ...rest, timeApproximate: true }
+    })
+}
+
+/**
+ * Plays another platform holds as copies of a Stremio watch count once, at the original
+ * time. A copy collapses only when it sits within 36 h of the original (one play seen
+ * twice) or belongs to a multi-title import burst (a migration stamping its own time).
+ * A single-series burst is a binge marked together: it collapses only per row within
+ * 36 h. Burst rows that match nothing become real plays with approximate time. The
+ * original row keeps its timestamp and gains the copy's source. Each copy source
+ * collapses at most one play per original, so genuine rewatches survive. Matching
+ * ignores login origin; names only bridge ids that share no IMDb form, and only when
+ * the title is unambiguous for the account.
+ */
+export function collapseImportedCopies(items: ActivityItem[]): ActivityItem[] {
+    const byId = new Map<string, ActivityItem[]>()
+    const byTitle = new Map<string, ActivityItem[]>()
+    const titleIds = new Map<string, Set<string>>()
+    const copies: ActivityItem[] = []
+    const push = (map: Map<string, ActivityItem[]>, key: string, item: ActivityItem) => {
+        const list = map.get(key)
+        if (list) list.push(item)
+        else map.set(key, [item])
+    }
+    for (const item of items) {
+        const shape = copyShape(item)
+        if (!shape) continue
+        if (sourceOf(item) === 'stremio') {
+            if (item.isInProgress || item.mediaObservation?.kind === 'live') continue
+            const scope = `${item.accountId}|${shape.cls}|`
+            push(byId, `${scope}id:${item.itemId}|${shape.episode}`, item)
+            const tt = COPY_ID_PATTERN.exec(item.itemId)?.[1].toLowerCase()
+            if (tt && tt !== item.itemId) push(byId, `${scope}id:${tt}|${shape.episode}`, item)
+            const title = copyTitle(item.name)
+            if (title) {
+                push(byTitle, `${scope}${title}|${shape.episode}`, item)
+                const ids = titleIds.get(`${scope}${title}`) || new Set<string>()
+                ids.add(tt || item.itemId)
+                titleIds.set(`${scope}${title}`, ids)
+            }
+        } else {
+            const completed = item.mediaObservation ? item.mediaObservation.kind === 'played' : !item.isInProgress
+            if (completed) copies.push(item)
+        }
+    }
+    if (copies.length === 0 || byId.size === 0) return settleBursts(items)
+
+    const used = new Map<string, Set<ActivityItem>>()
+    const dropped = new Set<ActivityItem>()
+    const replaced = new Map<ActivityItem, ActivityItem>()
+    copies.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+    for (const copy of copies) {
+        const shape = copyShape(copy)!
+        const scope = `${copy.accountId}|${shape.cls}|`
+        const tt = COPY_ID_PATTERN.exec(copy.itemId)?.[1].toLowerCase()
+        let originals = byId.get(`${scope}id:${copy.itemId}|${shape.episode}`) || (tt ? byId.get(`${scope}id:${tt}|${shape.episode}`) : undefined)
+        if (!originals && !tt) {
+            const title = copyTitle(copy.name)
+            if (title && titleIds.get(`${scope}${title}`)?.size === 1) originals = byTitle.get(`${scope}${title}|${shape.episode}`)
+        }
+        if (!originals) continue
+        const usedKey = `${sourceOf(copy)}|${copy.mediaObservation?.connectionId || copy.sourceConnectionId || ''}|${scope}${copy.itemId}|${shape.episode}`
+        const taken = used.get(usedKey) || new Set<ActivityItem>()
+        const time = copy.timestamp.getTime()
+        const flagged = isUndated(copy) && (copy as BurstItem).importBurst !== 'series'
+        let target: ActivityItem | undefined
+        let best = Infinity
+        for (const original of originals) {
+            if (taken.has(original)) continue
+            const gap = time - original.timestamp.getTime()
+            const likely = isUndated(original) ? flagged : flagged || Math.abs(gap) <= CROSS_SOURCE_WINDOW_MS
+            if (likely && Math.abs(gap) < best) { target = original; best = Math.abs(gap) }
+        }
+        if (!target) continue
+        taken.add(target)
+        used.set(usedKey, taken)
+        const base = replaced.get(target) || target
+        const label = copy.mediaObservation?.productName || COPY_SOURCE_LABELS[sourceOf(copy)] || sourceOf(copy)
+        const mediaSources = [...new Set([...(base.mediaSources || []), ...(copy.mediaSources || []), label])]
+        const mediaTargets = [...new Map([...(base.mediaTargets || []), ...(copy.mediaTargets || [])].map(entry => [JSON.stringify([entry.connectionId, entry.itemId]), entry])).values()]
+        replaced.set(target, { ...base, mediaSources, ...(mediaTargets.length ? { mediaTargets } : {}) })
+        dropped.add(copy)
+    }
+    if (dropped.size === 0) return settleBursts(items)
+    return settleBursts(items.filter(item => !dropped.has(item)).map(item => replaced.get(item) || item))
 }
 
 export function isReadOnlyMediaActivity(item: Pick<ActivityItem, 'source' | 'readOnly'>): boolean {
@@ -270,7 +485,9 @@ export function activityNowStatus(item: ActivityItem, now = Date.now()): Activit
         const age = now - (item.mediaObservation.reportedAt ?? item.mediaObservation.checkedAt)
         return !item.mediaObservation.isPaused && age >= -5_000 && age < 120_000 ? 'playing' : undefined
     }
-    if (item.backfill || !item.isInProgress || item.progress >= 90 || (item.flaggedWatched ?? 0) > 0 || item.mediaObservation?.kind === 'played') return undefined
+    // 95 mirrors the row model's own in-progress cap (transformLibraryItemToActivityItem);
+    // a 90-94.9% resume row is unfinished and must keep its Now badge.
+    if (item.backfill || !item.isInProgress || item.progress >= 95 || (item.flaggedWatched ?? 0) > 0 || item.mediaObservation?.kind === 'played') return undefined
     const age = now - item.timestamp.getTime()
     return age >= -60_000 && age < RECENT_ACTIVITY_WINDOW_MS ? 'recent' : undefined
 }
