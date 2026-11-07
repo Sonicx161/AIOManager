@@ -58,11 +58,9 @@ export function applyAccountChainFlags(list, chains) {
     return { list: out, skipped }
 }
 
-export function applyOneActiveFlags(list, chainUrls, activeUrl) {
-    const addonList = Array.isArray(list) ? list : []
-    const normalizedChain = (Array.isArray(chainUrls) ? chainUrls : []).map(u => normalizeAddonUrl(u))
-    const normalizedTarget = normalizeAddonUrl(activeUrl)
-
+// Effective chain URL of an addon (null when it is not a chain member): by normalized transport URL, or by a
+// unique manifest id that maps to a chain member (the swapped-URL case).
+function chainMembership(addonList, normalizedChain) {
     const chainSet = new Set(normalizedChain)
     const chainIndex = new Map(normalizedChain.map((u, i) => [u, i]))
 
@@ -85,18 +83,50 @@ export function applyOneActiveFlags(list, chainUrls, activeUrl) {
         if (idx !== undefined) chainIdMap.set(addon.manifest.id, normalizedChain[idx])
     })
 
+    return (addon) => {
+        const normUrl = normalizeAddonUrl(addon.transportUrl)
+        if (chainSet.has(normUrl)) return normUrl
+        if (addon.manifest?.id && chainIdMap.has(addon.manifest.id)) return chainIdMap.get(addon.manifest.id)
+        return null
+    }
+}
+
+export function preserveLiveMembers(list, live, preservedUrls) {
+    const preserved = new Set((preservedUrls || []).map(normalizeAddonUrl))
+    if (preserved.size === 0) return list
+    const urlOf = addon => normalizeAddonUrl(addon?.transportUrl || addon?.url)
+    const current = new Map((live || []).map(addon => [urlOf(addon), addon]))
+    const seen = new Set()
+    const out = (list || []).flatMap(addon => {
+        const url = urlOf(addon)
+        if (!preserved.has(url)) return [addon]
+        if (!current.has(url) || seen.has(url)) return []
+        seen.add(url)
+        return [current.get(url)]
+    })
+    for (let i = 0; i < (live || []).length; i++) {
+        const addon = live[i]
+        const url = urlOf(addon)
+        if (!preserved.has(url) || seen.has(url)) continue
+        const following = new Set(live.slice(i + 1).map(urlOf))
+        const before = out.findIndex(row => following.has(urlOf(row)))
+        out.splice(before < 0 ? out.length : before, 0, addon)
+        seen.add(url)
+    }
+    return out
+}
+
+export function applyOneActiveFlags(list, chainUrls, activeUrl, preservedUrls = []) {
+    const addonList = Array.isArray(list) ? list : []
+    const normalizedChain = (Array.isArray(chainUrls) ? chainUrls : []).map(u => normalizeAddonUrl(u))
+    const normalizedTarget = normalizeAddonUrl(activeUrl)
+    const effectiveUrlOf = chainMembership(addonList, normalizedChain)
+    const preserved = new Set((preservedUrls || []).map(normalizeAddonUrl))
+
     let violationDetected = false
     const updatedList = addonList.map(addon => {
-        const normUrl = normalizeAddonUrl(addon.transportUrl)
-        let effectiveUrl = normUrl
-        let isChainMember = chainSet.has(normUrl)
-
-        if (!isChainMember && addon.manifest?.id && chainIdMap.has(addon.manifest.id)) {
-            isChainMember = true
-            effectiveUrl = chainIdMap.get(addon.manifest.id)
-        }
-
-        if (isChainMember) {
+        const effectiveUrl = effectiveUrlOf(addon)
+        if (effectiveUrl !== null && !preserved.has(effectiveUrl)) {
             const shouldBeEnabled = effectiveUrl === normalizedTarget
             if (addon.flags?.enabled !== shouldBeEnabled) violationDetected = true
             return {
@@ -108,6 +138,28 @@ export function applyOneActiveFlags(list, chainUrls, activeUrl) {
     })
 
     return { list: updatedList, violationDetected }
+}
+
+// Compact form of a list's chain members, [effective URL, stored enabled flag (true, false or null)], so the
+// engine can re-derive violationDetected for any target without keeping the whole list in memory.
+export function chainMemberStates(list, chainUrls) {
+    const addonList = Array.isArray(list) ? list : []
+    const normalizedChain = (Array.isArray(chainUrls) ? chainUrls : []).map(u => normalizeAddonUrl(u))
+    const effectiveUrlOf = chainMembership(addonList, normalizedChain)
+    const states = []
+    for (const addon of addonList) {
+        const effectiveUrl = effectiveUrlOf(addon)
+        if (effectiveUrl === null) continue
+        const enabled = addon.flags?.enabled
+        states.push([effectiveUrl, enabled === true || enabled === false ? enabled : null])
+    }
+    return states
+}
+
+// Same answer as applyOneActiveFlags(list, chain, activeUrl).violationDetected.
+export function violationFromStates(states, activeUrl) {
+    const normalizedTarget = normalizeAddonUrl(activeUrl)
+    return (states || []).some(([effectiveUrl, enabled]) => enabled !== (effectiveUrl === normalizedTarget))
 }
 
 // One predicate for every guard site. A write may never leave a managed chain without an enabled

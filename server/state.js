@@ -58,5 +58,7 @@ export const serverState = {
     lastWorkerRun: Date.now(),
     autopilotInterval: null,
     autopilotScanCursor: '',
-    autopilotLastCycleStats: null
+    autopilotLastCycleStats: null,
+    autopilotLastCycleEndedAt: null,
+    autopilotWatchdog: null
 }

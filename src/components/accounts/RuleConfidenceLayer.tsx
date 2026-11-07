@@ -1,8 +1,20 @@
-import { Activity, AlertTriangle, ArrowRight, Check, Pause, Shield, XCircle, type LucideIcon } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Activity, AlertTriangle, ArrowRight, Check, ChevronDown, CloudOff, Pause, RefreshCw, Shield, XCircle, type LucideIcon } from 'lucide-react'
 import { StatusChip } from '@/components/ui/status-chip'
-import { formatRelative, useRelativeTime } from '@/hooks/use-relative-time'
-import { normalizeAddonUrl } from '@/lib/utils'
-import type { AutopilotCycleStats, AutopilotStabilizationEntry, FailoverRule } from '@/store/failoverStore'
+import { Button } from '@/components/ui/button'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { isQuietRuleState, quietRuleLine, ruleDotTone, staleHeartbeatRuleState, type RuleConfidenceLabel } from '@/components/accounts/autopilot-rule-card'
+import { formatRelative, useNow, useRelativeTime } from '@/hooks/use-relative-time'
+import { useStremioSyncRepair } from '@/hooks/useStremioSyncRepair'
+import { maskNameLevel, normalizeAddonUrl } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
+import { findRuleOverlaps, getRuleMissingConnection } from '@/lib/autopilot-conflicts'
+import {
+    AUTOPILOT_FIX_LABEL, AUTOPILOT_SAFE_MODE_DETAIL, AUTOPILOT_SKIP_DETAIL, AUTOPILOT_WORKER_OFF_TITLE, describeRuleError, liveAccountCheck, resolveAutopilotFreshness, resolveRuleFix, ruleConflictDetail, type AutopilotRuleFix,
+} from '@/lib/autopilot-freshness'
+import { getStremioConnection, useAccountStore } from '@/store/accountStore'
+import { useFailoverStore, type AutopilotCycleStats, type AutopilotStabilizationEntry, type FailoverRule } from '@/store/failoverStore'
 
 type ConfidenceVariant = 'muted' | 'primary' | 'success' | 'warning' | 'destructive'
 
@@ -15,11 +27,12 @@ interface RuleConfidenceLayerProps {
 }
 
 interface ConfidenceState {
-    label: string
+    label: RuleConfidenceLabel
     variant: ConfidenceVariant
     icon: LucideIcon
     detail: string
     proof?: string
+    title?: string
 }
 
 function readCheckedAt(rule: FailoverRule) {
@@ -67,7 +80,9 @@ function getConfidenceState(
     isAutopilotLive: boolean,
     lastCycle: AutopilotCycleStats | undefined,
     activeAddonName: string,
-    primaryAddonName: string
+    primaryAddonName: string,
+    statePullFailed: boolean,
+    workerEnabled: boolean,
 ): ConfidenceState {
     const primaryUrl = rule.priorityChain[0]
     const activeUrl = rule.activeUrl || primaryUrl
@@ -82,6 +97,7 @@ function getConfidenceState(
     const primaryFailures = primaryEntry.failures || 0
     const activeFailures = activeEntry.failures || 0
     const isFailedOver = !!activeNorm && !!primaryNorm && activeNorm !== primaryNorm
+    const freshness = resolveAutopilotFreshness({ ageMs, staleMs, statePullFailed, skipReason: rule.skipReason })
 
     if (!rule.isActive) {
         return {
@@ -91,6 +107,9 @@ function getConfidenceState(
             detail: 'Rule is paused; Autopilot will not enforce changes.',
         }
     }
+
+    const conflictDetail = ruleConflictDetail(rule)
+    if (conflictDetail) return { label: 'Needs attention', variant: 'warning', icon: AlertTriangle, detail: conflictDetail }
 
     if (rule.isAutomatic === false) {
         return {
@@ -102,12 +121,41 @@ function getConfidenceState(
         }
     }
 
-    if (!isAutopilotLive) {
+    // A turned-off worker outranks the heartbeat: even a heartbeat younger than
+    // the live window must not present an automatic rule as live or healthy.
+    if ((!isAutopilotLive || workerEnabled === false) && !rule.skipReason) {
+        const standby = staleHeartbeatRuleState(rule, { workerEnabled })
+        const neverChecked = standby.label === 'Pending'
         return {
-            label: 'Standby',
-            variant: 'warning',
+            label: standby.label,
+            variant: neverChecked ? 'primary' : 'warning',
             icon: Activity,
-            detail: 'Worker heartbeat is stale; waiting for fresh confirmation.',
+            detail: standby.detail,
+            title: standby.label === 'Turned off' ? AUTOPILOT_WORKER_OFF_TITLE : undefined,
+            proof: neverChecked
+                ? 'No server check has been recorded yet.'
+                : standby.label === 'Turned off'
+                    ? undefined
+                    : `Last confirmed check was ${formatRelative(checkedAt) || 'just now'}.`,
+        }
+    }
+
+    if (freshness === 'not-monitored' && rule.skipReason) {
+        return {
+            label: 'Not monitored',
+            variant: 'warning',
+            icon: AlertTriangle,
+            detail: AUTOPILOT_SKIP_DETAIL[rule.skipReason],
+            proof: checkedAt ? `Last check was ${formatRelative(checkedAt) || 'just now'}.` : undefined,
+        }
+    }
+
+    if (freshness === 'unverified') {
+        return {
+            label: 'Unverified',
+            variant: 'warning',
+            icon: CloudOff,
+            detail: "Couldn't reach server to confirm this rule's latest check.",
             proof: checkedAt ? `Last confirmed check was ${formatRelative(checkedAt) || 'just now'}.` : 'No server check has been recorded yet.',
         }
     }
@@ -132,23 +180,30 @@ function getConfidenceState(
         }
     }
 
-    if (ageMs !== null && ageMs > staleMs) {
+    // A live worker can legitimately have an older per-rule timestamp while a
+    // budgeted scan is working through a large public instance. Surface that
+    // queue state before the generic stale warning; otherwise the UI says
+    // "Stale" precisely when the worker is healthy but this rule is waiting.
+    const queuedWindowMs = lastCycle
+        ? Math.max(5 * 60 * 1000, Math.min(60 * 60 * 1000, Math.max(120_000, lastCycle.durationMs * 3)))
+        : 0
+    if (lastCycle?.budgetHit && ageMs !== null && ageMs > 120_000 && ageMs <= queuedWindowMs) {
+        return {
+            label: 'Queued',
+            variant: 'primary',
+            icon: Activity,
+            detail: 'The worker is live and this rule is waiting in the scan budget.',
+            proof: `${lastCycle.scanned} rules were scanned in ${Math.round(lastCycle.durationMs / 1000)}s.`,
+        }
+    }
+
+    if (freshness === 'stale') {
         return {
             label: 'Stale',
             variant: 'warning',
             icon: AlertTriangle,
             detail: 'Last check is older than expected for this worker cadence.',
             proof: `Last check was ${formatRelative(checkedAt) || 'just now'}.`,
-        }
-    }
-
-    if (lastCycle?.budgetHit && ageMs !== null && ageMs > 120_000) {
-        return {
-            label: 'Queued',
-            variant: 'primary',
-            icon: Activity,
-            detail: 'Large-instance scan budget is active; this rule may wait for the cursor.',
-            proof: `${lastCycle.scanned} rules were scanned in ${Math.round(lastCycle.durationMs / 1000)}s.`,
         }
     }
 
@@ -192,25 +247,149 @@ function getConfidenceState(
     }
 }
 
+/** The one fix for a stale rule, from the server's reason. Shared by the rule row and the header Autopilot popover. */
+export function AutopilotRuleFixAction({ rule, fix, className, onRemove }: { rule: FailoverRule; fix: AutopilotRuleFix; className?: string; onRemove?: () => Promise<void> }) {
+    const navigate = useNavigate()
+    const now = useNow()
+    const issue = useFailoverStore(s => s.restoreIssues[rule.id])
+    const hasStremio = useAccountStore(s => {
+        const account = s.accounts.find(a => a.id === rule.accountId)
+        return !!account && !!getStremioConnection(account)?.credentials?.authKey
+    })
+    const { repair } = useStremioSyncRepair(rule.accountId)
+    const [busy, setBusy] = useState(false)
+    const [actionError, setActionError] = useState<string | null>(null)
+    const inFlight = useRef(false)
+    if (fix === 'safe-mode') return null
+    const rateLimited = (fix === 'restore' || fix === 'grant-access') && !!issue?.retryAt && issue.retryAt > now
+    const run = async () => {
+        if (inFlight.current) return
+        inFlight.current = true
+        setBusy(true)
+        setActionError(null)
+        const store = useFailoverStore.getState()
+        try {
+            if (fix === 'restore') await store.restoreRuleOnServer(rule.id)
+            else if (fix === 'remove') { if (onRemove) await onRemove(); else await store.removeRule(rule.id) }
+            else if (fix === 'grant-access') {
+                if (hasStremio) await repair()
+                await store.restoreRuleOnServer(rule.id, { quiet: true })
+            } else if (fix === 'reconnect') navigate(`/account/${encodeURIComponent(rule.accountId)}?tab=connections`)
+            else if (fix === 'resume') await store.toggleRuleActive(rule.id, true)
+            else if (fix === 'edit-chain') navigate(`/account/${encodeURIComponent(rule.accountId)}?tab=failover&editRule=${encodeURIComponent(rule.id)}`)
+            else if (fix === 'retry-conflict') await store.retryRuleConflict(rule.id)
+            else await store.pullServerState()
+        } catch {
+            if (fix === 'retry-conflict') setActionError('Unable to retry this rule. Try again.')
+            else if (fix === 'remove') setActionError('Unable to remove this rule. Try again.')
+        } finally {
+            inFlight.current = false
+            setBusy(false)
+        }
+    }
+    const label = rateLimited ? 'Try again later' : issue && (fix === 'restore' || fix === 'grant-access') ? 'Try again' : AUTOPILOT_FIX_LABEL[fix]
+    return (
+        <div className={className ?? 'flex flex-col items-end gap-1'} data-testid="autopilot-rule-fix">
+            {issue && <p className="break-words text-xs text-warning" role="alert">{issue.message}</p>}
+            {actionError && <p className="break-words text-xs text-warning" role="alert">{actionError}</p>}
+            <Button size="sm" variant="outline" className="h-7 gap-1.5 text-xs" onClick={run} disabled={busy || rateLimited}>
+                {(fix === 'restore' || fix === 'refresh' || fix === 'grant-access' || fix === 'retry-conflict') && <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} />}
+                {busy ? 'Working...' : label}
+            </Button>
+        </div>
+    )
+}
+
+/** Small header dot, rendered only for states that need a look. */
+export function RuleHealthDot({ rule, isAutopilotLive, lastCycle }: { rule: FailoverRule; isAutopilotLive: boolean; lastCycle?: AutopilotCycleStats }) {
+    const pullUnverified = useFailoverStore(s => s.statePullFailed || s.statePullPartial)
+    const workerEnabled = useFailoverStore(s => s.workerEnabled)
+    const { label } = getConfidenceState(rule, isAutopilotLive, lastCycle, '', '', pullUnverified, workerEnabled)
+    const tone = rule.isActive && ruleConflictDetail(rule) ? 'warning' : ruleDotTone(label)
+    if (!tone) return null
+    return (
+        <span role="img" aria-label={label} className={`h-2 w-2 shrink-0 rounded-full ${tone === 'destructive' ? 'bg-destructive' : 'bg-warning'}`} />
+    )
+}
+
 export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName }: RuleConfidenceLayerProps) {
+    const account = useAccountStore(s => s.accounts.find(a => a.id === rule.accountId))
+    const rules = useFailoverStore(s => s.rules)
+    const privacyNameLevel = useUIStore(s => s.isPrivacyModeEnabled ? s.privacyLevelNames : 0)
     const formatRelativeLabel = useRelativeTime()
     const checkedAt = readCheckedAt(rule)
     const activeUrl = rule.activeUrl || rule.priorityChain[0]
     const activeEntry = readStabilizationEntry(rule, activeUrl)
-    const confidence = getConfidenceState(rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName)
+    const pullUnverified = useFailoverStore(s => s.statePullFailed || s.statePullPartial)
+    const workerEnabled = useFailoverStore(s => s.workerEnabled)
+    const safeMode = useFailoverStore(s => s.safeMode)
+    const accountExists = useAccountStore(s => liveAccountCheck(s.accounts.map(a => a.id), s.deletedAccounts, s.restoredAccounts)(rule.accountId))
+    const confidence = getConfidenceState(rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName, pullUnverified, workerEnabled)
     const Icon = confidence.icon
-    const lastCheckLabel = checkedAt ? `Last checked ${formatRelativeLabel(checkedAt) || 'just now'}` : 'Check pending'
-    const latencyLabel = typeof activeEntry.latencyMs === 'number' ? `Latency ${Math.round(activeEntry.latencyMs)}ms` : null
+    const checkedRelative = checkedAt ? formatRelativeLabel(checkedAt) || 'just now' : null
+    const lastCheckLabel = checkedRelative ? `Last checked ${checkedRelative}` : 'Check pending'
+    const errorLabel = rule.isActive ? describeRuleError(rule.lastError) : null
+    const latencyMs = typeof activeEntry.latencyMs === 'number' ? activeEntry.latencyMs : null
+    const latencyLabel = latencyMs !== null ? `Latency ${Math.round(latencyMs)}ms` : null
+    const stale = confidence.label === 'Stale' || confidence.label === 'Not monitored'
+    const fix = isAutopilotLive || rule.skipReason === 'not_on_server' || !rule.isActive || !!ruleConflictDetail(rule)
+        ? resolveRuleFix(rule, { accountExists, safeMode, stale })
+        : null
+
+    const missingConnection = getRuleMissingConnection(rule, account)
+    const overlap = rule.lastError?.code === 'chain_overlap' ? findRuleOverlaps(rule, rules, account?.addons || [])[0] : undefined
+    const overlapAddon = overlap ? account?.addons.find(addon => normalizeAddonUrl(addon.transportUrl) === normalizeAddonUrl(overlap.url)) : undefined
+    const overlapName = overlapAddon ? maskNameLevel(overlapAddon.metadata?.customName || overlapAddon.manifest.name || 'An addon', privacyNameLevel) : undefined
+    const conflictDetail = rule.isActive ? ruleConflictDetail(rule, overlapName) : null
+    const warning = missingConnection
+        ? `${missingConnection.label}. ${rule.isActive ? 'This rule has no login to run on.' : 'This rule is paused.'}`
+        : conflictDetail
+    if (warning && !safeMode) {
+        return (
+            <div data-theme-part="panel" className="mx-2 rounded-xl border border-border/40 bg-muted/20 px-3 py-2.5" data-testid="rule-conflict-warning">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="flex min-w-0 items-start gap-2 text-sm text-warning">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                        <span className="break-words">{warning}</span>
+                    </p>
+                    {!missingConnection && fix && <AutopilotRuleFixAction rule={rule} fix={fix} className="flex shrink-0 flex-col items-end gap-1" />}
+                </div>
+            </div>
+        )
+    }
+
+    if (isQuietRuleState(confidence.label, { fix, hasError: !!errorLabel })) {
+        return (
+            <p className="mx-2 text-right text-xs tabular-nums text-muted-foreground" data-testid="rule-quiet-status">
+                {quietRuleLine(confidence.label, { checkedLabel: checkedRelative, latencyMs })}
+            </p>
+        )
+    }
 
     return (
         <div data-theme-part="panel" className="mx-2 rounded-xl border border-border/40 bg-muted/20 px-3 py-2.5">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <StatusChip variant={confidence.variant} size="sm">
-                        <Icon />
-                        {confidence.label}
-                    </StatusChip>
-                    <span className="min-w-0 truncate text-sm text-foreground/90">
+                    <Popover>
+                        <PopoverTrigger asChild>
+                            <button type="button" className="shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`${confidence.label} details`}>
+                                <StatusChip variant={confidence.variant} size="sm">
+                                    <Icon />
+                                    {confidence.label}
+                                    <ChevronDown className="opacity-70" />
+                                </StatusChip>
+                            </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" className="w-[min(18rem,92vw)] space-y-1.5 p-3 text-xs">
+                            <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                                <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                                {confidence.title ?? confidence.label}
+                            </p>
+                            <p className="break-words text-foreground/80">{confidence.detail}</p>
+                            {confidence.proof && <p className="break-words text-muted-foreground">{confidence.proof}</p>}
+                        </PopoverContent>
+                    </Popover>
+                    <span className="min-w-0 break-words text-sm text-foreground/90">
                         {confidence.detail}
                     </span>
                 </div>
@@ -223,14 +402,17 @@ export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAd
                             {latencyLabel}
                         </StatusChip>
                     )}
-                    {lastCycle?.budgetHit && (
-                        <StatusChip variant="primary" size="sm">
-                            {lastCycle.scanned} scanned
-                        </StatusChip>
-                    )}
+                    {fix && fix !== 'safe-mode' && <AutopilotRuleFixAction rule={rule} fix={fix} />}
                 </div>
             </div>
             {confidence.proof && <p className="mt-1 text-xs text-muted-foreground/60">{confidence.proof}</p>}
+            {fix === 'safe-mode' && <p className="mt-1 text-xs text-muted-foreground">{AUTOPILOT_SAFE_MODE_DETAIL}</p>}
+            {errorLabel && (
+                <p className="mt-1 flex items-center gap-1 text-xs text-warning" data-testid="rule-last-error">
+                    <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 break-words">{errorLabel}</span>
+                </p>
+            )}
         </div>
     )
 }

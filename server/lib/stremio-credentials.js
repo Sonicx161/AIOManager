@@ -4,8 +4,8 @@ import { FALLBACK_KEYS } from '../keys.js'
 
 const STREMIO_CRED_PREDICATE = "(credential_type = 'stremio' OR credential_type IS NULL)"
 
-export async function listStremioCredentialedAccountIds(syncUser) {
-    const rows = await db.query(
+export async function listStremioCredentialedAccountIds(syncUser, conn = db) {
+    const rows = await conn.query(
         `SELECT DISTINCT account_id FROM server_credentials WHERE sync_user = $1 AND ${STREMIO_CRED_PREDICATE}`,
         [syncUser]
     )

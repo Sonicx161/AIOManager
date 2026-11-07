@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertTriangle, ArrowRightLeft, Check, ChevronDown, Loader2, Pencil, Plus, Trash2, XCircle } from "lucide-react"
 import { DndContext, closestCenter } from '@dnd-kit/core'
 import type { DragEndEvent, SensorDescriptor, SensorOptions } from '@dnd-kit/core'
@@ -23,7 +23,9 @@ import {
 import { StatusChip } from "@/components/ui/status-chip"
 import { Tooltip } from "@/components/ui/tooltip"
 import { AddonIcon } from "@/components/ui/addon-icon"
+import { SecretUrlInput } from "@/components/ui/secret-url-input"
 import { SortableDialogTier } from "@/components/accounts/SortableFailoverTiers"
+import { customWebhookError, parseCooldownMinutes } from "@/components/accounts/rule-dialog-fields"
 import { testWebhook } from "@/components/accounts/WebhooksPanel"
 import { identifyAddon } from "@/lib/addon-identifier"
 import { toast } from "@/hooks/use-toast"
@@ -31,7 +33,9 @@ import { apiFetch } from "@/lib/http-client"
 import { useFailoverStore, readScopeBackups, readScopeDecisions, recordScopeDecision, clearScopeBackup } from "@/store/failoverStore"
 import type { FailoverRule, FailoverScopeBackup } from "@/store/failoverStore"
 import type { AddonDescriptor } from "@/types/addon"
-import { normalizeAddonUrl } from "@/lib/utils"
+import { maskNameLevel, normalizeAddonUrl } from "@/lib/utils"
+import { useUIStore } from "@/store/uiStore"
+import { getTakenRuleAddons, growsRuleOverlap } from "@/lib/autopilot-conflicts"
 import { findClosestChainAddon, findStaleScopeEntries, getUrlHostname, isSameCheckUrl, restoreScopedChecks, validateCustomCheckScopes } from "@/lib/failover-scope"
 import type { ScopeValidationError } from "@/lib/failover-scope"
 
@@ -86,6 +90,11 @@ export function RuleDialog({
     const updateRule = useFailoverStore(s => s.updateRule)
     const globalWebhook = useFailoverStore(s => s.webhook)
     const globalWebhookConfigured = !!(globalWebhook.url && globalWebhook.enabled)
+    const privacyNameLevel = useUIStore(s => s.isPrivacyModeEnabled ? s.privacyLevelNames : 0)
+    const takenAddons = useMemo(() => {
+        const taken = getTakenRuleAddons(accountId, rules, localAddons, editingRule?.id)
+        return new Map([...taken].map(([url, entry]) => [url, { ...entry, ruleName: maskNameLevel(entry.ruleName, privacyNameLevel) }]))
+    }, [accountId, rules, localAddons, editingRule?.id, privacyNameLevel])
 
     const [chain, setChain] = useState<string[]>(["", ""])
     const [editingRuleId, setEditingRuleId] = useState<string | null>(null)
@@ -101,7 +110,13 @@ export function RuleDialog({
     const [replacementPicker, setReplacementPicker] = useState<{ checkIndex: number; unmatchedUrl: string; closestUrl?: string } | null>(null)
     const [scopeBackups, setScopeBackups] = useState<Record<string, FailoverScopeBackup>>({})
     const [scopeDecidedRuleIds, setScopeDecidedRuleIds] = useState<string[]>([])
+    const [dismissedBackupRuleIds, setDismissedBackupRuleIds] = useState<string[]>([])
+    const [isSaving, setIsSaving] = useState(false)
+    const [webhookError, setWebhookError] = useState<string | null>(null)
+    const [saveError, setSaveError] = useState<string | null>(null)
+    const chainErrorRef = useRef<HTMLParagraphElement>(null)
     const checkRowRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+    const webhookInputRef = useRef<HTMLInputElement>(null)
 
     useEffect(() => {
         if (!open) return
@@ -120,6 +135,8 @@ export function RuleDialog({
         setUrlTestResults({})
         setScopeError(null)
         setReplacementPicker(null)
+        setWebhookError(null)
+        setSaveError(null)
         setEditingRuleId(rule?.id ?? null)
     }, [open, editingRule, globalWebhookConfigured])
 
@@ -146,6 +163,7 @@ export function RuleDialog({
     }
 
     const handleSaveRule = async () => {
+        if (isSaving) return
         const filteredChain = chain.filter(url => !!url)
         if (filteredChain.length < 2) {
             toast({ title: "Invalid Rule", description: "An autopilot chain needs at least 2 addons.", variant: "destructive" })
@@ -155,8 +173,22 @@ export function RuleDialog({
             toast({ title: "Duplicate Addon", description: "Each Autopilot tier needs a different addon URL.", variant: "destructive" })
             return
         }
+        setSaveError(null)
+        if (growsRuleOverlap(filteredChain, editingRule?.priorityChain || [], takenAddons)) {
+            setSaveError('An addon is already in another Autopilot rule. Remove it from one rule first.')
+            requestAnimationFrame(() => chainErrorRef.current?.focus())
+            return
+        }
 
-        const cooldownMs = cooldownMinutes ? parseInt(cooldownMinutes) * 60 * 1000 : undefined
+        const webhookIssue = customWebhookError(ruleNotifyMode, ruleWebhookUrl)
+        if (webhookIssue) {
+            setWebhookError(webhookIssue)
+            webhookInputRef.current?.focus()
+            return
+        }
+        setWebhookError(null)
+
+        const cooldownMs = parseCooldownMinutes(cooldownMinutes)
 
         const notifyEnabled = ruleNotifyMode !== 'off'
         const webhookUrl = ruleNotifyMode === 'custom' ? ruleWebhookUrl.trim() : ''
@@ -176,34 +208,46 @@ export function RuleDialog({
         }
         setScopeError(null)
 
-        if (editingRuleId) {
-            const existingRule = rules.find(r => r.id === editingRuleId)
-            const chainChanged = !existingRule || JSON.stringify(existingRule.priorityChain) !== JSON.stringify(filteredChain)
-            await updateRule(editingRuleId, {
-                priorityChain: filteredChain,
-                activeUrl: chainChanged ? filteredChain[0] : existingRule!.activeUrl,
-                name: ruleName.trim() || undefined,
-                cooldown_ms: cooldownMs,
-                notifyEnabled,
-                webhookUrl,
-                messageTemplate,
-                customCheckUrls: filteredCustomChecks,
-            })
-            toast({ title: "Rule Updated", description: "Rule settings modified." })
-            setEditingRuleId(null)
-        } else {
-            await addRule(accountId, filteredChain, ruleName.trim() || undefined, cooldownMs, webhookUrl, notifyEnabled, messageTemplate, filteredCustomChecks)
-            toast({ title: "Rule Created", description: "Autopilot is now monitoring this chain." })
-        }
+        setIsSaving(true)
+        try {
+            if (editingRuleId) {
+                const existingRule = rules.find(r => r.id === editingRuleId)
+                const chainChanged = !existingRule || JSON.stringify(existingRule.priorityChain) !== JSON.stringify(filteredChain)
+                await updateRule(editingRuleId, {
+                    priorityChain: filteredChain,
+                    activeUrl: chainChanged ? filteredChain[0] : existingRule!.activeUrl,
+                    name: ruleName.trim() || undefined,
+                    cooldown_ms: cooldownMs,
+                    notifyEnabled,
+                    webhookUrl,
+                    messageTemplate,
+                    customCheckUrls: filteredCustomChecks,
+                })
+                toast({ title: "Rule Updated", description: "Rule settings modified." })
+                setEditingRuleId(null)
+            } else {
+                await addRule(accountId, filteredChain, ruleName.trim() || undefined, cooldownMs, webhookUrl, notifyEnabled, messageTemplate, filteredCustomChecks)
+                toast({ title: "Rule Created", description: "Autopilot is now monitoring this chain." })
+            }
 
-        onOpenChange(false)
+            onOpenChange(false)
+        } catch (error) {
+            const message = error instanceof Error ? error.message : ''
+            setSaveError(message && !/[a-z][a-z0-9+.-]*:\/\//i.test(message)
+                ? message
+                : 'The rule was not saved. Check your connection and try again.')
+            requestAnimationFrame(() => chainErrorRef.current?.focus())
+        } finally {
+            setIsSaving(false)
+        }
     }
 
-    const addToChain = () => setChain([...chain, ""])
-    const removeFromChain = (index: number) => setChain(chain.filter((_, i) => i !== index))
+    const addToChain = () => { setSaveError(null); setChain([...chain, ""]) }
+    const removeFromChain = (index: number) => { setSaveError(null); setChain(chain.filter((_, i) => i !== index)) }
     const updateChainUrl = (index: number, url: string) => {
         const newChain = [...chain]
         newChain[index] = url
+        setSaveError(null)
         setChain(newChain)
     }
 
@@ -268,8 +312,10 @@ export function RuleDialog({
     const restorableBackupChecks = activeScopeBackup?.checks.filter(b =>
         b.appliesTo.length > 0 && customChecks.some(c => c.appliesTo.length === 0 && isSameCheckUrl(b.url, c.url))
     ) || []
-    const showRestoreModal = !!editingRuleId && open && restorableBackupChecks.length > 0 && !scopeDecidedRuleIds.includes(editingRuleId)
+    const scopeDecisionMade = !!editingRuleId && (scopeDecidedRuleIds.includes(editingRuleId) || dismissedBackupRuleIds.includes(editingRuleId))
+    const showRestoreModal = !!editingRuleId && open && restorableBackupChecks.length > 0 && !scopeDecisionMade
     const showLegacyBanner = !!editingRuleId && open && !activeScopeBackup && hasEmptyScopeCheck
+    const showDismissedBackupBanner = !!editingRuleId && open && !!activeScopeBackup && restorableBackupChecks.length > 0 && dismissedBackupRuleIds.includes(editingRuleId)
 
     const applyReplacement = (checkIndex: number, pickedUrl: string) => {
         const staleUrl = replacementPicker?.unmatchedUrl
@@ -293,6 +339,11 @@ export function RuleDialog({
     const handleScopeDecision = async (choice: 'restore' | 'keep' | 'dismiss') => {
         const ruleId = editingRuleId
         if (!ruleId) return
+        // Dismiss is session-only so the backup can still be reviewed later; only Restore and Keep persist.
+        if (choice === 'dismiss') {
+            setDismissedBackupRuleIds(prev => prev.includes(ruleId) ? prev : [...prev, ruleId])
+            return
+        }
         if (choice === 'restore') {
             const restored = restoreScopedChecks(customChecks, restorableBackupChecks)
             setCustomChecks(restored)
@@ -310,6 +361,7 @@ export function RuleDialog({
         }
         await recordScopeDecision(ruleId)
         setScopeDecidedRuleIds(prev => prev.includes(ruleId) ? prev : [...prev, ruleId])
+        setDismissedBackupRuleIds(prev => prev.filter(id => id !== ruleId))
     }
     const testCustomCheckUrl = async (index: number) => {
         const url = customChecks[index]?.url.trim()
@@ -341,12 +393,13 @@ export function RuleDialog({
         const oldIndex = Number(active.id)
         const newIndex = Number(over.id)
         if (isNaN(oldIndex) || isNaN(newIndex)) return
+        setSaveError(null)
         setChain(prev => arrayMove(prev, oldIndex, newIndex))
     }, [])
 
     return (
         <>
-            <Dialog open={open} onOpenChange={onOpenChange}>
+            <Dialog open={open} onOpenChange={(nextOpen) => { if (isSaving && !nextOpen) return; onOpenChange(nextOpen) }}>
                 <DialogContent
                     className='!grid-cols-none !gap-0 !p-0 flex flex-col overflow-hidden !h-[92vh] !max-h-[92vh] rounded-t-3xl sm:!h-auto sm:!max-w-2xl sm:!max-h-[92vh] text-card-foreground'
                 >
@@ -398,11 +451,14 @@ export function RuleDialog({
                                                 addons={addons}
                                                 updateChainUrl={updateChainUrl}
                                                 removeFromChain={removeFromChain}
+                                                takenAddons={takenAddons}
+                                                getAddonNameForUrl={(value) => maskNameLevel(getAddonNameForUrl(value), privacyNameLevel)}
                                             />
                                         ))}
                                     </div>
                                 </SortableContext>
                             </DndContext>
+                            {saveError && <p ref={chainErrorRef} tabIndex={-1} role="alert" className="text-xs text-destructive focus:outline-none">{saveError}</p>}
                             <Button
                                 variant="ghost"
                                 size="sm"
@@ -425,6 +481,23 @@ export function RuleDialog({
                                             Saved before a recent fix, this check's scope may have been widened to all addons. Review the addons it applies to.
                                         </p>
                                         <Button size="sm" variant="outline" className="h-7 px-3 text-xs shrink-0" onClick={focusFirstEmptyScopeCheck}>
+                                            Review
+                                        </Button>
+                                    </div>
+                                )}
+
+                                {showDismissedBackupBanner && (
+                                    <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl border border-warning/25 bg-warning/[0.07] px-3 py-2.5 flex items-start gap-2.5">
+                                        <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+                                        <p className="text-xs leading-relaxed text-foreground/80 flex-1 pt-0.5">
+                                            A backup of this check's original scope is still saved on this device.
+                                        </p>
+                                        <Button
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-7 px-3 text-xs shrink-0"
+                                            onClick={() => setDismissedBackupRuleIds(prev => prev.filter(id => id !== editingRuleId))}
+                                        >
                                             Review
                                         </Button>
                                     </div>
@@ -488,11 +561,12 @@ export function RuleDialog({
                                             data-theme-part="panel"
                                         >
                                             <div className="flex gap-2 items-center">
-                                                <Input
+                                                <SecretUrlInput
                                                     placeholder="https://api.torbox.app/v1/api/user/me"
                                                     value={check.url}
-                                                    onChange={(e) => updateCustomCheckUrl(index, e.target.value)}
-                                                    className="bg-muted/30 border-border rounded-xl"
+                                                    onChange={(url) => updateCustomCheckUrl(index, url)}
+                                                    className="rounded-xl"
+                                                    ariaLabel={`Custom check URL ${index + 1}`}
                                                 />
                                                 <Button
                                                     size="sm"
@@ -753,6 +827,8 @@ export function RuleDialog({
                                         <Input
                                             type="number"
                                             placeholder="10"
+                                            min={0}
+                                            step={1}
                                             value={cooldownMinutes}
                                             onChange={(e) => setCooldownMinutes(e.target.value)}
                                             className="bg-muted/30 border-border rounded-xl"
@@ -764,11 +840,16 @@ export function RuleDialog({
                                     <div className="space-y-1.5">
                                         <label className="text-xs font-medium text-muted-foreground uppercase ml-1">Custom Webhook URL</label>
                                         <div className="flex gap-2">
-                                            <Input
+                                            <SecretUrlInput
                                                 placeholder="https://discord.com/api/webhooks/... or Slack URL"
                                                 value={ruleWebhookUrl}
-                                                onChange={(e) => setRuleWebhookUrl(e.target.value)}
-                                                className="bg-muted/30 border-border rounded-xl"
+                                                inputRef={webhookInputRef}
+                                                onChange={(url) => {
+                                                    setRuleWebhookUrl(url)
+                                                    if (webhookError) setWebhookError(null)
+                                                }}
+                                                className="rounded-xl"
+                                                ariaLabel="Custom webhook URL"
                                             />
                                             {ruleWebhookUrl && (
                                                 <Button
@@ -780,6 +861,9 @@ export function RuleDialog({
                                                 </Button>
                                             )}
                                         </div>
+                                        {webhookError && (
+                                            <p role="alert" className="text-xs text-destructive ml-1">{webhookError}</p>
+                                        )}
                                     </div>
                                 )}
 
@@ -802,16 +886,20 @@ export function RuleDialog({
 
                     <div className="shrink-0 bg-card px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-8">
                         <div className="flex justify-end gap-3 [&_button]:h-11 [&_button]:rounded-full [&_button]:px-5">
-                            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+                            <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={isSaving}>
                                 Cancel
                             </Button>
                             <Button
                                 size="sm"
                                 className="bg-primary hover:bg-primary/90 text-primary-foreground font-bold"
                                 onClick={handleSaveRule}
-                                disabled={chain.filter(u => !!u).length < 2}
+                                disabled={chain.filter(u => !!u).length < 2 || isSaving}
                             >
-                                {editingRuleId ? "Update Chain" : "Enable Autopilot"}
+                                {isSaving ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin" /> Saving
+                                    </>
+                                ) : editingRuleId ? "Update Chain" : "Enable Autopilot"}
                             </Button>
                         </div>
                     </div>
@@ -827,12 +915,12 @@ export function RuleDialog({
                         </DialogTitle>
                     </DialogHeader>
                     <p className="text-sm text-foreground/70 leading-relaxed">
-                        A backup of this rule's original check scope was found on this device. It was widened to all addons by a sync bug that's now fixed.
+                        A sync bug widened this check to all addons. A backup of its original scope was found on this device.
                     </p>
                     <div className="flex flex-col sm:flex-row sm:items-center justify-end gap-2 pt-2 [&_button]:rounded-full [&_button]:px-4">
                         <Button variant="ghost" onClick={() => void handleScopeDecision('dismiss')}>Not now</Button>
-                        <Button variant="outline" onClick={() => void handleScopeDecision('keep')}>Keep as global (applies to all addons)</Button>
-                        <Button onClick={() => void handleScopeDecision('restore')}>Restore scope</Button>
+                        <Button variant="outline" onClick={() => void handleScopeDecision('keep')}>Keep all addons</Button>
+                        <Button onClick={() => void handleScopeDecision('restore')}>Restore</Button>
                     </div>
                 </DialogContent>
             </Dialog>

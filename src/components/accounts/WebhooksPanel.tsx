@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { Pencil, Webhook } from "lucide-react"
+import { maskSecretUrl } from '@/lib/mask-secret-url'
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { SecretUrlInput } from "@/components/ui/secret-url-input"
 import { StatusChip } from "@/components/ui/status-chip"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
 import { EmptyState } from "@/components/common/EmptyState"
@@ -103,11 +104,12 @@ export function WebhooksPanel({ accountId, accountName, accountRules, onEditRule
                 </div>
             </div>
             <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
-                <Input
+                <SecretUrlInput
                     placeholder="https://discord.com/api/webhooks/... or Slack URL"
                     value={webhookUrl}
-                    onChange={(e) => setWebhookUrl(e.target.value)}
-                    className="bg-muted/30 border-border rounded-lg"
+                    onChange={(url) => setWebhookUrl(url)}
+                    className="rounded-lg"
+                    ariaLabel="Global webhook URL"
                 />
                 <div className="flex gap-2">
                     <Button size="sm" onClick={handleSaveWebhook}>Set Webhook</Button>
@@ -150,7 +152,7 @@ export function WebhooksPanel({ accountId, accountName, accountRules, onEditRule
                                     {rule.name || `Rule ${rule.id.slice(0, 8)}`}
                                 </span>
                                 <span className="text-xs font-mono text-muted-foreground truncate max-w-xs">
-                                    {rule.webhookUrl}
+                                    {maskSecretUrl(rule.webhookUrl!)}
                                 </span>
                             </div>
                             <div className="flex gap-2 shrink-0">

@@ -1,30 +1,33 @@
 import { memo } from "react"
 import type { ReactNode } from "react"
-import { ChevronDown, CircleDot, GripVertical, Star, Trash2 } from "lucide-react"
+import { AlertTriangle, CircleDot, GripVertical, Star, Trash2 } from "lucide-react"
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AddonIcon } from "@/components/ui/addon-icon"
-import { SquircleOverlay } from "@/components/ui/squircle-overlay"
 import { Tooltip } from "@/components/ui/tooltip"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { AddonDescriptor } from "@/types/addon"
+import { normalizeAddonUrlForMatch } from '@/lib/addon-url'
+import type { TakenRuleAddon } from '@/lib/autopilot-conflicts'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
 interface SortableChainTierProps {
     id: string
     url: string
     idx: number
-    chainLength: number
     isActiveInRule: boolean
     isTier1: boolean
     isFailedOver: boolean
     addonName: string
     addonLogo?: string
     getTierClassName: (active: boolean, tier1: boolean) => string
+    warning?: string
+    warningDetail?: string
 }
 
 export const SortableChainTier = memo(function SortableChainTier({
-    id, idx, chainLength, isActiveInRule, isTier1, isFailedOver,
-    addonName, addonLogo, getTierClassName
+    id, idx, isActiveInRule, isTier1, isFailedOver,
+    addonName, addonLogo, getTierClassName, warning, warningDetail
 }: SortableChainTierProps) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
     const style = {
@@ -36,7 +39,7 @@ export const SortableChainTier = memo(function SortableChainTier({
 
     return (
         <div ref={setNodeRef} style={style} className="flex flex-col">
-            <div className={`flex items-center gap-3 py-3 px-4 rounded-xl relative z-10 transition-colors ${getTierClassName(isActiveInRule, isTier1)}`}>
+            <div className={`flex items-center gap-3 py-3 px-4 rounded-xl relative z-10 transition-colors ${warning ? 'flex-wrap sm:flex-nowrap' : ''} ${getTierClassName(isActiveInRule, isTier1)}`}>
                 <div
                     {...attributes}
                     {...listeners}
@@ -45,10 +48,7 @@ export const SortableChainTier = memo(function SortableChainTier({
                 >
                     <GripVertical className="w-4 h-4" />
                 </div>
-                <div className="relative w-5 h-5 shrink-0 flex items-center justify-center">
-                    <SquircleOverlay />
-                    <span className="relative z-10 text-xs font-bold text-muted-foreground">{idx + 1}</span>
-                </div>
+                <span className="w-4 shrink-0 text-center text-xs font-semibold tabular-nums text-muted-foreground">{idx + 1}</span>
                 <AddonIcon
                     name={addonName}
                     logo={addonLogo}
@@ -57,7 +57,15 @@ export const SortableChainTier = memo(function SortableChainTier({
                     imageClassName="p-0.5"
                 />
                 <span className="font-bold truncate text-sm flex-1">{addonName}</span>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className={`flex items-center gap-2 shrink-0 ${warning ? 'max-sm:w-full max-sm:justify-end' : ''}`}>
+                    {warning && <Popover>
+                        <PopoverTrigger asChild>
+                            <button type="button" className="inline-flex min-h-8 items-center gap-1 rounded-full border border-warning/20 bg-warning/10 px-2 text-xs font-medium text-warning focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`${addonName}: ${warning}`}>
+                                <AlertTriangle className="h-3 w-3" aria-hidden="true" />{warning}
+                            </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="end" className="w-[min(18rem,85vw)] p-3 text-xs">{warningDetail || warning}</PopoverContent>
+                    </Popover>}
                     {isTier1 && (
                         <Tooltip content="Primary failover addon">
                             <span aria-label="Primary failover addon" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/25 bg-primary/12 text-primary/80">
@@ -74,11 +82,6 @@ export const SortableChainTier = memo(function SortableChainTier({
                     )}
                 </div>
             </div>
-            {idx < chainLength - 1 && (
-                <div className="w-full flex items-center justify-center py-1 opacity-30">
-                    <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
-                </div>
-            )}
         </div>
     )
 })
@@ -93,11 +96,13 @@ interface SortableDialogTierProps {
     addons: AddonDescriptor[]
     updateChainUrl: (index: number, url: string) => void
     removeFromChain: (index: number) => void
+    takenAddons?: ReadonlyMap<string, TakenRuleAddon>
+    getAddonNameForUrl?: (url: string) => string
 }
 
 export const SortableDialogTier = memo(function SortableDialogTier({
     id, index, url, chainLength, localAddons, chain, addons,
-    updateChainUrl, removeFromChain
+    updateChainUrl, removeFromChain, takenAddons, getAddonNameForUrl
 }: SortableDialogTierProps) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
     const style = {
@@ -106,10 +111,11 @@ export const SortableDialogTier = memo(function SortableDialogTier({
         opacity: isDragging ? 0.5 : 1,
         zIndex: isDragging ? 10 : 'auto' as const,
     }
+    const overlap = takenAddons?.get(normalizeAddonUrlForMatch(url))
     return (
-        <div ref={setNodeRef} style={style} data-theme-part="panel" className="bg-muted/30 border border-border/40 rounded-2xl px-4 py-3 flex flex-col gap-1.5">
+        <div ref={setNodeRef} style={style} data-theme-part="panel" className={`bg-muted/30 border rounded-2xl px-4 py-3 flex flex-col gap-1.5 ${overlap ? 'border-warning/30' : 'border-border/40'}`}>
             <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <div
                         {...attributes}
                         {...listeners}
@@ -119,6 +125,7 @@ export const SortableDialogTier = memo(function SortableDialogTier({
                         <GripVertical className="w-4 h-4" />
                     </div>
                     <span className="font-mono text-xs font-medium text-muted-foreground uppercase">TIER {index + 1}</span>
+                    {overlap && <span className="max-w-full truncate rounded-full border border-warning/20 bg-warning/10 px-2 py-0.5 text-xs text-warning">Also in rule {overlap.ruleName}</span>}
                 </div>
                 <button
                     data-theme-part="button"
@@ -145,7 +152,7 @@ export const SortableDialogTier = memo(function SortableDialogTier({
                                         textClassName="text-xs"
                                         imageClassName="p-0.5"
                                     />
-                                    <span className="truncate">{selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
+                                    <span className="truncate">{getAddonNameForUrl?.(selectedAddon.transportUrl) || selectedAddon.metadata?.customName || selectedAddon.manifest.name}</span>
                                 </div>
                             )
                         })()}
@@ -155,7 +162,7 @@ export const SortableDialogTier = memo(function SortableDialogTier({
                     {localAddons
                         .filter(addon => !chain.some((u, i) => i !== index && u === addon.transportUrl))
                         .map(addon => (
-                        <SelectItem key={addon.transportUrl} value={addon.transportUrl}>
+                        <SelectItem key={addon.transportUrl} value={addon.transportUrl} disabled={takenAddons?.has(normalizeAddonUrlForMatch(addon.transportUrl))} className={takenAddons?.has(normalizeAddonUrlForMatch(addon.transportUrl)) ? 'text-muted-foreground/50' : undefined}>
                             <div className="flex items-center gap-2">
                                 <AddonIcon
                                     name={addon.metadata?.customName || addon.manifest.name}
@@ -164,23 +171,26 @@ export const SortableDialogTier = memo(function SortableDialogTier({
                                     textClassName="text-xs"
                                     imageClassName="p-0.5"
                                 />
-                                <span>{addon.metadata?.customName || addon.manifest.name}</span>
+                                <span>{getAddonNameForUrl?.(addon.transportUrl) || addon.metadata?.customName || addon.manifest.name}</span>
+                                {takenAddons?.get(normalizeAddonUrlForMatch(addon.transportUrl)) && <span className="ml-auto pl-3 text-xs text-muted-foreground">In rule {takenAddons.get(normalizeAddonUrlForMatch(addon.transportUrl))!.ruleName}</span>}
                             </div>
                         </SelectItem>
                     ))}
                 </SelectContent>
             </Select>
+            {overlap && <p className="text-xs text-warning">Remove {getAddonNameForUrl?.(url) || 'this addon'} from this rule or from {overlap.ruleName}.</p>}
         </div>
     )
 })
 
 export const SortableRuleWrapper = memo(function SortableRuleWrapper({
-    id, children,
+    id, draggable = true, children,
 }: {
     id: string
+    draggable?: boolean
     children: ReactNode
 }) {
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled: !draggable })
     const style = {
         transform: CSS.Translate.toString(transform),
         transition,
@@ -189,14 +199,14 @@ export const SortableRuleWrapper = memo(function SortableRuleWrapper({
     }
     return (
         <div ref={setNodeRef} style={style} className="relative min-w-0">
-            <div
+            {draggable && <div
                 {...attributes}
                 {...listeners}
-                className="absolute left-0 top-6 cursor-grab active:cursor-grabbing text-foreground/30 hover:text-foreground/60 transition-colors z-20 px-0.5"
+                className="absolute left-0 top-7 cursor-grab active:cursor-grabbing text-foreground/30 hover:text-foreground/60 transition-colors z-20 px-0.5"
                 style={{ touchAction: 'none' }}
             >
                 <GripVertical className="w-4 h-4" />
-            </div>
+            </div>}
             {children}
         </div>
     )
