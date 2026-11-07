@@ -60,10 +60,34 @@ const flush = () => {
 
 export const traceEnabled = isOn
 
+const URL_IN_TEXT = /\b(?:https?|stremio):\/\/[^\s"'<>]+/gi
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url.replace(/^stremio:/i, 'https:')).host || '[url]'
+  } catch {
+    return '[url]'
+  }
+}
+
+// Addon URLs carry config and keys in their path and query: traces keep the host only.
+// Keys are redacted like values; anything deeper than the limit or not plain data
+// becomes a marker rather than passing through unredacted.
+export function redactTraceValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return value.replace(URL_IN_TEXT, hostOf)
+  if (value === null || typeof value !== 'object') return typeof value === 'function' || typeof value === 'symbol' ? '[unsupported]' : value
+  if (depth > 8) return '[truncated]'
+  if (value instanceof Date) return value.toISOString()
+  if (value instanceof Error) return { name: value.name, message: redactTraceValue(value.message) }
+  if (Array.isArray(value)) return value.map(v => redactTraceValue(v, depth + 1))
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return '[unsupported]'
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactTraceValue(k) as string, redactTraceValue(v, depth + 1)]))
+}
+
 export function trace(scope: string, event: string, data: TraceData = {}) {
   // In dev, always ship to the server file so no flag/console step is needed; in a prod build
   // only ship when the user has explicitly opted in via localStorage.
-  const entry: TraceEntry = { t: new Date().toISOString(), scope, event, ...data }
+  const entry: TraceEntry = { t: new Date().toISOString(), scope, event, ...(redactTraceValue(data) as TraceData) }
   ring[(head + size) % RING_MAX] = entry
   if (size < RING_MAX) size++
   else head = (head + 1) % RING_MAX
@@ -79,7 +103,7 @@ export function trace(scope: string, event: string, data: TraceData = {}) {
 export const briefAddons = (addons: Array<{ manifest?: { id?: string }; transportUrl?: string }> = []) =>
   (Array.isArray(addons) ? addons : []).map(a => ({
     id: a?.manifest?.id || '?',
-    url: (a?.transportUrl || '').slice(-48),
+    host: a?.transportUrl ? hostOf(a.transportUrl) : '',
   }))
 
 const formatEntry = (e: TraceEntry): string => {
@@ -94,7 +118,7 @@ const formatEntry = (e: TraceEntry): string => {
   return `${time} ${scope}/${event} ${body}`
 }
 
-const dump = (): string => {
+export const dumpTrace = (): string => {
   const entries: string[] = []
   for (let i = 0; i < size; i++) {
     entries.push(formatEntry(ring[(head + i) % RING_MAX]))
@@ -107,7 +131,7 @@ if (typeof window !== 'undefined') {
     on: () => { try { localStorage.setItem('aiomanTrace', '1') } catch {} },
     off: () => { try { localStorage.removeItem('aiomanTrace') } catch {} },
     status: isOn,
-    dump,
+    dump: dumpTrace,
     clear: () => { head = 0; size = 0 },
     count: () => size,
   }

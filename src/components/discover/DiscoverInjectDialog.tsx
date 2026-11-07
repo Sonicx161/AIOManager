@@ -15,6 +15,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { AddonLogo } from '@/components/discover/AddonLogo'
 import { useToast } from '@/hooks/use-toast'
 import { getStoredAIOStreamsPassword } from '@/lib/aiostreams-utils'
+import { useUIStore } from '@/store/uiStore'
+import { maskNameLevel } from '@/lib/utils'
 import type { AIOStreamsInstance, AIOStreamsInstanceAccount } from '@/hooks/useAIOStreamsInstances'
 import { Lock, Loader2, ServerCog } from 'lucide-react'
 
@@ -56,6 +58,9 @@ export function DiscoverInjectDialog({
   onConfirm,
 }: DiscoverInjectDialogProps) {
   const { toast } = useToast()
+  const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+  const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
+  const namePrivacy = isPrivacyModeEnabled ? privacyLevelNames : 0
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
 
@@ -185,7 +190,7 @@ export function DiscoverInjectDialog({
                     const checked = selected.has(key)
                     const host = hostOf(inst.baseUrl)
                     const isDefault = !inst.addonName || inst.addonName === 'AIOStreams'
-                    const accountNames = inst.accounts.map(a => a.accountName).join(', ')
+                    const accountNames = inst.accounts.map(a => maskNameLevel(a.accountName, namePrivacy)).join(', ')
                     const primaryLabel = isDefault ? accountNames : inst.addonName
                     const secondaryLabel = isDefault ? host : `${accountNames} · ${host}`
                     return (

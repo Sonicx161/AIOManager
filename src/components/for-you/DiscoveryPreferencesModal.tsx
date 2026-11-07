@@ -8,6 +8,7 @@ import {
     setAccountRailSize,
 } from '@/lib/discovery-prefs-store'
 import { useAccountStore } from '@/store/accountStore'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 import { useDiscoveryStore, useDiscoveryPrefs, useHouseholdSettings, HOUSEHOLD_CONTEXT } from '@/store/discoveryStore'
 
 const SHELF_SIZE_OPTIONS = [10, 20, 30, 40, 50, 75, 100]
@@ -54,10 +55,11 @@ export function DiscoveryPreferencesModal({ open, onOpenChange, accountId }: Dis
     const hasOverride = isAccountMode && accountSize !== globalSize
     const activeSize = isAccountMode ? accountSize : globalSize
     const accounts = useAccountStore(s => s.accounts)
+    const maskedLabel = useMaskedAccountLabel()
     const accountName = (() => {
         if (!accountId) return ''
         const acc = accounts.find(a => a.id === accountId)
-        return acc?.name || acc?.email?.split('@')[0] || 'Account'
+        return acc ? maskedLabel(acc) : 'Account'
     })()
 
     const ctx = accountId || HOUSEHOLD_CONTEXT
@@ -112,7 +114,8 @@ export function DiscoveryPreferencesModal({ open, onOpenChange, accountId }: Dis
 
     const handleResetAll = () => {
         discoveryPrefs.resetToDefaults()
-        setRailSize(DEFAULT_RAIL_SIZE)
+        if (accountId) setAccountRailSize(accountId, null)
+        else setRailSize(DEFAULT_RAIL_SIZE)
     }
 
     const applySize = (size: number) => {
@@ -413,7 +416,7 @@ export function DiscoveryPreferencesModal({ open, onOpenChange, accountId }: Dis
                                                     enabled ? 'border-border/40 bg-muted/20' : 'border-border/25 opacity-50',
                                                 )}
                                             >
-                                                <span className="font-medium text-foreground">{acc.name || acc.email?.split('@')[0] || acc.id}</span>
+                                                <span className="font-medium text-foreground">{maskedLabel(acc)}</span>
                                                 <span className={cn('h-2 w-2 rounded-full', enabled ? 'bg-success' : 'bg-muted-foreground/30')} />
                                             </button>
                                         )
@@ -493,7 +496,7 @@ export function DiscoveryPreferencesModal({ open, onOpenChange, accountId }: Dis
                         onClick={handleResetAll}
                     >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        Reset
+                        Reset to defaults
                     </Button>
                     <Button
                         size="sm"

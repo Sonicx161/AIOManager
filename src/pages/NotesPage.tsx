@@ -642,10 +642,17 @@ function NoteEditor({ note, onClose, onNavigateToNote, allNotes }: NoteEditorPro
     const [wikilinkIndex, setWikilinkIndex] = useState(0)
     const [wikilinkPos, setWikilinkPos] = useState({ top: 0, left: 0 })
     
+    const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle')
+    const saveFailed = useNotesStore(s => s.saveFailed)
+
+    useEffect(() => { setSaveStatus('idle') }, [note.id])
+
     const autosave = useCallback((newTitle: string, newContent: string) => {
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+        setSaveStatus('saving')
         saveTimerRef.current = setTimeout(() => {
-            updateNote(note.id, { title: newTitle.trim() || 'Untitled', content: newContent })
+            Promise.resolve(updateNote(note.id, { title: newTitle.trim() || 'Untitled', content: newContent }))
+                .then(() => setSaveStatus('saved'), () => setSaveStatus('idle'))
         }, 600)
     }, [note.id, updateNote])
 
@@ -855,7 +862,8 @@ function NoteEditor({ note, onClose, onNavigateToNote, allNotes }: NoteEditorPro
 
     const handleSave = useCallback(() => {
         if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-        updateNote(note.id, { title: title.trim() || 'Untitled', content })
+        Promise.resolve(updateNote(note.id, { title: title.trim() || 'Untitled', content }))
+            .then(() => setSaveStatus('saved'), () => setSaveStatus('idle'))
         setViewMode('preview')
     }, [note.id, title, content, updateNote])
 
@@ -1214,7 +1222,10 @@ function NoteEditor({ note, onClose, onNavigateToNote, allNotes }: NoteEditorPro
                 <div className="hidden flex-1 items-center gap-3 text-[11px] text-muted-foreground font-medium min-[560px]:flex">
                     <span>Updated {formatDistanceToNow(new Date(note.updatedAt), { addSuffix: true })}</span>
                     <span>·</span>
-                    <span>{words} words</span>
+                    <span>{words} {words === 1 ? 'word' : 'words'}</span>
+                    <span aria-live="polite" className="min-w-[3.5rem] text-muted-foreground/60">
+                        {saveFailed ? '' : saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? 'Saved' : ''}
+                    </span>
                     {viewMode === 'edit' && (
                         <>
                             <span>·</span>
@@ -1599,6 +1610,7 @@ export function NotesPage() {
     const [selectionMode, setSelectionMode] = useState(false)
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [eraseAllOpen, setEraseAllOpen] = useState(false)
+    const [emptyTrashOpen, setEmptyTrashOpen] = useState(false)
     const [isErasing, setIsErasing] = useState(false)
     const searchRef = useRef<HTMLInputElement>(null)
     const importInputRef = useRef<HTMLInputElement>(null)
@@ -1727,7 +1739,7 @@ export function NotesPage() {
         try {
             allNotesWithContent = await useNotesStore.getState().getAllNotesWithContent()
         } catch {
-            toast({ variant: 'destructive', title: 'Notes export paused', description: 'Some notes could not be read. No partial backup was created. Unlock your vault or restore its key, then retry.' })
+            toast({ variant: 'destructive', title: 'Notes export paused', description: 'Some notes could not be read. No partial backup was created. Unlock your vault or restore its key, then retry.', href: '/vault' })
             return
         }
         const files: Record<string, Uint8Array> = {}
@@ -1875,7 +1887,7 @@ export function NotesPage() {
                     ) : (
                         trash.length > 0 && (
                             <Tooltip content="Empty trash" side="right">
-                                <Button variant="ghost" onClick={emptyTrash}
+                                <Button variant="ghost" onClick={() => setEmptyTrashOpen(true)}
                                     aria-label="Empty trash"
                                     className="h-7 px-2 shrink-0 text-xs font-semibold text-destructive hover:bg-destructive/10">
                                     <Trash className="h-3 w-3" /> Empty
@@ -2072,6 +2084,15 @@ export function NotesPage() {
                                 </Button>
                             </Tooltip>
                         </div>
+                        <ConfirmationDialog
+                            open={emptyTrashOpen}
+                            onOpenChange={setEmptyTrashOpen}
+                            title="Empty Trash?"
+                            description={`${trash.length} deleted note${trash.length === 1 ? '' : 's'} will be permanently erased. This cannot be undone.`}
+                            confirmText="Empty Trash"
+                            isDestructive={true}
+                            onConfirm={() => { setEmptyTrashOpen(false); emptyTrash() }}
+                        />
                         <ConfirmationDialog
                             open={eraseAllOpen}
                             onOpenChange={setEraseAllOpen}

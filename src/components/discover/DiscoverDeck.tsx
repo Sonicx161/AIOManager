@@ -7,8 +7,10 @@ import { getAddonResources, RESOURCE_LABELS, type DiscoverAddon } from '@/api/di
 import { getRarity, getRarityConfig, countByRarity, type RarityTier } from './rarity'
 import { useConfetti } from '@/components/ui/confetti'
 import { AddonLogo } from './AddonLogo'
+import { isKeyboardSyntheticTap } from './deck-input'
 
 const SWIPE_THRESHOLD = 110
+export const DECK_CARD_CLASS = 'relative aspect-[7/10] h-[clamp(15rem,calc(100dvh_-_26rem_-_env(safe-area-inset-bottom,0px)),32rem)] sm:h-[clamp(18rem,calc(100dvh_-_29rem),44rem)] max-w-full'
 
 interface DiscoverDeckProps {
   pool: DiscoverAddon[]
@@ -229,6 +231,9 @@ export function DiscoverDeck({ pool, loading, onReshuffle, isSaved, savingKey, o
       const key = e.key.toLowerCase()
       if (e.key === 'ArrowRight') { e.preventDefault(); next() }
       else if (e.key === ' ' || key === 'f') { e.preventDefault(); if (!revealed) flip() }
+      else if (e.key === 'Enter' && !revealed) {
+        if (t?.tagName !== 'BUTTON' && t?.tagName !== 'A') { e.preventDefault(); flip() }
+      }
       else if (e.key === 'ArrowUp' || e.key === 'Enter' || key === 'i') { if (revealed) { e.preventDefault(); onOpenDetail(addon) } }
     }
     window.addEventListener('keydown', onKey)
@@ -273,9 +278,9 @@ export function DiscoverDeck({ pool, loading, onReshuffle, isSaved, savingKey, o
 
   return (
     <div className="flex flex-col items-center gap-6 sm:gap-7">
-      {/* Portrait card whose height tracks the viewport (grows on desktop, bounded on mobile);
-          width follows the 7:10 aspect so the proportions stay uniform at every size. */}
-      <div className="relative aspect-[7/10] h-[clamp(22rem,55vh,32rem)] sm:h-[clamp(28rem,70vh,44rem)] max-w-full">
+      {/* Card height is the viewport minus the chrome above and the toolbar below (plus bottom nav and safe area on phones),
+          so the actions stay visible; width follows the 7:10 aspect. */}
+      <div className={DECK_CARD_CLASS}>
         {afterNext && <DeckBackdrop offset={2} />}
         {upcoming && <DeckBackdrop offset={1} />}
         <motion.div
@@ -288,7 +293,7 @@ export function DiscoverDeck({ pool, loading, onReshuffle, isSaved, savingKey, o
           onDragEnd={handleDragEnd}
           onPointerDownCapture={() => { draggedRef.current = false }}
           onDragStart={() => { draggedRef.current = true }}
-          onTap={() => { if (draggedRef.current) return; if (!revealed) flip(); else onOpenDetail(current) }}
+          onTap={(e) => { if (draggedRef.current || isKeyboardSyntheticTap(e as PointerEvent)) return; if (!revealed) flip(); else onOpenDetail(current) }}
           initial={{ scale: 0.95, y: 12 }}
           animate={{ scale: 1, y: 0 }}
           transition={prefersReducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 400, damping: 28 }}

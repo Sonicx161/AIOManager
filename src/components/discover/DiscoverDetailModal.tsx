@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip } from '@/components/ui/tooltip'
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, FileText, Link2, Plus, Send, Settings2, Star, Layers } from 'lucide-react'
@@ -29,6 +29,9 @@ interface DiscoverDetailModalProps {
   addon: DiscoverAddon | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  // Changes when the detail is opened fresh. A reopen with the same key (for example after a
+  // child dialog closes) keeps the internal nav stack instead of resetting it.
+  sessionKey?: number
   saved: boolean
   isSaved?: (addon: DiscoverAddon) => boolean
   onSave: (addon: DiscoverAddon) => void
@@ -39,19 +42,21 @@ interface DiscoverDetailModalProps {
   onOpenAddon?: (addon: DiscoverAddon) => void
 }
 
-export function DiscoverDetailModal({ addon, open, onOpenChange, saved, isSaved, onSave, onDeploy, onConfigure, onInjectAIOStreams, hasAIOStreams }: DiscoverDetailModalProps) {
+export function DiscoverDetailModal({ addon, open, onOpenChange, sessionKey = 0, saved, isSaved, onSave, onDeploy, onConfigure, onInjectAIOStreams, hasAIOStreams }: DiscoverDetailModalProps) {
   const { toast } = useToast()
   const [detail, setDetail] = useState<DiscoverAddonDetail | null>(null)
   const [activeAddon, setActiveAddon] = useState<DiscoverAddon | null>(addon)
   const [navStack, setNavStack] = useState<Array<{ addon: DiscoverAddon }>>([])
   const scrollBodyRef = useRef<HTMLDivElement>(null)
+  const lastSessionRef = useRef<number | null>(null)
 
   useEffect(() => {
-    if (open && addon) {
+    if (open && addon && lastSessionRef.current !== sessionKey) {
+      lastSessionRef.current = sessionKey
       setActiveAddon(addon)
       setNavStack([])
     }
-  }, [open, addon])
+  }, [open, addon, sessionKey])
 
   const handleInternalNav = useCallback((next: DiscoverAddon) => {
     setActiveAddon(prev => {
@@ -263,9 +268,9 @@ export function DiscoverDetailModal({ addon, open, onOpenChange, saved, isSaved,
                 ))}
               </div>
 
-              <h2 className="truncate text-xl sm:text-2xl font-extrabold tracking-tight text-white sm:text-4xl drop-shadow-md">
+              <DialogTitle className="truncate text-xl sm:text-2xl font-extrabold tracking-tight text-white sm:text-4xl drop-shadow-md">
                 {name}
-              </h2>
+              </DialogTitle>
               {updated && <p className="text-xs text-white/70 font-medium">{updated}</p>}
             </div>
           </div>

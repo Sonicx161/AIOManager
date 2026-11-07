@@ -171,6 +171,33 @@
   box-shadow: inset 0 0.5px 0 hsl(0 0% 100% / 0.06), 0 1px 0 hsl(0 0% 0% / 0.5);
 }
 
+/* Hairline system: one chrome line colour for dividers and sheet edges, plus a
+   1px inset ring on artwork so very dark posters still read as tiles.
+   Theme-aware: white 10% on dark palettes, black 12% on light. */
+:root {
+  --chrome-line: hsl(0 0% 100% / 0.1);
+  --media-ring: hsl(0 0% 100% / 0.16);
+}
+
+html.theme-light {
+  --chrome-line: hsl(0 0% 0% / 0.12);
+  --media-ring: hsl(0 0% 0% / 0.16);
+}
+
+@layer utilities {
+  .chrome-line {
+    border-color: var(--chrome-line);
+  }
+
+  .chrome-line-b {
+    border-bottom-color: var(--chrome-line);
+  }
+
+  .media-ring {
+    box-shadow: inset 0 0 0 1px var(--media-ring);
+  }
+}
+
 @layer utilities {
   .mesh-gradient {
     background-color: hsl(var(--background));
@@ -344,3 +371,14 @@
   scrollbar-width: none;
 }
 
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-shimmer-bg,
+  .animate-pulse-dot,
+  .animate-pulse,
+  .animate-ping,
+  .animate-bounce,
+  .animate-spin {
+    animation: none !important;
+  }
+}

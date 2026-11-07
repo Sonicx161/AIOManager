@@ -9,6 +9,7 @@ export function NotFoundPage() {
   useDocumentTitle('404')
   const { logoUrl } = useTheme()
   const location = useLocation()
+  const requestedPath = (location.state as { from?: string } | null)?.from ?? location.pathname
 
   return (
     <div className="min-h-[70vh] flex items-center justify-center p-4">
@@ -28,7 +29,7 @@ export function NotFoundPage() {
             The link may have moved, expired, or never existed.
           </p>
           <p data-theme-part="field" className="mx-auto max-w-sm truncate rounded-lg border border-border/40 bg-muted/20 px-3 py-2 font-mono text-xs text-muted-foreground">
-            {location.pathname}
+            {requestedPath}
           </p>
         </div>
 

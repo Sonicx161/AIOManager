@@ -77,7 +77,7 @@ export function DiscoverSaveDialog({ addon, open, onOpenChange, saving, onSave }
         <div className="space-y-5 py-4">
           <div className="space-y-2">
             <Label htmlFor="discover-save-name">Name</Label>
-            <Input id="discover-save-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Addon name" />
+            <Input id="discover-save-name" data-autofocus="true" value={name} onChange={(e) => setName(e.target.value)} placeholder="Addon name" />
           </div>
 
           <div className="space-y-3">

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -26,6 +26,9 @@ export function DiscoverHero({ addons, isSaved, savingKey, onSave, onConfigure, 
   const [paused, setPaused] = useState(false)
   const [failedBackgrounds, setFailedBackgrounds] = useState<Set<string>>(new Set())
   const [failedLogos, setFailedLogos] = useState<Set<string>>(new Set())
+  const rootRef = useRef<HTMLDivElement>(null)
+  const [onScreen, setOnScreen] = useState(true)
+  const [tabHidden, setTabHidden] = useState(() => document.hidden)
 
   const count = addons.length
   const active = count > 0 ? index % count : 0
@@ -33,10 +36,25 @@ export function DiscoverHero({ addons, isSaved, savingKey, onSave, onConfigure, 
   useEffect(() => { setIndex(0) }, [count])
 
   useEffect(() => {
-    if (paused || count <= 1) return
+    const onChange = () => setTabHidden(document.hidden)
+    document.addEventListener('visibilitychange', onChange)
+    return () => document.removeEventListener('visibilitychange', onChange)
+  }, [])
+
+  const mounted = count > 0
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [mounted])
+
+  useEffect(() => {
+    if (paused || !onScreen || tabHidden || count <= 1) return
     const id = setInterval(() => setIndex((i) => (i + 1) % count), ROTATE_MS)
     return () => clearInterval(id)
-  }, [paused, count])
+  }, [paused, onScreen, tabHidden, count])
 
   if (count === 0) return null
 
@@ -58,6 +76,7 @@ export function DiscoverHero({ addons, isSaved, savingKey, onSave, onConfigure, 
 
   return (
     <div
+      ref={rootRef}
       data-theme-part="addon-card"
       className="group relative w-full overflow-hidden rounded-3xl bg-background text-foreground shadow-2xl ring-1 ring-border/30 cursor-pointer"
       style={{ height: 'clamp(280px, 36vh, 380px)' }}

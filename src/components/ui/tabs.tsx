@@ -25,7 +25,7 @@ const TabsTrigger = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger> & { animated?: boolean }
 >(({ className, children, animated: _animated = true, ...props }, ref) => {
-  const activeClass = "data-[state=active]:border data-[state=active]:border-border/40 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+  const activeClass = "data-[state=active]:border data-[state=active]:border-foreground/10 data-[state=active]:bg-foreground/[0.08] data-[state=active]:text-foreground data-[state=active]:shadow-none"
   return (
     <TabsPrimitive.Trigger
       data-theme-part="tab"

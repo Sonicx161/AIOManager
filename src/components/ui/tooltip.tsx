@@ -53,6 +53,19 @@ function Tooltip({
     const [open, setOpen] = React.useState(false)
     const triggerRef = React.useRef<React.ElementRef<typeof TooltipPrimitive.Trigger>>(null)
     const contentRef = React.useRef<React.ElementRef<typeof TooltipPrimitive.Content>>(null)
+    // The portal subtree (positioning, arrow, animation) only mounts around opens:
+    // lists render one tooltip trigger per card, so the heavy part stays out of the
+    // resting tree while Root + Trigger stay put from the first render. The unmount
+    // lingers so the close animation plays out.
+    const [contentMounted, setContentMounted] = React.useState(false)
+    React.useEffect(() => {
+        if (open) {
+            setContentMounted(true)
+            return
+        }
+        const timer = setTimeout(() => setContentMounted(false), 250)
+        return () => clearTimeout(timer)
+    }, [open])
 
     React.useEffect(() => {
         if (!open) return
@@ -65,7 +78,8 @@ function Tooltip({
             closeTooltip()
         }
         const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') closeTooltip()
+            // An open tooltip consumes its Escape so a dialog sheet behind it does not also step back.
+            if (event.key === 'Escape') { event.preventDefault(); closeTooltip() }
         }
         const handleVisibilityChange = () => {
             if (document.visibilityState !== 'visible') closeTooltip()
@@ -75,7 +89,7 @@ function Tooltip({
         window.addEventListener('scroll', closeTooltip, true)
         window.addEventListener('blur', closeTooltip)
         document.addEventListener('focusin', handleFocusIn)
-        document.addEventListener('keydown', handleKeyDown)
+        document.addEventListener('keydown', handleKeyDown, true)
         document.addEventListener('visibilitychange', handleVisibilityChange)
 
         return () => {
@@ -83,7 +97,7 @@ function Tooltip({
             window.removeEventListener('scroll', closeTooltip, true)
             window.removeEventListener('blur', closeTooltip)
             document.removeEventListener('focusin', handleFocusIn)
-            document.removeEventListener('keydown', handleKeyDown)
+            document.removeEventListener('keydown', handleKeyDown, true)
             document.removeEventListener('visibilitychange', handleVisibilityChange)
         }
     }, [open])
@@ -95,11 +109,13 @@ function Tooltip({
             <TooltipTrigger ref={triggerRef} asChild>
                 {React.isValidElement(children) ? children : <span>{children}</span>}
             </TooltipTrigger>
-            <TooltipPortal>
-                <TooltipContent ref={contentRef} side={side} align={align} className={className}>
-                    {content}
-                </TooltipContent>
-            </TooltipPortal>
+            {contentMounted && (
+                <TooltipPortal>
+                    <TooltipContent ref={contentRef} side={side} align={align} className={className}>
+                        {content}
+                    </TooltipContent>
+                </TooltipPortal>
+            )}
         </TooltipRoot>
     )
 }

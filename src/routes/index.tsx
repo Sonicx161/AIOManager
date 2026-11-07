@@ -6,6 +6,8 @@ import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 import { AppLoader } from '@/components/common/LoadingScreen'
 import { lazyChunk } from '@/lib/lazy-chunk'
 
+const DashboardPage = lazyChunk(() => import('@/pages/admin/DashboardPage').then(m => ({ default: m.DashboardPage })))
+
 const AccountsPage = lazyChunk(() => import('@/pages/AccountsPage').then(m => ({ default: m.AccountsPage })))
 const AccountDetailPage = lazyChunk(() => import('@/pages/AccountDetailPage').then(m => ({ default: m.AccountDetailPage })))
 const SavedAddonsPage = lazyChunk(() => import('@/pages/SavedAddonsPage').then(m => ({ default: m.SavedAddonsPage })))
@@ -25,12 +27,42 @@ const VaultPage = lazyChunk(() => import('@/pages/VaultPage').then(m => ({ defau
 const ThemeEditorPage = lazyChunk(() => import('@/pages/ThemeEditorPage').then(m => ({ default: m.ThemeEditorPage })))
 const fallback = <AppLoader variant="route" />
 
+// Boot-time / intent-time route chunk matching. Resolves the lazyChunk factory for
+// a pathname so the chunk download overlaps boot init and navigation intent instead
+// of waiting for the route to render. Palette targets carry hashes and queries
+// (`/saved-addons#discover`, `/notes?note=...`), so strip them before matching.
+// Returns the loader promise (which never rejects) so callers can await a chunk.
+export function preloadRouteChunk(pathname: string): Promise<unknown> | undefined {
+    const path = pathname.split(/[?#]/)[0]
+    if (path === '/' || path === '/accounts') return AccountsPage.preload()
+    if (path === '/saved-addons' || path === '/discover' || path === '/addons') return SavedAddonsPage.preload()
+    if (path.startsWith('/account/')) {
+        if (path.includes('/aiostreams/')) return AIOStreamsPage.preload()
+        if (path.includes('/aiometadata/')) return AIOMetadataPage.preload()
+        return AccountDetailPage.preload()
+    }
+    if (path === '/activity') return ActivityPage.preload()
+    if (path === '/metrics') return MetricsPage.preload()
+    if (path.startsWith('/replay/share/')) return ReplaySharePage.preload()
+    if (path === '/replay') return ReplayPage.preload()
+    if (path === '/settings') return SettingsPage.preload()
+    if (path === '/settings/theme/editor') return ThemeEditorPage.preload()
+    if (path === '/notes') return NotesPage.preload()
+    if (path === '/vault') return VaultPage.preload()
+    if (path.startsWith('/kronorium') || path === '/faq') {
+        void KronoriumPage.preload()
+        return KronoriumDocsLayout.preload()
+    }
+}
+
 export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<ErrorBoundary><Suspense fallback={fallback}><AccountsPage /></Suspense></ErrorBoundary>} />
+      <Route path="/accounts" element={<Navigate to="/" replace />} />
       <Route path="/saved-addons" element={<ErrorBoundary><Suspense fallback={fallback}><SavedAddonsPage /></Suspense></ErrorBoundary>} />
       <Route path="/discover" element={<Navigate to="/saved-addons#discover" replace />} />
+      <Route path="/addons" element={<Navigate to="/saved-addons" replace />} />
 
       <Route path="/account/:accountId" element={<ErrorBoundary><Suspense fallback={fallback}><AccountDetailPage /></Suspense></ErrorBoundary>} />
       <Route path="/account/:accountId/aiostreams/:uuid" element={<ErrorBoundary><Suspense fallback={fallback}><AIOStreamsPage /></Suspense></ErrorBoundary>} />
@@ -48,12 +80,17 @@ export function AppRoutes() {
       <Route path="/vault" element={<ErrorBoundary><Suspense fallback={fallback}><VaultPage /></Suspense></ErrorBoundary>} />
       <Route path="/vault/:groupSlug" element={<Navigate to="/vault" replace />} />
 
+      {/* Dashboard (instance admin UI) renders only when the status endpoint reports enabled. */}
+      <Route path="/dashboard" element={<ErrorBoundary><Suspense fallback={fallback}><DashboardPage /></Suspense></ErrorBoundary>} />
+      <Route path="/dashboard/:section" element={<ErrorBoundary><Suspense fallback={fallback}><DashboardPage /></Suspense></ErrorBoundary>} />
+      <Route path="/dashboard/users/:userId" element={<ErrorBoundary><Suspense fallback={fallback}><DashboardPage /></Suspense></ErrorBoundary>} />
+
       <Route path="/kronorium" element={<ErrorBoundary><Suspense fallback={fallback}><KronoriumDocsLayout><KronoriumPage /></KronoriumDocsLayout></Suspense></ErrorBoundary>} />
       <Route path="/kronorium/*" element={<ErrorBoundary><Suspense fallback={fallback}><KronoriumDocsLayout><KronoriumPage /></KronoriumDocsLayout></Suspense></ErrorBoundary>} />
       <Route path="/faq" element={<Navigate to="/kronorium" replace />} />
 
       <Route path="/404" element={<NotFoundPage />} />
-      <Route path="*" element={<Navigate to="/404" replace />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   )
 }

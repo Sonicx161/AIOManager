@@ -1,8 +1,10 @@
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { vaultKeyLabel, vaultKeySearchHost } from '@/lib/vault-key-label'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useAccountStore } from '@/store/accountStore'
 import type { BulkActionDefinition } from '@/components/accounts/bulk-actions/registry'
 import { useNavigate } from 'react-router-dom'
+import { preloadRouteChunk } from '@/routes'
 import {
     LayoutDashboard,
     Package,
@@ -23,11 +25,16 @@ import {
     Compass,
     Link2,
     Palette,
-    Database,
     Wrench,
     Plug,
     Radar,
     Film,
+    RefreshCw,
+    Rocket,
+    UserRound,
+    BellOff,
+    Zap,
+    AlertTriangle,
 } from 'lucide-react'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useFailoverStore } from '@/store/failoverStore'
@@ -35,37 +42,30 @@ import { useUIStore } from '@/store/uiStore'
 import { useNotesStore } from '@/store/notesStore'
 import { useVaultStore } from '@/store/vaultStore'
 import { useAddonStore } from '@/store/addonStore'
-import { maskEmailLevel, maskNameLevel } from '@/lib/utils'
+import { useSyncStore } from '@/store/syncStore'
+import { useProviderStore } from '@/store/providerStore'
+import { useInboxStore } from '@/store/notificationInbox'
+import { toast } from '@/hooks/use-toast'
+import { PaletteDeployDialog } from '@/components/PaletteDeployDialog'
+import { SETTINGS_PAGE_IDS, type SettingsPageId } from '@/components/settings/settings-model'
+import { SETTING_PAGE_LABELS } from '@/components/settings/SettingsNavigation'
+import { PALETTE_CATEGORY_ORDER, buildPaletteActions, resolvePaletteShortcut, type PaletteActionId } from '@/lib/palette-actions'
+import { getAllPendingPush } from '@/lib/sync/pending-push'
+import { syncPendingAndCloud } from '@/lib/sync-now'
+import { maskAccountLabel, maskEmailLevel } from '@/lib/utils'
 import { isAIOStreamsAddon, parseAIOStreamsUrl } from '@/lib/aiostreams-utils'
 import { isAIOMetadataAddon, parseAIOMetadataUrl } from '@/lib/aiometadata-utils'
-import { filterCommandsByQuery, groupCommandsByCategory } from '@/lib/command-search'
+import { dedupeByInstallUrl, filterCommandsByQuery, groupCommandsByCategory } from '@/lib/command-search'
 import type { Account } from '@/types/account'
 
-type CommandCategory =
-    | 'Navigation'
-    | 'Settings'
-    | 'Accounts'
-    | 'Addons'
-    | 'Notes'
-    | 'Vault'
-    | 'Saved Addons'
-    | 'Quick Actions'
-    | 'Bulk Operations'
+type CommandCategory = (typeof PALETTE_CATEGORY_ORDER)[number]
 
 // Authoritative visual order of the result groups. The keyboard selection
 // index is derived from the flattened grouped order, never from the raw item
 // list, so the highlighted row always matches what the user sees.
-const CATEGORY_ORDER: CommandCategory[] = [
-    'Navigation',
-    'Settings',
-    'Accounts',
-    'Addons',
-    'Notes',
-    'Vault',
-    'Saved Addons',
-    'Quick Actions',
-    'Bulk Operations',
-]
+const CATEGORY_ORDER = PALETTE_CATEGORY_ORDER
+
+let syncNowInFlight = false
 
 const NO_ACCOUNTS: Account[] = []
 const NO_RULES: ReturnType<typeof useFailoverStore.getState>['rules'] = []
@@ -85,6 +85,11 @@ export interface CommandItem {
     avatarUrl?: string
     searchText?: string
     aliases?: string[]
+    hint?: string[]
+    disabled?: boolean
+    subject?: { type: 'account' | 'saved-addon'; id: string }
+    /** Destination path for navigating items; drives intent-time route chunk preload. */
+    target?: string
 }
 
 const VIRTUAL_RESULTS_THRESHOLD = 100
@@ -92,53 +97,24 @@ export interface CommandResultGroup { category: string; items: CommandItem[] }
 
 type VirtualResultsComponent = typeof import('./CommandPaletteResults').VirtualCommandResults
 
-// Settings tab destinations. The tab ids and hash routing mirror how
-// SettingsPage reads location.hash ('general' | 'appearance' | 'data' |
-// 'advanced') and the labels mirror SettingsNavigation's SETTING_TAB_LABELS.
-const SETTINGS_TAB_ITEMS: Array<{
-    id: string
-    hash: string
-    label: string
-    sublabel: string
-    icon: React.ReactNode
-    aliases: string[]
-}> = [
-    {
-        id: 'settings-general',
-        hash: 'general',
-        label: 'Settings - General',
-        sublabel: 'Sync identity, privacy mode, install, about',
-        icon: <Settings className="h-4 w-4" />,
-        aliases: ['general', 'privacy', 'identity', 'preferences'],
-    },
-    {
-        id: 'settings-appearance',
-        hash: 'appearance',
-        label: 'Settings - Appearance',
-        sublabel: 'Light, dark, and OLED themes with accent colors',
-        icon: <Palette className="h-4 w-4" />,
-        aliases: ['appearance', 'theme', 'themes', 'dark mode', 'light mode', 'oled', 'accent'],
-    },
-    {
-        id: 'settings-data',
-        hash: 'data',
-        label: 'Settings - Data & Sync',
-        sublabel: 'Backup and restore, metadata integrations, API keys, active sync connections',
-        icon: <Database className="h-4 w-4" />,
-        aliases: ['data', 'backup', 'restore', 'export', 'import', 'api keys', 'metadata integrations'],
-    },
-    {
-        id: 'settings-advanced',
-        hash: 'advanced',
-        label: 'Settings - Advanced',
-        sublabel: 'Monitoring and alerts, repair and recovery, sync diagnostics, danger zone',
-        icon: <Wrench className="h-4 w-4" />,
-        aliases: ['advanced', 'webhook', 'webhooks', 'repair', 'diagnostics', 'alerts', 'danger zone', 'remembered devices', 'sessions'],
-    },
-]
+// One destination per Settings page. Labels come from SETTING_PAGE_LABELS and the hash is the
+// page id that SettingsPage resolves; aliases keep the old tab and page names searchable.
+const SETTINGS_PAGE_DETAILS: Record<SettingsPageId, { sublabel: string; icon: React.ReactNode; aliases: string[] }> = {
+    'account-sync': { sublabel: 'Display name, avatar, push to cloud, pull from cloud and backups', icon: <UserRound className="h-4 w-4" />, aliases: ['general', 'identity', 'data', 'account', 'cloud', 'push', 'pull', 'profile', 'backup', 'restore', 'export', 'import', 'sync connections'] },
+    'appearance-privacy': { sublabel: 'Themes, privacy mode, install the app and about', icon: <Palette className="h-4 w-4" />, aliases: ['appearance', 'theme', 'themes', 'dark mode', 'light mode', 'oled', 'accent', 'privacy', 'privacy mode', 'mask', 'hide', 'install', 'pwa', 'app', 'desktop', 'about', 'version', 'build'] },
+    keys: { sublabel: 'Metadata provider keys and account API keys', icon: <KeyRound className="h-4 w-4" />, aliases: ['keys', 'api keys', 'credentials', 'metadata integrations', 'tmdb'] },
+    'updates-activity': { sublabel: 'Auto-update, live activity refresh, alerts and history cache', icon: <Zap className="h-4 w-4" />, aliases: ['advanced', 'notifications', 'alerts', 'monitoring', 'webhook', 'webhooks', 'auto-update', 'live activity', 'history cache'] },
+    'devices-maintenance': { sublabel: 'Remembered devices, sync diagnostics and repair', icon: <Wrench className="h-4 w-4" />, aliases: ['devices', 'remembered devices', 'sessions', 'diagnostics', 'sync diagnostics', 'debug', 'repair', 'recovery', 'fix'] },
+    'danger-zone': { sublabel: 'Clear data and delete accounts', icon: <AlertTriangle className="h-4 w-4" />, aliases: ['danger zone', 'reset', 'wipe', 'delete'] },
+}
 
-export function CommandPalette() {
-    const [open, setOpen] = useState(false)
+function installHost(url: string | undefined): string {
+    if (!url) return ''
+    try { return new URL(url).host } catch { return '' }
+}
+
+export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: boolean }) {
+    const [open, setOpen] = useState(initiallyOpen)
     const [exitPending, setExitPending] = useState(false)
     // Dialog keeps its children for a 200ms exit. Keep the current list through
     // that transition, then release its subscriptions and derived commands.
@@ -151,6 +127,8 @@ export function CommandPalette() {
     const [query, setQuery] = useState('')
     const [selectedIndex, setSelectedIndex] = useState(0)
     const [bulkActions, setBulkActions] = useState<BulkActionDefinition[]>([])
+    const [subList, setSubList] = useState<'accounts' | 'addons' | null>(null)
+    const [deployAddonId, setDeployAddonId] = useState<string | null>(null)
     const [VirtualCommandResults, setVirtualCommandResults] = useState<VirtualResultsComponent | null>(null)
     const [resultsLoadFailed, setResultsLoadFailed] = useState(false)
     const [resultsLoadAttempt, setResultsLoadAttempt] = useState(0)
@@ -164,6 +142,9 @@ export function CommandPalette() {
     const navigate = useNavigate()
     const accounts = useAccountStore((s) => indexActive ? s.accounts : NO_ACCOUNTS)
     const syncAllAccounts = useAccountStore((s) => s.syncAllAccounts)
+    const signedIn = useSyncStore((s) => s.auth.isAuthenticated)
+    const notificationCount = useInboxStore((s) => indexActive ? s.entries.length : 0)
+    const syncing = useSyncStore((s) => s.isSyncing || s.isRefreshingFromCloud)
     const checkRules = useFailoverStore((s) => s.checkRules)
     const autopilotRules = useFailoverStore((s) => indexActive ? s.rules : NO_RULES)
     const notes = useNotesStore((s) => indexActive ? s.notes : NO_NOTES)
@@ -199,14 +180,66 @@ export function CommandPalette() {
         [navigate]
     )
 
+    const runSyncNow = useCallback(() => {
+        const { auth, isSyncing, isRefreshingFromCloud, syncToRemote } = useSyncStore.getState()
+        if (!auth.isAuthenticated || isSyncing || isRefreshingFromCloud || syncNowInFlight) return
+        syncNowInFlight = true
+        syncPendingAndCloud({
+            pendingAccountIds: getAllPendingPush().map(([id]) => id),
+            knownAccountIds: new Set(useAccountStore.getState().accounts.map(a => a.id)),
+            syncAccount: useAccountStore.getState().syncAccount,
+            syncToRemote: () => syncToRemote(false),
+        })
+            .catch(() => {})
+            .finally(() => { syncNowInFlight = false })
+        setOpen(false)
+    }, [])
+
+    const runVaultCheck = useCallback(() => {
+        setOpen(false)
+        const providers = useProviderStore.getState()
+        if (providers.isRefreshing) return
+        providers.forceRefreshAll()
+            .then(() => {
+                const { health } = useProviderStore.getState()
+                const keyIds = useVaultStore.getState().keys.map((k) => k.id)
+                const checked = keyIds.filter((id) => health[id] && health[id].status !== 'none')
+                if (checked.length === 0) return
+                const attention = checked.filter((id) => health[id].status === 'error' || health[id].status === 'expired').length
+                toast({
+                    title: 'Vault check complete',
+                    description: attention > 0
+                        ? `${attention} of ${checked.length} key${checked.length !== 1 ? 's' : ''} need attention.`
+                        : `All ${checked.length} key${checked.length !== 1 ? 's' : ''} look healthy.`,
+                    variant: attention > 0 ? 'destructive' : undefined,
+                    href: '/vault',
+                })
+            })
+            .catch(() => toast({ title: 'Vault check failed', description: 'Could not check your vault keys.', variant: 'destructive', href: '/vault' }))
+    }, [])
+
+    const actionHandlers = useMemo<Record<PaletteActionId, () => void>>(() => ({
+        'sync-now': runSyncNow,
+        'deploy-addon': () => { setSubList('addons'); setQuery(''); setSelectedIndex(0) },
+        'open-account': () => { setSubList('accounts'); setQuery(''); setSelectedIndex(0) },
+        'check-vault': runVaultCheck,
+        'clear-notifications': () => { useInboxStore.getState().clear(); setOpen(false) },
+    }), [runSyncNow, runVaultCheck])
+
+    const actionSpecs = useMemo(() => buildPaletteActions({
+        signedIn,
+        syncing,
+        accountCount: accounts.length,
+        savedAddonCount: Object.keys(savedAddonLibrary).length,
+        vaultKeyCount: vaultKeys.length,
+        notificationCount,
+    }), [signedIn, syncing, accounts.length, savedAddonLibrary, vaultKeys.length, notificationCount])
+
     // Display helpers. Labels render masked under privacy mode while the raw
     // values stay searchable through searchText. Credential fields (connection
     // credentials, vault key values) are never searched or displayed.
     const accountLabel = useCallback(
-        (acc: Account) => {
-            const name = acc.name || acc.email || ''
-            return (name.includes('@') ? maskEmailLevel(name, emailPrivacy) : maskNameLevel(name, namePrivacy)) || 'Unnamed Account'
-        },
+        (acc: Account) => maskAccountLabel(acc, namePrivacy, emailPrivacy),
         [namePrivacy, emailPrivacy]
     )
 
@@ -234,6 +267,27 @@ export function CommandPalette() {
             }
         }
 
+        const actionIcons: Record<PaletteActionId, React.ReactNode> = {
+            'sync-now': <RefreshCw className="h-4 w-4" />,
+            'deploy-addon': <Rocket className="h-4 w-4" />,
+            'open-account': <UserRound className="h-4 w-4" />,
+            'check-vault': <KeyRound className="h-4 w-4" />,
+            'clear-notifications': <BellOff className="h-4 w-4" />,
+        }
+        for (const spec of actionSpecs) {
+            items.push({
+                id: `palette-action-${spec.id}`,
+                label: spec.label,
+                sublabel: spec.sublabel,
+                icon: actionIcons[spec.id],
+                action: spec.disabled ? () => {} : actionHandlers[spec.id],
+                category: 'Actions',
+                aliases: spec.aliases,
+                hint: spec.hint,
+                disabled: spec.disabled,
+            })
+        }
+
         items.push(
             {
                 id: 'nav-accounts',
@@ -241,6 +295,7 @@ export function CommandPalette() {
                 sublabel: 'Dashboard home - manage all accounts',
                 icon: <LayoutDashboard className="h-4 w-4" />,
                 action: () => go('/'),
+                target: '/',
                 category: 'Navigation',
                 aliases: ['home', 'dashboard', 'accounts'],
             },
@@ -250,6 +305,7 @@ export function CommandPalette() {
                 sublabel: 'Find and save new addons',
                 icon: <Compass className="h-4 w-4" />,
                 action: () => go('/saved-addons#discover'),
+                target: '/saved-addons#discover',
                 category: 'Navigation',
                 aliases: ['discover', 'discovery', 'find addons', 'browse addons', 'new addons', 'catalog'],
             },
@@ -259,6 +315,7 @@ export function CommandPalette() {
                 sublabel: 'Browse and manage saved addon profiles',
                 icon: <Package className="h-4 w-4" />,
                 action: () => go('/saved-addons'),
+                target: '/saved-addons',
                 category: 'Navigation',
                 aliases: ['library', 'saved addons', 'addon library'],
             },
@@ -268,6 +325,7 @@ export function CommandPalette() {
                 sublabel: 'Review saved addons mirrored into account addons',
                 icon: <Link2 className="h-4 w-4" />,
                 action: () => go('/saved-addons#sync'),
+                target: '/saved-addons#sync',
                 category: 'Navigation',
                 aliases: ['sync', 'mirroring', 'mirror', 'active sync', 'deployment', 'addon sync'],
             },
@@ -277,6 +335,7 @@ export function CommandPalette() {
                 sublabel: 'Unified watch history from all accounts',
                 icon: <Activity className="h-4 w-4" />,
                 action: () => go('/activity'),
+                target: '/activity',
                 category: 'Navigation',
                 aliases: ['history', 'watch history', 'activity'],
             },
@@ -286,6 +345,7 @@ export function CommandPalette() {
                 sublabel: 'Stats, charts, and insights',
                 icon: <BarChart3 className="h-4 w-4" />,
                 action: () => go('/metrics'),
+                target: '/metrics',
                 category: 'Navigation',
                 aliases: ['metrics', 'stats', 'statistics', 'charts'],
             },
@@ -295,6 +355,7 @@ export function CommandPalette() {
                 sublabel: 'Year in review experience',
                 icon: <Tv className="h-4 w-4" />,
                 action: () => go('/replay'),
+                target: '/replay',
                 category: 'Navigation',
                 aliases: ['replay', 'year in review', 'wrapped'],
             },
@@ -304,6 +365,7 @@ export function CommandPalette() {
                 sublabel: 'Markdown notes and documentation',
                 icon: <StickyNote className="h-4 w-4" />,
                 action: () => go('/notes'),
+                target: '/notes',
                 category: 'Navigation',
                 aliases: ['notes', 'markdown', 'documentation'],
             },
@@ -313,6 +375,7 @@ export function CommandPalette() {
                 sublabel: 'Encrypted API key management',
                 icon: <KeyRound className="h-4 w-4" />,
                 action: () => go('/vault'),
+                target: '/vault',
                 category: 'Navigation',
                 aliases: ['vault', 'api keys', 'keys', 'credentials'],
             },
@@ -322,6 +385,7 @@ export function CommandPalette() {
                 sublabel: 'Edit the custom theme color palette',
                 icon: <Palette className="h-4 w-4" />,
                 action: () => go('/settings/theme/editor'),
+                target: '/settings/theme/editor',
                 category: 'Navigation',
                 aliases: ['theme editor', 'custom theme', 'colors', 'design'],
             },
@@ -331,6 +395,7 @@ export function CommandPalette() {
                 sublabel: 'Themes, sync, privacy, and preferences',
                 icon: <Settings className="h-4 w-4" />,
                 action: () => go('/settings'),
+                target: '/settings',
                 category: 'Navigation',
                 aliases: ['settings', 'preferences', 'options'],
             },
@@ -340,20 +405,23 @@ export function CommandPalette() {
                 sublabel: 'Help, guides, and troubleshooting',
                 icon: <HelpCircle className="h-4 w-4" />,
                 action: () => go('/kronorium'),
+                target: '/kronorium',
                 category: 'Navigation',
                 aliases: ['docs', 'documentation', 'help', 'faq', 'guides', 'kronorium'],
             }
         )
 
-        for (const tab of SETTINGS_TAB_ITEMS) {
+        for (const page of SETTINGS_PAGE_IDS) {
+            const details = SETTINGS_PAGE_DETAILS[page]
             items.push({
-                id: tab.id,
-                label: tab.label,
-                sublabel: tab.sublabel,
-                icon: tab.icon,
-                action: () => go(`/settings#${tab.hash}`),
+                id: `settings-${page}`,
+                label: `Settings - ${SETTING_PAGE_LABELS[page]}`,
+                sublabel: details.sublabel,
+                icon: details.icon,
+                action: () => go(`/settings#${page}`),
+                target: `/settings#${page}`,
                 category: 'Settings',
-                aliases: tab.aliases,
+                aliases: details.aliases,
             })
         }
 
@@ -366,8 +434,10 @@ export function CommandPalette() {
                 sublabel: acc.email && acc.name ? maskEmailLevel(acc.email, emailPrivacy) : undefined,
                 icon: <User className="h-4 w-4" />,
                 action: () => go(`/account/${acc.id}`),
+                target: `/account/${acc.id}`,
                 category: 'Accounts',
                 searchText: accountSearchText(acc),
+                subject: { type: 'account', id: acc.id },
             })
 
             // Per-account Connections tab destination, searchable by account
@@ -385,6 +455,7 @@ export function CommandPalette() {
                     sublabel: platformLabels.join(', '),
                     icon: <Plug className="h-4 w-4" />,
                     action: () => go(`/account/${acc.id}?tab=connections`),
+                    target: `/account/${acc.id}?tab=connections`,
                     category: 'Accounts',
                     searchText: accountSearchText(acc),
                     aliases: ['connections', 'platforms', 'linked platforms', 'integrations'],
@@ -406,6 +477,7 @@ export function CommandPalette() {
                             : countLabel,
                     icon: <Radar className="h-4 w-4" />,
                     action: () => go(`/account/${acc.id}?tab=failover`),
+                    target: `/account/${acc.id}?tab=failover`,
                     category: 'Accounts',
                     searchText: [accountSearchText(acc), ...ruleNames].filter(Boolean).join(' '),
                     aliases: ['autopilot', 'failover', 'rules', 'monitoring', 'chains'],
@@ -415,19 +487,25 @@ export function CommandPalette() {
 
         // Per-account AIOStreams and AIOMetadata instance destinations. The
         // routes and uuid parsing mirror AIOStreamsPage and AIOMetadataPage.
+        // Duplicate installs of one instance parse to the same uuid, so keep
+        // only the first: rows stay unique and React keys never collide.
         for (const acc of accounts) {
+            const seenInstances = new Set<string>()
             for (const addon of acc.addons ?? []) {
                 const addonName =
                     addon.metadata?.customName || addon.manifest?.name || addon.transportName || ''
                 if (isAIOStreamsAddon(addon)) {
                     const parsed = parseAIOStreamsUrl(addon.transportUrl)
-                    if (parsed) {
+                    const instanceKey = parsed ? `aiostreams:${parsed.uuid}` : null
+                    if (parsed && instanceKey && !seenInstances.has(instanceKey)) {
+                        seenInstances.add(instanceKey)
                         items.push({
                             id: `aiostreams-${acc.id}-${parsed.uuid}`,
                             label: addonName || 'AIOStreams',
                             sublabel: `AIOStreams - ${accountLabel(acc)}`,
                             icon: <Tv className="h-4 w-4" />,
                             action: () => go(`/account/${acc.id}/aiostreams/${parsed.uuid}`),
+                            target: `/account/${acc.id}/aiostreams/${parsed.uuid}`,
                             category: 'Addons',
                             searchText: [
                                 accountSearchText(acc),
@@ -444,13 +522,16 @@ export function CommandPalette() {
                 }
                 if (isAIOMetadataAddon(addon)) {
                     const parsed = parseAIOMetadataUrl(addon.transportUrl)
-                    if (parsed) {
+                    const instanceKey = parsed ? `aiometadata:${parsed.uuid}` : null
+                    if (parsed && instanceKey && !seenInstances.has(instanceKey)) {
+                        seenInstances.add(instanceKey)
                         items.push({
                             id: `aiometadata-${acc.id}-${parsed.uuid}`,
                             label: addonName || 'AIOMetadata',
                             sublabel: `AIOMetadata - ${accountLabel(acc)}`,
                             icon: <Film className="h-4 w-4" />,
                             action: () => go(`/account/${acc.id}/aiometadata/${parsed.uuid}`),
+                            target: `/account/${acc.id}/aiometadata/${parsed.uuid}`,
                             category: 'Addons',
                             searchText: [
                                 accountSearchText(acc),
@@ -476,6 +557,7 @@ export function CommandPalette() {
                 sublabel,
                 icon: <StickyNote className="h-4 w-4" />,
                 action: () => go(`/notes?note=${encodeURIComponent(n.id)}`),
+                target: `/notes?note=${encodeURIComponent(n.id)}`,
                 category: 'Notes',
                 searchText: [n.title, ...n.tags, ...n.wikilinks].filter(Boolean).join(' '),
             })
@@ -484,17 +566,23 @@ export function CommandPalette() {
         for (const k of vaultKeys) {
             items.push({
                 id: `vault-${k.id}`,
-                label: k.name || k.customProviderName || k.provider,
+                label: vaultKeyLabel(k),
                 sublabel: k.provider,
                 icon: <Key className="h-4 w-4" />,
                 action: () => go('/vault'),
+                target: '/vault',
                 category: 'Vault',
-                searchText: [k.serverUrl, k.addonUuid, k.customProviderName].filter(Boolean).join(' '),
+                searchText: [vaultKeySearchHost(k.serverUrl), k.customProviderName].filter(Boolean).join(' '),
                 aliases: ['api key', 'vault', 'credential'],
             })
         }
 
-        const savedAddonList = Object.values(savedAddonLibrary)
+        const savedAddonList = dedupeByInstallUrl(Object.values(savedAddonLibrary))
+        const savedAddonNameCounts = new Map<string, number>()
+        for (const a of savedAddonList) {
+            const name = (a.name ?? '').toLowerCase()
+            savedAddonNameCounts.set(name, (savedAddonNameCounts.get(name) ?? 0) + 1)
+        }
         for (const a of savedAddonList) {
             const tagStr = (a.tags ?? []).join(' ')
             const manifestName = a.manifest?.name ?? ''
@@ -510,11 +598,15 @@ export function CommandPalette() {
             items.push({
                 id: `addon-${a.id}`,
                 label: a.name || 'Unnamed Addon',
-                sublabel: accountStr,
+                sublabel: (savedAddonNameCounts.get((a.name ?? '').toLowerCase()) ?? 0) > 1
+                    ? [accountStr, installHost(a.installUrl)].filter(Boolean).join(' · ')
+                    : accountStr,
                 icon: <Bookmark className="h-4 w-4" />,
                 action: () => go(firstAccountId ? `/account/${firstAccountId}` : '/saved-addons'),
+                target: firstAccountId ? `/account/${firstAccountId}` : '/saved-addons',
                 category: 'Saved Addons',
                 searchText: `${a.name ?? ''} ${manifestName} ${tagStr} ${rawAccountStr}`,
+                subject: { type: 'saved-addon', id: a.id },
             })
         }
 
@@ -556,15 +648,26 @@ export function CommandPalette() {
                     navigate('/?bulk=' + def.id)
                     setOpen(false)
                 },
+                target: '/',
                 category: 'Bulk Operations',
                 aliases: ['bulk', 'batch'],
             })
         }
 
         return items
-    }, [indexActive, accounts, notes, vaultKeys, savedAddonLibrary, autopilotRules, go, syncAllAccounts, checkRules, navigate, bulkActions, accountLabel, accountSearchText, emailPrivacy])
+    }, [indexActive, accounts, notes, vaultKeys, savedAddonLibrary, autopilotRules, go, syncAllAccounts, checkRules, navigate, bulkActions, accountLabel, accountSearchText, emailPrivacy, actionSpecs, actionHandlers])
 
-    const filtered = useMemo(() => filterCommandsByQuery(allItems, query), [allItems, query])
+    const visibleItems = useMemo(() => {
+        if (!subList) return allItems
+        const type = subList === 'addons' ? 'saved-addon' : 'account'
+        return allItems
+            .filter((item) => item.subject?.type === type)
+            .map((item) => subList === 'addons' && item.subject
+                ? { ...item, action: () => { setDeployAddonId(item.subject!.id); setSubList(null); setOpen(false) } }
+                : item)
+    }, [allItems, subList])
+
+    const filtered = useMemo(() => filterCommandsByQuery(visibleItems, query), [visibleItems, query])
 
     const groups = useMemo(() => groupCommandsByCategory(filtered, CATEGORY_ORDER), [filtered])
 
@@ -597,6 +700,13 @@ export function CommandPalette() {
         setSelectedIndex(0)
     }, [query])
 
+    // Keyboard navigation moves aria-activedescendant without DOM focus; preload the
+    // highlighted row's destination chunk the same way a hover would.
+    useEffect(() => {
+        const item = ordered[selectedIndex]
+        if (item?.target) preloadRouteChunk(item.target)
+    }, [ordered, selectedIndex])
+
     // Keep the selection inside the result list as it shrinks or empties.
     // Never allow a negative index with zero results.
     useEffect(() => {
@@ -615,12 +725,24 @@ export function CommandPalette() {
     useEffect(() => {
         if (open) {
             setQuery('')
+            setSubList(null)
             setSelectedIndex(0)
             setTimeout(() => inputRef.current?.focus(), 50)
         }
     }, [open])
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        const shortcut = resolvePaletteShortcut(e, actionSpecs)
+        if (shortcut) {
+            e.preventDefault()
+            if (!shortcut.disabled) actionHandlers[shortcut.id]()
+            return
+        }
+        if (e.key === 'Backspace' && subList && query === '') {
+            e.preventDefault()
+            setSubList(null)
+            return
+        }
         if (e.key === 'ArrowDown') {
             e.preventDefault()
             if (ordered.length === 0) return
@@ -640,7 +762,13 @@ export function CommandPalette() {
                 item.action()
             }
         } else if (e.key === 'Escape') {
-            setOpen(false)
+            if (subList) {
+                e.preventDefault()
+                e.stopPropagation()
+                setSubList(null)
+            } else {
+                setOpen(false)
+            }
         }
     }
 
@@ -659,12 +787,19 @@ export function CommandPalette() {
         return (
             <button data-theme-part="nav-item" data-state={isSelected ? "active" : "inactive"}
                 key={item.id}
+                id={`command-palette-option-${item.id}`}
+                role="option"
+                aria-selected={isSelected}
                 data-index={flatIndex}
                 onClick={(e) => {
                     e.preventDefault()
                     item.action()
                 }}
-                className={`relative mx-3 flex w-[calc(100%-1.5rem)] items-center gap-3 rounded-2xl px-3 py-3 text-left transition-[background-color,box-shadow,color,transform] duration-150 ${isSelected
+                onPointerEnter={() => { if (item.target) preloadRouteChunk(item.target) }}
+                onFocus={() => { if (item.target) preloadRouteChunk(item.target) }}
+                onTouchStart={() => { if (item.target) preloadRouteChunk(item.target) }}
+                aria-disabled={item.disabled || undefined}
+                className={`relative mx-3 flex w-[calc(100%-1.5rem)] items-center gap-3 rounded-2xl px-3 py-3 text-left transition-[background-color,box-shadow,color,transform] duration-150 ${item.disabled ? 'opacity-60' : ''} ${isSelected
                     ? 'bg-primary/10 text-foreground shadow-sm ring-1 ring-primary/20'
                     : 'text-foreground hover:bg-muted/30'
                     }`}
@@ -694,6 +829,13 @@ export function CommandPalette() {
                         </div>
                     )}
                 </div>
+                {item.hint && (
+                    <span className="hidden flex-shrink-0 items-center gap-1 sm:flex" aria-hidden="true">
+                        {item.hint.map((key) => (
+                            <kbd key={key} data-theme-part="badge" className="min-w-[1.5rem] rounded-lg border border-border/50 bg-background/40 px-1.5 py-0.5 text-center font-mono text-[11px] text-muted-foreground shadow-sm">{key}</kbd>
+                        ))}
+                    </span>
+                )}
                 {isSelected && (
                     <CornerDownLeft className="h-3.5 w-3.5 flex-shrink-0 text-primary" />
                 )}
@@ -702,9 +844,11 @@ export function CommandPalette() {
 
     }
     return (
+        <>
+        {deployAddonId && <PaletteDeployDialog addonId={deployAddonId} onClose={() => setDeployAddonId(null)} />}
         <Dialog open={open} onOpenChange={setOpen}>
             <DialogContent
-                className="max-w-[min(92vw,42rem)] sm:max-w-2xl p-0 gap-0 overflow-hidden rounded-[2rem] border border-border/50 bg-card/90 shadow-2xl ring-1 ring-white/5 backdrop-blur-2xl [&>button:last-child]:hidden"
+                className="sm:max-w-[min(92vw,42rem)] sm:max-w-2xl p-0 gap-0 overflow-hidden sm:rounded-[2rem] border border-border/50 bg-card/90 shadow-2xl ring-1 ring-white/5 backdrop-blur-2xl [&>button:last-child]:hidden"
                 onKeyDown={handleKeyDown}
             >
                 <DialogTitle className="sr-only">Command palette</DialogTitle>
@@ -714,9 +858,16 @@ export function CommandPalette() {
                     <input
                         data-theme-part="inline-input"
                         ref={inputRef}
+                        role="combobox"
+                        aria-expanded
+                        aria-autocomplete="list"
+                        aria-controls={filtered.length > 0 ? 'command-palette-listbox' : undefined}
+                        aria-activedescendant={ordered[selectedIndex]
+                            ? `command-palette-option-${ordered[selectedIndex].id}`
+                            : undefined}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Search pages, accounts, addons, actions..."
+                        placeholder={subList === 'accounts' ? 'Choose an account...' : subList === 'addons' ? 'Choose a saved addon to deploy...' : 'Search pages, accounts, addons, actions...'}
                         className="h-6 w-full min-w-0 flex-1 border-0 bg-transparent p-0 text-base font-medium text-foreground outline-none placeholder:text-muted-foreground/55 focus:ring-0 sm:text-sm"
                     />
                     <button data-theme-part="button"
@@ -730,12 +881,12 @@ export function CommandPalette() {
 
                 <ScrollArea className={ordered.length > VIRTUAL_RESULTS_THRESHOLD ? "h-[min(54vh,440px)]" : "max-h-[min(54vh,440px)]"} ref={attachScrollRoot}>
                     <div className="py-3">
-                        {filtered.length === 0 && (
+                        {filtered.length === 0 ? (
                             <div data-theme-part="panel" className="mx-3 rounded-2xl border border-dashed border-border/40 bg-muted/15 px-4 py-10 text-center text-sm text-muted-foreground">
                                 No results found for "{query}"
                             </div>
-                        )}
-
+                        ) : (
+                            <div id="command-palette-listbox" role="listbox" aria-label="Command results">
                         {ordered.length > VIRTUAL_RESULTS_THRESHOLD ? (VirtualCommandResults
                             ? <VirtualCommandResults groups={groups} selectedIndex={selectedIndex} query={query} scrollRoot={scrollRoot} renderItem={renderCommandItem} />
                             : <div className="px-6 py-4 text-sm text-muted-foreground" role="status">
@@ -748,11 +899,13 @@ export function CommandPalette() {
                                 {items.map(item => renderCommandItem(item))}
                             </div>
                         ))}
+                            </div>
+                        )}
                     </div>
                 </ScrollArea>
 
 
-                <div data-theme-part="toolbar" className="m-3 mt-0 flex items-center gap-4 rounded-2xl border border-border/35 bg-muted/20 px-4 py-2.5 text-xs text-muted-foreground">
+                <div data-theme-part="toolbar" className="m-3 mt-0 hidden items-center gap-4 rounded-2xl border border-border/35 bg-muted/20 px-4 py-2.5 text-xs text-muted-foreground sm:flex">
                     <span className="flex items-center gap-1">
                         <kbd data-theme-part="badge" className="rounded-lg border border-border/50 bg-background/40 px-1.5 py-0.5 text-xs shadow-sm">↑↓</kbd>
                         Navigate
@@ -763,10 +916,11 @@ export function CommandPalette() {
                     </span>
                     <span className="flex items-center gap-1">
                         <kbd data-theme-part="badge" className="rounded-lg border border-border/50 bg-background/40 px-1.5 py-0.5 text-xs shadow-sm">Esc</kbd>
-                        Close
+                        {subList ? 'Back' : 'Close'}
                     </span>
                 </div>
             </DialogContent>
         </Dialog>
+        </>
     )
 }

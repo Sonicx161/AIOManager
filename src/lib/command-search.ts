@@ -9,6 +9,8 @@
  * (and therefore never execute) an unrelated command.
  */
 
+import { normalizeAddonUrl } from './addon-url.ts'
+
 export interface CommandSearchFields {
     /** Primary display label. Matched raw, even when the UI renders it masked. */
     label: string
@@ -63,6 +65,20 @@ export function commandMatchesQuery(query: string, fields: CommandSearchFields):
     return tokens.every((token) => haystack.includes(token))
 }
 
+// Haystacks are pure functions of the item's own matchable fields. Palette items
+// are rebuilt only when their sources change and are never mutated in place, so
+// the normalized haystack can be cached per object identity and reused across
+// keystrokes. The cached value is exactly what commandHaystack would return.
+const haystackCache = new WeakMap<object, string>()
+
+function cachedHaystack(item: CommandSearchFields): string {
+    const cached = haystackCache.get(item)
+    if (cached !== undefined) return cached
+    const haystack = commandHaystack(item)
+    haystackCache.set(item, haystack)
+    return haystack
+}
+
 /**
  * Filter a list of items against a multiword query. An empty or whitespace
  * only query returns the input unchanged.
@@ -71,7 +87,7 @@ export function filterCommandsByQuery<T extends CommandSearchFields>(items: T[],
     const tokens = tokenizeCommandQuery(query)
     if (tokens.length === 0) return items
     return items.filter((item) => {
-        const haystack = commandHaystack(item)
+        const haystack = cachedHaystack(item)
         if (haystack.length === 0) return false
         return tokens.every((token) => haystack.includes(token))
     })
@@ -115,4 +131,16 @@ export function groupCommandsByCategory<T extends { category: string }>(
         category,
         items: byCategory.get(category) ?? [],
     }))
+}
+
+/** Drop saved addons whose install URL matches an earlier one after normalization. */
+export function dedupeByInstallUrl<T extends { installUrl?: string }>(addons: T[]): T[] {
+    const seen = new Set<string>()
+    return addons.filter((addon) => {
+        const key = normalizeAddonUrl(addon.installUrl ?? '')
+        if (!key) return true
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+    })
 }

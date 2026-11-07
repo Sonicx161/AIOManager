@@ -142,7 +142,11 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
   const [storeRefreshFailed, setStoreRefreshFailed] = useState(false)
   const [storeUpdatedAt, setStoreUpdatedAt] = useState<number | null>(null)
   const [storeReloadKey, setStoreReloadKey] = useState(0)
-  const [categories, setCategories] = useState<DiscoverCategory[]>([])
+  const [allCategories, setCategories] = useState<DiscoverCategory[]>([])
+  const categories = useMemo(
+    () => (showAdult ? allCategories : allCategories.filter((c) => !/^nsfw$/i.test(c.slug) && !/^nsfw$/i.test(c.name))),
+    [allCategories, showAdult],
+  )
   const [categoryShelves, setCategoryShelves] = useState<{ category: DiscoverCategory; addons: DiscoverAddon[] }[]>([])
 
   const [addons, setAddons] = useState<DiscoverAddon[]>([])
@@ -155,6 +159,8 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [detailAddon, setDetailAddon] = useState<DiscoverAddon | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [detailSession, setDetailSession] = useState(0)
+  const [reopenDetailAfterChild, setReopenDetailAfterChild] = useState(false)
   const [saveAddon, setSaveAddon] = useState<DiscoverAddon | null>(null)
   const [saveOpen, setSaveOpen] = useState(false)
   const [deployAddon, setDeployAddon] = useState<DiscoverAddon | null>(null)
@@ -447,10 +453,26 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
     })
   }, [addons, selectedResources, selectedTypes])
 
-  const openSave = (addon: DiscoverAddon) => { setSaveAddon(addon); setSaveOpen(true) }
-  const openDeploy = (addon: DiscoverAddon) => { setDeployAddon(addon); setDeployOpen(true) }
-  const openInject = useCallback((addon: DiscoverAddon) => { setInjectAddon(addon); setInjectOpen(true) }, [])
-  const openDetail = (addon: DiscoverAddon) => { setDetailAddon(addon); setDetailOpen(true) }
+  // Child dialogs never stack on the detail: close it first and reopen it when the child
+  // closes. The session key stays the same, so the detail keeps its place in the nav stack.
+  const closeDetailForChild = useCallback(() => {
+    if (detailOpen) {
+      setDetailOpen(false)
+      setReopenDetailAfterChild(true)
+    }
+  }, [detailOpen])
+
+  const maybeReopenDetail = useCallback(() => {
+    if (reopenDetailAfterChild) {
+      setReopenDetailAfterChild(false)
+      setDetailOpen(true)
+    }
+  }, [reopenDetailAfterChild])
+
+  const openSave = (addon: DiscoverAddon) => { closeDetailForChild(); setSaveAddon(addon); setSaveOpen(true) }
+  const openDeploy = (addon: DiscoverAddon) => { closeDetailForChild(); setDeployAddon(addon); setDeployOpen(true) }
+  const openInject = useCallback((addon: DiscoverAddon) => { closeDetailForChild(); setInjectAddon(addon); setInjectOpen(true) }, [closeDetailForChild])
+  const openDetail = (addon: DiscoverAddon) => { setDetailAddon(addon); setDetailSession((s) => s + 1); setDetailOpen(true) }
 
   const handleConfigure = (addon: DiscoverAddon) => {
     const url = getConfigureUrl(addon)
@@ -470,6 +492,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
       await createSavedAddon(payload.name, saveAddon.manifestUrl, payload.tags, profileId, saveAddon.manifest)
       toast({ title: 'Saved to Library', description: `${payload.name} is now in your library.` })
       setSaveOpen(false)
+      maybeReopenDetail()
     } catch (err) {
       toast({ title: 'Save Failed', description: err instanceof Error ? err.message : 'Could not save this addon', variant: 'destructive' })
     } finally {
@@ -496,6 +519,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
       variant: fail > 0 && ok === 0 ? 'destructive' : 'default',
     })
     setDeployOpen(false)
+    maybeReopenDetail()
   }
 
   const handleInjectConfirm = async (selected: DiscoverInjectSelection[]) => {
@@ -531,6 +555,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
       throw new Error(`Injected into ${succeeded} instance${succeeded !== 1 ? 's' : ''}, but ${reinstallFailed} reinstall${reinstallFailed !== 1 ? 's' : ''} failed. The addon may not appear until you manually refresh.`)
     }
     setInjectOpen(false)
+    maybeReopenDetail()
   }
 
   const toggleCategory = (slug: string) => {
@@ -821,6 +846,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
         addon={detailAddon}
         open={detailOpen}
         onOpenChange={setDetailOpen}
+        sessionKey={detailSession}
         saved={detailAddon ? isSaved(detailAddon) : false}
         isSaved={isSaved}
         onSave={openSave}
@@ -834,23 +860,33 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
       <DiscoverSaveDialog
         addon={saveAddon}
         open={saveOpen}
-        onOpenChange={setSaveOpen}
+        onOpenChange={(open) => {
+          setSaveOpen(open)
+          if (!open) maybeReopenDetail()
+        }}
         saving={savingKey === saveAddon?.uuid}
         onSave={handleSaveConfirm}
       />
 
       <AccountPickerDialog
         open={deployOpen}
-        onOpenChange={setDeployOpen}
+        onOpenChange={(open) => {
+          setDeployOpen(open)
+          if (!open) maybeReopenDetail()
+        }}
         title="Deploy Addon"
         description={`Install "${deployAddon?.manifest?.name ?? 'this addon'}" to the selected accounts.`}
         onConfirm={handleDeployConfirm}
         confirmLabel="Deploy"
+        confirmPendingLabel="Deploying..."
       />
 
       <DiscoverInjectDialog
         open={injectOpen}
-        onOpenChange={setInjectOpen}
+        onOpenChange={(open) => {
+          setInjectOpen(open)
+          if (!open) maybeReopenDetail()
+        }}
         addonName={injectAddon?.manifest?.name?.trim() || injectAddon?.slug || ''}
         instances={aioStreamsInstances}
         onConfirm={handleInjectConfirm}

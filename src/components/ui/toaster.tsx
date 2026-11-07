@@ -1,7 +1,35 @@
 import { cn } from '@/lib/utils'
-import { useToast } from '@/hooks/use-toast'
+import { DEFAULT_TOAST_DURATION, useToast, type Toast } from '@/hooks/use-toast'
 import { AlertCircle, AlertTriangle, CheckCircle, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
+
+function ToastAction({ toast, onDone }: { toast: Toast; onDone: () => void }) {
+  const action = toast.action
+  const duration = toast.duration ?? DEFAULT_TOAST_DURATION
+  const finite = Number.isFinite(duration) && duration > 0
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!finite) return
+    const timer = setInterval(() => setNow(Date.now()), 250)
+    return () => clearInterval(timer)
+  }, [finite, toast.createdAt])
+
+  if (!action) return null
+  const seconds = finite ? Math.max(0, Math.ceil((toast.createdAt + duration - now) / 1000)) : null
+
+  return (
+    <button
+      type="button"
+      onClick={() => { action.onClick(); onDone() }}
+      className="shrink-0 rounded-lg border border-border/50 bg-muted/50 px-2.5 py-1.5 text-xs font-bold tabular-nums text-foreground transition-colors hover:bg-muted"
+    >
+      {action.label}
+      {seconds !== null && <span className="ml-1 font-medium text-muted-foreground">({seconds}s)</span>}
+    </button>
+  )
+}
 
 export function Toaster() {
   const { toasts, dismiss } = useToast()
@@ -58,6 +86,7 @@ export function Toaster() {
                     </p>
                   )}
                 </div>
+                {toast.action && <ToastAction toast={toast} onDone={() => dismiss(toast.id)} />}
                 <button
                   data-theme-part="button"
                   data-variant="ghost"
@@ -68,6 +97,16 @@ export function Toaster() {
                   <span className="sr-only">Close</span>
                 </button>
               </div>
+              {toast.action && Number.isFinite(toast.duration ?? DEFAULT_TOAST_DURATION) && (
+                <motion.div
+                  key={toast.createdAt}
+                  aria-hidden="true"
+                  className="absolute inset-x-0 bottom-0 h-0.5 origin-left bg-primary/60"
+                  initial={{ scaleX: 1 }}
+                  animate={{ scaleX: 0 }}
+                  transition={{ duration: (toast.duration ?? DEFAULT_TOAST_DURATION) / 1000, ease: 'linear' }}
+                />
+              )}
             </motion.div>
           )
         })}

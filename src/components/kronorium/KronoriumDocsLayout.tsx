@@ -1,4 +1,4 @@
-import { type ReactNode, lazy, useMemo } from 'react'
+import { type ReactNode, lazy, useEffect, useLayoutEffect, useMemo } from 'react'
 import '@/styles/kronorium.css'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { DocsLayout } from 'fumadocs-ui/layouts/docs'
@@ -16,6 +16,12 @@ export function KronoriumDocsLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams();
+
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.classList.add('kronorium-active');
+    return () => root.classList.remove('kronorium-active');
+  }, []);
 
   const isExternal = (url: string) => /^https?:\/\/|^\/\//.test(url);
 
@@ -65,6 +71,18 @@ export function KronoriumDocsLayout({ children }: { children: ReactNode }) {
 function KronoriumContent({ location, children }: { location: { pathname: string }, children: ReactNode }) {
     const isHome = location.pathname.replace(/\/$/, '') === '/kronorium';
     const search = useSearchContext();
+    const { open: searchOpen, setOpenSearch } = search;
+
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'k') return
+            if (e.defaultPrevented) return
+            e.preventDefault()
+            setOpenSearch(!searchOpen)
+        }
+        window.addEventListener('keydown', onKeyDown, true)
+        return () => window.removeEventListener('keydown', onKeyDown, true)
+    }, [searchOpen, setOpenSearch])
 
     if (isHome) {
         return (
@@ -87,13 +105,13 @@ function KronoriumContent({ location, children }: { location: { pathname: string
                                 </div>
                             </button>
                             <div className="flex items-center h-9">
-                                <a href="https://torbox.app/subscription?referral=a7aecfd0-57c8-48fa-9e49-2904f09d57d2" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-foreground hover:bg-fd-accent/20 transition-all">
+                                <a aria-label="TorBox" href="https://torbox.app/subscription?referral=a7aecfd0-57c8-48fa-9e49-2904f09d57d2" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-foreground hover:bg-fd-accent/20 transition-all">
                                     <Box className="h-4.5 w-4.5" />
                                 </a>
-                                <a href="https://ko-fi.com/sonicx161" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-primary hover:bg-fd-accent/20 transition-all">
+                                <a aria-label="Donate" href="https://ko-fi.com/sonicx161" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-primary hover:bg-fd-accent/20 transition-all">
                                     <Heart className="h-4.5 w-4.5" />
                                 </a>
-                                <a href="https://github.com/sonicx161/AIOManager" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-foreground hover:bg-fd-accent/20 transition-all">
+                                <a aria-label="GitHub" href="https://github.com/sonicx161/AIOManager" target="_blank" rel="noopener noreferrer" className="h-9 w-9 flex items-center justify-center rounded-full text-fd-muted-foreground hover:text-fd-foreground hover:bg-fd-accent/20 transition-all">
                                     <Github className="h-4.5 w-4.5" />
                                 </a>
                             </div>

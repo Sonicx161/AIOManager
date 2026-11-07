@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Link } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, RefreshCw, AlertCircle, Sparkles, ArrowRight, Dice3, Info, Search, Bookmark, LayoutGrid, Upload } from 'lucide-react'
 
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
-import { Input } from '@/components/ui/input'
 import { ContentRail, ContentRailCard, ContentRailSkeleton } from '@/components/ui/content-rail'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { Button } from '@/components/ui/button'
@@ -700,15 +700,16 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
         </>}>
 
             <ToolbarShell contentClassName="gap-2 sm:gap-3">
-                <div className="relative w-full sm:w-80 shrink-0 min-w-0">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                    <Input
-                        placeholder="Search movies, series, anime, people…"
-                        value=""
-                        onClick={(e) => { setSearchOpen(true); e.currentTarget.blur() }}
-                        readOnly
-                        className="pl-9 h-8 text-xs bg-muted/30 border border-border/40 cursor-pointer hover:bg-muted/40 transition-colors w-full"
-                    />
+                <div className="w-full sm:w-80 shrink-0 min-w-0">
+                    <button
+                        type="button"
+                        aria-haspopup="dialog"
+                        onClick={() => setSearchOpen(true)}
+                        className="flex h-11 sm:h-8 w-full cursor-pointer items-center gap-2 rounded-md border border-border/40 bg-muted/30 pl-3 pr-3 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                        <Search className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">Search movies, series, anime, people…</span>
+                    </button>
                 </div>
                 <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:ml-auto sm:gap-2">
                     <Button
@@ -922,9 +923,9 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
                                             <p className="mt-1 text-sm text-muted-foreground">
                                                 Start watching content on your connected accounts to unlock personalized recommendations.
                                             </p>
-                                            <a href="/addons" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline">
+                                            <Link to="/saved-addons#discover" className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-primary hover:underline">
                                                 Browse addons to get started
-                                            </a>
+                                            </Link>
                                         </div>
                                     )
                                 }

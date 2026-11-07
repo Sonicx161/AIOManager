@@ -5,16 +5,16 @@
 /*
  * fumadocs base.css injects: body { background-color: var(--color-fd-background); color: var(--color-fd-foreground); }
  * That rule bleeds into the main app after Kronorium CSS is loaded.
- * Counter it: restore app CSS vars on body when #kronorium-root is NOT present.
+ * Counter it: restore app CSS vars on body unless html.kronorium-active is set by KronoriumDocsLayout.
  */
-body:not(:has(#kronorium-root)) {
+html:not(.kronorium-active) body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
 }
 
 /* Keep docs and their body-level portals on the same neutral palette. */
 
-:root:has(#kronorium-root),
+html.kronorium-active,
 #kronorium-root {
   /* fumadocs-ui neutral theme tokens (0 saturation = pure neutral) */
   --fd-background: 0 0% 7%;
@@ -78,7 +78,7 @@ body:not(:has(#kronorium-root)) {
 }
 
 /* Ensure body-level portals (Search) inherit variables only when docs are active */
-body:has(#kronorium-root) [data-search-dialog] {
+html.kronorium-active [data-search-dialog] {
     --fd-popover: 0 0% 11.6%;
 }
 

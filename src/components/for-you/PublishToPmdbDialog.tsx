@@ -37,18 +37,21 @@ export function PublishToPmdbDialog({ open, onOpenChange, scope, scopeLabel, rai
     const [cancelled, setCancelled] = useState(false)
     const [railStatuses, setRailStatuses] = useState<Record<string, RailStatusInfo>>({})
     const abortRef = useRef<AbortController | null>(null)
+    const wasOpenRef = useRef(false)
 
     useEffect(() => {
-        if (!open) return
-        if (publishing) return
-        const defaults = new Set<string>()
-        for (const r of rails) {
-            if (r.items.length > 0) defaults.add(r.railKey)
+        // Seed defaults only on the closed-to-open transition; late rails or publishing flips must not wipe results.
+        if (open && !wasOpenRef.current) {
+            const defaults = new Set<string>()
+            for (const r of rails) {
+                if (r.items.length > 0) defaults.add(r.railKey)
+            }
+            setSelected(defaults)
+            setRailStatuses({})
+            setPublishing(false)
         }
-        setSelected(defaults)
-        setRailStatuses({})
-        setPublishing(false)
-    }, [open, rails, publishing])
+        wasOpenRef.current = open
+    }, [open, rails])
 
     const toggleRail = useCallback((railKey: string) => {
         setSelected(prev => {

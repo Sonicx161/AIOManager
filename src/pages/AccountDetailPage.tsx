@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { AddonList } from '@/components/addons/AddonList'
 import { useAccountStore } from '@/store/accountStore'
 import { useDocumentTitle } from '@/hooks/use-document-title'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 export function AccountDetailPage() {
   const { accountId } = useParams<{ accountId: string }>()
@@ -10,8 +11,9 @@ export function AccountDetailPage() {
   const accounts = useAccountStore((state) => state.accounts)
   const hydrated = useAccountStore((state) => state.hydrated)
   const account = accounts.find((acc) => acc.id === accountId)
+  const maskedLabel = useMaskedAccountLabel()
 
-  useDocumentTitle(account?.name || 'Account')
+  useDocumentTitle((account && maskedLabel(account)) || 'Account')
 
   useEffect(() => {
     if (!hydrated) return

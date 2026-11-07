@@ -14,7 +14,7 @@ const GROUPS = [
         items: [
             { keys: ['?'], desc: 'Show this help' },
             { keys: ['Ctrl', 'K'], desc: 'Command palette' },
-            { keys: ['/'], desc: 'Search' },
+            { keys: ['/'], desc: 'Focus search (Accounts, Addons, Discover, Activity)' },
         ],
     },
     {
@@ -108,7 +108,7 @@ export function KeybindingsHelp({ isOpen, onClose }: KeybindingsHelpProps) {
                 </div>
 
                 <div className="border-t border-border/30 bg-muted/15 px-5 py-3">
-                    <p className="text-[10px] text-center text-muted-foreground/50">Shortcuts work everywhere except text inputs.</p>
+                    <p className="text-[10px] text-center text-muted-foreground/50">Shortcuts are off while typing in a field or a dialog is open.</p>
                 </div>
             </DialogContent>
         </Dialog>

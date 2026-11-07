@@ -24,24 +24,28 @@ export function baseOptions(): BaseLayoutProps {
       {
         icon: <ArrowLeft className="h-4 w-4" />,
         text: 'Back to App',
+        label: 'Back to App',
         url: '/',
         type: 'icon',
       },
       {
         icon: <Box className="h-4 w-4" />,
         text: 'TorBox',
+        label: 'TorBox',
         url: 'https://torbox.app/subscription?referral=a7aecfd0-57c8-48fa-9e49-2904f09d57d2',
         type: 'icon',
       },
       {
         icon: <Github className="h-4 w-4" />,
         text: 'GitHub',
+        label: 'GitHub',
         url: 'https://github.com/sonicx161/AIOManager',
         type: 'icon',
       },
       {
         icon: <span className="text-destructive">❤️</span>,
         text: 'Donate',
+        label: 'Donate',
         url: 'https://ko-fi.com/sonicx161',
         type: 'icon',
       }

@@ -5,7 +5,7 @@ import { Header, MobileBottomNav } from './Header'
 import { SyncIdReminder } from './SyncIdReminder'
 import { ReauthBanner } from './ReauthBanner'
 import { useAddonStore } from '@/store/addonStore'
-import { CommandPalette } from '@/components/CommandPalette'
+import { LazyCommandPalette } from '@/components/LazyCommandPalette'
 
 interface LayoutProps {
   children: ReactNode
@@ -34,7 +34,7 @@ export function Layout({ children }: LayoutProps) {
     return (
       <div className="min-h-screen bg-[#08080f] flex flex-col overflow-hidden">
         <main id="main-content" className="flex-1 overflow-hidden">{children}</main>
-        <CommandPalette />
+        <LazyCommandPalette />
       </div>
     )
   }
@@ -62,7 +62,7 @@ export function Layout({ children }: LayoutProps) {
       <main id="main-content" className="relative z-10 max-w-[1800px] mx-auto w-full px-4 py-6 md:py-10 flex-1 overflow-y-auto md:overflow-visible">{children}</main>
       <MobileBottomNav />
       <Footer className="hidden md:block" />
-      <CommandPalette />
+      <LazyCommandPalette />
     </div>
   )
 }
