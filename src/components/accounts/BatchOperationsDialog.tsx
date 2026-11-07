@@ -18,6 +18,7 @@ import { useProfileStore } from '@/store/profileStore'
 import { Account } from '@/types/account'
 import type { AddonDescriptor } from '@/types/addon'
 import type { BulkResult } from '@/types/saved-addon'
+import { appendBulkResult, bulkDoneLine } from '@/lib/bulk-result'
 import {
   BULK_ACTION_GROUPS,
   BULK_ACTION_OPTIONS,
@@ -35,6 +36,7 @@ import {
 } from './bulk-actions/registry'
 import { AccountAvatar } from './AccountAvatar'
 import { AddonTag } from '@/components/addons/AddonTag'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 import { AlertTriangle, CheckCircle2, ChevronDown, Copy, Info, LayoutGrid, Library, Loader2, PlusCircle, ShieldCheck, Trash2, Search, Tags, X } from 'lucide-react'
 import { useState, useEffect, useMemo, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Switch } from '@/components/ui/switch'
@@ -120,6 +122,7 @@ function PreviewStatCard({ stat }: { stat: PreviewStat }) {
 
 function BatchImpactPreview({ preview, accounts }: { preview: BatchPreview; accounts: Account[] }) {
   const accountsById = new Map(accounts.map(account => [account.id, account]))
+  const maskedAccountLabel = useMaskedAccountLabel()
 
   return (
     <div data-theme-tone="status" data-theme-part="panel" className={cn(
@@ -203,7 +206,7 @@ function BatchImpactPreview({ preview, accounts }: { preview: BatchPreview; acco
               <div key={row.id} data-theme-part="panel" className="flex items-center justify-between gap-3 rounded-xl border border-border/25 bg-background/35 px-2.5 py-2">
                 <span className="flex min-w-0 items-center gap-2">
                   {account && <AccountAvatar account={account} size="xs" showStatus={false} />}
-                  <span className="min-w-0 truncate text-xs font-medium">{row.name}</span>
+                  <span className="min-w-0 truncate text-xs font-medium">{account ? maskedAccountLabel(account) : row.name}</span>
                 </span>
                 <span className={cn(
                   "max-w-[58%] shrink-0 truncate text-right text-xs text-muted-foreground",
@@ -234,6 +237,7 @@ function BatchImpactPreview({ preview, accounts }: { preview: BatchPreview; acco
 }
 
 function ResultReceipt({ result, accounts, action }: { result: BulkResult; accounts: Account[]; action: BulkAction }) {
+  const maskedAccountLabel = useMaskedAccountLabel()
   const summary = summarizeResult(result, accounts, action)
   const accountsById = new Map(accounts.map(account => [account.id, account]))
   const labels = getReceiptLabels(action)
@@ -248,7 +252,7 @@ function ResultReceipt({ result, accounts, action }: { result: BulkResult; accou
         <CheckCircle2 className={cn("mt-0.5 h-4 w-4", hasWarnings ? "text-warning" : "text-success")} />
         <div className="min-w-0 flex-1">
           <p className={cn("text-sm font-medium", hasWarnings ? "text-warning" : "text-success")}>
-            Done: {result.success} account{result.success !== 1 ? 's' : ''} processed, {result.failed} failed
+            {bulkDoneLine(result)}
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {summary.added} {labels.added}, {summary.updated} {labels.updated}, {summary.removed} {labels.removed}, {summary.skipped} {labels.skipped}, {summary.protected} {labels.protected}.
@@ -264,7 +268,7 @@ function ResultReceipt({ result, accounts, action }: { result: BulkResult; accou
               <div key={row.id} data-theme-part="panel" className="flex items-center gap-2 rounded-xl border border-border/25 bg-background/35 px-2.5 py-2">
                 {account && <AccountAvatar account={account} size="xs" showStatus={false} />}
                 <div className="min-w-0">
-                  <div className="truncate text-xs font-medium">{row.name}</div>
+                  <div className="truncate text-xs font-medium">{account ? maskedAccountLabel(account) : row.name}</div>
                   <div className={cn(
                     "mt-0.5 truncate text-[11px] text-muted-foreground",
                     row.tone === 'warning' && "text-warning",
@@ -281,11 +285,14 @@ function ResultReceipt({ result, accounts, action }: { result: BulkResult; accou
 
       {result.errors.length > 0 && (
         <ul className="space-y-1 border-t border-border/25 pt-2 text-xs text-destructive">
-          {result.errors.map((entry) => (
-            <li key={`${entry.accountId}-${entry.error}`}>
-              {getAccountName(accounts.find(account => account.id === entry.accountId))}: {entry.error}
-            </li>
-          ))}
+          {result.errors.map((entry) => {
+            const errorAccount = accounts.find(account => account.id === entry.accountId)
+            return (
+              <li key={`${entry.accountId}-${entry.error}`}>
+                {errorAccount ? maskedAccountLabel(errorAccount) : getAccountName(errorAccount)}: {entry.error}
+              </li>
+            )
+          })}
         </ul>
       )}
     </div>
@@ -312,6 +319,7 @@ export function BatchOperationsDialog({
   const bulkProtectAddons = useAccountStore(s => s.bulkProtectAddons)
   const bulkSetHideConfigure = useAccountStore(s => s.bulkSetHideConfigure)
   const profiles = useProfileStore(s => s.profiles)
+  const maskedAccountLabel = useMaskedAccountLabel()
 
     const [action, setAction] = useState<BulkAction>(initialAction ?? 'install-from-library')
   const [actionMenuOpen, setActionMenuOpen] = useState(false)
@@ -352,6 +360,8 @@ export function BatchOperationsDialog({
   const [result, setResult] = useState<BulkResult | null>(null)
   const [progress, setProgress] = useState<BulkProgress | null>(null)
   const cancelRequestedRef = useRef(false)
+  // Shared by every deploy in one run: Cancel here or on any deploy question stops them all.
+  const batchRef = useRef<AbortController | null>(null)
   const isExecuting = progress?.status === 'running' || progress?.status === 'cancelling'
   const actionDefinition = getBulkActionDefinition(action)
   const ActionIcon = actionDefinition.icon
@@ -608,15 +618,9 @@ export function BatchOperationsDialog({
     })
   }
 
-  const appendBulkResult = (target: BulkResult, update: BulkResult) => {
-    target.success += update.success
-    target.failed += update.failed
-    target.errors.push(...update.errors)
-    target.details.push(...update.details)
-  }
-
   const handleCancelOperation = () => {
     cancelRequestedRef.current = true
+    batchRef.current?.abort()
     setProgress(prev => prev && prev.status === 'running' ? { ...prev, status: 'cancelling' } : prev)
   }
 
@@ -627,6 +631,9 @@ export function BatchOperationsDialog({
     setSuccess(false)
     setResult(null)
     cancelRequestedRef.current = false
+    const batch = new AbortController()
+    batch.signal.addEventListener('abort', () => { cancelRequestedRef.current = true })
+    batchRef.current = batch
 
     const accountsData: BulkAccountTarget[] = selectedAccounts.map((a: Account) => ({
       id: a.id,
@@ -660,7 +667,7 @@ export function BatchOperationsDialog({
         selectedInstallProfileId,
         selectedInstallTagName,
         library,
-        bulkApplySavedAddons,
+        bulkApplySavedAddons: (ids, targets, allow) => bulkApplySavedAddons(ids, targets, allow, { batch }),
         bulkRemoveAddons,
         bulkReinstallAddons,
         bulkInstallFromUrls,
@@ -699,12 +706,14 @@ export function BatchOperationsDialog({
         }
 
         const targetAccount = selectedAccounts.find(a => a.id === target.id) || allAccounts.find(a => a.id === target.id)
-        const accountName = targetAccount?.name || targetAccount?.email || `${target.id.substring(0, 8)}...`
+        const accountName = targetAccount ? maskedAccountLabel(targetAccount) : `${target.id.substring(0, 8)}...`
 
         setProgress({ status: 'running', current: completedCount, total: targets.length, accountName })
 
         try {
           const accountResult = await runForAccount(target)
+          // Cancel on a deploy question stops the remaining accounts too.
+          if ((accountResult as BulkResult | undefined)?.cancelled) cancelRequestedRef.current = true
           completedCount++
           setProgress({
             status: cancelRequestedRef.current ? 'cancelling' : 'running',
@@ -950,31 +959,6 @@ export function BatchOperationsDialog({
 
         <div className="min-w-0 space-y-4">
           <Card className="overflow-hidden border-border/45 bg-card/80 shadow-sm">
-          <CardHeader className="pb-3">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-start gap-3">
-                <div data-theme-part="panel" data-theme-tone="status"
-                  className={cn(
-                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border",
-                    actionDefinition.severity === 'danger'
-                      ? "border-destructive/20 bg-destructive/10 text-destructive"
-                      : actionDefinition.severity === 'warning'
-                        ? "border-warning/20 bg-warning/10 text-warning"
-                        : "border-primary/20 bg-primary/12 text-primary",
-                  )}
-                >
-                  <ActionIcon className="h-5 w-5" />
-                </div>
-                <div className="min-w-0">
-                  <CardTitle className="text-lg leading-tight">{actionDefinition.title}</CardTitle>
-                  <p className="mt-1 text-sm text-muted-foreground">{actionDefinition.description}</p>
-                </div>
-              </div>
-              <span data-theme-part="badge" className="w-fit rounded-full border border-border/40 bg-background/70 px-2.5 py-1 text-xs font-semibold text-muted-foreground">
-                {selectedAccounts.length} account{selectedAccounts.length !== 1 ? 's' : ''}
-              </span>
-            </div>
-          </CardHeader>
           <CardContent className="p-4 sm:p-5">
             {action === 'add-saved-addons' && (
               <div className="space-y-3">
@@ -1240,7 +1224,7 @@ export function BatchOperationsDialog({
                                     <span className="text-xs font-bold text-muted-foreground">{(acc.name || acc.email || '?')[0]?.toUpperCase()}</span>
                                 )}
                               </span>
-                              <span>{acc.name !== acc.email ? acc.name : acc.email}</span>
+                              <span>{maskedAccountLabel(acc)}</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -1486,7 +1470,7 @@ export function BatchOperationsDialog({
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-xs text-muted-foreground truncate font-mono">{item.addon.manifest.id}</p>
                               <span data-theme-part="badge" className="text-xs text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded truncate max-w-[120px]">
-                                {item.accounts.length === selectedAccounts.length ? 'All selected' : item.accounts.map(a => a.name || 'Unknown').join(', ')}
+                                {item.accounts.length === selectedAccounts.length ? 'All selected' : item.accounts.map(a => maskedAccountLabel(a)).join(', ')}
                               </span>
                             </div>
                           </div>
@@ -1602,7 +1586,7 @@ export function BatchOperationsDialog({
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-xs text-muted-foreground truncate">v{item.addon.manifest.version}</p>
                               <span data-theme-part="badge" className="text-xs text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded truncate max-w-[120px]">
-                                {item.accounts.length === selectedAccounts.length ? 'All selected' : item.accounts.map(a => a.name || 'Unknown').join(', ')}
+                                {item.accounts.length === selectedAccounts.length ? 'All selected' : item.accounts.map(a => maskedAccountLabel(a)).join(', ')}
                               </span>
                             </div>
                           </div>

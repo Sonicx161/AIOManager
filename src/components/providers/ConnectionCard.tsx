@@ -1,18 +1,11 @@
 import { Switch } from '@/components/ui/switch'
-import { Tooltip } from '@/components/ui/tooltip'
-import { ChevronRight, Loader2 } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { Connection, ConnectionStatus } from '@/types/connection'
-import { displayStatus, tokenExpiry } from '@/lib/connection-format'
-import { PlatformLogo, ConnectionStatusPill, connectionLabel } from './ConnectionPrimitives'
-
-function getHintText(conn: Connection): string {
-    if (conn.platform === 'jellyfin') return 'Media server · Jellyfin API'
-    if (conn.connectionType === 'hydra-outbound') return 'API configuration'
-    if (conn.platform === 'nuvio') return 'Plugins, Profiles, Library & more'
-    return 'Session management'
-}
+import { connectionStatusParts, displayStatus, tokenExpiry } from '@/lib/connection-format'
+import { connectionPresentation, isHealthyConnection } from './connection-state'
+import { ConnectionStatusPill, PlatformLogo, connectionLabel, connectionLogoProduct } from './ConnectionPrimitives'
 
 interface ConnectionCardProps {
     connection: Connection
@@ -33,12 +26,10 @@ export const ConnectionCard = memo(function ConnectionCard({
     connection,
     status,
     lastSync,
-    lastError,
     syncing,
     onEdit,
     onToggle,
     email,
-    contextLabel,
     badge,
     addonCount,
 }: ConnectionCardProps) {
@@ -46,21 +37,30 @@ export const ConnectionCard = memo(function ConnectionCard({
     const expiry = tokenExpiry(connection)
     const display = displayStatus(status, expiry)
 
-    const [enabled, setEnabled] = useState(connection.enabled)
-    useEffect(() => { setEnabled(connection.enabled) }, [connection.enabled])
+    const [enabled, setEnabled] = useState(connection.enabled !== false)
+    useEffect(() => { setEnabled(connection.enabled !== false) }, [connection.enabled])
+
+    const { pill, showLive } = connectionPresentation(enabled, display)
+    const healthy = isHealthyConnection(enabled, display)
 
     const tint =
+        !showLive ? undefined :
         display === 'expired' || display === 'error' ? 'border-destructive/30' :
         display === 'expiring' || display === 'degraded' ? 'border-warning/30' :
         undefined
 
-    const statusTooltip = [
-        lastError ? `Last error: ${lastError}` : null,
-        expiry.label,
-    ].filter(Boolean).join(' \u00b7 ')
+    const statusParts = connectionStatusParts({
+        name,
+        identity: email,
+        addonCount,
+        enabled,
+        platform: connection.platform,
+        lastSync,
+        mediaServerLastCheckedAt: connection.mediaServer?.lastCheckedAt,
+    })
 
     const stop = (e: React.SyntheticEvent) => e.stopPropagation()
-    const hint = getHintText(connection)
+    const stopActivate = (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }
 
     return (
         <div
@@ -70,69 +70,42 @@ export const ConnectionCard = memo(function ConnectionCard({
             onClick={onEdit}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEdit() } }}
             className={cn(
-                'group cursor-pointer rounded-2xl border border-border/40 bg-card text-card-foreground shadow-sm',
-                'transition-[background-color,border-color,box-shadow,transform] duration-200',
-                'hover:-translate-y-0.5 hover:border-border/70 hover:bg-card/95 hover:shadow-md',
+                'group flex w-full cursor-pointer items-center gap-3 rounded-xl border border-border/40 bg-card px-3 py-2 text-left text-card-foreground shadow-sm sm:gap-4 sm:rounded-2xl sm:px-4 sm:py-3.5',
+                'transition-[background-color,border-color] duration-200 hover:border-border/70 hover:bg-card/95',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                 tint
             )}
         >
-            <div className="flex items-start gap-3 p-4">
-                <PlatformLogo platform={connection.platform} className="h-11 w-11 shrink-0 mt-0.5" isHydra={connection.connectionType === 'hydra-outbound'} />
-                <div className="min-w-0 flex-1 space-y-1.5">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-sm font-semibold leading-tight truncate">{name}</span>
-                        {badge}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                        <Tooltip content={statusTooltip || undefined}>
-                            <span className="inline-flex items-center gap-1.5">
-                                <ConnectionStatusPill status={display} />
-                                {syncing && <Loader2 className="h-3 w-3 animate-spin" />}
-                            </span>
-                        </Tooltip>
-                    </div>
-                    {email && (
-                        <p className="text-xs text-muted-foreground truncate">{email}</p>
-                    )}
-                    {contextLabel && <p className="truncate text-xs text-muted-foreground">{contextLabel}</p>}
-                    <p className="line-clamp-1 text-xs text-muted-foreground">
-                        {connection.connectionType === 'hydra-outbound' ? 'Outbound \u00b7 ' : ''}
-                        {addonCount !== undefined ? `${addonCount} account addon${addonCount === 1 ? '' : 's'} \u00b7 ` : ''}
-                        {connection.platform === 'jellyfin'
-                            ? `Verified ${connection.mediaServer?.lastCheckedAt ? timeAgo(connection.mediaServer.lastCheckedAt) : 'never'}`
-                            : `Synced ${lastSync ? timeAgo(lastSync) : 'never'}`}
-                    </p>
-                    {lastError && (
-                        <p className="line-clamp-1 text-xs text-destructive">{lastError}</p>
-                    )}
-                    {(expiry.state === 'expiring' || expiry.state === 'expired') && (
-                        <p className={cn('text-xs font-medium', expiry.state === 'expired' ? 'text-destructive' : 'text-warning')}>
-                            {expiry.label}
-                        </p>
-                    )}
-                    <p className="text-xs text-muted-foreground/60">{hint}</p>
+            <PlatformLogo platform={connection.platform} product={connectionLogoProduct(connection)} className="h-10 w-10 shrink-0 sm:h-11 sm:w-11" isHydra={connection.connectionType === 'hydra-outbound'} />
+            <div className="min-w-0 flex-1">
+                {/* Phone keeps the chips beside the name (the name yields, chips never
+                    shrink) and lets the status wrap onto a second line instead of
+                    truncating. Desktop renders the single truncated line as before. */}
+                <div className="flex min-w-0 flex-wrap max-sm:flex-nowrap items-center gap-x-2 gap-y-0.5">
+                    <span className="min-w-0 truncate text-sm font-semibold leading-tight sm:text-[15px]">{name}</span>
+                    {badge}
                 </div>
-                <div className="flex shrink-0 flex-col items-center gap-1" onClick={stop} onKeyDown={stop}>
-                    <Switch
-                        checked={enabled}
-                        onCheckedChange={() => { setEnabled(v => !v); onToggle() }}
-                        className="scale-90"
-                        aria-label={`${enabled ? 'Disable' : 'Enable'} ${name}`}
-                        disabled={syncing}
-                    />
-                    <ChevronRight className="h-4 w-4 text-muted-foreground/40 mt-1" />
-                </div>
+                <p className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs leading-tight text-muted-foreground sm:mt-1 sm:block sm:truncate sm:text-[13px] sm:leading-snug">
+                    {statusParts.identity && (
+                        <>
+                            <span className="max-sm:min-w-0 max-sm:max-w-full max-sm:truncate">{statusParts.identity}</span>
+                            {/* Full-width zero-height break on phone; the joined separator on desktop. */}
+                            <span aria-hidden="true" className="max-sm:block max-sm:h-0 max-sm:basis-full max-sm:overflow-hidden">{' \u00b7 '}</span>
+                        </>
+                    )}
+                    <span>{statusParts.activity}</span>
+                </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2" onClick={stop} onKeyDown={stopActivate}>
+                {!healthy && <ConnectionStatusPill status={pill} />}
+                <Switch
+                    checked={enabled}
+                    onCheckedChange={() => { setEnabled(v => !v); onToggle() }}
+                    aria-label={`${enabled ? 'Disable' : 'Enable'} ${name}`}
+                    disabled={syncing}
+                />
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/40" />
             </div>
         </div>
     )
 })
-
-function timeAgo(ts: number): string {
-    const m = Math.floor((Date.now() - ts) / 60000)
-    if (m < 1) return 'just now'
-    if (m < 60) return `${m}m ago`
-    const h = Math.floor(m / 60)
-    if (h < 24) return `${h}h ago`
-    return `${Math.floor(h / 24)}d ago`
-}

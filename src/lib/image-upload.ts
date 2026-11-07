@@ -1,3 +1,6 @@
+import { AVATAR_GIF_CAP_BYTES, gifScreenSize } from './avatar-export.ts'
+import { shrinkGifBytesOffMain } from './avatar-gif-worker-client.ts'
+
 const MAGIC_BYTES: Record<string, number[]> = {
     'image/jpeg': [0xFF, 0xD8, 0xFF],
     'image/png': [0x89, 0x50, 0x4E, 0x47],
@@ -50,8 +53,23 @@ export async function processImageFile(file: File, options: ProcessImageOptions)
         if (file.size > MAX_GIF_SIZE) {
             throw new Error(`GIF too large. Max ${formatFileSize(MAX_GIF_SIZE)}, got ${formatFileSize(file.size)}.`)
         }
-        const dataUrl = await fileToDataUrl(file)
-        return { dataUrl, size: file.size, mime: 'image/gif' }
+        // Compliant GIFs (already avatar-sized and under the cap) pass through verbatim
+        // without a worker round trip, matching the shrinker's own fast path.
+        const screen = gifScreenSize(new Uint8Array(buf))
+        if (screen && screen.width <= options.maxDimension && screen.height <= options.maxDimension && buf.byteLength <= AVATAR_GIF_CAP_BYTES) {
+            const dataUrl = await fileToDataUrl(file)
+            return { dataUrl, size: file.size, mime: 'image/gif' }
+        }
+        // Animated GIFs keep their animation, shrunk off the main thread; static or
+        // undecodable GIFs come back null and take the static paths below.
+        const animated = await shrinkGifBytesOffMain(new Uint8Array(buf), options.maxDimension)
+        if (animated) {
+            return { dataUrl: animated.dataUrl, size: animated.size, mime: 'image/gif' }
+        }
+        if (buf.byteLength <= AVATAR_GIF_CAP_BYTES) {
+            const dataUrl = await fileToDataUrl(file)
+            return { dataUrl, size: file.size, mime: 'image/gif' }
+        }
     }
 
     const img = await loadImage(dataUrlFromArrayBuffer(buf, detectedMime))

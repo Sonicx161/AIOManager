@@ -2,18 +2,21 @@ import { Button } from '@/components/ui/button'
 import { motion } from 'framer-motion'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { StatusChip } from '@/components/ui/status-chip'
+import { Tooltip } from '@/components/ui/tooltip'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
-import { TabsContent, TabsTrigger } from '@/components/ui/tabs'
-import { WorkspaceTabs } from '@/components/ui/workspace-tabs'
+import { TabsContent } from '@/components/ui/tabs'
+import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Trash2, ArrowLeft, Loader2, Mail, Lock, Key, RefreshCw, Eye, EyeOff, QrCode, Puzzle, BookOpen, ChevronDown, ChevronRight, Users } from 'lucide-react'
+import { Trash2, ArrowLeft, Loader2, Mail, Lock, Key, RefreshCw, Eye, EyeOff, QrCode, BookOpen, ChevronDown, Users, Power, Zap, TriangleAlert } from 'lucide-react'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useConnectionStore } from '@/store/connectionStore'
-import { useAccountStore, getCachedAuthKey, getEncryptionKey, getAccountEmail } from '@/store/accountStore'
+import { useAccountStore, getCachedAuthKey, getEncryptionKey, getAccountEmail, getStremioConnection } from '@/store/accountStore'
+import { useAuthStore } from '@/store/authStore'
+import { useLibraryCache } from '@/store/libraryCache'
 import { useAddons } from '@/hooks/useAddons'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { stremioClient } from '@/api/stremio-client'
+import { getUserCached } from '@/lib/stremio-user-cache'
 import { loginWithCredentials } from '@/api/auth'
 import { nuvioAuth, realstreamAuth } from '@/api/hydra-providers'
 import { exchangeNuvioQr, pollNuvioQr, startNuvioQr } from '@/api/nuvio-qr'
@@ -24,20 +27,39 @@ import { fetchConnectionToken } from '@/api/connection'
 import { encrypt } from '@/lib/crypto'
 import type { PremiumStatus } from '@/lib/stremio-premium'
 import type { NuvioMemberStatus } from '@/lib/nuvio-tier'
+import { DEFAULT_BASE_URL as NUVIO_DEFAULT_BASE_URL } from '@/lib/drivers/nuvio'
+import { DEFAULT_BASE_URL as REALSTREAM_DEFAULT_BASE_URL } from '@/lib/drivers/realstream'
 import { toast } from '@/hooks/use-toast'
-import { cn } from '@/lib/utils'
+import { cn, maskEmailLevel, maskNameLevel, maskProfileLevel, maskUrlLevel } from '@/lib/utils'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useFailoverStore } from '@/store/failoverStore'
+import { boundRulesRemovalNotice, findDependentRules, isLastStremioLoginRemoval } from '@/lib/rule-removal'
+import { ruleDisplayName } from '@/lib/autopilot-conflicts'
 import type { Connection, ConnectionStatus } from '@/types/connection'
-import { PlatformLogo, ConnectionStatusPill, ConnectionTestButton, ConnectionTestResult, connectionLabel } from './ConnectionPrimitives'
+import type { HydraStatus } from '@/types/provider'
+import { PlatformLogo, connectionLogoProduct, ConnectionStatusPill, ConnectionTestButton, ConnectionTestResult, connectionLabel, type ConnectionTestOutcome, type PillStatus } from './ConnectionPrimitives'
 import { StremioSocialAuth } from '@/components/accounts/StremioSocialAuth'
-import { displayStatus, tokenExpiry, timeAgo } from '@/lib/connection-format'
-import { getPlatformEntry } from '@/lib/platform-registry'
+import { displayStatus, friendlyConnectionError, tokenExpiry, timeAgo } from '@/lib/connection-format'
+import { cumulativeWatchKey, canonicalStremioConnections } from '@/lib/activity-utils'
+import { computeLibraryStats } from '@/lib/connection-library-stats'
 import { NuvioBackupTab, NuvioPluginsTab, NuvioProfilesTab, NuvioLibraryTab, NuvioCollectionsTab, TabToolbar } from './NuvioWorkspace'
-import { ConnectionMembershipTab } from './ConnectionMembershipTab'
+import { NuvioOverview, useNuvioMembership } from './NuvioOverview'
+import { StremioMembershipCard, StremioSupportersBadge, type StremioMembershipState } from './ConnectionMembershipTab'
 import { ProfileRosterRow } from './ProfileRosterRow'
+import { connectionPresentation } from './connection-state'
 import { useUIStore } from '@/store/uiStore'
 import { addStremioProfileAccount, findAccountByAuthKey } from '@/store/account/profileQuickAdd'
 import { getProfileClaims, resolveProfileState, profileClaimKey } from '@/lib/profile-claims'
 import type { ProfileRosterState } from '@/lib/profile-claims'
+import {
+    PopoverFacts, SectionCard, SectionRow, SectionRows, VaultLockedNotice, WorkspaceAction, WorkspaceError, WorkspaceHeader,
+    WorkspaceLoading, WorkspaceMoreMenu, WorkspaceNotice, WorkspaceStatStrip, WorkspaceStatusPill, WorkspaceTabs,
+    type WorkspaceStat, type WorkspaceTabItem,
+} from './workspace'
+import {
+    DEFAULT_WORKSPACE_TAB, backendLabel, needsReauth, resolveWorkspaceTab, sessionState, statusSentence, syncSummary,
+    tokenExpiresIn, workspaceKind, workspaceTabsFor, type SessionState, type WorkspaceKind,
+} from './workspace/workspace-model'
 
 const errMsg = (e: unknown, fallback = 'Try again.') => (e instanceof Error ? e.message : fallback)
 
@@ -48,6 +70,42 @@ function withTimeout<T>(promise: Promise<T>, ms = 10000): Promise<T> {
             setTimeout(() => reject(new Error('Connection test timed out')), ms)
         )
     ])
+}
+
+// One test path per platform, shared by the header, Overview and the Connection tab.
+export async function runConnectionTest(accountId: string, connection: Connection, override?: { apiKey?: string }): Promise<{ message: string; hydra?: HydraStatus; token?: { accessToken: string; expiresAt: number } }> {
+    const kind = workspaceKind(connection)
+    if (kind === 'hydra-outbound') {
+        const { testHydraEndpoint } = await import('@/api/hydra-providers')
+        const baseUrl = connection.driverConfig?.baseUrl
+        const authType = connection.driverConfig?.authType || 'header'
+        const authHeader = connection.driverConfig?.authHeader || 'x-api-key'
+        const authValue = override?.apiKey?.trim() || connection.credentials?.apiKey || ''
+        if (!authValue) throw new Error('No API key set. Enter one to test.')
+        if (!baseUrl) throw new Error('No endpoint URL configured.')
+        const hydra = await withTimeout(testHydraEndpoint(baseUrl, authType, authHeader, authValue), 15000)
+        return { message: 'Outbound endpoint reachable.', hydra }
+    }
+    if (kind === 'stremio') {
+        // Verify THIS connection's session. The account-level key would test the
+        // canonical login and report a secondary's broken session as healthy.
+        const encryptedKey = stremioConnectionAuthKey(connection)
+        if (!encryptedKey) throw new Error('No auth key stored for this connection')
+        const authKey = await getCachedAuthKey(encryptedKey, getEncryptionKey())
+        const user = await withTimeout(stremioClient.getUser(authKey))
+        return { message: user.email ? 'Connection healthy and signed in.' : 'Connection healthy.' }
+    }
+    if (kind === 'nuvio') {
+        const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'nuvio', connection.credentials?.baseUrl))
+        return { message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})`, token }
+    }
+    if (kind === 'realstream') {
+        // Beta's RealStream token path never passes a baseUrl (self-hosted
+        // RealStream is gone), so the test must match it exactly.
+        const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'realstream'))
+        return { message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})`, token }
+    }
+    throw new Error('This connection has no test.')
 }
 
 interface ReauthMethod {
@@ -398,7 +456,6 @@ function StremioCredentialsSection({ accountId, connection }: { accountId: strin
 }
 
 function StremioDangerZoneSection({ accountId, connection }: { accountId: string; connection: Connection }) {
-    const removeConnection = useConnectionStore(s => s.removeConnection)
     const [password, setPassword] = useState('')
     const [showPassword, setShowPassword] = useState(false)
     const [deleting, setDeleting] = useState(false)
@@ -417,7 +474,18 @@ function StremioDangerZoneSection({ accountId, connection }: { accountId: string
             if (!encryptedKey) throw new Error('No auth key stored for this connection')
             const authKey = await getCachedAuthKey(encryptedKey, getEncryptionKey())
             await stremioClient.deleteUser(authKey, password)
-            removeConnection(accountId, connection.id)
+            // The account is gone on the platform, so its rules cannot keep running on this
+            // login: pause them server-first (reversible, same disposition as the removal
+            // flow) before unlinking. A failed pause keeps the connection so it can retry.
+            const { isLastStremioLoginRemoval, findDependentRules } = await import('@/lib/rule-removal')
+            const accountNow = useAccountStore.getState().accounts.find(a => a.id === accountId)
+            if (accountNow && isLastStremioLoginRemoval(accountNow, connection.id)) {
+                const dependent = findDependentRules(useFailoverStore.getState().rules, accountId, connection.id, accountNow)
+                for (const rule of dependent) {
+                    await useFailoverStore.getState().pauseRule(rule.id)
+                }
+            }
+            await useConnectionStore.getState().removeConnection(accountId, connection.id, { autopilotRules: 'paused' })
             toast({ title: 'Stremio account deleted', description: 'The account was permanently deleted from Stremio.' })
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to delete account')
@@ -484,35 +552,183 @@ function StremioDangerZoneSection({ accountId, connection }: { accountId: string
     )
 }
 
-function RemoveConnectionSection({ accountId, connection, onBack }: { accountId: string; connection: Connection; onBack: () => void }) {
-    const removeConnection = useConnectionStore(s => s.removeConnection)
-    const [confirmRemove, setConfirmRemove] = useState(false)
+// Actions for the last-Stremio-login removal: dispose the dependent Autopilot rules on
+// the server first (pause or strict delete), then unlink the login. Any failure keeps
+// the login and reports inline.
+function AutopilotRulesRemovalDialog({ accountId, connection, rules, open, onOpenChange, onBack }: {
+    accountId: string
+    connection: Connection
+    rules: ReadonlyArray<{ id: string; name?: string }>
+    open: boolean
+    onOpenChange: (open: boolean) => void
+    onBack: () => void
+}) {
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const nameLevel = useUIStore(s => s.privacyLevelNames)
+    const [busy, setBusy] = useState<'paused' | 'deleted' | null>(null)
+    const [error, setError] = useState<string | null>(null)
+    const visibleRules = rules.slice(0, 5)
+    const extraCount = rules.length - visibleRules.length
+
+    // Recompute at action time: retries after a partial failure must act on what is
+    // actually still here, not on the snapshot the dialog was opened with.
+    const dependentsNow = () => {
+        const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
+        return account ? findDependentRules(useFailoverStore.getState().rules, accountId, connection.id, account) : []
+    }
+
+    const runRemoval = async (disposition: 'paused' | 'deleted') => {
+        if (busy) return
+        setBusy(disposition)
+        setError(null)
+        try {
+            const failover = useFailoverStore.getState()
+            for (const rule of dependentsNow()) {
+                if (disposition === 'deleted') await failover.removeRule(rule.id, { strict: true })
+                else await failover.pauseRule(rule.id)
+            }
+            await useConnectionStore.getState().removeConnection(accountId, connection.id, { autopilotRules: disposition })
+            onOpenChange(false)
+            onBack()
+        } catch (err) {
+            setError(errMsg(err, 'Could not reach the server, so the login was not removed. Try again.'))
+        } finally {
+            setBusy(null)
+        }
+    }
 
     return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
-            <div className="min-w-0">
-                <p className="text-sm font-semibold">Remove connection</p>
-                <p className="text-xs leading-relaxed text-muted-foreground">
-                    Unlinks this {connectionLabel(connection)} connection from AIOManager. Nothing is deleted on the platform itself.
-                </p>
-            </div>
-            <div className="flex items-center justify-end gap-1.5">
-                {confirmRemove ? (
-                    <>
-                        <Button size="sm" variant="subtle" className="h-8 text-xs" onClick={() => setConfirmRemove(false)}>Cancel</Button>
-                        <Button size="sm" variant="destructive" className="h-8 gap-1.5 text-xs" onClick={() => { removeConnection(accountId, connection.id); onBack() }}>
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Remove Connection
-                        </Button>
-                    </>
-                ) : (
-                    <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive" onClick={() => setConfirmRemove(true)}>
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Remove Connection...
-                    </Button>
+        <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }}>
+            <DialogContent className="max-w-sm sm:max-w-sm" hideClose>
+                <DialogHeader className="items-center pr-0 text-center sm:text-center">
+                    <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-warning/30 bg-warning/10 text-warning">
+                        <TriangleAlert className="h-6 w-6" />
+                    </span>
+                    <DialogTitle>Autopilot rules use this login</DialogTitle>
+                    <DialogDescription className="leading-relaxed">
+                        Removing it leaves these rules without a Stremio login:
+                    </DialogDescription>
+                </DialogHeader>
+                {visibleRules.length > 0 && (
+                    <div className="rounded-2xl border border-border/40 bg-muted/20 p-3">
+                        <ul className="space-y-2">
+                            {visibleRules.map(rule => (
+                                <li key={rule.id} className="flex items-center gap-2 text-sm font-medium">
+                                    <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/50" />
+                                    <span className="truncate">{maskNameLevel(ruleDisplayName(rule), privacyOn ? nameLevel : 0)}</span>
+                                </li>
+                            ))}
+                        </ul>
+                        {extraCount > 0 && <p className="mt-2 text-xs text-muted-foreground">and {extraCount} more</p>}
+                    </div>
                 )}
+                {error && (
+                    <p role="alert" className="flex items-start gap-2 text-xs leading-relaxed text-destructive">
+                        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        {error}
+                    </p>
+                )}
+                <DialogFooter className="gap-2">
+                    <div className="grid w-full grid-cols-2 gap-3 sm:w-auto">
+                        <Button type="button" variant="subtle" disabled={busy !== null} onClick={() => onOpenChange(false)}>
+                            Cancel
+                        </Button>
+                        <Button type="button" data-autofocus="true" disabled={busy !== null} onClick={() => void runRemoval('paused')}>
+                            {busy === 'paused' && <Loader2 className="h-4 w-4 animate-spin" />}
+                            Keep Paused
+                        </Button>
+                    </div>
+                    <Button type="button" variant="ghost" className="text-destructive hover:text-destructive" disabled={busy !== null} onClick={() => void runRemoval('deleted')}>
+                        {busy === 'deleted' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        Delete Rules
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+    )
+}
+
+function RemoveConnectionSection({ accountId, connection, onBack }: { accountId: string; connection: Connection; onBack: () => void }) {
+    const removeConnection = useConnectionStore(s => s.removeConnection)
+    const account = useAccountStore(s => s.accounts.find(a => a.id === accountId))
+    const rules = useFailoverStore(s => s.rules)
+    const [confirmRemove, setConfirmRemove] = useState(false)
+    const [rulesDialogOpen, setRulesDialogOpen] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+
+    // Only removing the LAST Stremio login can strand rules; every other removal keeps
+    // today's inline confirm.
+    const dependentRules = useMemo(
+        () => account && isLastStremioLoginRemoval(account, connection.id)
+            ? findDependentRules(rules, accountId, connection.id, account)
+            : [],
+        [rules, account, accountId, connection.id]
+    )
+    // Any other removal still deletes rules bound to this login (server and local); name them.
+    const boundRulesNotice = useMemo(
+        () => account && !isLastStremioLoginRemoval(account, connection.id)
+            ? boundRulesRemovalNotice(findDependentRules(rules, accountId, connection.id, account))
+            : null,
+        [rules, account, accountId, connection.id]
+    )
+
+    const handleRemove = () => {
+        setError(null)
+        if (dependentRules.length > 0) {
+            setConfirmRemove(false)
+            setRulesDialogOpen(true)
+            return
+        }
+        setConfirmRemove(false)
+        removeConnection(accountId, connection.id)
+            .then(() => onBack())
+            .catch(err => setError(errMsg(err, 'Could not remove the connection. Try again.')))
+    }
+
+    return (
+        <>
+            <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
+                <div className="min-w-0">
+                    <p className="text-sm font-semibold">Remove connection</p>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                        Unlinks this {connectionLabel(connection)} connection from AIOManager. Nothing is deleted on the platform itself.
+                    </p>
+                    {boundRulesNotice && (
+                        <p className="mt-1 text-xs leading-relaxed text-destructive">{boundRulesNotice}</p>
+                    )}
+                </div>
+                {error && (
+                    <p className="flex items-start gap-2 text-xs leading-relaxed text-destructive">
+                        <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        {error}
+                    </p>
+                )}
+                <div className="flex items-center justify-end gap-1.5">
+                    {confirmRemove ? (
+                        <>
+                            <Button size="sm" variant="subtle" className="h-8 text-xs" onClick={() => setConfirmRemove(false)}>Cancel</Button>
+                            <Button size="sm" variant="destructive" className="h-8 gap-1.5 text-xs" onClick={handleRemove}>
+                                <Trash2 className="h-3.5 w-3.5" />
+                                Remove Connection
+                            </Button>
+                        </>
+                    ) : (
+                        <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive" onClick={() => { setError(null); if (dependentRules.length > 0) { setRulesDialogOpen(true) } else { setConfirmRemove(true) } }}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                            Remove Connection...
+                        </Button>
+                    )}
+                </div>
             </div>
-        </div>
+            <AutopilotRulesRemovalDialog
+                accountId={accountId}
+                connection={connection}
+                rules={dependentRules}
+                open={rulesDialogOpen}
+                onOpenChange={setRulesDialogOpen}
+                onBack={onBack}
+            />
+        </>
     )
 }
 
@@ -552,16 +768,18 @@ function NuvioCredentialsSection({ accountId, connection }: { accountId: string;
                 status: 'active',
             })
             const { storeConnectionCredential } = await import('@/api/hydra-providers')
-            storeConnectionCredential(accountId, connection.id, {
-                accessToken: t.accessToken,
-                refreshToken: t.refreshToken,
-                expiresAt: t.expiresAt,
-                profileId: connection.credentials?.profileId || null,
-                baseUrl: bu || null,
-                publishableKey: pk || null,
-            }, 'nuvio').catch(err => {
+            try {
+                await storeConnectionCredential(accountId, connection.id, {
+                    accessToken: t.accessToken,
+                    refreshToken: t.refreshToken,
+                    expiresAt: t.expiresAt,
+                    profileId: connection.credentials?.profileId || null,
+                    baseUrl: bu || null,
+                    publishableKey: pk || null,
+                }, 'nuvio', connection.generation)
+            } catch (err) {
                 toast({ title: 'Saved locally, but the server did not store the new session', description: errMsg(err), variant: 'destructive' })
-            })
+            }
             toast({ title: 'Nuvio session refreshed' })
             setPassword('')
             await useConnectionStore.getState().syncConnections(accountId)
@@ -588,16 +806,18 @@ function NuvioCredentialsSection({ accountId, connection }: { accountId: string;
                 status: 'active',
             })
             const { storeConnectionCredential } = await import('@/api/hydra-providers')
-            storeConnectionCredential(accountId, connection.id, {
-                accessToken: t.accessToken,
-                refreshToken: t.refreshToken,
-                expiresAt: t.expiresAt,
-                profileId: connection.credentials?.profileId || null,
-                baseUrl: storedBaseUrl || null,
-                publishableKey: storedPublishableKey || null,
-            }, 'nuvio').catch(err => {
+            try {
+                await storeConnectionCredential(accountId, connection.id, {
+                    accessToken: t.accessToken,
+                    refreshToken: t.refreshToken,
+                    expiresAt: t.expiresAt,
+                    profileId: connection.credentials?.profileId || null,
+                    baseUrl: storedBaseUrl || null,
+                    publishableKey: storedPublishableKey || null,
+                }, 'nuvio', connection.generation)
+            } catch (err) {
                 toast({ title: 'Saved locally, but the server did not store the new session', description: errMsg(err), variant: 'destructive' })
-            })
+            }
             toast({ title: 'Nuvio session refreshed' })
             await useConnectionStore.getState().syncConnections(accountId)
         } catch (err) {
@@ -611,8 +831,8 @@ function NuvioCredentialsSection({ accountId, connection }: { accountId: string;
         setTesting(true)
         setTestResult(null)
         try {
-            const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'nuvio', connection.credentials?.baseUrl))
-            setTestResult({ ok: true, message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})` })
+            const { message } = await runConnectionTest(accountId, connection)
+            setTestResult({ ok: true, message })
             toast({ title: 'Connection healthy' })
         } catch (err) {
             const message = errMsg(err, 'Session could not be verified. Try re-authenticating.')
@@ -752,16 +972,18 @@ function RealStreamCredentialsSection({ accountId, connection }: { accountId: st
             }
             await updateConnection(accountId, connection.id, { credentials, status: 'active' })
             const { storeConnectionCredential } = await import('@/api/hydra-providers')
-            storeConnectionCredential(accountId, connection.id, {
-                accessToken: t.accessToken,
-                userId: t.userId || null,
-                expiresAt: t.expiresAt,
-                baseUrl: connection.credentials?.baseUrl || null,
-                email,
-                password,
-            }, 'realstream').catch(err => {
+            try {
+                await storeConnectionCredential(accountId, connection.id, {
+                    accessToken: t.accessToken,
+                    userId: t.userId || null,
+                    expiresAt: t.expiresAt,
+                    baseUrl: connection.credentials?.baseUrl || null,
+                    email,
+                    password,
+                }, 'realstream', connection.generation)
+            } catch (err) {
                 toast({ title: 'Saved locally, but the server did not store the new session', description: errMsg(err), variant: 'destructive' })
-            })
+            }
             toast({ title: 'RealStream session refreshed' })
             setPassword('')
             await useConnectionStore.getState().syncConnections(accountId)
@@ -776,10 +998,8 @@ function RealStreamCredentialsSection({ accountId, connection }: { accountId: st
         setTesting(true)
         setTestResult(null)
         try {
-            // Beta's RealStream token path never passes a baseUrl (self-hosted
-            // RealStream is gone), so the test must match it exactly.
-            const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'realstream'))
-            setTestResult({ ok: true, message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})` })
+            const { message } = await runConnectionTest(accountId, connection)
+            setTestResult({ ok: true, message })
             toast({ title: 'Connection healthy' })
         } catch (err) {
             const message = errMsg(err, 'Session could not be verified. Try re-authenticating.')
@@ -884,11 +1104,14 @@ function HydraCredentialsSection({ accountId, connection }: { accountId: string;
                 authHeader: connection.driverConfig?.authHeader,
                 enabled: connection.enabled,
             }
-            storeConnectionCredential(accountId, connection.id, bundle, 'hydra').catch(err => {
+            try {
+                await storeConnectionCredential(accountId, connection.id, bundle, 'hydra', connection.generation)
+            } catch (err) {
                 toast({ title: 'Saved locally, but the server did not store the key', description: errMsg(err), variant: 'destructive' })
-            })
+            }
             toast({ title: 'API key updated' })
             setNewApiKey('')
+            setTestResult(null)
             await useConnectionStore.getState().syncConnections(accountId)
         } catch (err) {
             toast({ title: 'Update failed', description: errMsg(err), variant: 'destructive' })
@@ -901,15 +1124,8 @@ function HydraCredentialsSection({ accountId, connection }: { accountId: string;
         setTesting(true)
         setTestResult(null)
         try {
-            const { testHydraEndpoint } = await import('@/api/hydra-providers')
-            const baseUrl = connection.driverConfig?.baseUrl
-            const authType = connection.driverConfig?.authType || 'header'
-            const authHeader = connection.driverConfig?.authHeader || 'x-api-key'
-            const authValue = newApiKey.trim() || connection.credentials?.apiKey || ''
-            if (!authValue) throw new Error('No API key set. Enter one to test.')
-            if (!baseUrl) throw new Error('No endpoint URL configured.')
-            await withTimeout(testHydraEndpoint(baseUrl, authType, authHeader, authValue), 15000)
-            setTestResult({ ok: true, message: 'Outbound endpoint reachable.' })
+            const { message } = await runConnectionTest(accountId, connection, { apiKey: newApiKey })
+            setTestResult({ ok: true, message })
             toast({ title: 'Connection healthy' })
         } catch (err) {
             const message = errMsg(err, 'Endpoint test failed. Check the API key and target server.')
@@ -943,7 +1159,7 @@ function HydraCredentialsSection({ accountId, connection }: { accountId: string;
                                         type={showKey ? 'text' : 'password'}
                                         placeholder="Paste a new API key"
                                         value={newApiKey}
-                                        onChange={e => setNewApiKey(e.target.value)}
+                                        onChange={e => { setNewApiKey(e.target.value); setTestResult(null) }}
                                         className="pl-10 pr-9"
                                         onKeyDown={e => { if (e.key === 'Enter' && newApiKey.trim()) handleUpdate() }}
                                     />
@@ -992,11 +1208,13 @@ function SupportersProfilesRoster({ accountId, connection }: { accountId: string
         setError(null)
         try {
             // Supporters profiles belong to the login being edited; the canonical key
-            // would list a different user's profiles on a secondary card.
+            // would list a different user's profiles on a secondary card. The shared
+            // GetUser cache is keyed per auth key, so a secondary never sees the
+            // canonical login's cached user.
             const encryptedKey = stremioConnectionAuthKey(connection)
             if (!encryptedKey) throw new Error('No auth key stored for this connection')
             const authKey = await getCachedAuthKey(encryptedKey, getEncryptionKey())
-            const user = await stremioClient.getUser(authKey)
+            const user = await getUserCached(authKey, key => stremioClient.getUser(key))
             selfUserId.current = user._id || ''
             const userProfiles = user.premiumPrefs?.userProfiles
             if (userProfiles) {
@@ -1220,166 +1438,47 @@ function SupportersProfilesRoster({ accountId, connection }: { accountId: string
     )
 }
 
-function ConnectionAddonsSection({ accountId, platform }: { accountId: string; platform: string }) {
-    const { addons } = useAddons(accountId)
-    const platformName = getPlatformEntry(platform)?.name || platform
-
-    // This list is AIOManager's recorded collection for the account. It is not a
-    // fresh read from the platform (RealStream especially exposes no live addon
-    // read here), so the note says what the rows actually are.
-    const note = (
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-            This is the account's recorded AIOManager collection. Check {platformName} to confirm its current addons.
-        </p>
-    )
-
-    if (addons.length === 0) {
-        return (
-            <div className="space-y-2">
-                {note}
-                <EmptyState
-                    icon={<Puzzle className="h-5 w-5" />}
-                    title="No addons recorded"
-                    description="Addons recorded for this account will appear here."
-                />
-            </div>
-        )
-    }
-
-    return (
-        <div className="space-y-1.5">
-            {note}
-            {addons.map((addon, i) => {
-                const name = addon.metadata?.customName || addon.transportName || addon.manifest.name || 'Unknown addon'
-                const logo = addon.metadata?.customLogo || addon.manifest.logo
-                const enabled = addon.flags?.enabled !== false
-                return (
-                    <div
-                        key={`${addon.transportUrl}-${i}`}
-                        data-theme-part="panel"
-                        className="flex items-center gap-3 rounded-2xl border border-border/40 bg-card shadow-sm px-3.5 py-2.5"
-                    >
-                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/60 overflow-hidden">
-                            {logo ? (
-                                <img
-                                    src={logo}
-                                    alt=""
-                                    className="h-full w-full object-contain"
-                                    onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden') }}
-                                />
-                            ) : null}
-                            <Puzzle className={cn('h-3.5 w-3.5 text-muted-foreground', logo && 'hidden')} />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{name}</p>
-                            {addon.manifest.version && (
-                                <p className="truncate text-[11px] text-muted-foreground/70 mt-0.5">v{addon.manifest.version}</p>
-                            )}
-                        </div>
-                        <span
-                            data-theme-part="badge"
-                            className={cn(
-                                'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold',
-                                enabled ? 'bg-success/15 text-success' : 'bg-muted text-muted-foreground'
-                            )}
-                        >
-                            {enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                    </div>
-                )
-            })}
-        </div>
-    )
+/** Undated saved-state rows are excluded from watch time; say so when they exist. */
+export function stremioLibraryWatchTimeSub(entries: ReadonlyArray<{ backfill?: boolean; importedSavedState?: boolean }>): string | undefined {
+    const undated = entries.filter(entry => entry.backfill || entry.importedSavedState).length
+    return undated > 0 ? `Excludes ${undated.toLocaleString()} undated saved ${undated === 1 ? 'row' : 'rows'}` : undefined
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
-    return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 px-3.5 py-3 shadow-sm">
-            <p className="text-lg font-semibold leading-tight">{value}</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5">{label}</p>
-        </div>
-    )
-}
-
-function HeaderStat({ label, value, isError, wide }: { label: string; value: string; isError?: boolean; wide?: boolean }) {
-    return (
-        <div className={cn('min-w-0', wide && 'col-span-2 sm:col-span-4')}>
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
-            <p className={cn('mt-0.5 text-xs font-medium', wide ? 'break-words' : 'truncate', isError ? 'text-destructive' : 'text-foreground/80')}>{value}</p>
-        </div>
-    )
-}
-
-// The same four facts render on every platform's detail surface, so no connection reads
-// thinner than the others. The Session entry is the platform's honest re-auth state:
-// a stored Stremio auth key proves the key is saved, not that Stremio is reachable,
-// so the label never claims live presence.
-function sessionState(connection: Connection, display: string): string {
-    // Hydra-outbound connections can carry a platform-like slug (e.g. a target
-    // named "Nuvio"), so the outbound check must come before platform checks
-    // or an outbound connection would show the slug platform's auth expectations.
-    if (connection.connectionType === 'hydra-outbound') return 'Static API key'
-    if (connection.platform === 'stremio') {
-        if (display === 'expired') return 'Re-auth required'
-        return connection.credentials?.authKey ? 'Auth key stored' : 'Sign in required'
-    }
-    if (connection.platform === 'nuvio') {
-        // A stored access token only proves a session is saved. It does not by
-        // itself prove refresh works, so the label never claims auto-refresh;
-        // an expired or failing session says so instead.
-        if (display === 'expired' || display === 'error') return 'Re-auth required'
-        return connection.credentials?.accessToken ? 'Session stored' : 'Sign in required'
-    }
-    if (connection.platform === 'realstream') {
-        if (display === 'expired' || display === 'error') return 'Re-auth required'
-        return connection.credentials?.password ? 'Silent re-auth ready' : 'Manual re-auth'
-    }
-    return connection.credentials?.accessToken ? 'Session stored' : 'No session'
-}
-
-function StremioLibrarySection({ accountId }: { accountId: string }) {
-    const { history: accountHistory, loading } = useWatchHistory(accountId)
+function StremioLibrarySection({ accountId, error }: { accountId: string; error?: string | null }) {
+    // Jellyfin rows are filtered out below, so this view never pays for
+    // Jellyfin media reads or archive walks.
+    const { history: accountHistory, loading } = useWatchHistory(accountId, true, { media: false })
     const history = useMemo(() => accountHistory.filter(entry => !entry.source || entry.source === 'stremio'), [accountHistory])
+    const accounts = useAccountStore(s => s.accounts)
+    const canonical = useMemo(() => canonicalStremioConnections(accounts), [accounts])
 
-    const stats = useMemo(() => {
-        let movies = 0
-        let episodes = 0
-        let watchMs = 0
-        const byShow = new Map<string, number>()
-        for (const entry of history) {
-            const isSeries = entry.type === 'series' || entry.type === 'anime' || entry.type === 'episode'
-            if (isSeries) {
-                episodes++
-                if (entry.name) byShow.set(entry.name, (byShow.get(entry.name) || 0) + 1)
-            } else {
-                movies++
-            }
-            if (entry.duration > 0 && entry.progress > 0) {
-                watchMs += (entry.duration * Math.min(entry.progress, 100)) / 100
-            }
-        }
-        const topShows = Array.from(byShow.entries())
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 5)
-        return { movies, episodes, watchMs, topShows }
-    }, [history])
-
-    if (loading && history.length === 0) {
-        return (
-            <div className="flex items-center justify-center gap-2 py-16 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Loading…
-            </div>
-        )
+    const stats = useMemo(() => computeLibraryStats(history, entry => cumulativeWatchKey(entry, canonical)), [history, canonical])
+    const unlocked = useAuthStore(s => Boolean(s.encryptionKey))
+    useEffect(() => {
+        if (!unlocked) return
+        void useLibraryCache.getState().ensureLoaded(useAccountStore.getState().accounts)
+    }, [unlocked, accountId])
+    const retry = () => {
+        const cache = useLibraryCache.getState()
+        cache.revalidate([accountId])
+        void cache.ensureLoaded(useAccountStore.getState().accounts)
     }
+    const errorBanner = error ? (
+        <WorkspaceError title="Could not refresh this library" message={`${error} Showing what AIOManager last read.`} onRetry={retry} />
+    ) : null
+
+    if (loading && history.length === 0) return <WorkspaceLoading />
 
     if (history.length === 0) {
         return (
-            <EmptyState
-                icon={<BookOpen className="h-5 w-5" />}
-                title="No watch history"
-                description="Watch activity tracked for this account will appear here."
-            />
+            <div className="space-y-3">
+                {errorBanner}
+                <EmptyState
+                    icon={<BookOpen className="h-5 w-5" />}
+                    title="No watch history"
+                    description="Watch activity tracked for this account will appear here."
+                />
+            </div>
         )
     }
 
@@ -1388,33 +1487,151 @@ function StremioLibrarySection({ accountId }: { accountId: string }) {
 
     return (
         <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <StatCard label="Watched items" value={String(history.length)} />
-                <StatCard label="Movies" value={String(stats.movies)} />
-                <StatCard label="Episodes" value={String(stats.episodes)} />
-                <StatCard label="Watch time" value={watchTime} />
-            </div>
+            {errorBanner}
+            <WorkspaceStatStrip bordered stats={[
+                { label: 'Watched items', value: String(history.length) },
+                { label: 'Movies', value: String(stats.movies) },
+                { label: 'Episodes', value: String(stats.episodes) },
+                { label: 'Watch time', value: watchTime, sub: stremioLibraryWatchTimeSub(history), title: 'Dated watches only; imported saved state has no watch times.' },
+            ]} />
             {stats.topShows.length > 0 && (
-                <div className="space-y-1.5">
-                    <p className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">Most watched</p>
-                    {stats.topShows.map(([name, count], i) => (
-                        <div
-                            key={name}
-                            data-theme-part="panel"
-                            className="flex items-center gap-3 rounded-2xl border border-border/40 bg-card shadow-sm px-3.5 py-2.5"
-                        >
-                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-[11px] font-bold text-muted-foreground">
-                                {i + 1}
-                            </span>
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">{name}</span>
-                            <span className="shrink-0 text-[11px] text-muted-foreground">
-                                {count} episode{count === 1 ? '' : 's'}
-                            </span>
-                        </div>
-                    ))}
-                </div>
+                <SectionCard title="Most watched">
+                    <div className="space-y-1.5">
+                        {stats.topShows.map(({ itemId, name, episodes: count }, i) => (
+                            <div key={itemId} className="flex min-w-0 items-center gap-3">
+                                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-xs font-bold text-muted-foreground">{i + 1}</span>
+                                <span className="min-w-0 flex-1 truncate text-sm font-medium">{name}</span>
+                                <span className="shrink-0 text-xs text-muted-foreground">{count} episode{count === 1 ? '' : 's'}</span>
+                            </div>
+                        ))}
+                    </div>
+                </SectionCard>
             )}
         </div>
+    )
+}
+
+function ConnectionHealthCard({ kind, pill, showLive, sync, failures, lastError, testing, testResult, onTest, testDisabledReason }: {
+    kind: WorkspaceKind
+    pill: PillStatus
+    showLive: boolean
+    sync: { value: string; sub: string }
+    failures?: number
+    lastError?: string | null
+    testing: boolean
+    testResult: ConnectionTestOutcome | null
+    onTest?: () => void
+    testDisabledReason?: string
+}) {
+    return (
+        <SectionCard
+            title="Connection health"
+            description="Latest test and sync result for this connection."
+            action={onTest ? (
+                <Tooltip content={testDisabledReason} disabled={!testDisabledReason}>
+                    <span><ConnectionTestButton testing={testing} disabled={!!testDisabledReason} onClick={onTest} /></span>
+                </Tooltip>
+            ) : undefined}
+        >
+            <SectionRows>
+                <SectionRow label="Status" value={<span className="inline-flex flex-wrap items-center gap-2"><ConnectionStatusPill status={pill} /><span className="font-normal text-muted-foreground">{statusSentence(pill, kind)}</span></span>} />
+                <SectionRow label="Last sync" value={sync.value} tone={showLive ? undefined : 'muted'} />
+                {showLive && failures != null && <SectionRow label="Failures in a row" value={String(failures)} tone={failures > 0 ? 'warning' : undefined} />}
+                <SectionRow label="Last error" value={!showLive ? 'Not checked while paused' : lastError || 'None'} tone={showLive && lastError ? 'destructive' : 'muted'} />
+            </SectionRows>
+            <ConnectionTestResult result={testResult} />
+        </SectionCard>
+    )
+}
+
+function HydraEndpointCard({ connection, status, onTest, testing }: { connection: Connection; status: HydraStatus | null; onTest?: () => void; testing: boolean }) {
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const urlLevel = useUIStore(s => s.privacyLevelUrls)
+    const config = connection.driverConfig
+    return (
+        <SectionCard title="Endpoint" description="The Hydra server AIOManager pushes this account's addons to.">
+            <SectionRows>
+                <SectionRow label="Name" value={config?.name || connection.displayName || 'Unnamed'} />
+                <SectionRow label="URL" value={config?.baseUrl ? maskUrlLevel(config.baseUrl, privacyOn ? urlLevel : 0) : 'Not set'} mono tone={config?.baseUrl ? undefined : 'muted'} />
+                <SectionRow label="Auth" value={hydraAuthLabel(connection)} />
+                <SectionRow
+                    label="Server reports"
+                    value={status ? `${status.name || 'Hydra server'}${status.version ? ` v${status.version}` : ''}` : 'Run a test to read it'}
+                    tone={status ? undefined : 'muted'}
+                    aside={!status && onTest ? <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={onTest} disabled={testing}>Test</Button> : undefined}
+                />
+                {status && status.capabilities?.length > 0 && <SectionRow label="Capabilities" value={status.capabilities.join(', ')} />}
+            </SectionRows>
+        </SectionCard>
+    )
+}
+
+function hydraAuthLabel(connection: Connection): string {
+    const config = connection.driverConfig
+    if (config?.authType === 'bearer') return 'Bearer token'
+    if (config?.authType === 'basic') return 'Basic auth'
+    if (config?.authType === 'none') return 'None'
+    return `API key in ${config?.authHeader || 'x-api-key'}`
+}
+
+// The server owns Nuvio and RealStream token refresh, so the copy saved here goes stale.
+// Mirror the server's current token so the workspace never shows a refreshed session as expired.
+async function mirrorServerToken(accountId: string, connection: Connection, token: { accessToken: string; expiresAt: number }): Promise<void> {
+    if (!token.accessToken || String(token.expiresAt) === String(connection.credentials?.expiresAt)) return
+    await useConnectionStore.getState().updateConnection(accountId, connection.id, {
+        credentials: { ...connection.credentials, accessToken: token.accessToken, expiresAt: String(token.expiresAt) },
+    })
+}
+
+function useServerTokenMirror(accountId: string, connection: Connection, active: boolean) {
+    const expired = tokenExpiresIn(connection.credentials?.expiresAt, Date.now())?.expired === true
+    const checked = useRef<string | null>(null)
+    useEffect(() => {
+        if (!active || !expired || checked.current === connection.id) return
+        checked.current = connection.id
+        const platform = workspaceKind(connection) === 'nuvio' ? 'nuvio' : 'realstream'
+        const baseUrl = platform === 'nuvio' ? connection.credentials?.baseUrl : undefined
+        fetchConnectionToken(accountId, connection.id, platform, baseUrl)
+            .then(token => mirrorServerToken(accountId, connection, token))
+            .catch(() => {})
+    }, [accountId, connection, active, expired])
+}
+
+function RealStreamSessionCard({ connection, session, onReauth }: { connection: Connection; session: SessionState; onReauth: () => void }) {
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const emailLevel = useUIStore(s => s.privacyLevelEmail)
+    const email = connection.credentials?.email
+    const expires = tokenExpiresIn(connection.credentials?.expiresAt, Date.now())
+    const backend = backendLabel(connection.credentials?.baseUrl, REALSTREAM_DEFAULT_BASE_URL)
+    return (
+        <SectionCard
+            title="Session"
+            description="The server refreshes RealStream sessions when it can."
+            footer={<Button variant="outline" size="sm" className="h-11 gap-1.5 text-xs sm:h-8" onClick={onReauth}><Key className="h-3.5 w-3.5" />Re-authenticate</Button>}
+        >
+            <SectionRows>
+                <SectionRow label="Signed in as" value={email ? maskEmailLevel(email, privacyOn ? emailLevel : 0) : 'Not recorded'} tone={email ? undefined : 'muted'} />
+                <SectionRow label="Token" value={expires?.label || 'No expiry recorded'} tone={expires?.expired ? 'destructive' : expires ? undefined : 'muted'} />
+                <SectionRow label="Backend" value={backend.host} mono />
+                <SectionRow label="Re-auth" value={session === 'Silent re-auth ready' ? 'Silent, with the saved password' : session} tone={needsReauth(session) ? 'destructive' : undefined} />
+            </SectionRows>
+        </SectionCard>
+    )
+}
+
+function StremioLoginCard({ connection, email }: { connection: Connection; email?: string }) {
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const emailLevel = useUIStore(s => s.privacyLevelEmail)
+    const profileLevel = useUIStore(s => s.privacyLevelProfiles)
+    const profile = connection.credentials?.stremioProfileName
+    return (
+        <SectionCard title="This Stremio login" description="Each Stremio login on this account has its own session.">
+            <SectionRows>
+                <SectionRow label="Signed in as" value={email ? maskEmailLevel(email, privacyOn ? emailLevel : 0) : 'Not recorded'} tone={email ? undefined : 'muted'} />
+                {profile && <SectionRow label="Profile" value={maskProfileLevel(profile, privacyOn ? profileLevel : 0)} />}
+                <SectionRow label="Auth key" value={connection.credentials?.authKey ? 'Stored, encrypted in your vault' : 'Not stored'} tone={connection.credentials?.authKey ? undefined : 'destructive'} />
+            </SectionRows>
+        </SectionCard>
     )
 }
 
@@ -1425,8 +1642,11 @@ export function ConnectionEditPanel({
     lastError,
     lastSync,
     premium,
+    premiumState = 'ready',
+    onRefreshPremium,
     nuvioMember,
     onBack,
+    onShowInstalledAddons,
 }: {
     accountId: string
     connection: Connection
@@ -1434,42 +1654,65 @@ export function ConnectionEditPanel({
     lastError?: string | null
     lastSync?: number
     premium?: PremiumStatus
+    premiumState?: StremioMembershipState
+    onRefreshPremium?: () => void
     nuvioMember?: NuvioMemberStatus
     onBack: () => void
+    onShowInstalledAddons?: () => void
 }) {
     const account = useAccountStore(s => s.accounts.find(a => a.id === accountId))
     const { addons } = useAddons(accountId)
+    const vaultLocked = !useAuthStore(s => s.encryptionKey)
+    const syncing = useConnectionStore(s => s.isSyncing === accountId)
+    const failures = useConnectionStore(s => s.connectionStates[accountId]?.[connection.id]?.consecutiveFailures)
+    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
+    const emailLevel = useUIStore(s => s.privacyLevelEmail)
+    const urlLevel = useUIStore(s => s.privacyLevelUrls)
+    const profileLevel = useUIStore(s => s.privacyLevelProfiles)
+
+    const kind = workspaceKind(connection)
+    const isStremio = kind === 'stremio'
+    const isNuvio = kind === 'nuvio'
+    const isRealStream = kind === 'realstream'
+    const isHydra = kind === 'hydra-outbound'
+    const enabled = connection.enabled !== false
+    const isPrimaryStremio = isStremio && !!account && getStremioConnection(account)?.id === connection.id
+
+    const [tabState, setTab] = useState(DEFAULT_WORKSPACE_TAB)
     const [testing, setTesting] = useState(false)
-    const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
-    const [tab, setTab] = useState('membership')
-    const isHydra = connection.connectionType === 'hydra-outbound'
-    const isStremio = connection.platform === 'stremio'
-    const isNuvio = connection.platform === 'nuvio'
-    const isRealStream = connection.platform === 'realstream'
-    const showTabs = isStremio || isNuvio || isRealStream
+    const [testResult, setTestResult] = useState<ConnectionTestOutcome | null>(null)
+    const [hydraStatus, setHydraStatus] = useState<HydraStatus | null>(null)
+
     const name = connectionLabel(connection)
     const expiry = tokenExpiry(connection)
     const display = displayStatus(status, expiry)
+    const { pill, showLive } = connectionPresentation(enabled, display)
     const session = sessionState(connection, display)
-    const needsAttention = !!lastError || session === 'Re-auth required' || session === 'Sign in required'
+    const reauth = showLive && needsReauth(session)
+    const sync = syncSummary(enabled, lastSync, ts => timeAgo(ts))
+    const liveError = showLive ? friendlyConnectionError(lastError) || null : null
+    const membership = useNuvioMembership(accountId, connection, nuvioMember, isNuvio && enabled)
+    useServerTokenMirror(accountId, connection, (isNuvio || isRealStream) && enabled)
 
-    const handleTestConnection = async () => {
-        if (!account) return
+    const testDisabledReason = isStremio && vaultLocked ? 'Unlock your vault to test this login.'
+        : isStremio && !connection.credentials?.authKey ? 'Sign in first.'
+            : kind === 'other' ? 'This connection has no test.' : undefined
+
+    const tabs: WorkspaceTabItem[] = workspaceTabsFor(kind, { supportersProfiles: isStremio && premium?.active === true })
+    const tab = resolveWorkspaceTab(tabs, tabState)
+
+    const handleTest = async () => {
+        if (testing || testDisabledReason) return
         setTesting(true)
         setTestResult(null)
         try {
-            // Verify THIS connection's session. The account-level key would test the
-            // canonical login and report a secondary's broken session as healthy.
-            const encryptedKey = stremioConnectionAuthKey(connection)
-            if (!encryptedKey) {
-                throw new Error('No auth key stored for this connection')
-            }
-            const authKey = await getCachedAuthKey(encryptedKey, getEncryptionKey())
-            const user = await withTimeout(stremioClient.getUser(authKey))
-            setTestResult({ ok: true, message: `Connection healthy${user.email ? ` \u2014 ${user.email}` : ''}` })
+            const result = await runConnectionTest(accountId, connection)
+            if (result.hydra) setHydraStatus(result.hydra)
+            if (result.token) await mirrorServerToken(accountId, connection, result.token)
+            setTestResult({ ok: true, message: result.message })
             toast({ title: 'Connection healthy' })
         } catch (err) {
-            const message = err instanceof Error ? err.message : 'Connection test failed'
+            const message = errMsg(err, 'Connection test failed')
             setTestResult({ ok: false, message })
             toast({ title: 'Connection test failed', description: message, variant: 'destructive' })
         } finally {
@@ -1477,159 +1720,218 @@ export function ConnectionEditPanel({
         }
     }
 
+    const handleSync = () => {
+        if (!enabled || syncing) return
+        useConnectionStore.getState().syncConnections(accountId).catch(err => {
+            toast({ title: 'Sync failed', description: errMsg(err), variant: 'destructive' })
+        })
+    }
+
+    const toggleEnabled = () => {
+        useConnectionStore.getState().toggleConnection(accountId, connection.id).catch(err => {
+            toast({ title: 'Could not change this connection', description: errMsg(err), variant: 'destructive' })
+        })
+    }
+
+    const email = connection.credentials?.email || (isPrimaryStremio && account ? getAccountEmail(account) : undefined)
+    const maskedEmail = email ? maskEmailLevel(email, privacyOn ? emailLevel : 0) : undefined
+    const identityParts: string[] = []
+    if (isHydra) {
+        if (connection.driverConfig?.baseUrl) identityParts.push(maskUrlLevel(connection.driverConfig.baseUrl, privacyOn ? urlLevel : 0))
+        identityParts.push('Outbound Hydra target')
+    } else {
+        if (maskedEmail) identityParts.push(maskedEmail)
+        if (isStremio && connection.credentials?.stremioProfileName) identityParts.push(maskProfileLevel(connection.credentials.stremioProfileName, privacyOn ? profileLevel : 0))
+        if (isNuvio) identityParts.push(backendLabel(connection.credentials?.baseUrl, NUVIO_DEFAULT_BASE_URL).host)
+        if (isRealStream) identityParts.push(backendLabel(connection.credentials?.baseUrl, REALSTREAM_DEFAULT_BASE_URL).host)
+    }
+
+    const addonsStat: WorkspaceStat = {
+        label: 'Account addons',
+        value: String(addons.length),
+        sub: 'Recorded in AIOManager',
+        onClick: onShowInstalledAddons,
+        actionLabel: 'Show installed addons',
+    }
+    const syncStat: WorkspaceStat = { label: 'Last sync', value: sync.value, sub: sync.sub, tone: enabled ? undefined : 'muted', title: sync.sub }
+    const sessionSub = isRealStream ? tokenExpiresIn(connection.credentials?.expiresAt, Date.now())?.label
+        : isNuvio ? 'Refreshed by the server'
+            : expiry.label || undefined
+    const sessionStat: WorkspaceStat = { label: 'Session', value: session, sub: sessionSub, tone: reauth ? 'destructive' : undefined }
+    const errorStat: WorkspaceStat = { label: 'Last error', value: !showLive ? 'Not checked' : liveError || 'None', tone: liveError ? 'destructive' : 'muted', title: liveError || undefined, sub: liveError ? 'Details in the status menu' : undefined }
+    // The Overview Membership card owns the tier display; a header copy would say it twice.
+    const stats: WorkspaceStat[] = isNuvio
+        ? [addonsStat, syncStat, sessionStat]
+        : isHydra
+            ? [addonsStat, syncStat, { label: 'Auth', value: hydraAuthLabel(connection) }, errorStat]
+            : [addonsStat, syncStat, sessionStat, errorStat]
+
+    const statusPopover = (
+        <>
+            <div className="space-y-1">
+                <p className="truncate text-sm font-semibold">{name}</p>
+                <p className="text-xs text-muted-foreground">{statusSentence(pill, kind)}</p>
+            </div>
+            <PopoverFacts facts={[
+                { label: 'Last sync', value: sync.value },
+                { label: 'Session', value: session, tone: reauth ? 'destructive' : undefined },
+                ...(showLive && expiry.label ? [{ label: 'Token', value: expiry.label, tone: expiry.state === 'expired' ? 'destructive' as const : expiry.state === 'expiring' ? 'warning' as const : undefined }] : []),
+                ...(liveError ? [{ label: 'Last error', value: liveError, tone: 'destructive' as const }] : []),
+                ...(testResult ? [{ label: 'Last test', value: testResult.message, tone: testResult.ok ? undefined : 'destructive' as const }] : []),
+            ]} />
+            <div className="flex flex-wrap gap-2">
+                {!enabled ? (
+                    <Button size="sm" className="h-9 flex-1 text-xs" data-close-popover onClick={toggleEnabled}><Power className="h-3.5 w-3.5" />Enable</Button>
+                ) : reauth ? (
+                    <Button size="sm" className="h-9 flex-1 text-xs" data-close-popover onClick={() => setTab('connection')}><Key className="h-3.5 w-3.5" />Re-authenticate</Button>
+                ) : (
+                    <Button size="sm" variant="outline" className="h-9 flex-1 text-xs" onClick={() => void handleTest()} disabled={testing || !!testDisabledReason}>
+                        {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                        {testing ? 'Testing...' : 'Test'}
+                    </Button>
+                )}
+                <Button size="sm" variant="ghost" className="h-9 text-xs" data-close-popover onClick={() => setTab('connection')}>Connection settings</Button>
+            </div>
+        </>
+    )
+
+    const notice = !enabled ? (
+        <WorkspaceNotice icon={<Power className="h-4 w-4" />} title="Connection paused" tone="muted" action={<WorkspaceAction onClick={toggleEnabled}>Enable</WorkspaceAction>}>
+            AIOManager skips it during sync. Nothing changes on {name}.
+        </WorkspaceNotice>
+    ) : reauth ? (
+        <WorkspaceNotice icon={<Key className="h-4 w-4" />} title="Sign-in needed" tone="destructive" action={<WorkspaceAction variant="default" onClick={() => setTab('connection')}>Re-authenticate</WorkspaceAction>}>
+            This connection can't push until you sign in again.
+        </WorkspaceNotice>
+    ) : isStremio && vaultLocked ? <VaultLockedNotice /> : undefined
+
+    const header = (
+        <WorkspaceHeader
+            logo={<PlatformLogo platform={connection.platform} product={connectionLogoProduct(connection)} className="h-12 w-12" isHydra={isHydra} />}
+            title={name}
+            pill={<WorkspaceStatusPill status={pill}>{statusPopover}</WorkspaceStatusPill>}
+            family={isStremio && premium?.active === true ? <StremioSupportersBadge /> : undefined}
+            identity={identityParts.join(' · ') || undefined}
+            actions={<>
+                {kind !== 'other' && (
+                    <Tooltip content={testDisabledReason} disabled={!testDisabledReason}>
+                        <WorkspaceAction onClick={() => void handleTest()} disabled={testing || !!testDisabledReason} aria-busy={testing}>
+                            {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                            {testing ? 'Testing...' : 'Test'}
+                        </WorkspaceAction>
+                    </Tooltip>
+                )}
+                <Tooltip content="Enable this connection to sync it." disabled={enabled}>
+                    <WorkspaceAction onClick={handleSync} disabled={syncing || !enabled}>
+                        <RefreshCw className={cn('h-3.5 w-3.5', syncing && 'animate-spin')} />
+                        {syncing ? 'Syncing...' : 'Sync'}
+                    </WorkspaceAction>
+                </Tooltip>
+                <WorkspaceMoreMenu label={`More actions for ${name}`}>
+                    <DropdownMenuItem className="gap-2 text-xs" onClick={() => setTab('connection')}><Key className="h-3.5 w-3.5" />Connection settings</DropdownMenuItem>
+                    <DropdownMenuItem className="gap-2 text-xs" onClick={toggleEnabled}><Power className="h-3.5 w-3.5" />{enabled ? 'Disable connection' : 'Enable connection'}</DropdownMenuItem>
+                    <DropdownMenuItem destructive className="gap-2 text-xs" onClick={() => setTab('connection')}><Trash2 className="h-3.5 w-3.5" />Remove connection…</DropdownMenuItem>
+                </WorkspaceMoreMenu>
+            </>}
+            notice={notice}
+            stats={stats}
+        />
+    )
+
+    const health = (
+        <ConnectionHealthCard
+            kind={kind}
+            pill={pill}
+            showLive={showLive}
+            sync={sync}
+            failures={failures}
+            lastError={liveError}
+            testing={testing}
+            testResult={testResult}
+            onTest={kind === 'other' ? undefined : () => void handleTest()}
+            testDisabledReason={testDisabledReason}
+        />
+    )
+
     return (
         <div className="space-y-4">
             <ToolbarShell className="w-fit max-w-full p-2" contentClassName="gap-2">
-                <Button variant="ghost" size="sm" className="h-8 shrink-0 gap-1.5 rounded-xl border border-border/40 bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm hover:bg-muted/50 hover:text-foreground" onClick={onBack}>
+                <Button variant="ghost" size="sm" className="h-11 shrink-0 gap-1.5 rounded-xl border border-border/40 bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm hover:bg-muted/50 hover:text-foreground sm:h-8" onClick={onBack}>
                     <ArrowLeft className="h-4 w-4" />
                     Connections
                 </Button>
             </ToolbarShell>
-            <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm">
-                <div className="flex items-center gap-3">
-                    <PlatformLogo platform={connection.platform} className="h-12 w-12 shrink-0" isHydra={isHydra} />
-                    <div className="min-w-0 flex-1">
-                        <p className="text-base font-semibold truncate">{name}</p>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            <ConnectionStatusPill status={display} />
-                            {!connection.enabled && <StatusChip size="sm" className="h-5 px-2 text-xs bg-muted/40">Paused</StatusChip>}
-                            {isHydra && <StatusChip size="sm" className="h-5 px-2 text-xs bg-muted/40">Outbound</StatusChip>}
-                            {connection.capabilities.map(c => (
-                                <StatusChip key={c} size="sm" className="h-5 px-2 text-xs bg-muted/40">{c}</StatusChip>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-border/30 pt-3 sm:grid-cols-4">
-                    <HeaderStat
-                        label="Account addons"
-                        value={String(addons.length)}
-                    />
-                    <HeaderStat label="Last sync" value={lastSync ? timeAgo(lastSync) : 'Never'} />
-                    <HeaderStat label="Last error" value={lastError || 'None'} isError={!!lastError} wide={!!lastError} />
-                    <HeaderStat label="Session" value={session} isError={session === 'Re-auth required'} />
-                </div>
-                {showTabs && needsAttention && (
-                    <button
-                        type="button"
-                        data-theme-part="button"
-                        onClick={() => setTab('connection')}
-                        className="mt-2.5 inline-flex items-center gap-1 rounded-md text-xs font-medium text-primary transition-colors hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                        Test or re-authenticate this connection
-                        <ChevronRight className="h-3.5 w-3.5" />
-                    </button>
-                )}
-            </div>
 
-            {showTabs ? (
-                <WorkspaceTabs label={`${name} workspace`} value={tab} onValueChange={setTab} contentClassName="[&_[data-theme-part=panel]]:shadow-none [&>[data-theme-part=tab-panel]>[data-theme-part=panel]]:rounded-none [&>[data-theme-part=tab-panel]>[data-theme-part=panel]]:border-0 [&>[data-theme-part=tab-panel]>[data-theme-part=panel]]:bg-transparent [&>[data-theme-part=tab-panel]>[data-theme-part=panel]]:p-0" tabs={<>
-                        <TabsTrigger value="membership">Membership</TabsTrigger>
-                        <TabsTrigger value="connection">Connection</TabsTrigger>
-                        {isStremio && premium?.active && (
-                            <TabsTrigger value="profiles">Supporters Profiles</TabsTrigger>
-                        )}
-                        {(isStremio || isRealStream) && (
-                            <TabsTrigger value="addons">Addons</TabsTrigger>
-                        )}
+            <WorkspaceTabs label={`${name} workspace`} tabs={tabs} value={tab} onValueChange={setTab} header={header}>
+                <TabsContent value="overview">
+                    {isNuvio ? (
+                        <NuvioOverview accountId={accountId} connection={connection} status={status} session={session} membership={membership} onOpenTab={setTab} health={health} />
+                    ) : (
+                        <div className="grid gap-4 lg:grid-cols-2">
+                            {isStremio && (
+                                <StremioMembershipCard
+                                    premium={premium}
+                                    state={!isPrimaryStremio ? 'not-primary' : vaultLocked && !premium ? 'locked' : premiumState}
+                                    onRefresh={onRefreshPremium}
+                                />
+                            )}
+                            {isRealStream && <RealStreamSessionCard connection={connection} session={session} onReauth={() => setTab('connection')} />}
+                            {isHydra && <HydraEndpointCard connection={connection} status={hydraStatus} onTest={() => void handleTest()} testing={testing} />}
+                            {health}
+                            {isStremio && <StremioLoginCard connection={connection} email={email} />}
+                        </div>
+                    )}
+                </TabsContent>
+
+                <TabsContent value="connection">
+                    <div className="space-y-4">
+                        {isStremio && vaultLocked && <VaultLockedNotice />}
                         {isStremio && (
-                            <TabsTrigger value="library">Library</TabsTrigger>
-                        )}
-                        {isNuvio && (
                             <>
-                                <TabsTrigger value="nuvio-profiles">Profiles</TabsTrigger>
-                                <TabsTrigger value="nuvio-plugins">Plugins</TabsTrigger>
-                                <TabsTrigger value="nuvio-library">Library</TabsTrigger>
-                                <TabsTrigger value="nuvio-collections">Collections</TabsTrigger>
-                                <TabsTrigger value="nuvio-backup">Backup</TabsTrigger>
+                                <StremioCredentialsSection accountId={accountId} connection={connection} />
+                                <StremioDangerZoneSection accountId={accountId} connection={connection} />
                             </>
                         )}
-                    </>}>
+                        {isNuvio && <NuvioCredentialsSection accountId={accountId} connection={connection} />}
+                        {isRealStream && <RealStreamCredentialsSection accountId={accountId} connection={connection} />}
+                        {isHydra && <HydraCredentialsSection accountId={accountId} connection={connection} />}
+                        <RemoveConnectionSection accountId={accountId} connection={connection} onBack={onBack} />
+                    </div>
+                </TabsContent>
 
-                    <TabsContent value="membership">
-                        <ConnectionMembershipTab platform={connection.platform} premium={premium} nuvioMember={nuvioMember} />
+                {isStremio && premium?.active && (
+                    <TabsContent value="profiles">
+                        {vaultLocked
+                            ? <VaultLockedNotice>Unlock your vault to load this login's Supporters profiles.</VaultLockedNotice>
+                            : <SupportersProfilesRoster accountId={accountId} connection={connection} />}
                     </TabsContent>
-
-                    <TabsContent value="connection">
-                        <div className="space-y-4">
-                            {isStremio && (
-                                <>
-                                    <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
-                                        <div className="flex items-center justify-between gap-3">
-                                            <div className="min-w-0">
-                                                <p className="text-sm font-semibold">Connection health</p>
-                                                <p className="text-xs text-muted-foreground">Verify the Stremio auth key is valid and reachable.</p>
-                                            </div>
-                                            <ConnectionTestButton testing={testing} onClick={handleTestConnection} disabled={!account} />
-                                        </div>
-                                        <ConnectionTestResult result={testResult} />
-                                    </div>
-                                    <StremioCredentialsSection accountId={accountId} connection={connection} />
-                                    <StremioDangerZoneSection accountId={accountId} connection={connection} />
-                                </>
-                            )}
-
-                            {isNuvio && (
-                                <NuvioCredentialsSection accountId={accountId} connection={connection} />
-                            )}
-
-                            {connection.platform === 'realstream' && (
-                                <RealStreamCredentialsSection accountId={accountId} connection={connection} />
-                            )}
-
-                            {isHydra && (
-                                <HydraCredentialsSection accountId={accountId} connection={connection} />
-                            )}
-
-                            <RemoveConnectionSection accountId={accountId} connection={connection} onBack={onBack} />
-                        </div>
+                )}
+                {isStremio && (
+                    <TabsContent value="library">
+                        <StremioLibrarySection accountId={accountId} error={liveError} />
                     </TabsContent>
+                )}
 
-                    {isStremio && premium?.active && (
+                {isNuvio && (
+                    <>
                         <TabsContent value="profiles">
-                            <SupportersProfilesRoster accountId={accountId} connection={connection} />
+                            <NuvioProfilesTab accountId={accountId} connection={connection} status={status} />
                         </TabsContent>
-                    )}
-                    {(isStremio || isRealStream) && (
-                        <TabsContent value="addons">
-                            <ConnectionAddonsSection accountId={accountId} platform={connection.platform} />
+                        <TabsContent value="plugins">
+                            <NuvioPluginsTab accountId={accountId} connection={connection} />
                         </TabsContent>
-                    )}
-                    {isStremio && (
                         <TabsContent value="library">
-                            <StremioLibrarySection accountId={accountId} />
+                            <NuvioLibraryTab accountId={accountId} connection={connection} />
                         </TabsContent>
-                    )}
-
-                    {isNuvio && (
-                        <>
-                            <TabsContent value="nuvio-profiles">
-                                <NuvioProfilesTab accountId={accountId} connection={connection} status={status} />
-                            </TabsContent>
-                            <TabsContent value="nuvio-plugins">
-                                <NuvioPluginsTab accountId={accountId} connection={connection} />
-                            </TabsContent>
-                            <TabsContent value="nuvio-library">
-                                <NuvioLibraryTab accountId={accountId} connection={connection} />
-                            </TabsContent>
-                            <TabsContent value="nuvio-collections">
-                                <NuvioCollectionsTab accountId={accountId} connection={connection} />
-                            </TabsContent>
-                            <TabsContent value="nuvio-backup">
-                                <NuvioBackupTab accountId={accountId} connection={connection} />
-                            </TabsContent>
-                        </>
-                    )}
-                </WorkspaceTabs>
-            ) : (
-                <div className="space-y-4">
-                    {isHydra && (
-                        <HydraCredentialsSection accountId={accountId} connection={connection} />
-                    )}
-
-                    <RemoveConnectionSection accountId={accountId} connection={connection} onBack={onBack} />
-                </div>
-            )}
+                        <TabsContent value="collections">
+                            <NuvioCollectionsTab accountId={accountId} connection={connection} />
+                        </TabsContent>
+                        <TabsContent value="backup">
+                            <NuvioBackupTab accountId={accountId} connection={connection} />
+                        </TabsContent>
+                    </>
+                )}
+            </WorkspaceTabs>
         </div>
     )
 }

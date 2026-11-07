@@ -1,4 +1,7 @@
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, Info, RefreshCw, Users } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
+import { SectionCard, WorkspaceError, WorkspaceLoading } from './workspace/SectionCard'
 import type { PremiumStatus } from '@/lib/stremio-premium'
 import type { NuvioMemberStatus } from '@/lib/nuvio-tier'
 
@@ -64,107 +67,63 @@ export function NuvioTierBadge({ member }: { member: NuvioMemberStatus }) {
     )
 }
 
-function ManageLink({ href, label }: { href: string; label: string }) {
-    return (
-        <a
-            href={href}
-            target="_blank"
-            rel="noreferrer"
-            data-theme-part="button"
-            className="inline-flex h-8 w-fit items-center gap-1.5 rounded-xl border border-border/40 bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm transition-colors hover:bg-muted/50 hover:text-foreground"
-        >
-            {label}
-            <ExternalLink className="h-3.5 w-3.5" />
-        </a>
-    )
-}
+export type StremioMembershipState = 'ready' | 'loading' | 'error' | 'locked' | 'not-primary'
 
-function StremioMembership({ premium }: { premium: PremiumStatus | undefined }) {
-    const detail = premium === undefined
-        ? 'Status unavailable'
-        : !premium.active
-            ? 'Free account'
-            : premium.lifetime
-                ? 'Lifetime member'
-                : premium.expiresAt != null
-                    ? `Supporter until ${formatPremiumUntil(premium.expiresAt)}`
-                    : 'Active supporter'
-    return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
-            <div className="min-w-0">
-                <p className="text-sm font-semibold">Stremio membership</p>
-                <p className="text-xs text-muted-foreground">Supporter status for this Stremio account.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-                {premium?.active ? (
-                    <StremioSupportersBadge />
-                ) : premium !== undefined && (
-                    <span data-theme-part="badge" className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
-                        Free
-                    </span>
-                )}
-                <p className="text-xs text-muted-foreground">{detail}</p>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground/80">
-                Supporters get dedicated profiles, skip intro/outro, downloads, catalog organization and appearance customization.
-            </p>
-            <ManageLink href="https://www.stremio.com/acc-settings" label="Manage subscription" />
-        </div>
-    )
-}
-
-function NuvioMembership({ nuvioMember }: { nuvioMember: NuvioMemberStatus | undefined }) {
-    const detail = nuvioMember === undefined
-        ? 'Status unavailable'
-        : nuvioMember.expiresAt != null
-            ? `until ${formatPremiumUntil(nuvioMember.expiresAt)}`
-            : nuvioMember.label
-    const perks = nuvioMember?.tier === 'supporter-plus'
-        ? 'Gradient themes, profile backgrounds, avatar collection, badge, Discord role, feature voting and the Plus role.'
-        : nuvioMember?.tier === 'supporter'
-            ? 'Gradient themes, profile backgrounds, avatar collection, badge and a Discord role.'
-            : 'Supporting Nuvio unlocks gradient themes, profile backgrounds, avatar collection, a badge and a Discord role.'
-    return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
-            <div className="min-w-0">
-                <p className="text-sm font-semibold">Nuvio membership</p>
-                <p className="text-xs text-muted-foreground">Membership tier for this Nuvio connection.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-                {nuvioMember && <NuvioTierBadge member={nuvioMember} />}
-                <p className="text-xs text-muted-foreground">{detail}</p>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground/80">
-                {perks}
-            </p>
-            <ManageLink href="https://nuvio.tv/support" label="Manage membership" />
-        </div>
-    )
-}
-
-// RealStream has no membership program we can read, so the slot stays with an honest
-// absence instead of a fabricated tier.
-function RealStreamMembership() {
-    return (
-        <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-4 shadow-sm space-y-3">
-            <div className="min-w-0">
-                <p className="text-sm font-semibold">RealStream membership</p>
-                <p className="text-xs text-muted-foreground">Membership tier for this RealStream connection.</p>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground/80">
-                RealStream does not expose a membership tier through its API, so there is nothing to show here.
-            </p>
-        </div>
-    )
-}
-
-export function ConnectionMembershipTab({ platform, premium, nuvioMember }: {
-    platform: string
-    premium?: PremiumStatus
-    nuvioMember?: NuvioMemberStatus
+export function StremioMembershipCard({ premium, state, onRefresh }: {
+    premium: PremiumStatus | undefined
+    state: StremioMembershipState
+    onRefresh?: () => void
 }) {
-    if (platform === 'stremio') return <StremioMembership premium={premium} />
-    if (platform === 'nuvio') return <NuvioMembership nuvioMember={nuvioMember} />
-    if (platform === 'realstream') return <RealStreamMembership />
-    return null
+    const active = premium?.active === true
+    const refresh = onRefresh && state !== 'not-primary' && state !== 'locked' ? (
+        <Button variant="outline" size="sm" className="h-11 gap-1.5 text-xs sm:h-8" onClick={onRefresh} disabled={state === 'loading'}>
+            <RefreshCw className={cn('h-3.5 w-3.5', state === 'loading' && 'animate-spin')} />
+            Refresh
+        </Button>
+    ) : null
+    return (
+        <SectionCard
+            title="Membership"
+            description="Stremio supporter status for this login."
+            footer={(active || refresh) ? (
+                <>
+                    {active && (
+                        <Button variant="outline" size="sm" className="h-11 gap-1.5 text-xs sm:h-8" asChild>
+                            <a href="https://www.stremio.com/acc-settings" target="_blank" rel="noreferrer">Manage subscription<ExternalLink className="h-3.5 w-3.5" /></a>
+                        </Button>
+                    )}
+                    {refresh}
+                </>
+            ) : undefined}
+        >
+            {state === 'not-primary' ? (
+                <p className="text-xs text-muted-foreground">Supporter status is read for this account's primary Stremio login only.</p>
+            ) : state === 'locked' ? (
+                <p className="text-xs text-muted-foreground">Unlock your vault to read the supporter status.</p>
+            ) : state === 'error' ? (
+                <WorkspaceError message="Could not read the supporter status from Stremio." onRetry={onRefresh} />
+            ) : state === 'loading' && !premium ? (
+                <WorkspaceLoading label="Checking supporter status…" compact />
+            ) : (
+                <>
+                    <div className="flex flex-wrap items-center gap-2">
+                        {active ? <StremioSupportersBadge /> : <span data-theme-part="badge" className="rounded-full border border-border/40 bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">Free</span>}
+                        <span className="text-xs text-muted-foreground">
+                            {!active ? 'No active supporter entitlement'
+                                : premium?.lifetime ? 'Lifetime supporter'
+                                    : premium?.expiresAt != null ? `Active until ${formatPremiumUntil(premium.expiresAt)}`
+                                        : 'Supporter access active'}
+                        </span>
+                    </div>
+                    {active && (
+                        <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Users className="h-3.5 w-3.5" />Unlocks Supporters Profiles on the Profiles tab.</p>
+                    )}
+                    <p className="flex items-start gap-1.5 text-xs leading-relaxed text-muted-foreground">
+                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span>Informational only. AIOManager does not change your Stremio plan or store payment details.</span>
+                    </p>
+                </>
+            )}
+        </SectionCard>
+    )
 }

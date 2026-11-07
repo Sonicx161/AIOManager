@@ -80,14 +80,7 @@ export const AccountReorderRow = memo(function AccountReorderRow({
             </div>
 
             <div className="relative shrink-0">
-                <AccountAvatar account={account} size="md" />
-                {accentColor && (
-                    <span
-                        className="pointer-events-none absolute inset-0 rounded-xl"
-                        style={{ boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
-                        aria-hidden="true"
-                    />
-                )}
+                <AccountAvatar account={account} size="md" accentColor={accentColor} />
             </div>
 
             <div className="flex-1 min-w-0">

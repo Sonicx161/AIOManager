@@ -4,14 +4,16 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
-import { AccountAvatar } from './AccountAvatar'
+import { AccountAvatar, AccountMenuHeader } from './AccountAvatar'
+import { usePhoneViewport } from '@/hooks/usePhoneViewport'
 import { AccountMediaPlayback } from './AccountMedia'
-import { AccountSyncIndicator } from './AccountSyncIndicator'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
 import { PlatformSourceChip, platformName } from '@/components/addons/PlatformSourceChip'
 import { accountPlatformSources } from '@/components/addons/platform-source'
 import { CopyButton } from '@/components/ui/copy-button'
+import { AccountStatChips } from './AccountStatChips'
+import { AddonPreviewTile } from './AddonPreviewTile'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,73 +21,22 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useUIStore } from '@/store/uiStore'
-import { useFailoverStore } from '@/store/failoverStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { activityForAccount } from '@/lib/account-activity-index'
-import { Account, type AddonChangelogEntry } from '@/types/account'
+import { Account } from '@/types/account'
 import type { ActivityItem } from '@/types/activity'
-import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ArrowUpRight, ArrowUpCircle, RotateCw, StickyNote, Undo2, Redo2, Bold, Italic, List, ListOrdered, Link2, Check, Trash2, Activity, ArrowRightLeft, CheckCircle2, Play } from 'lucide-react'
+import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ArrowUpRight, RotateCw, StickyNote, Undo2, Redo2, Bold, Italic, List, ListOrdered, Link2, Check, Trash2, Play } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { cn, getLatestAddonVersion, maskEmailLevel, maskNameLevel, getTimeAgo, isNewerVersion } from '@/lib/utils'
+import { cn, maskEmailLevel, maskNameLevel, getTimeAgo } from '@/lib/utils'
 import { STICKY_NOTE_MAX_LENGTH } from '@/lib/constants'
 import { memo, useMemo, useRef, useEffect, useState, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useLongPress } from '@/hooks/useLongPress'
 import { useToast } from '@/hooks/use-toast'
-import { useRelativeTime } from '@/hooks/use-relative-time'
-import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore, getAccountEmail, getStremioAuthKey, hasPlatformConnection } from '@/store/accountStore'
 
-function HideableImage({ src, alt, className, fallback, style, dataThemePart }: { src?: string; alt?: string; className?: string; fallback?: string; style?: React.CSSProperties; dataThemePart?: string }) {
-  const [failed, setFailed] = useState(false)
-  useEffect(() => { setFailed(false) }, [src])
-  if (!src || failed) {
-    if (fallback) {
-      return (
-        <div data-theme-part={dataThemePart} className={cn(className, 'flex items-center justify-center text-[8px] font-bold text-muted-foreground')} style={style}>
-          {fallback}
-        </div>
-      )
-    }
-    return null
-  }
-  return (
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      decoding="async"
-      onError={() => setFailed(true)}
-      data-theme-part={dataThemePart}
-      className={className}
-      style={style}
-    />
-  )
-}
-
-// Module-level memo for the "changes today" chip: the changelog is scanned once per
-// changelog publication (with a 60s TTL for the sliding 24h window), not once per card
-// on every store write. In a 100-card grid that turns N x M work per sync into N O(1)
-// map lookups. The shared 60s relative-time ticker still refreshes the rendered count.
-// Semantics match the previous inline filter (entries strictly newer than 24h,
-// invalid timestamps dropped); only the 24h boundary can lag by up to the 60s TTL.
-// A new changelog array (sync append, clearChangelog) always rebuilds immediately.
-let recentChangeCountsCache: { changelog: AddonChangelogEntry[]; builtAt: number; counts: Map<string, number> } | null = null
-const RECENT_CHANGE_TTL_MS = 60_000
-function recentChangeCountsFor(changelog: AddonChangelogEntry[], now: number): Map<string, number> {
-  if (recentChangeCountsCache && recentChangeCountsCache.changelog === changelog && now - recentChangeCountsCache.builtAt < RECENT_CHANGE_TTL_MS) {
-    return recentChangeCountsCache.counts
-  }
-  const cutoff = now - 24 * 60 * 60 * 1000
-  const counts = new Map<string, number>()
-  for (const entry of changelog) {
-    const ts = new Date(entry.timestamp).getTime()
-    if (!Number.isFinite(ts) || ts <= cutoff) continue
-    counts.set(entry.accountId, (counts.get(entry.accountId) || 0) + 1)
-  }
-  recentChangeCountsCache = { changelog, builtAt: now, counts }
-  return counts
-}
+/** Cards only show the latest-watched row and live playback, so they read the head and skip archive walks. */
+const CARD_MEDIA_OPTIONS = { archive: false } as const
 
 interface AccountCardProps {
   account: Account
@@ -111,6 +62,7 @@ export const AccountCard = memo(function AccountCard({
   const navigate = useNavigate()
   const preventNavRef = useRef(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const phone = usePhoneViewport()
   const handleMenuOpenChange = useCallback((open: boolean) => {
     setIsMenuOpen(open)
     if (!open) {
@@ -207,7 +159,6 @@ export const AccountCard = memo(function AccountCard({
     handleNoteClose(false)
   }, [account.id, handleNoteClose])
   const { toast } = useToast()
-  useRelativeTime()
   const syncAccount = useAccountStore((state) => state.syncAccount)
   const repairAccount = useAccountStore((state) => state.repairAccount)
   const loading = useAccountStore((state) => state.loadingAccounts.has(account.id))
@@ -217,25 +168,6 @@ export const AccountCard = memo(function AccountCard({
       isAddAccountDialogOpen: state.isAddAccountDialogOpen,
       privacyLevelNames: state.privacyLevelNames
     }))
-  )
-  const failoverRules = useFailoverStore(
-    useShallow((state) => state.rules.filter(r => r.accountId === account.id))
-  )
-  const activeRules = useMemo(() => failoverRules.filter(r => r.isActive), [failoverRules])
-  const failedOverRules = useMemo(() => activeRules.filter(r => r.activeUrl !== r.priorityChain?.[0]), [activeRules])
-
-
-
-  const latestVersions = useAddonStore((state) => state.latestVersions)
-  const updateCount = useMemo(() =>
-    account.addons.filter(addon => {
-      const latest = getLatestAddonVersion(latestVersions, addon)
-      return latest && isNewerVersion(addon.manifest.version, latest)
-    }).length,
-    [account.addons, latestVersions]
-  )
-  const recentChanges = useAccountStore(
-    (state) => recentChangeCountsFor(state.changelog, Date.now()).get(account.id) ?? 0
   )
 
   // Watch dialog state to prevent accidental navigation when it closes
@@ -260,7 +192,7 @@ export const AccountCard = memo(function AccountCard({
     useShallow((state) => activityForAccount(state.items, account.id))
   )
   const libraryLoading = useLibraryCache((state) => state.loading)
-  const media = useJellyfinActivity(account.id)
+  const media = useJellyfinActivity(account.id, true, CARD_MEDIA_OPTIONS)
   const accountItems = useMemo(() => mergeMediaItems(cachedAccountItems, media.history), [cachedAccountItems, media.history])
 
   const prevLastWatchedRef = useRef<ActivityItem | null>(null)
@@ -325,8 +257,6 @@ export const AccountCard = memo(function AccountCard({
     }
   }
   const noteToolbarButtonClass = 'h-8 w-8 rounded-xl text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-  const statChipClass = 'inline-flex h-4 items-center gap-1 leading-none'
-  const statCountClass = 'text-[11px] font-medium leading-none tabular-nums'
 
   return (
     <Card
@@ -349,7 +279,7 @@ export const AccountCard = memo(function AccountCard({
       }}
       onKeyDown={(e) => {
         if (noteOpen) return
-        // Nested focusables (menu trigger, note toggle, dismiss chip) handle their own
+        // Nested focusables (menu trigger, note toggle, stat chips) handle their own
         // Enter/Space; only keys pressed on the card itself activate navigation.
         if (e.target !== e.currentTarget) return
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleCardActivate() }
@@ -389,15 +319,7 @@ export const AccountCard = memo(function AccountCard({
             <div className={`flex items-center gap-3 flex-1 min-w-0 ${restProps.dragHandleProps ? 'pl-8' : ''}`}>
 
               <div className="relative shrink-0">
-                <AccountAvatar account={account} size="lg" className="h-11 w-11" />
-                {accentColor && (
-                  <span
-                    data-theme-part="account-accent"
-                    className="pointer-events-none absolute inset-0 rounded-xl"
-                    style={{ boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
-                    aria-hidden="true"
-                  />
-                )}
+                <AccountAvatar account={account} size="lg" className="h-11 w-11" accentColor={accentColor} />
               </div>
 
               <div className="flex-1 min-w-0">
@@ -422,60 +344,20 @@ export const AccountCard = memo(function AccountCard({
                     )}
                     <span className="whitespace-nowrap">{account.addons.length} addon{account.addons.length !== 1 ? 's' : ''}</span>
                   </span>
-                  {updateCount > 0 && (
-                    <Tooltip content={`${updateCount} update${updateCount !== 1 ? 's' : ''} available`} side="top">
-                      <span aria-label={`${updateCount} update${updateCount !== 1 ? 's' : ''} available`} data-theme-part="badge" className={cn(statChipClass, 'text-primary')}>
-                        <ArrowUpCircle className="h-3 w-3" />
-                        <span className={statCountClass}>{updateCount}</span>
-                      </span>
-                    </Tooltip>
-                  )}
-                  {recentChanges > 0 && updateCount === 0 && (
-                    <Tooltip content={`${recentChanges} change${recentChanges !== 1 ? 's' : ''} today · Click to dismiss`} side="top">
-                      <button
-                        data-theme-part="badge"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          useAccountStore.getState().clearChangelog(account.id)
-                        }}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }}
-                        aria-label={`${recentChanges} change${recentChanges !== 1 ? 's' : ''} today`}
-                        className={cn(statChipClass, 'cursor-pointer rounded-sm text-primary transition-colors hover:bg-muted/50')}
-                      >
-                        <Activity className="h-3 w-3" />
-                        <span className={statCountClass}>{recentChanges}</span>
-                      </button>
-                    </Tooltip>
-                  )}
-                  {activeRules.length > 0 && (
-                    <Tooltip content={failedOverRules.length > 0
-                      ? `${failedOverRules.length} rule${failedOverRules.length !== 1 ? 's' : ''} failed over`
-                      : `${activeRules.length} Autopilot rule${activeRules.length !== 1 ? 's' : ''} healthy`} side="top">
-                      <span
-                        aria-label={failedOverRules.length > 0
-                          ? `${failedOverRules.length} rule${failedOverRules.length !== 1 ? 's' : ''} failed over`
-                          : `${activeRules.length} Autopilot rule${activeRules.length !== 1 ? 's' : ''} healthy`}
-                        data-theme-part="badge"
-                        className={cn(statChipClass, failedOverRules.length > 0 ? 'text-warning' : 'text-success')}
-                      >
-                        {failedOverRules.length > 0 ? <ArrowRightLeft className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
-                        <span className={statCountClass}>{failedOverRules.length || activeRules.length}</span>
-                      </span>
-                    </Tooltip>
-                  )}
+                  <AccountStatChips account={account} />
                 </div>
               </div>
 
               {!isSelectionMode && (
                 <DropdownMenu onOpenChange={handleMenuOpenChange}>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" className="-mr-1 h-8 w-7 shrink-0 rounded-full p-0 text-muted-foreground hover:bg-muted/45 hover:text-foreground" onClick={(e) => e.stopPropagation()}>
+                    <Button variant="ghost" className="-mr-1 h-8 w-7 shrink-0 rounded-full p-0 max-sm:-mr-2 max-sm:h-11 max-sm:w-11 text-muted-foreground hover:bg-muted/45 hover:text-foreground" onClick={(e) => e.stopPropagation()}>
                       <span className="sr-only">Open menu</span>
                       <MoreVertical className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="z-50 w-56">
-                    <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">MANAGE ACCOUNT</div>
+                  <DropdownMenuContent align="end" className="z-50 w-56" sheetHeader={<AccountMenuHeader account={account} name={displayName} />}>
+                    {!phone && <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">MANAGE ACCOUNT</div>}
                     {account.status === 'expired' && (
                       <DropdownMenuItem className="gap-2 text-warning focus:text-warning" onClick={(e) => { e.stopPropagation(); handleEdit(); }}>
                         <AlertCircle className="h-4 w-4 shrink-0" />
@@ -492,9 +374,9 @@ export const AccountCard = memo(function AccountCard({
                         try {
                           toast({ title: 'Syncing...', description: `Refreshing ${displayName}` });
                           await syncAccount(account.id, true);
-                          toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}` });
+                          toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}`, accountId: account.id });
                         } catch (err) {
-                          toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}` });
+                          toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}`, accountId: account.id });
                         }
                       }}
                       disabled={loading}
@@ -553,19 +435,12 @@ export const AccountCard = memo(function AccountCard({
           </div>
         </CardHeader>
 
-        <CardContent className="min-w-0 flex-grow px-5 pb-10 pt-2 md:px-6">
+        <CardContent className="min-w-0 flex-grow px-5 pb-10 pt-2 max-sm:pb-3 md:px-6">
           <div className="space-y-3.5">
             {!account.hideAddonPreview && enabledAddons.length > 0 && (
               <div className="flex min-h-6 flex-wrap items-center gap-1.5">
                 {previewAddons.map((addon, i) => (
-                  <HideableImage
-                    key={`${addon.transportUrl}-${i}`}
-                    src={addon.manifest.logo}
-                    alt={addon.manifest.name}
-                    fallback={addon.manifest.name?.[0]?.toUpperCase()}
-                    dataThemePart="image-tile"
-                    className="h-[22px] w-[22px] shrink-0 rounded-md bg-muted/30 object-contain p-0.5 ring-1 ring-border/20 md:h-6 md:w-6"
-                  />
+                  <AddonPreviewTile key={`${addon.transportUrl}-${i}`} src={addon.manifest.logo} name={addon.manifest.name} />
                 ))}
                 {remainingCount > 0 && (
                   <span className="ml-0.5 text-[11px] text-muted-foreground">+{remainingCount}</span>
@@ -599,7 +474,7 @@ export const AccountCard = memo(function AccountCard({
                           handleEdit()
                       }
                   }}
-                  className="w-full mt-2 border-destructive/30 text-destructive hover:bg-destructive/20 gap-2"
+                  className="w-full mt-2 border-destructive/30 text-destructive hover:bg-destructive/20 gap-2 max-sm:h-10"
                 >
                   <Pencil className="h-3 w-3" />
                   Try Sync / Update
@@ -645,17 +520,12 @@ export const AccountCard = memo(function AccountCard({
             </div>
           )}
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            <AccountSyncIndicator
-              loading={loading}
-              lastSync={account.lastSync}
-              error={account.status === 'error' ? account.lastError || 'Last sync attempt failed' : null}
-            />
             <Tooltip content={account.note ? `Note: ${account.note.slice(0, 60)}${account.note.length > 60 ? '…' : ''}` : 'Add note'} side="top">
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={handleNoteOpen}
-                className={`h-6 w-6 flex items-center justify-center rounded-md p-0.5 ring-1 ring-border/20 transition-colors ${account.note ? 'text-primary bg-primary/10' : 'text-muted-foreground/60 bg-muted/30 hover:text-muted-foreground hover:bg-muted/50'}`}
+                className={cn('flex h-6 w-6 items-center justify-center rounded-md p-0.5 transition-colors max-sm:-mb-2 max-sm:-mr-2 max-sm:h-10 max-sm:w-10', account.note ? 'bg-primary/10 text-primary ring-1 ring-border/20' : 'bg-transparent text-muted-foreground/50 ring-0 hover:bg-muted/40 hover:text-muted-foreground')}
                 aria-label="Toggle note"
               >
                 <StickyNote className="h-3 w-3" />
@@ -674,15 +544,7 @@ export const AccountCard = memo(function AccountCard({
           <DialogHeader className="border-b border-border/25 px-5 py-4 pr-16">
             <div className="flex items-center gap-3">
               <div className="relative shrink-0">
-                <AccountAvatar account={account} size="md" showStatus={false} />
-                {accentColor && (
-                  <span
-                    data-theme-part="account-accent"
-                    className="pointer-events-none absolute inset-0 rounded-xl"
-                    style={{ boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
-                    aria-hidden="true"
-                  />
-                )}
+                <AccountAvatar account={account} size="md" showStatus={false} accentColor={accentColor} />
               </div>
               <div className="min-w-0 flex-1">
                 <DialogTitle className="truncate text-base min-w-0">{displayName}</DialogTitle>

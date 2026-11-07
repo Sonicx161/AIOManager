@@ -8,29 +8,35 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogBack,
+  DialogAltHistory,
+  useDrillHistory,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { useAccounts } from '@/hooks/useAccounts'
 import { useUIStore } from '@/store/uiStore'
-import { useAccountStore, hasPlatformConnection, getStremioAuthKey, getStremioConnection } from '@/store/accountStore'
+import { useAccountStore, hasPlatformConnection, getStremioConnection } from '@/store/accountStore'
 import {
   AlertCircle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   ExternalLink,
   HelpCircle,
   KeyRound,
   Mail,
+  Play,
   QrCode,
   Search,
   ShieldCheck,
   Smile,
-  MoreVertical,
   X,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
+import { AddonPreviewTile } from './AddonPreviewTile'
 import { Link } from 'react-router-dom'
 import {
   Popover,
@@ -53,17 +59,28 @@ import { encrypt } from '@/lib/crypto'
 import { ProviderSetupDialog } from '@/components/providers/ProviderSetupDialog'
 import { useConnectionStore } from '@/store/connectionStore'
 import type { HydraDriverConfig } from '@/types/provider'
-import { ACCOUNT_COLORS, cn } from '@/lib/utils'
+import { ACCOUNT_COLORS, cn, getTimeAgo } from '@/lib/utils'
 import { EMOJI_GROUPS } from '@/lib/emoji-data'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { useShallow } from 'zustand/react/shallow'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { useLibraryCache } from '@/store/libraryCache'
+import { activityForAccount } from '@/lib/account-activity-index'
+import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
+import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
+import { AccountMediaPlayback } from './AccountMedia'
+import { aggregateAccountPlatforms, accountPlatformSources } from '@/components/addons/platform-source'
+import { toast } from '@/hooks/use-toast'
+import { formatFileSize, processImageFile } from '@/lib/image-upload'
+import type { ActivityItem } from '@/types/activity'
+import { cardVisibilitySummary, activeConnectionsLabel } from './profile-sheet'
 import { ColorPicker } from '@/components/ui/color-picker'
+import { ConnectionManager } from '@/components/providers/ConnectionManager'
 import { useTheme } from '@/contexts/ThemeContext'
 import { motion, AnimatePresence } from 'framer-motion'
-import { PLATFORM_REGISTRY } from '@/lib/platform-registry'
-import { ConnectionManager } from '@/components/providers/ConnectionManager'
-import { PlatformLogo } from '@/components/providers/ConnectionPrimitives'
+import { PLATFORM_REGISTRY, getPlatformEntry } from '@/lib/platform-registry'
 import { AccountAvatar } from './AccountAvatar'
+import { ConnectionPicturesSection } from './ConnectionPicturesSection'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 type AccountAuthMode = 'credentials' | 'oauth' | 'authKey' | 'qr'
 type WizardStep = 'identity' | 'platform' | 'connect-more'
@@ -111,14 +128,49 @@ export function AccountForm() {
   const [emoji, setEmoji] = useState('')
   const [emojiSearch, setEmojiSearch] = useState('')
   const [avatar, setAvatar] = useState('')
+  // A large GIF is resized in a worker; Done waits for it so the new picture is never dropped.
+  const [avatarProcessing, setAvatarProcessing] = useState(false)
   const [hideLastWatched, setHideLastWatched] = useState(false)
   const [hideAddonPreview, setHideAddonPreview] = useState(false)
   const [hidePlatformLogos, setHidePlatformLogos] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  // Edit-page history with the shared back/forward model (profile <-> connections);
+  // transitions pull focus back to the sheet through the hook's containerRef.
+  const editSheetRef = useRef<HTMLDivElement>(null)
+  const { page: editPage, canBack: editCanBack, canForward: editCanForward, go: setEditPage, back: editPageBack, goForward: editPageForward, reset: resetEditPage } = useDrillHistory<'profile' | 'connections'>('profile', { containerRef: editSheetRef })
+  const isEditing = !!editingAccount
+  const [colorOpen, setColorOpen] = useState(false)
+  const [cardOpen, setCardOpen] = useState(false)
+  const [emojiOpen, setEmojiOpen] = useState(false)
+  const [showAvatarUrl, setShowAvatarUrl] = useState(false)
+  const avatarFileInputRef = useRef<HTMLInputElement>(null)
+  const [signInAgainTarget, setSignInAgainTarget] = useState<{ id: string; nonce: number } | null>(null)
+  const maskedAccountLabel = useMaskedAccountLabel()
   const connectionSubDialogRef = useRef(false)
   const subDialogClosedAtRef = useRef(0)
 
-  const isEditing = !!editingAccount
+  // Draft-aware dashboard card preview: the same read-only activity sources the real
+  // AccountCard reads, hoisted here so the add flow never polls them.
+  const previewAccountId = editingAccount?.id
+  const previewCachedItems = useLibraryCache(useShallow((state) => previewAccountId ? activityForAccount(state.items, previewAccountId) : []))
+  const previewMedia = useJellyfinActivity(previewAccountId, !!previewAccountId, { archive: false })
+  const previewItems = useMemo(
+    () => previewAccountId ? mergeMediaItems(previewCachedItems, previewMedia.history) : [],
+    [previewAccountId, previewCachedItems, previewMedia.history]
+  )
+  const previewLastWatched = useMemo((): ActivityItem | null => {
+    if (!previewAccountId || previewItems.length === 0) return null
+    return previewItems.reduce<ActivityItem>(
+      (max, item) => new Date(item.timestamp).getTime() > new Date(max.timestamp).getTime() ? item : max,
+      previewItems[0]
+    )
+  }, [previewAccountId, previewItems])
+
   const isExpiredSession = editingAccount?.status === 'expired'
+  const expiredSessionConnection = editingAccount?.connections?.find(c => c.enabled !== false && c.status === 'expired')
+  const expiredSessionPlatformName = expiredSessionConnection
+    ? getPlatformEntry(expiredSessionConnection.platform)?.name || expiredSessionConnection.platform
+    : editingAccount && hasPlatformConnection(editingAccount) ? 'Stremio' : 'Account'
 
   useEffect(() => {
     setOauthAuthKey('')
@@ -132,6 +184,15 @@ export function AccountForm() {
     setPlatformStep('select')
     setCreatedAccountId(null)
     setConnectedPlatforms(new Set())
+    // An expired account opens on Connections with Profile below it, so Back and
+    // Escape still work; everything else starts on Profile.
+    resetEditPage(editingAccount?.status === 'expired' ? ['profile', 'connections'] : 'profile')
+    setColorOpen(false)
+    setCardOpen(false)
+    setEmojiOpen(false)
+    setShowAvatarUrl(false)
+    setSignInAgainTarget(null)
+    setSubmitting(false)
 
     if (editingAccount) {
       setName(editingAccount.name)
@@ -173,12 +234,29 @@ export function AccountForm() {
       setAvatar('')
       setHideLastWatched(false)
     }
-  }, [editingAccount, isOpen])
+  }, [editingAccount, isOpen, resetEditPage])
 
   const handleClose = () => {
     setCreatedAccountId(null)
     setConnectedPlatforms(new Set())
     closeDialog()
+  }
+
+  const handleAvatarFile = async (file: File) => {
+    if (file.size > 8 * 1024 * 1024) {
+      toast({ variant: 'destructive', title: 'File too large', description: `Max 8 MB, got ${formatFileSize(file.size)}.` })
+      return
+    }
+    setAvatarProcessing(true)
+    try {
+      const result = await processImageFile(file, { maxDimension: 256, square: true, quality: 0.85 })
+      setAvatar(result.dataUrl)
+      toast({ title: 'Image uploaded', description: `${formatFileSize(result.size)} ${result.mime.split('/')[1].toUpperCase()}` })
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Upload failed', description: err instanceof Error ? err.message : 'Unknown error.' })
+    } finally {
+      setAvatarProcessing(false)
+    }
   }
 
   const handleOAuthApproved = (key: string, user?: { email?: string; username?: string; name?: string }) => {
@@ -317,11 +395,14 @@ export function AccountForm() {
       return
     }
     setError('')
+    setSubmitting(true)
     try {
       await addLocalAccount(name.trim(), accentColor === 'none' ? undefined : accentColor, emoji.trim() || undefined, avatar || undefined)
       handleClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create account')
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -344,7 +425,7 @@ export function AccountForm() {
       const profileIndex = (() => {
         if (!profileId) return ''
         const match = (_profiles as Array<Record<string, unknown>>).find(p => p?.id === profileId)
-        const idx = match ? Number(match.profileIndex ?? match.profileIndex) : NaN
+        const idx = match ? Number(match.profile_index ?? match.profileIndex) : NaN
         return Number.isFinite(idx) && idx > 0 ? String(idx) : ''
       })()
       await useConnectionStore.getState().addConnection(accountId, {
@@ -366,7 +447,7 @@ export function AccountForm() {
         capabilities: ['addons', 'plugins', 'profiles'],
       })
       const { scheduleSyncAccount } = await import('@/store/account/accountSync')
-      scheduleSyncAccount(accountId)
+      scheduleSyncAccount(accountId, false, 'user')
       setConnectedPlatforms(prev => new Set(prev).add('nuvio'))
       if (isFirstConnection) {
         setWizardStep('connect-more')
@@ -374,8 +455,12 @@ export function AccountForm() {
         setNuvioDialogOpen(false)
       }
     } catch (err) {
-      if (isFirstConnection && accountId) removeAccount(accountId).catch(() => {})
+      if (isFirstConnection) {
+        if (accountId) removeAccount(accountId).catch(() => {})
+        setCreatedAccountId(null)
+      }
       setError(err instanceof Error ? err.message : 'Failed to add Nuvio connection')
+      throw err
     }
   }
 
@@ -420,7 +505,7 @@ export function AccountForm() {
         capabilities: ['addons'],
       })
       const { scheduleSyncAccount } = await import('@/store/account/accountSync')
-      scheduleSyncAccount(accountId)
+      scheduleSyncAccount(accountId, false, 'user')
       setConnectedPlatforms(prev => new Set(prev).add('realstream'))
       if (isFirstConnection) {
         setWizardStep('connect-more')
@@ -428,8 +513,12 @@ export function AccountForm() {
         setRealstreamDialogOpen(false)
       }
     } catch (err) {
-      if (isFirstConnection && accountId) removeAccount(accountId).catch(() => {})
+      if (isFirstConnection) {
+        if (accountId) removeAccount(accountId).catch(() => {})
+        setCreatedAccountId(null)
+      }
       setError(err instanceof Error ? err.message : 'Failed to add RealStream connection')
+      throw err
     }
   }
 
@@ -460,8 +549,12 @@ export function AccountForm() {
         setHydraDialogOpen(false)
       }
     } catch (err) {
-      if (isFirstConnection && accountId) removeAccount(accountId).catch(() => {})
+      if (isFirstConnection) {
+        if (accountId) removeAccount(accountId).catch(() => {})
+        setCreatedAccountId(null)
+      }
       setError(err instanceof Error ? err.message : 'Failed to add Hydra connection')
+      throw err
     }
   }
 
@@ -472,6 +565,8 @@ export function AccountForm() {
     }
 
     if (mode === 'oauth' || mode === 'qr') return
+    // Enter-to-submit must not save past a picture that is still being resized.
+    if (avatarProcessing) return
     setError('')
 
     if (!encryptionKey) {
@@ -481,32 +576,13 @@ export function AccountForm() {
 
     if (editingAccount) {
       const resolvedEmail = email.trim() || editingAccount.email || ''
-      const expiredConnection = editingAccount.connections?.find(c => c.status === 'expired')
-      const isStremioExpired = !expiredConnection || expiredConnection.platform === 'stremio'
       if (mode === 'credentials' && password.trim() && !resolvedEmail) {
         setError('Email is required when updating Stremio credentials.')
         return
       }
-      if (editingAccount.status === 'expired' && mode === 'credentials' && (!resolvedEmail || !password.trim())) {
-        if (isStremioExpired) {
-          setError('Enter the Stremio email and password to restore this expired session.')
-        } else {
-          const platformName = expiredConnection.platform.charAt(0).toUpperCase() + expiredConnection.platform.slice(1)
-          setError(`Session expired. Reconnect your ${platformName} account in the Connections tab to restore it.`)
-        }
-        return
-      }
-      if (editingAccount.status === 'expired' && mode === 'authKey' && !authKey.trim()) {
-        if (isStremioExpired) {
-          setError('Paste a fresh AuthKey to replace this expired token.')
-        } else {
-          const platformName = expiredConnection.platform.charAt(0).toUpperCase() + expiredConnection.platform.slice(1)
-          setError(`Session expired. Reconnect your ${platformName} account in the Connections tab to restore it.`)
-        }
-        return
-      }
     }
 
+    setSubmitting(true)
     try {
       const beforeIds = !editingAccount ? new Set(useAccountStore.getState().accounts.map(a => a.id)) : null
       if (editingAccount) {
@@ -560,6 +636,8 @@ export function AccountForm() {
           ? err.message
           : `Failed to ${editingAccount ? 'update' : 'add'} account`
       )
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -745,17 +823,6 @@ export function AccountForm() {
           />
         </div>
       </div>
-
-      {error && (
-        <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-bold text-destructive">{error}</p>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 
@@ -950,7 +1017,7 @@ export function AccountForm() {
                 <Button
                   type="button"
                   onClick={() => handleSaveOAuthAccount(true)}
-                  disabled={loading || oauthSaving || oauthEmailLoading || !encryptionKey}
+                  disabled={submitting || oauthSaving || oauthEmailLoading || !encryptionKey}
                   className="rounded-xl font-bold text-xs"
                 >
                   {oauthSaving ? 'Saving...' : oauthEmailLoading ? 'Checking email...' : isEditing ? 'Save persistent session' : 'Save persistent account'}
@@ -959,7 +1026,7 @@ export function AccountForm() {
                   type="button"
                   variant="subtle"
                   onClick={() => handleSaveOAuthAccount(false)}
-                  disabled={loading || oauthSaving || !encryptionKey}
+                  disabled={submitting || oauthSaving || !encryptionKey}
                   className="rounded-xl font-semibold text-xs"
                 >
                   {isEditing ? 'Use OAuth token only' : 'Continue with OAuth only'}
@@ -971,7 +1038,7 @@ export function AccountForm() {
           <StremioOAuth
             onAuthKey={handleOAuthApproved}
             onError={setError}
-            disabled={loading}
+            disabled={submitting}
           />
         )
       ) : mode === 'qr' ? (
@@ -986,7 +1053,7 @@ export function AccountForm() {
           <Button
             type="button"
             onClick={() => setQrDialogOpen(true)}
-            disabled={loading}
+            disabled={submitting}
             className="w-full gap-2"
           >
             <QrCode className="h-4 w-4" />
@@ -1123,7 +1190,7 @@ export function AccountForm() {
             setMode('oauth')
           }}
           onError={setError}
-          disabled={loading}
+          disabled={submitting}
         />
       )}
 
@@ -1158,17 +1225,6 @@ export function AccountForm() {
               checked={hidePlatformLogos}
               onCheckedChange={setHidePlatformLogos}
             />
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-bold text-destructive">{error}</p>
-            </div>
           </div>
         </div>
       )}
@@ -1241,188 +1297,225 @@ export function AccountForm() {
     </div>
   )
 
-  const renderEditingView = () => (
-    <form onSubmit={handleSubmit} className="mt-4">
-      <Tabs defaultValue="customize" className="w-full">
-        <TabsList className="mb-6">
-          <TabsTrigger value="customize">
-            Customize
-          </TabsTrigger>
-          <TabsTrigger value="connections">
-            Connections
-          </TabsTrigger>
-        </TabsList>
+  const emojiPickerContent = (
+    <div className="flex flex-col h-[380px] bg-popover">
+      <div className="p-3 border-b border-border/10 bg-muted/20">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search emojis..."
+            className="pl-9 h-9 text-xs bg-muted/30 border border-border/40 focus:bg-muted/40 rounded-lg"
+            value={emojiSearch}
+            onChange={(e) => setEmojiSearch(e.target.value)}
+            autoFocus
+          />
+        </div>
+      </div>
 
-        <TabsContent value="customize" className="space-y-6">
-          <div className="space-y-2">
-            <Label htmlFor="edit-name" className="text-xs font-medium text-muted-foreground uppercase">Display Name</Label>
+      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+        {Object.entries(EMOJI_GROUPS).map(([group, emojis]) => {
+          const filtered = emojis.filter(e =>
+            e.keywords.some(k => k.toLowerCase().includes(emojiSearch.toLowerCase())) ||
+            e.char.includes(emojiSearch)
+          )
+          if (filtered.length === 0) return null
+
+          return (
+            <div key={group} className="mb-6 last:mb-0">
+              <h4 className="text-xs font-semibold text-primary/60 mb-3 px-1">{group}</h4>
+              <div className="grid grid-cols-6 gap-2">
+                {filtered.map((e) => (
+                  <Tooltip key={e.char} content={e.keywords[0]}>
+                    <button
+                      type="button"
+                      onClick={() => { setEmoji(e.char); setAvatar('') }}
+                      className={`h-10 w-10 flex items-center justify-center text-xl rounded-xl transition-[transform,opacity,box-shadow] duration-200 hover:scale-115 hover:bg-primary/20 ${emoji === e.char ? `bg-primary/25 ring-2 ${isLight ? 'ring-primary' : 'ring-primary/50'} shadow-lg scale-110` : 'hover:bg-accent/40'}`}
+                    >
+                      {e.char}
+                    </button>
+                  </Tooltip>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  const connectionsCount = activeConnectionsLabel(liveAccount?.connections ?? editingAccount?.connections ?? [])
+  const hasAccentColor = !!accentColor && accentColor !== 'none'
+
+  const renderEditingView = () => {
+    const previewAccount = liveAccount ?? editingAccount
+    return (
+    <form onSubmit={handleSubmit} className="mt-4 min-w-0">
+      <div className="flex items-center gap-2 pb-4">
+        {editPage === 'connections' ? (
+          <>
+            <span className="flex shrink-0 items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={editPageBack}
+                aria-label="Back to account"
+                className="h-11 w-11 rounded-full p-0"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={editPageForward}
+                disabled={!editCanForward}
+                aria-label="Forward"
+                className="h-11 w-11 rounded-full p-0 disabled:opacity-35"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </span>
+            <DialogTitle className="min-w-0 flex-1 truncate text-left text-lg font-bold leading-tight tracking-tight">Connections</DialogTitle>
+            <span aria-hidden="true" className="h-11 w-11 shrink-0" />
+          </>
+        ) : (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={handleClose}
+              className="h-11 shrink-0 rounded-full px-3 text-sm font-semibold text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </Button>
+            {editCanForward && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={editPageForward}
+                aria-label="Forward to connections"
+                className="h-11 w-11 shrink-0 rounded-full p-0 disabled:opacity-35"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            )}
+            <DialogTitle className="min-w-0 flex-1 truncate text-center text-base font-bold">Edit Account</DialogTitle>
+            <Button
+              type="submit"
+              disabled={submitting || !encryptionKey || avatarProcessing}
+              className="h-11 shrink-0 rounded-full px-4 text-sm font-bold transition-[transform,opacity,box-shadow]"
+            >
+              {submitting ? 'Saving...' : !encryptionKey ? 'Vault locked' : avatarProcessing ? 'Processing...' : 'Done'}
+            </Button>
+          </>
+        )}
+      </div>
+
+      {editPage === 'profile' ? (
+        <div className="space-y-5">
+          {isExpiredSession && (
+            <div data-theme-tone="status" data-theme-part="panel" className="flex flex-wrap items-center gap-3 rounded-xl border border-warning/25 bg-warning/10 px-4 py-3 text-warning">
+              <AlertCircle className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <p className="min-w-0 flex-1 text-sm font-medium">{expiredSessionPlatformName} session expired</p>
+              {expiredSessionConnection && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-9 shrink-0 border-warning/35 bg-background/60 text-warning hover:bg-warning/10"
+                  onClick={() => {
+                    setEditPage('connections')
+                    setSignInAgainTarget({ id: expiredSessionConnection.id, nonce: Date.now() })
+                  }}
+                >
+                  Sign in again
+                </Button>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col items-center">
+            <div className="relative">
+              <AccountAvatar
+                account={{ name: name || 'Account', email, emoji, avatar: avatar || undefined, status: 'active' }}
+                size="lg"
+                showStatus={false}
+                className="h-24 w-24 rounded-full [&>span]:text-5xl [&>span>span]:text-4xl"
+              />
+              {hasAccentColor && (
+                <span
+                  className="pointer-events-none absolute inset-0 rounded-full"
+                  style={{ boxShadow: `inset 0 0 0 2px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
+                  aria-hidden="true"
+                />
+              )}
+              <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
+                <PopoverTrigger asChild>
+                  <span aria-hidden="true" tabIndex={-1} className="pointer-events-none absolute left-1/2 top-1/2 h-px w-px" />
+                </PopoverTrigger>
+                <PopoverContent className="w-[320px] p-0 border-border/10 shadow-2xl overflow-hidden rounded-xl" align="center">
+                  {emojiPickerContent}
+                </PopoverContent>
+              </Popover>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="subtle" className="mt-2 h-11 rounded-full px-5 text-xs font-semibold">
+                  Edit photo
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="center" className="w-60">
+                <DropdownMenuItem onClick={() => avatarFileInputRef.current?.click()}>
+                  Upload photo
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setEmojiOpen(true)}>
+                  Choose emoji
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => {
+                  setShowAvatarUrl(true)
+                  window.setTimeout(() => {
+                    const input = document.getElementById('edit-avatar-url') as HTMLInputElement | null
+                    input?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+                    input?.focus()
+                  }, 120)
+                }}>
+                  Paste image link
+                </DropdownMenuItem>
+                <DropdownMenuItem destructive onClick={() => { setAvatar(''); setEmoji('') }}>
+                  Remove photo
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <input
+              ref={avatarFileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void handleAvatarFile(file)
+                e.target.value = ''
+              }}
+            />
+          </div>
+
+          <div className="mx-auto w-full max-w-[280px]">
             <Input
               id="edit-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="My Account"
-              className="bg-background/50 border-muted focus:bg-background transition-colors h-10 rounded-xl"
+              className="h-11 rounded-xl border-muted bg-background/50 text-center text-base font-semibold focus:bg-background"
               maxLength={32}
             />
           </div>
-          <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground uppercase">Card Preview</p>
-            {(() => {
-              const hasAccent = accentColor && accentColor !== 'none'
-              const displayName = name || (email ? email.split('@')[0] : 'My Account')
-              const addonCount = loading ? '-' : editingAccount?.addons.length ?? 0
-              return (
-                <Card
-                  className="pointer-events-none relative rounded-[1.35rem] border-border/45 bg-card/80 shadow-sm"
-                >
-                  <CardHeader className="relative z-10 px-4 pb-3 pt-4">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <div className="relative shrink-0">
-                          <AccountAvatar account={{ name: displayName, email, emoji, avatar, status: 'active' }} size="lg" showStatus={false} />
-                          {hasAccent && (
-                            <span
-                              className="pointer-events-none absolute inset-0 rounded-xl"
-                              style={{ boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
-                              aria-hidden="true"
-                            />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <CardTitle className="flex items-center gap-2 text-base font-semibold truncate tracking-tight">
-                            <span className="truncate flex-1">{displayName}</span>
-                          </CardTitle>
-                          {email && (
-                            <p className="text-xs text-muted-foreground mt-0.5 truncate">{email}</p>
-                          )}
-                          {liveAccount && (hasPlatformConnection(liveAccount) || (liveAccount.connections || []).filter(c => c.platform !== 'stremio').length > 0) && (
-                            <div className="flex items-center gap-1 mt-1">
-                              {getStremioAuthKey(liveAccount) && (
-                                <PlatformLogo platform="stremio" className="h-5 w-5" />
-                              )}
-                              {(liveAccount.connections || []).filter(c => c.platform !== 'stremio').map(conn => (
-                                <PlatformLogo key={conn.id} platform={conn.platform} className={cn("h-5 w-5", conn.enabled === false && "opacity-40 grayscale")} isHydra={conn.connectionType === 'hydra-outbound'} />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <Button variant="ghost" className="h-8 w-8 rounded-full p-0 text-muted-foreground opacity-30 shrink-0">
-                        <MoreVertical className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="relative z-10 px-4 pb-3">
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                        <span className="inline-flex items-center gap-1.5">
-                          <span className="font-semibold text-foreground">{addonCount}</span>
-                          addon{addonCount === 1 ? '' : 's'}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {(!liveAccount || liveAccount.status !== 'error') && (
-                          <span data-theme-part="badge" className="inline-flex h-6 items-center gap-1 rounded-full border border-success/25 bg-success/10 px-2 text-xs font-semibold text-success">
-                            <ShieldCheck className="h-3 w-3" />
-                            Healthy
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </CardContent>
-                  {liveAccount?.lastSync && (
-                    <div className="px-4 pb-4 pt-1">
-                      <span className="text-xs text-muted-foreground/60">Synced {new Date(liveAccount.lastSync).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
-                    </div>
-                  )}
-                </Card>
-              )
-            })()}
-          </div>
 
-          <div className="space-y-4 px-1">
-            <div className="space-y-3">
-              <Label className="text-xs font-medium text-muted-foreground uppercase">Account Emoji</Label>
-              <div className="flex items-center gap-3">
-                <div className="relative">
-                  <Input
-                    id="emoji"
-                    value={emoji}
-                    onChange={(e) => setEmoji(e.target.value)}
-                    placeholder="👤"
-                    className="bg-background/50 border-muted focus:bg-background transition-colors w-14 h-14 text-center text-2xl p-0 rounded-xl shadow-inner"
-                    maxLength={4}
-                  />
-                </div>
-
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button variant="subtle" size="icon" className="h-14 w-14 rounded-xl bg-background/50 border-muted hover:bg-muted/50 transition-[transform,opacity,box-shadow] shadow-sm">
-                      <Smile className="h-6 w-6 opacity-60" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[320px] p-0 border-border/10 shadow-2xl overflow-hidden rounded-xl" align="start">
-                    <div className="flex flex-col h-[380px] bg-popover">
-                      <div className="p-3 border-b border-border/10 bg-muted/20">
-                        <div className="relative">
-                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                          <Input
-                            placeholder="Search emojis..."
-                            className="pl-9 h-9 text-xs bg-muted/30 border border-border/40 focus:bg-muted/40 rounded-lg"
-                            value={emojiSearch}
-                            onChange={(e) => setEmojiSearch(e.target.value)}
-                            autoFocus
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                        {Object.entries(EMOJI_GROUPS).map(([group, emojis]) => {
-                          const filtered = emojis.filter(e =>
-                            e.keywords.some(k => k.toLowerCase().includes(emojiSearch.toLowerCase())) ||
-                            e.char.includes(emojiSearch)
-                          )
-                          if (filtered.length === 0) return null
-
-                          return (
-                            <div key={group} className="mb-6 last:mb-0">
-                              <h4 className="text-xs font-semibold text-primary/60 mb-3 px-1">{group}</h4>
-                              <div className="grid grid-cols-6 gap-2">
-                                {filtered.map((e) => (
-                                  <Tooltip key={e.char} content={e.keywords[0]}>
-                                    <button
-                                      type="button"
-                                      onClick={() => setEmoji(e.char)}
-                                      className={`h-10 w-10 flex items-center justify-center text-xl rounded-xl transition-[transform,opacity,box-shadow] duration-200 hover:scale-115 hover:bg-primary/20 ${emoji === e.char ? `bg-primary/25 ring-2 ${isLight ? 'ring-primary' : 'ring-primary/50'} shadow-lg scale-110` : 'hover:bg-accent/40'}`}
-                                    >
-                                      {e.char}
-                                    </button>
-                                  </Tooltip>
-                                ))}
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-14 px-4 text-xs font-bold uppercase rounded-xl opacity-40 hover:opacity-100 hover:text-destructive hover:bg-destructive/5 transition-[transform,opacity,box-shadow]"
-                  onClick={() => setEmoji('')}
-                >
-                  Clear
-                </Button>
-              </div>
-            </div>
-
+          {showAvatarUrl && (
             <div className="space-y-2">
               <div>
-                <Label className="text-xs font-medium text-muted-foreground uppercase">Avatar URL</Label>
+                <Label htmlFor="edit-avatar-url" className="text-xs font-medium text-muted-foreground">Image link</Label>
                 <p className="text-xs text-muted-foreground mt-1">Direct image link (https://...). Overrides emoji when set. Syncs across devices.</p>
               </div>
               <div className="flex items-center gap-2">
@@ -1430,6 +1523,7 @@ export function AccountForm() {
                   <AccountAvatar account={{ name: name || 'Account', email, emoji, avatar: avatar || undefined, status: 'active' }} size="sm" showStatus={false} />
                 </div>
                 <input
+                  id="edit-avatar-url"
                   type="url"
                   data-theme-part="input"
                   value={avatar.startsWith('data:') ? '\u2713 Uploaded image' : avatar}
@@ -1452,171 +1546,285 @@ export function AccountForm() {
                     <X className="h-4 w-4" />
                   </Button>
                 )}
-                <ImageUploadButton
-                  onUploaded={(dataUrl) => setAvatar(dataUrl)}
-                  options={{ maxDimension: 256, square: true, quality: 0.85 }}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-border/50 text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
-                  label="Upload avatar"
-                />
               </div>
             </div>
+          )}
 
-            <div className="space-y-4">
-              <Label className="text-xs font-medium text-muted-foreground uppercase">Theme Color</Label>
-
-              <div data-theme-part="panel" className="bg-muted/10 p-4 rounded-2xl border border-border/10 space-y-5">
-                <div className="flex flex-wrap items-center gap-3">
-                  <Tooltip content="No accent color" side="top">
-                    <button
-                      key="none"
-                      type="button"
-                      onClick={() => setAccentColor('none')}
-              className={`w-8 h-8 rounded-xl flex items-center justify-center transition-[transform,opacity,box-shadow] hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background relative overflow-hidden group ${accentColor === 'none' ? 'ring-2 ring-foreground ring-offset-2 ring-offset-background' : 'border border-foreground/20'}`}
-                    >
-                      <div className="absolute inset-x-0 h-0.5 bg-destructive/50 rotate-45" />
-                      <div className="text-xs font-bold opacity-40 group-hover:opacity-100 transition-opacity">Off</div>
-                    </button>
-                  </Tooltip>
-
-                  {ACCOUNT_COLORS.map((hex) => (
-                    <button
-                      key={hex}
-                      type="button"
-                      onClick={() => setAccentColor(hex)}
-              className={`w-8 h-8 rounded-xl transition-[transform,opacity,box-shadow] hover:scale-115 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${accentColor === hex ? 'ring-2 ring-white ring-offset-2 ring-offset-background shadow-lg' : ''}`}
-                      style={{ backgroundColor: hex }}
-                    />
-                  ))}
-
-                  <Popover>
-                    <Tooltip content="Custom color" side="top">
-                      <PopoverTrigger asChild>
-                        <button
-                          type="button"
-                  className={`w-8 h-8 rounded-xl transition-[transform,opacity,box-shadow] hover:scale-115 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background bg-[conic-gradient(red,yellow,lime,cyan,blue,magenta,red)] ${(accentColor && accentColor !== 'none' && !ACCOUNT_COLORS.includes(accentColor)) ? 'ring-2 ring-white ring-offset-2 ring-offset-background shadow-lg' : ''}`}
-                        />
-                      </PopoverTrigger>
-                    </Tooltip>
-                    <PopoverContent className="w-[280px] p-4" align="start">
-                      <ColorPicker
-                        value={accentColor && accentColor.startsWith('#') ? accentColor : '#6366f1'}
-                        onChange={(hex) => setAccentColor(hex)}
-                      />
-                    </PopoverContent>
-                  </Popover>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-10 h-10 rounded-xl shadow-inner border border-foreground/10 shrink-0 transition-colors duration-500"
-                    style={{ background: (accentColor && accentColor !== 'none') ? accentColor : 'transparent' }}
+          <div data-theme-part="panel" className="overflow-hidden rounded-2xl border border-border/40 bg-muted/10">
+            <div className="border-b border-border/30">
+              <button
+                type="button"
+                onClick={() => setColorOpen(current => !current)}
+                aria-expanded={colorOpen}
+                className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
+              >
+                <span className="text-sm font-semibold">Color</span>
+                <span className="flex items-center gap-2.5">
+                  <span
+                    className="h-4 w-4 shrink-0 rounded-full border border-foreground/15 shadow-inner"
+                    style={{ background: hasAccentColor ? accentColor : 'transparent' }}
                   />
-                  <div className="relative flex-1">
-                    <Input
-                      type="text"
-                      value={accentColor === 'none' ? '' : (accentColor || '')}
-                      onChange={(e) => {
-                        const val = e.target.value
-                        if (/^#[0-9a-fA-F]{0,6}$/.test(val)) setAccentColor(val)
-                      }}
-                      placeholder={accentColor === 'none' ? 'None' : "#hexcode"}
-                      className="font-mono text-xs bg-background/50 border-muted focus:bg-background h-10 rounded-xl"
-                      disabled={accentColor === 'none'}
+                  <ChevronRight className={cn('h-4 w-4 text-muted-foreground transition-transform', colorOpen && 'rotate-90')} />
+                </span>
+              </button>
+              {colorOpen && (
+                <div className="space-y-4 px-4 pb-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Tooltip content="No accent color" side="top">
+                      <button
+                        key="none"
+                        type="button"
+                        onClick={() => setAccentColor('none')}
+                        className={`w-8 h-8 rounded-xl flex items-center justify-center transition-[transform,opacity,box-shadow] hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background relative overflow-hidden group ${accentColor === 'none' ? 'ring-2 ring-foreground ring-offset-2 ring-offset-background' : 'border border-foreground/20'}`}
+                      >
+                        <div className="absolute inset-x-0 h-0.5 bg-destructive/50 rotate-45" />
+                        <div className="text-xs font-bold opacity-40 group-hover:opacity-100 transition-opacity">Off</div>
+                      </button>
+                    </Tooltip>
+
+                    {ACCOUNT_COLORS.map((hex) => (
+                      <button
+                        key={hex}
+                        type="button"
+                        onClick={() => setAccentColor(hex)}
+                        className={`w-8 h-8 rounded-xl transition-[transform,opacity,box-shadow] hover:scale-115 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${accentColor === hex ? 'ring-2 ring-white ring-offset-2 ring-offset-background shadow-lg' : ''}`}
+                        style={{ backgroundColor: hex }}
+                      />
+                    ))}
+
+                    <Popover>
+                      <Tooltip content="Custom color" side="top">
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className={`w-8 h-8 rounded-xl transition-[transform,opacity,box-shadow] hover:scale-115 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background bg-[conic-gradient(red,yellow,lime,cyan,blue,magenta,red)] ${(accentColor && accentColor !== 'none' && !ACCOUNT_COLORS.includes(accentColor)) ? 'ring-2 ring-white ring-offset-2 ring-offset-background shadow-lg' : ''}`}
+                          />
+                        </PopoverTrigger>
+                      </Tooltip>
+                      <PopoverContent className="w-[280px] p-4" align="start">
+                        <ColorPicker
+                          value={accentColor && accentColor.startsWith('#') ? accentColor : '#6366f1'}
+                          onChange={(hex) => setAccentColor(hex)}
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-xl shadow-inner border border-foreground/10 shrink-0 transition-colors duration-500"
+                      style={{ background: hasAccentColor ? accentColor : 'transparent' }}
+                    />
+                    <div className="relative flex-1">
+                      <Input
+                        type="text"
+                        value={accentColor === 'none' ? '' : (accentColor || '')}
+                        onChange={(e) => {
+                          const val = e.target.value
+                          if (/^#[0-9a-fA-F]{0,6}$/.test(val)) setAccentColor(val)
+                        }}
+                        placeholder={accentColor === 'none' ? 'None' : "#hexcode"}
+                        className="font-mono text-xs bg-background/50 border-muted focus:bg-background h-10 rounded-xl"
+                        disabled={accentColor === 'none'}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="border-b border-border/30">
+              <button
+                type="button"
+                onClick={() => setCardOpen(current => !current)}
+                aria-expanded={cardOpen}
+                className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
+              >
+                <span className="shrink-0 text-sm font-semibold">On the card</span>
+                <span className="flex min-w-0 items-center gap-2.5">
+                  <span className="truncate text-xs text-muted-foreground">
+                    {cardVisibilitySummary({ hideLastWatched, hideAddonPreview, hidePlatformLogos })}
+                  </span>
+                  <ChevronRight className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', cardOpen && 'rotate-90')} />
+                </span>
+              </button>
+              {cardOpen && (
+                <div className="px-4 pb-2">
+                  <div className="flex items-center justify-between py-2">
+                    <div>
+                      <p className="text-sm font-medium">Hide last watched</p>
+                      <p className="text-xs text-muted-foreground">Don't show what this account is currently watching on the card.</p>
+                    </div>
+                    <Switch
+                      checked={hideLastWatched}
+                      onCheckedChange={setHideLastWatched}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between py-2">
+                    <div>
+                      <p className="text-sm font-medium">Hide addon preview</p>
+                      <p className="text-xs text-muted-foreground">Don't show addon logos on the card.</p>
+                    </div>
+                    <Switch
+                      checked={hideAddonPreview}
+                      onCheckedChange={setHideAddonPreview}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between py-2">
+                    <div>
+                      <p className="text-sm font-medium">Hide platform logos</p>
+                      <p className="text-xs text-muted-foreground">Don't show connection logos on the card.</p>
+                    </div>
+                    <Switch
+                      checked={hidePlatformLogos}
+                      onCheckedChange={setHidePlatformLogos}
                     />
                   </div>
                 </div>
-              </div>
+              )}
             </div>
 
-            <div className="border-t border-border/10 pt-4 space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase">Card Options</Label>
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <p className="text-sm font-medium">Hide last watched</p>
-                  <p className="text-xs text-muted-foreground">Don't show what this account is currently watching on the card.</p>
-                </div>
-                <Switch
-                  checked={hideLastWatched}
-                  onCheckedChange={setHideLastWatched}
-                />
-              </div>
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <p className="text-sm font-medium">Hide addon preview</p>
-                  <p className="text-xs text-muted-foreground">Don't show addon logos on the card.</p>
-                </div>
-                <Switch
-                  checked={hideAddonPreview}
-                  onCheckedChange={setHideAddonPreview}
-                />
-              </div>
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <p className="text-sm font-medium">Hide platform logos</p>
-                  <p className="text-xs text-muted-foreground">Don't show connection logos on the card.</p>
-                </div>
-                <Switch
-                  checked={hidePlatformLogos}
-                  onCheckedChange={setHidePlatformLogos}
-                />
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={() => setEditPage('connections')}
+              className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
+            >
+              <span className="text-sm font-semibold">Connections</span>
+              <span className="flex items-center gap-2.5">
+                <span className="text-xs text-muted-foreground">{connectionsCount}</span>
+                <ChevronRight className="h-4 w-4 text-muted-foreground" />
+              </span>
+            </button>
           </div>
-        </TabsContent>
 
-        <TabsContent value="connections" className="space-y-5">
+          {editingAccount && encryptionKey && (
+            <ConnectionPicturesSection accountId={editingAccount.id} />
+          )}
+
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">How it looks</p>
+            {(() => {
+              const displayName = name || (email ? email.split('@')[0] : 'My Account')
+              const maskedDisplayName = maskedAccountLabel({ name: displayName, email })
+              const addonCount = loading ? '-' : previewAccount?.addons.length ?? 0
+              const enabledAddons = (previewAccount?.addons ?? []).filter(a => a.flags?.enabled !== false)
+              let addonPreviewCount = 4
+              try { addonPreviewCount = parseInt(localStorage.getItem('aioman:addon-preview-count') || '4') } catch { /* keep 4 */ }
+              const previewAddons = addonPreviewCount === 0 ? enabledAddons : enabledAddons.slice(0, addonPreviewCount)
+              const remainingCount = addonPreviewCount === 0 ? 0 : Math.max(0, enabledAddons.length - addonPreviewCount)
+              const platformSummary = previewAccount ? aggregateAccountPlatforms([previewAccount]) : null
+              const hasPlatformSources = previewAccount ? accountPlatformSources(previewAccount).length > 0 : false
+              const previewPlayback = accountMediaPlayback(previewMedia.playback, previewLastWatched)
+              return (
+                <div data-theme-part="panel" className="pointer-events-none relative flex flex-col rounded-2xl border border-border/40 bg-card shadow-sm">
+                  <div className="flex items-start justify-between px-5 pb-2 pt-5">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <div className="relative shrink-0">
+                        <AccountAvatar account={{ name: displayName, email, emoji, avatar: avatar || undefined, status: 'active' }} size="lg" showStatus={false} accentColor={hasAccentColor ? accentColor : undefined} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-base font-semibold leading-tight tracking-tight">{maskedDisplayName}</p>
+                        {email && (
+                          <p className="sr-only mt-0.5 truncate text-xs text-muted-foreground">{maskedAccountLabel({ email })}</p>
+                        )}
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs leading-tight text-muted-foreground">
+                          <span className="inline-flex items-center gap-2">
+                            {!hidePlatformLogos && hasPlatformSources && platformSummary && platformSummary.platforms.length > 0 && (
+                              <span className="inline-flex items-center gap-1 border-r border-border/50 pr-2">
+                                {platformSummary.platforms.map(platformId => {
+                                  const entry = getPlatformEntry(platformId)
+                                  return entry ? (
+                                    <img key={platformId} src={entry.logo} alt="" loading="lazy" className="h-3.5 w-3.5 shrink-0 rounded-full object-contain" />
+                                  ) : (
+                                    <span key={platformId} className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-bold text-muted-foreground">
+                                      {platformId[0]?.toUpperCase() || '?'}
+                                    </span>
+                                  )
+                                })}
+                                <span>{platformSummary.platforms.length} platform{platformSummary.platforms.length === 1 ? '' : 's'}</span>
+                              </span>
+                            )}
+                            {!hasPlatformSources && (
+                              <span className="border-r border-border/50 pr-2 text-[11px]">Local</span>
+                            )}
+                            <span className="whitespace-nowrap">{addonCount} addon{addonCount === 1 ? '' : 's'}</span>
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="min-w-0 flex-grow px-5 pb-2 pt-2">
+                    {!hideAddonPreview && enabledAddons.length > 0 && (
+                      <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                        {previewAddons.map((addon, i) => (
+                          <AddonPreviewTile key={`${addon.transportUrl}-${i}`} src={addon.manifest.logo} name={addon.manifest.name} />
+                        ))}
+                        {remainingCount > 0 && (
+                          <span className="ml-0.5 text-[11px] text-muted-foreground">+{remainingCount}</span>
+                        )}
+                      </div>
+                    )}
+                    {previewAccount && previewAccount.addons.length === 0 && (
+                      <p className="py-1 text-xs text-muted-foreground">No addons yet</p>
+                    )}
+                  </div>
+                  <div className="mt-auto flex min-h-5 flex-wrap items-center gap-1.5 px-5 pb-4 text-xs">
+                    {!hideLastWatched && (previewPlayback ? (
+                      <AccountMediaPlayback playback={previewPlayback} />
+                    ) : previewLastWatched && (
+                      <>
+                        <Play className="h-3.5 w-3.5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
+                        <span className="truncate font-medium text-foreground/80">{previewLastWatched.name}</span>
+                        <time className="ml-0.5 shrink-0 text-[11px] text-muted-foreground">{getTimeAgo(new Date(previewLastWatched.timestamp))}</time>
+                      </>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
+
+          {error && (
+            <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-destructive">{error}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-5">
           {editingAccount && (
             <ConnectionManager
+              variant="sheet"
               accountId={editingAccount.id}
               connections={liveAccount?.connections ?? editingAccount.connections}
+              focusEditConnection={signInAgainTarget}
               onSubDialogChange={(open) => { connectionSubDialogRef.current = open; if (!open) subDialogClosedAtRef.current = Date.now() }}
             />
           )}
-        </TabsContent>
-      </Tabs>
-
-      {error && (
-        <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 mt-6 animate-in shake duration-500">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="text-sm font-bold text-destructive">{error}</p>
-            </div>
-          </div>
         </div>
       )}
-
-      <DialogFooter className="mt-8 pt-2">
-        <Button type="button" variant="subtle" onClick={handleClose} className="rounded-xl font-semibold text-xs">
-          Cancel
-        </Button>
-        {mode !== 'oauth' && mode !== 'qr' && (
-          <Button
-            type="submit"
-            disabled={loading || !encryptionKey}
-            className="rounded-xl font-bold text-xs px-8 transition-[transform,opacity,box-shadow]"
-          >
-            {loading
-              ? isEditing ? 'Updating...' : 'Adding...'
-              : !encryptionKey ? 'Vault Locked' : isExpiredSession ? 'Restore Session' : isEditing ? 'Save Changes' : 'Create Account'}
-          </Button>
-        )}
-      </DialogFooter>
     </form>
-  )
+    )
+  }
 
   if (isEditing) {
     return (
       <Dialog open={isOpen} onOpenChange={(open) => { if (open) return; if (jellyfinDialogOpen || connectionSubDialogRef.current) return; if (Date.now() - subDialogClosedAtRef.current < 250) return; handleClose() }}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Edit Account</DialogTitle>
-            <DialogDescription>
-              {isExpiredSession
-                ? 'Re-authenticate this account to restore sync.'
-                : 'Update account details. Leave credentials blank to keep them unchanged.'}
-            </DialogDescription>
-          </DialogHeader>
+        <DialogContent ref={editSheetRef} tabIndex={-1} className="outline-none sm:max-w-2xl" hideClose>
+          <DialogBack active={editPage === 'connections' && editCanBack} onBack={editPageBack} />
+          {/* Registered before the Connections content so its panel history stays deeper in the shared Alt stack. */}
+          <DialogAltHistory
+            active={isOpen && isEditing && (editCanBack || editCanForward)}
+            canBack={editCanBack}
+            canForward={editCanForward}
+            onBack={editPageBack}
+            onForward={editPageForward}
+          />
           {renderEditingView()}
         </DialogContent>
       </Dialog>
@@ -1656,8 +1864,8 @@ export function AccountForm() {
               : renderPlatformStep()}
         </div>
 
-        {error && (wizardStep === 'identity' || wizardStep === 'connect-more') && (
-          <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
+        {error && (
+          <div role="alert" data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
             <div className="flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
               <div className="flex-1">
@@ -1717,7 +1925,7 @@ export function AccountForm() {
                   type="button"
                   variant="subtle"
                   onClick={handleSkipLocal}
-                  disabled={loading}
+                  disabled={submitting}
                   className="rounded-xl font-semibold text-xs"
                 >
                   Skip for Now
@@ -1727,10 +1935,10 @@ export function AccountForm() {
                 <Button
                   type="button"
                   onClick={(e) => handleSubmit(e as unknown as React.FormEvent)}
-                  disabled={loading || !encryptionKey}
+                  disabled={submitting || !encryptionKey}
                   className="rounded-xl font-bold text-xs px-8"
                 >
-                  {loading ? 'Adding...' : !encryptionKey ? 'Vault Locked' : 'Connect & Create'}
+                  {submitting ? 'Adding...' : !encryptionKey ? 'Vault Locked' : 'Connect & Create'}
                 </Button>
               )}
             </>

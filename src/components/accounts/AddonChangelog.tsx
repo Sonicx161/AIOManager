@@ -2,6 +2,7 @@ import { useAccountStore } from '@/store/accountStore'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
 import { getTimeAgo, normalizeAddonUrl } from '@/lib/utils'
+import { maskSecretUrl } from '@/lib/mask-secret-url'
 import { Plus, Trash2, RefreshCw, Clock } from 'lucide-react'
 import { useMemo } from 'react'
 import { AddonIcon } from '@/components/ui/addon-icon'
@@ -122,12 +123,12 @@ export function AddonChangelog({ accountId }: AddonChangelogProps) {
                                         </p>
                                         {entry.action === 'replaced' && entry.oldAddonUrl && entry.newAddonUrl && (
                                             <p className="mt-0.5 max-w-[48rem] truncate font-mono text-[11px] text-muted-foreground/70">
-                                                {entry.oldAddonUrl} {'->'} {entry.newAddonUrl}
+                                                {maskSecretUrl(entry.oldAddonUrl)} {'->'} {maskSecretUrl(entry.newAddonUrl)}
                                             </p>
                                         )}
                                         {entry.addonUrl && (
                                             <p className="mt-0.5 max-w-[48rem] truncate font-mono text-[11px] text-muted-foreground/70">
-                                                {entry.addonUrl}
+                                                {maskSecretUrl(entry.addonUrl)}
                                             </p>
                                         )}
                                     </div>

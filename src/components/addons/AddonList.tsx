@@ -12,6 +12,7 @@ import { AccountSwitcher } from '@/components/common/AccountSwitcher'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { useAccountStore, getAccountEmail, getStremioAuthKey, hasPlatformConnection } from '@/store/accountStore'
 import { pushAddonsToPlatform } from '@/lib/account-compat'
+import { buildSavedAddonIndex } from '@/lib/saved-addon-index'
 import type { AddonDescriptor } from '@/types/addon'
 import { useAddonStore } from '@/store/addonStore'
 import { useAuthStore } from '@/store/authStore'
@@ -24,6 +25,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef, Suspense } fr
 import { Input } from '@/components/ui/input'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AddonCard } from './AddonCard'
+import { ResurrectedNotice } from './ResurrectedNotice'
 import { useProfileOperations } from './useProfileOperations'
 import { useAddonFlagOperations } from './useAddonFlagOperations'
 import { useAddonHeavyOperations } from './useAddonHeavyOperations'
@@ -211,7 +213,7 @@ export function AddonList({ accountId }: AddonListProps) {
     })
   }
 
-  const toggleAddonSelection = (addonUrl: string) => {
+  const toggleAddonSelection = useCallback((addonUrl: string) => {
     setSelectedAddonUrls((prev) => {
       const newSet = new Set(prev)
       if (newSet.has(addonUrl)) {
@@ -221,7 +223,12 @@ export function AddonList({ accountId }: AddonListProps) {
       }
       return newSet
     })
-  }
+  }, [])
+
+  const handleAddonLongPress = useCallback((id: string) => {
+    setIsSelectionMode(true)
+    toggleAddonSelection(id)
+  }, [toggleAddonSelection])
 
   const toggleSelectionMode = () => {
     setIsSelectionMode(!isSelectionMode)
@@ -233,12 +240,14 @@ export function AddonList({ accountId }: AddonListProps) {
 
   // Sync first, then reconcile Autopilot so a fresh Stremio pull cannot
   // re-enable backup addons after the server says a different URL is active.
+  // lastSync is read via getState() so background syncs of the open account do not re-run this effect.
   useEffect(() => {
     if (!accountId || !encryptionKey) return
 
     let cancelled = false
     const reconcile = async () => {
-      const lastSync = account?.lastSync ? new Date(account.lastSync).getTime() : 0
+      const lastSyncValue = useAccountStore.getState().accounts.find(acc => acc.id === accountId)?.lastSync
+      const lastSync = lastSyncValue ? new Date(lastSyncValue).getTime() : 0
       const isStale = Date.now() - lastSync > 2 * 60 * 1000
       if (isStale) {
         await syncAccount(accountId, false)
@@ -255,7 +264,7 @@ export function AddonList({ accountId }: AddonListProps) {
     return () => {
       cancelled = true
     }
-  }, [accountId, syncAccount, encryptionKey, account?.lastSync, pullServerState])
+  }, [accountId, syncAccount, encryptionKey, pullServerState])
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showClearAllConfirm, setShowClearAllConfirm] = useState(false)
@@ -301,7 +310,7 @@ export function AddonList({ accountId }: AddonListProps) {
       setIsSelectionMode(false)
       setSelectedAddonUrls(new Set())
       setShowDeleteConfirm(false)
-      await syncAccount(accountId, true)
+      await syncAccount(accountId, true, 'user')
     } catch (e) {
       const msg = (e as Error)?.message || ''
       if (msg.includes('Anti-wipe guard')) {
@@ -346,6 +355,8 @@ export function AddonList({ accountId }: AddonListProps) {
   const latestVersions = useAddonStore((state) => state.latestVersions)
   const manifestChangeHints = useAddonStore((state) => state.manifestChangeHints)
   const library = useAddonStore(useShallow((state) => state.library))
+  const accountAuthKey = useMemo(() => (account ? getStremioAuthKey(account) : ''), [account])
+  const isSavedAddon = useMemo(() => buildSavedAddonIndex(Object.values(library)), [library])
   const installedKeys = useMemo(() => {
     const keys = new Set<string>()
     for (const saved of Object.values(library)) {
@@ -440,7 +451,8 @@ export function AddonList({ accountId }: AddonListProps) {
 
     setRefreshProgress({ status: 'running', current: 0, total: 3, label: 'Syncing addon list', detail: `Pulling from ${platformText}...` })
     try {
-      await syncAccount(accountId, true)
+      // Refresh is a force-read plus the same user push as Sync: additive merge, nothing removed by the read.
+      await syncAccount(accountId, true, 'user')
       setRefreshProgress({ status: 'running', current: 1, total: 3, label: 'Syncing server state', detail: 'Checking failover rules and connection health...' })
 
       await pullServerState()
@@ -516,6 +528,17 @@ export function AddonList({ accountId }: AddonListProps) {
   } = useAddonFlagOperations({ accountId, account, addons, selectedAddonUrls, setSelectedAddonUrls, setIsSelectionMode })
 
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  const updateAddonRef = useRef(handleUpdateAddon)
+  updateAddonRef.current = handleUpdateAddon
+  const stableUpdateAddon = useCallback(
+    (accId: string, transportUrl: string) => updateAddonRef.current(accId, transportUrl),
+    []
+  )
+  const handleRemoveAddon = useCallback(
+    (accId: string, _transportUrl: string, index?: number) => removeAddonByIndex(accId, index ?? 0),
+    [removeAddonByIndex]
+  )
 
   const {
     handleCreateRule,
@@ -712,6 +735,7 @@ export function AddonList({ accountId }: AddonListProps) {
         </TabsList>
 
         <TabsContent value="addons" animated={false} className="space-y-4">
+          <ResurrectedNotice accountId={accountId} />
           <ToolbarShell contentClassName="gap-2 sm:gap-3">
             {/* Search + view toggle - grouped so they never wrap apart */}
             <div className="grid w-full grid-cols-[1fr_auto] items-center gap-2 sm:flex sm:w-auto sm:flex-none">
@@ -967,16 +991,16 @@ export function AddonList({ accountId }: AddonListProps) {
                       index={originalIndex}
                       addon={addon}
                       accountId={accountId}
-                      accountAuthKey={account ? getStremioAuthKey(account) : ''}
-                      onRemove={async () => { await removeAddonByIndex(accountId, originalIndex) }}
-                      onUpdate={handleUpdateAddon}
+                      accountAuthKey={accountAuthKey}
+                      onRemove={handleRemoveAddon}
+                      onUpdate={stableUpdateAddon}
                       latestVersion={getLatestAddonVersion(latestVersions, addon)}
                       manifestChange={manifestChangeHints[addon.manifest.id]}
                       isOnline={healthStatus[addon.manifest.id]?.isOnline}
                       healthError={healthStatus[addon.manifest.id]?.error}
                       isSelectionMode={isSelectionMode}
                       onToggleSelect={toggleAddonSelection}
-                      onLongPress={(id) => { setIsSelectionMode(true); toggleAddonSelection(id) }}
+                      onLongPress={handleAddonLongPress}
                       selectionId={`${addon.transportUrl}::${originalIndex}`}
                       isSelected={selectedAddonUrls.has(`${addon.transportUrl}::${originalIndex}`)}
                       failoverPrimaryName={linkedRule && primaryAddon ? (primaryAddon.metadata?.customName || primaryAddon.manifest.name) : undefined}
@@ -984,6 +1008,7 @@ export function AddonList({ accountId }: AddonListProps) {
                       isPrimary={!!primaryRule}
                       isPrimaryPaused={primaryRule ? !primaryRule.isActive : undefined}
                       isInstalled={installedKeys.has(`${addon.manifest.id}::${addon.transportUrl}`)}
+                      isSaved={isSavedAddon(addon)}
                       compact={effectiveAddonListView === 'list'}
                     />
                   </StaggerItem>
@@ -1027,6 +1052,7 @@ export function AddonList({ accountId }: AddonListProps) {
               accountId={accountId}
               account={account ?? undefined}
               connections={account?.connections}
+              onShowInstalledAddons={() => handleTabChange('addons')}
             />
 
           </div>
@@ -1086,10 +1112,10 @@ export function AddonList({ accountId }: AddonListProps) {
       <ConfirmationDialog
         open={showDeleteConfirm}
         onOpenChange={setShowDeleteConfirm}
-        title={`Delete ${selectedAddonUrls.size} Addons?`}
+        title={`Delete ${selectedAddonUrls.size} Addon${selectedAddonUrls.size !== 1 ? 's' : ''}?`}
         description={
           <>
-            Are you sure you want to delete {selectedAddonUrls.size} selected addons? This action cannot be undone.
+            Are you sure you want to delete {selectedAddonUrls.size} selected addon{selectedAddonUrls.size !== 1 ? 's' : ''}? This action cannot be undone.
             {protectedInSelection > 0 && (
               <p className="mt-2 p-2 bg-destructive/10 text-destructive text-xs rounded border border-destructive/20 font-medium">
                 Note: This includes {protectedInSelection} protected addon{protectedInSelection !== 1 ? 's' : ''}.
