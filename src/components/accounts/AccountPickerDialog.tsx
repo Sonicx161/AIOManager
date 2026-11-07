@@ -1,3 +1,4 @@
+import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { Button, type ButtonProps } from '@/components/ui/button'
 import {
     Dialog,
@@ -14,7 +15,7 @@ import { useAccountStore, getAccountEmail } from '@/store/accountStore'
 import { accountMatchesQuery } from '@/lib/account-compat'
 import { useUIStore } from '@/store/uiStore'
 import { maskNameLevel, maskEmailLevel } from '@/lib/utils'
-import { User, Search, X } from 'lucide-react'
+import { User, Search, X, Loader2 } from 'lucide-react'
 import { useCallback, useEffect, useState, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Input } from '@/components/ui/input'
@@ -27,8 +28,11 @@ interface AccountPickerDialogProps {
     description: string
     onConfirm: (accountIds: string[]) => Promise<void>
     confirmLabel?: string
+    confirmPendingLabel?: string
     confirmVariant?: ButtonProps['variant']
     renderPreview?: (accountIds: string[]) => ReactNode
+    // Accounts never offered as targets, e.g. the source of a clone or move.
+    excludeAccountIds?: string[]
 }
 
 export function AccountPickerDialog({
@@ -38,13 +42,17 @@ export function AccountPickerDialog({
     description,
     onConfirm,
     confirmLabel = 'Confirm',
+    confirmPendingLabel,
     confirmVariant = 'default',
     renderPreview,
+    excludeAccountIds,
 }: AccountPickerDialogProps) {
     const accounts = useAccountStore((state) => state.accounts)
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
     const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
+    const privacyLevelEmail = useUIStore(s => s.privacyLevelEmail)
     const namePrivacy = isPrivacyModeEnabled ? privacyLevelNames : 0
+    const emailPrivacy = isPrivacyModeEnabled ? privacyLevelEmail : 0
     const { toast } = useToast()
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
     const [searchQuery, setSearchQuery] = useState('')
@@ -62,9 +70,11 @@ export function AccountPickerDialog({
     }, [open, resetDialogState])
 
     const filteredAccounts = useMemo(() => {
-        if (!searchQuery.trim()) return accounts
-        return accounts.filter(acc => accountMatchesQuery(acc, searchQuery))
-    }, [accounts, searchQuery])
+        const excluded = new Set(excludeAccountIds ?? [])
+        const pool = excluded.size > 0 ? accounts.filter(acc => !excluded.has(acc.id)) : accounts
+        if (!searchQuery.trim()) return pool
+        return pool.filter(acc => accountMatchesQuery(acc, searchQuery))
+    }, [accounts, searchQuery, excludeAccountIds])
 
     const selectedAccountIds = useMemo(() => Array.from(selectedIds), [selectedIds])
 
@@ -139,7 +149,7 @@ export function AccountPickerDialog({
 
                     <div className="flex items-center justify-between px-2">
                         <Label className="text-xs font-medium text-muted-foreground">
-                            {selectedIds.size} accounts selected
+                            {selectedIds.size} account{selectedIds.size !== 1 ? 's' : ''} selected
                         </Label>
                         <Button variant="link" size="sm" onClick={handleSelectAll} className="h-auto p-0 text-xs">
                             {selectedIds.size === filteredAccounts.length ? 'Deselect All' : 'Select All'}
@@ -158,19 +168,12 @@ export function AccountPickerDialog({
                                         onCheckedChange={() => toggleAccount(account.id)}
                                     />
                                     <div className="flex items-center gap-2 min-w-0">
-                                        <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-                                            <User className="h-4 w-4 text-primary" />
-                                        </div>
+                                        <AccountAvatar account={account} size="sm" />
                                         <div className="min-w-0">
                                             <div className="flex items-center gap-2">
-                                                {account.avatar ? (
-                                                    <img src={account.avatar} alt="" className="h-5 w-5 shrink-0 rounded-full object-cover" loading="lazy" />
-                                                ) : account.emoji ? (
-                                                    <span className="text-base shrink-0">{account.emoji}</span>
-                                                ) : null}
                                                 <p className="text-sm font-medium truncate">{maskNameLevel(account.name, namePrivacy)}</p>
                                             </div>
-                                            <p className="text-xs text-muted-foreground truncate">{maskEmailLevel(getAccountEmail(account) || '', namePrivacy)}</p>
+                                            <p className="text-xs text-muted-foreground truncate">{maskEmailLevel(getAccountEmail(account) || '', emailPrivacy)}</p>
                                         </div>
                                     </div>
                                 </label>
@@ -197,8 +200,9 @@ export function AccountPickerDialog({
                     <Button variant="subtle" onClick={() => handleOpenChange(false)} disabled={loading}>
                         Cancel
                     </Button>
-                    <Button variant={confirmVariant} onClick={handleConfirm} disabled={selectedIds.size === 0 || loading}>
-                        {confirmLabel}
+                    <Button variant={confirmVariant} onClick={handleConfirm} disabled={selectedIds.size === 0 || loading} className="gap-2">
+                        {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {loading ? (confirmPendingLabel ?? confirmLabel) : confirmLabel}
                     </Button>
                 </DialogFooter>
             </DialogContent>

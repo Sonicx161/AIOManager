@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -23,11 +23,13 @@ export function AddonInstaller() {
   const closeDialog = useUIStore((state) => state.closeAddAddonDialog)
   const selectedAccountId = useUIStore((state) => state.selectedAccountId)
   const installAddon = useAccountStore((state) => state.installAddonToAccount)
-  const loading = useAccountStore((state) => state.loadingAccounts.size > 0)
 
   const [addonUrl, setAddonUrl] = useState('')
   const [error, setError] = useState('')
+  const [installing, setInstalling] = useState(false)
   const [isClipboardScanActive, setIsClipboardScanActive] = useState(false)
+  const addonUrlRef = useRef(addonUrl)
+  addonUrlRef.current = addonUrl
   const [debouncedUrl, setDebouncedUrl] = useState('')
   const { isLight } = useTheme()
 
@@ -57,6 +59,7 @@ export function AddonInstaller() {
       try {
         if (!navigator.clipboard) return
         const text = await navigator.clipboard.readText()
+        if (addonUrlRef.current !== '') return
         if (text && (text.startsWith('stremio://') || (text.includes('/manifest.json') && text.startsWith('http')))) {
           setAddonUrl(text)
           setIsClipboardScanActive(true)
@@ -67,10 +70,8 @@ export function AddonInstaller() {
       }
     }
 
-    window.addEventListener('focus', checkClipboard)
-    checkClipboard() // Initial check when opened
-
-    return () => window.removeEventListener('focus', checkClipboard)
+    // Prefill once per open and only into an empty field; the Paste button covers the rest.
+    checkClipboard()
   }, [isOpen])
 
   const handleClose = () => {
@@ -95,6 +96,7 @@ export function AddonInstaller() {
 
     const normalizedUrl = addonUrl.trim().replace(/^stremio:\/\//, 'https://')
 
+    setInstalling(true)
     try {
       new URL(normalizedUrl)
 
@@ -106,6 +108,8 @@ export function AddonInstaller() {
       } else {
         setError(err instanceof Error ? err.message : 'Failed to install addon')
       }
+    } finally {
+      setInstalling(false)
     }
   }
 
@@ -157,9 +161,9 @@ export function AddonInstaller() {
               className={isClipboardScanActive ? `ring-2 ${isLight ? 'ring-primary/50' : 'ring-primary/25'}` : ""}
             />
             {isClipboardScanActive && (
-              <div className="flex items-center gap-1.5 text-xs text-primary font-semibold uppercase animate-in fade-in slide-in-from-top-1">
+              <div className="flex items-center gap-1.5 text-xs text-primary font-semibold animate-in fade-in slide-in-from-top-1">
                 <Zap className="h-3 w-3" />
-                URL DETECTED FROM CLIPBOARD
+                Pasted from clipboard
               </div>
             )}
             <p className="text-xs text-muted-foreground">
@@ -207,8 +211,9 @@ export function AddonInstaller() {
             <Button type="button" variant="subtle" onClick={handleClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={loading}>
-              {loading ? 'Installing...' : 'Install Addon'}
+            <Button type="submit" disabled={installing} className="gap-2">
+              {installing && <Loader2 className="h-4 w-4 animate-spin" />}
+              {installing ? 'Installing...' : 'Install Addon'}
             </Button>
           </DialogFooter>
         </form>

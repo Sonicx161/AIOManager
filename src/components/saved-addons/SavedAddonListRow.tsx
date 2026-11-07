@@ -11,20 +11,15 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-    Dialog,
-    DialogContent,
-    DialogTitle,
-} from '@/components/ui/dialog'
 import { useUIStore } from '@/store/uiStore'
 import { memo } from 'react'
-import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
-import { SavedAddonDetails } from './SavedAddonDetails'
+import { SavedAddonEditDialog, SavedAddonDeleteConfirm } from './SavedAddonEditDialog'
 import { getTagColor } from '@/lib/tag-utils'
 import { Button } from '@/components/ui/button'
 import { SavedAddonDeploymentBadge } from './SavedAddonDeploymentBadge'
 import { PlatformSourceChip } from '@/components/addons/PlatformSourceChip'
 import { SavedAddonIcon } from './SavedAddonIcon'
+import { StatusDot } from '@/components/common/StatusDot'
 import { useSavedAddonActions } from './hooks/useSavedAddonActions'
 import { SourceUrlBox } from '@/components/addons/SourceUrlBox'
 import { extractAddonParams } from '@/lib/addon-params'
@@ -87,8 +82,6 @@ export const SavedAddonListRow = memo(function SavedAddonListRow({
         }
     })
 
-    const logo = savedAddon.metadata?.customLogo || savedAddon.manifest.logo
-
     return (
         <>
             <div
@@ -120,23 +113,19 @@ export const SavedAddonListRow = memo(function SavedAddonListRow({
                 <div className="relative w-9 h-9 shrink-0">
                     <SavedAddonIcon
                         name={savedAddon.name}
-                        logo={logo}
+                        addon={savedAddon}
                         alt={savedAddon.name}
                         className="h-full w-full"
                         textClassName="text-sm"
                     />
-                    <Tooltip content={getHealthTooltip()} side="top">
-                        <span
-                            className={cn(
-                                "absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-card z-20",
-                                savedAddon.health
-                                    ? savedAddon.health.isOnline
-                                        ? "bg-success animate-pulse"
-                                        : "bg-destructive"
-                                    : "bg-muted-foreground/60"
-                            )}
+                    {savedAddon.health && (
+                        <StatusDot
+                            tone={savedAddon.health.isOnline ? 'success' : 'destructive'}
+                            label={savedAddon.health.isOnline ? 'Online' : 'Offline'}
+                            tooltip={getHealthTooltip()}
+                            pulse={savedAddon.health.isOnline}
                         />
-                    </Tooltip>
+                    )}
                 </div>
 
 
@@ -145,6 +134,19 @@ export const SavedAddonListRow = memo(function SavedAddonListRow({
                     <div className="flex items-center gap-2 min-w-0">
                         <span className="text-sm font-semibold truncate">{savedAddon.name}</span>
                         <span className="hidden text-xs text-muted-foreground/60 shrink-0 min-[380px]:inline">v{savedAddon.manifest.version}</span>
+                        {(savedAddon.manifest.behaviorHints?.configurable || savedAddon.manifest.behaviorHints?.configurationRequired) && (
+                            <Tooltip content="Configure">
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={handleOpenConfiguration}
+                                    className="h-5 w-5 shrink-0 text-muted-foreground hover:text-foreground"
+                                    aria-label="Configure"
+                                >
+                                    <AnimatedSettingsIcon className="h-3 w-3" />
+                                </Button>
+                            </Tooltip>
+                        )}
                         {savedAddon.syncWithInstalled && (
                             hasUpdate ? (
                                 <Tooltip content={`${manifestChangeLabel || 'A newer version is available to push to your installed accounts'} (${getSyncScopeLabel(savedAddon.syncAccountIds)})`} side="top">
@@ -293,20 +295,17 @@ export const SavedAddonListRow = memo(function SavedAddonListRow({
                 </div>
             </div>
 
-            <Dialog open={showDetails} onOpenChange={setShowDetails}>
-                <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
-                    <DialogTitle className="sr-only">Edit {savedAddon.name}</DialogTitle>
-                    <SavedAddonDetails savedAddon={savedAddon} onClose={() => setShowDetails(false)} />
-                </DialogContent>
-            </Dialog>
+            <SavedAddonEditDialog
+                savedAddon={savedAddon}
+                deployedAccounts={deployedAccounts}
+                open={showDetails}
+                onOpenChange={setShowDetails}
+            />
 
-            <ConfirmationDialog
+            <SavedAddonDeleteConfirm
+                savedAddon={savedAddon}
                 open={showDeleteDialog}
                 onOpenChange={setShowDeleteDialog}
-                title="Delete Saved Addon?"
-                description="This will NOT remove it from accounts where it's already installed."
-                confirmText="Delete"
-                isDestructive={true}
                 onConfirm={handleConfirmDelete}
             />
         </>

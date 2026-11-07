@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils'
 import { mapConcurrent } from '@/lib/concurrency'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Loader2, Check, AlertTriangle, UserPlus, Eye, EyeOff, Users, Info } from 'lucide-react'
+import { maskSecretUrl } from '@/lib/mask-secret-url'
 
 interface AIOMetadataActionsTabProps {
     sourceConfig: Record<string, unknown>
@@ -263,7 +264,7 @@ export function AIOMetadataActionsTab({ sourceConfig, baseUrl, targetOptions, re
                                 </div>
                                 <div className="space-y-0.5">
                                     <p className="text-xs font-medium text-muted-foreground uppercase">Install URL</p>
-                                    <div className="flex items-start gap-1.5"><p className="text-xs font-mono break-all flex-1">{createResult.installUrl}</p><CopyButton value={createResult.installUrl} iconSize={12} variant="ghost" /></div>
+                                    <div className="flex items-start gap-1.5"><p className="text-xs font-mono break-all flex-1">{maskSecretUrl(createResult.installUrl)}</p><CopyButton value={createResult.installUrl} iconSize={12} variant="ghost" /></div>
                                 </div>
                             </div>
                             <p className="text-xs text-muted-foreground flex items-center gap-1"><Check className="w-3 h-3 text-success" /> Password saved to vault.</p>

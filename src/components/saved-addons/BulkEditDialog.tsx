@@ -7,7 +7,6 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
 import {
     Select,
@@ -21,7 +20,7 @@ import { TagSelector } from '@/components/ui/tag-selector'
 import { useAddonStore } from '@/store/addonStore'
 import { useProfileStore } from '@/store/profileStore'
 import { Loader2, Tags, User, RefreshCw } from 'lucide-react'
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 
 interface BulkEditDialogProps {
     open: boolean
@@ -44,12 +43,14 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
     }, [library])
 
     const [loading, setLoading] = useState(false)
+    const [error, setError] = useState<string | null>(null)
 
     const [tagsToAdd, setTagsToAdd] = useState<string[]>([])
     const [tagsToRemove, setTagsToRemove] = useState<string[]>([])
     const [selectedProfileId, setSelectedProfileId] = useState<string>('no-change')
     const [syncWithInstalled, setSyncWithInstalled] = useState<'no-change' | boolean>('no-change')
-    const syncCardRef = useRef<HTMLDivElement>(null)
+
+    const hasChanges = tagsToAdd.length > 0 || tagsToRemove.length > 0 || selectedProfileId !== 'no-change' || syncWithInstalled !== 'no-change'
 
     useEffect(() => {
         if (open) {
@@ -57,11 +58,13 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
             setTagsToRemove([])
             setSelectedProfileId('no-change')
             setSyncWithInstalled('no-change')
+            setError(null)
         }
     }, [open])
 
     const handleSave = async () => {
         setLoading(true)
+        setError(null)
         try {
             const data: { tags?: string[]; tagsRemove?: string[]; profileId?: string | null; syncWithInstalled?: boolean } = {}
 
@@ -83,8 +86,9 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
 
             await onSave(data)
             onOpenChange(false)
-        } catch (error) {
-            if (import.meta.env.DEV) console.error(error)
+        } catch (err) {
+            if (import.meta.env.DEV) console.error(err)
+            setError(err instanceof Error ? err.message : 'Bulk update failed. Nothing was changed.')
         } finally {
             setLoading(false)
         }
@@ -92,59 +96,55 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="sm:max-w-xl">
-                <DialogHeader>
+            <DialogContent className="sm:max-w-xl flex max-h-[calc(92dvh-1rem)] flex-col gap-0 overflow-hidden p-0 sm:p-0">
+                <DialogHeader className="p-5 pb-3 sm:p-6 sm:pb-4">
                     <DialogTitle>Edit {selectedCount} Addon{selectedCount !== 1 ? 's' : ''}</DialogTitle>
                     <DialogDescription>
                         Configure tags and profile assignment for all selected library items.
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="grid gap-6 py-6">
-                    <Card className="border shadow-none">
-                        <CardHeader className="pb-3">
-                            <CardTitle className="text-xs font-medium flex items-center gap-2 uppercase text-muted-foreground">
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 sm:px-6">
+                    <div className="space-y-6">
+                        <section className="space-y-4">
+                            <h4 className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                                 <Tags className="h-4 w-4" />
                                 Tag Management
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent className="grid gap-5">
-                            <div className="grid gap-2">
-                                <Label className="text-xs font-medium">Add Tags</Label>
-                                <TagInput
-                                    value={tagsToAdd}
-                                    onChange={setTagsToAdd}
-                                    placeholder="Type and press Enter to add..."
-                                    suggestions={allKnownTags}
-                                />
-                                <p className="text-xs text-muted-foreground">
-                                    These tags will be appended to the selection.
-                                </p>
-                            </div>
+                            </h4>
+                            <div className="grid gap-5">
+                                <div className="grid gap-2">
+                                    <Label className="text-xs font-medium">Add Tags</Label>
+                                    <TagInput
+                                        value={tagsToAdd}
+                                        onChange={setTagsToAdd}
+                                        placeholder="Type and press Enter to add..."
+                                        suggestions={allKnownTags}
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        These tags will be appended to the selection.
+                                    </p>
+                                </div>
 
-                            <div className="grid gap-2">
-                                <Label className="text-xs font-medium">Remove Tags</Label>
-                                <TagSelector
-                                    value={tagsToRemove}
-                                    onChange={setTagsToRemove}
-                                    options={availableTags}
-                                    placeholder="Select tags to remove..."
-                                />
-                                <p className="text-xs text-muted-foreground">
-                                    Only tags currently present in the selection are shown here.
-                                </p>
+                                <div className="grid gap-2">
+                                    <Label className="text-xs font-medium">Remove Tags</Label>
+                                    <TagSelector
+                                        value={tagsToRemove}
+                                        onChange={setTagsToRemove}
+                                        options={availableTags}
+                                        placeholder="Select tags to remove..."
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Only tags currently present in the selection are shown here.
+                                    </p>
+                                </div>
                             </div>
-                        </CardContent>
-                    </Card>
+                        </section>
 
-                    <Card className="border shadow-none">
-                        <CardHeader className="pb-3">
-                            <CardTitle className="text-xs font-medium flex items-center gap-2 uppercase text-muted-foreground">
+                        <section className="space-y-2">
+                            <h4 className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                                 <User className="h-4 w-4" />
                                 Profile Migration
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent>
+                            </h4>
                             <div className="grid gap-2">
                                 <Label htmlFor="profile" className="text-xs font-medium">Assign to Profile</Label>
                                 <Select value={selectedProfileId} onValueChange={setSelectedProfileId}>
@@ -162,17 +162,13 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
                                     </SelectContent>
                                 </Select>
                             </div>
-                        </CardContent>
-                    </Card>
+                        </section>
 
-                    <Card ref={syncCardRef} className="border shadow-none">
-                        <CardHeader className="pb-3">
-                            <CardTitle className="text-xs font-medium flex items-center gap-2 uppercase text-muted-foreground">
+                        <section className="space-y-2">
+                            <h4 className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                                 <RefreshCw className="h-4 w-4" />
                                 Version Sync
-                            </CardTitle>
-                        </CardHeader>
-                        <CardContent>
+                            </h4>
                             <div className="flex items-center justify-between gap-4">
                                 <div className="space-y-0.5">
                                     <Label className="text-xs font-medium">Keep in sync with installed versions</Label>
@@ -189,36 +185,42 @@ export function BulkEditDialog({ open, onOpenChange, selectedCount, availableTag
                                     </SelectContent>
                                 </Select>
                             </div>
-                        </CardContent>
-                    </Card>
+                        </section>
 
-                    <div className="bg-muted/30 border border-dashed rounded-lg p-3 space-y-2">
-                        <h4 className="text-xs font-bold uppercase text-muted-foreground">Change Preview</h4>
-                        <div className="text-xs space-y-1">
-                            {tagsToAdd.length > 0 && (
-                                <p>• Will add <b>{tagsToAdd.length}</b> tag{tagsToAdd.length !== 1 ? 's' : ''}: <span className="text-primary">{tagsToAdd.join(', ')}</span></p>
-                            )}
-                            {tagsToRemove.length > 0 && (
-                                <p>• Will remove <b>{tagsToRemove.length}</b> tag{tagsToRemove.length !== 1 ? 's' : ''}: <span className="text-destructive">{tagsToRemove.join(', ')}</span></p>
-                            )}
-                            {selectedProfileId !== 'no-change' && (
-                                <p>• Will move to <b>{selectedProfileId === 'unassigned' ? 'Unassigned' : profiles.find(p => p.id === selectedProfileId)?.name}</b> profile.</p>
-                            )}
-                            {syncWithInstalled !== 'no-change' && (
-                                <p>• Will <b>{syncWithInstalled ? 'enable' : 'disable'}</b> version sync.</p>
-                            )}
-                            {tagsToAdd.length === 0 && tagsToRemove.length === 0 && selectedProfileId === 'no-change' && syncWithInstalled === 'no-change' && (
-                                <p className="italic text-muted-foreground">No changes configured.</p>
-                            )}
+                        <div className="bg-muted/30 border border-dashed rounded-lg p-3 space-y-2">
+                            <h4 className="text-xs font-bold uppercase text-muted-foreground">Change Preview</h4>
+                            <div className="text-xs space-y-1">
+                                {tagsToAdd.length > 0 && (
+                                    <p>• Will add <b>{tagsToAdd.length}</b> tag{tagsToAdd.length !== 1 ? 's' : ''}: <span className="text-primary">{tagsToAdd.join(', ')}</span></p>
+                                )}
+                                {tagsToRemove.length > 0 && (
+                                    <p>• Will remove <b>{tagsToRemove.length}</b> tag{tagsToRemove.length !== 1 ? 's' : ''}: <span className="text-destructive">{tagsToRemove.join(', ')}</span></p>
+                                )}
+                                {selectedProfileId !== 'no-change' && (
+                                    <p>• Will move to <b>{selectedProfileId === 'unassigned' ? 'Unassigned' : profiles.find(p => p.id === selectedProfileId)?.name}</b> profile.</p>
+                                )}
+                                {syncWithInstalled !== 'no-change' && (
+                                    <p>• Will <b>{syncWithInstalled ? 'enable' : 'disable'}</b> version sync.</p>
+                                )}
+                                {tagsToAdd.length === 0 && tagsToRemove.length === 0 && selectedProfileId === 'no-change' && syncWithInstalled === 'no-change' && (
+                                    <p className="italic text-muted-foreground">No changes configured.</p>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <DialogFooter>
+                {error && (
+                    <div role="alert" className="mx-5 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive sm:mx-6">
+                        {error}
+                    </div>
+                )}
+
+                <DialogFooter className="px-5 pb-5 sm:px-6 sm:pb-6">
                     <Button variant="subtle" onClick={() => onOpenChange(false)} disabled={loading}>
                         Cancel
                     </Button>
-                    <Button onClick={handleSave} disabled={loading} className="gap-2">
+                    <Button onClick={handleSave} disabled={loading || !hasChanges} className="gap-2">
                         {loading && <Loader2 className="h-4 w-4 animate-spin" />}
                         Apply Changes
                     </Button>

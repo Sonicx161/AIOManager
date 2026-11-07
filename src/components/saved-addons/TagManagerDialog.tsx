@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useAddonStore } from '@/store/addonStore'
 import { Edit2, Trash2, Tag, Check, X, Search } from 'lucide-react'
-import { useState, useMemo } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { toast } from '@/hooks/use-toast'
 
 interface TagManagerDialogProps {
@@ -38,6 +38,14 @@ export function TagManagerDialog({ isOpen, onClose }: TagManagerDialogProps) {
     const [editingTag, setEditingTag] = useState<string | null>(null)
     const [newName, setNewName] = useState('')
     const [search, setSearch] = useState('')
+    const [confirmingDeleteTag, setConfirmingDeleteTag] = useState<string | null>(null)
+
+    useEffect(() => {
+        if (!isOpen) {
+            setEditingTag(null)
+            setConfirmingDeleteTag(null)
+        }
+    }, [isOpen])
 
     const filteredTags = useMemo(() => {
         const query = search.trim().toLowerCase()
@@ -97,9 +105,6 @@ export function TagManagerDialog({ isOpen, onClose }: TagManagerDialogProps) {
                             <p className="text-sm font-semibold">{allTags.length} tag{allTags.length !== 1 ? 's' : ''}</p>
                             <p className="text-xs text-muted-foreground">Changes apply across the whole library.</p>
                         </div>
-                        <span data-theme-part="badge" className="rounded-full border border-border/45 bg-background px-2 py-1 text-xs font-medium text-muted-foreground">
-                            Global
-                        </span>
                     </div>
 
                     {allTags.length > 0 && (
@@ -128,20 +133,50 @@ export function TagManagerDialog({ isOpen, onClose }: TagManagerDialogProps) {
                                         <Input
                                             value={newName}
                                             onChange={(e) => setNewName(e.target.value)}
-                                            className="h-8 py-0"
+                                            className="h-11 py-0 sm:h-8"
                                             autoFocus
                                             onKeyDown={(e) => {
                                                 if (e.key === 'Enter') handleRename(tag)
                                                 if (e.key === 'Escape') setEditingTag(null)
                                             }}
                                         />
-                                        <Button size="icon" variant="ghost" className="h-8 w-8 text-success" onClick={() => handleRename(tag)}>
+                                        <Button size="icon" variant="ghost" className="h-11 w-11 text-success sm:h-8 sm:w-8" onClick={() => handleRename(tag)} aria-label="Save name">
                                             <Check className="h-4 w-4" />
                                         </Button>
-                                        <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground" onClick={() => setEditingTag(null)}>
+                                        <Button size="icon" variant="ghost" className="h-11 w-11 text-muted-foreground sm:h-8 sm:w-8" onClick={() => setEditingTag(null)} aria-label="Cancel rename">
                                             <X className="h-4 w-4" />
                                         </Button>
                                     </div>
+                                ) : confirmingDeleteTag === tag ? (
+                                    <>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="truncate text-sm font-semibold">{tag}</div>
+                                            <div className="text-xs text-muted-foreground">
+                                                Remove from {count} addon{count !== 1 ? 's' : ''}?
+                                            </div>
+                                        </div>
+                                        <div className="flex shrink-0 gap-1">
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                className="h-11 px-3 text-destructive hover:text-destructive sm:h-8"
+                                                onClick={() => {
+                                                    setConfirmingDeleteTag(null)
+                                                    handleDeleteTag(tag, count)
+                                                }}
+                                            >
+                                                Remove
+                                            </Button>
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                className="h-11 px-3 text-muted-foreground sm:h-8"
+                                                onClick={() => setConfirmingDeleteTag(null)}
+                                            >
+                                                Cancel
+                                            </Button>
+                                        </div>
+                                    </>
                                 ) : (
                                     <>
                                         <div className="min-w-0 flex-1">
@@ -154,7 +189,8 @@ export function TagManagerDialog({ isOpen, onClose }: TagManagerDialogProps) {
                                             <Button
                                                 size="icon"
                                                 variant="ghost"
-                                                className="h-8 w-8 text-muted-foreground hover:text-primary"
+                                                className="h-11 w-11 text-muted-foreground hover:text-primary sm:h-8 sm:w-8"
+                                                aria-label={`Rename tag ${tag}`}
                                                 onClick={() => {
                                                     setEditingTag(tag)
                                                     setNewName(tag)
@@ -165,8 +201,9 @@ export function TagManagerDialog({ isOpen, onClose }: TagManagerDialogProps) {
                                             <Button
                                                 size="icon"
                                                 variant="ghost"
-                                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                                onClick={() => handleDeleteTag(tag, count)}
+                                                className="h-11 w-11 text-muted-foreground hover:text-destructive sm:h-8 sm:w-8"
+                                                aria-label={`Delete tag ${tag}`}
+                                                onClick={() => setConfirmingDeleteTag(tag)}
                                             >
                                                 <Trash2 className="h-3.5 w-3.5" />
                                             </Button>

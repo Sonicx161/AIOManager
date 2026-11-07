@@ -2,7 +2,10 @@ import { useCallback, useState } from 'react'
 import { toast } from '@/hooks/use-toast'
 import { useAddonStore } from '@/store/addonStore'
 import { getStremioAuthKey } from '@/store/accountStore'
-import type { MergeResult, SavedAddon } from '@/types/saved-addon'
+import type { SavedAddon } from '@/types/saved-addon'
+import { describeDeployOutcomes, getDeploymentSummary } from '@/lib/deploy-summary'
+import { maskAccountLabel } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
 
 interface BulkEditData {
   tags?: string[]
@@ -14,28 +17,6 @@ interface BulkEditData {
 interface UseSavedAddonSelectionActionsOptions {
   filteredAddons: SavedAddon[]
   library: Record<string, SavedAddon>
-}
-
-function getDeploymentSummary(details: Array<{ result: MergeResult }>) {
-  const totals = details.reduce(
-    (acc, detail) => ({
-      added: acc.added + detail.result.added.length,
-      removed: acc.removed + (detail.result.removed?.length || 0),
-      updated: acc.updated + detail.result.updated.length,
-      skipped: acc.skipped + detail.result.skipped.length,
-      protected: acc.protected + detail.result.protected.length,
-    }),
-    { added: 0, removed: 0, updated: 0, skipped: 0, protected: 0 }
-  )
-
-  const parts = []
-  if (totals.added > 0) parts.push(`${totals.added} installed`)
-  if (totals.removed > 0) parts.push(`${totals.removed} removed`)
-  if (totals.updated > 0) parts.push(`${totals.updated} refreshed`)
-  if (totals.skipped > 0) parts.push(`${totals.skipped} skipped`)
-  if (totals.protected > 0) parts.push(`${totals.protected} protected`)
-
-  return parts.length > 0 ? parts.join(', ') : 'No addon changes were needed'
 }
 
 export function useSavedAddonSelectionActions({
@@ -233,11 +214,15 @@ export function useSavedAddonSelectionActions({
         true
       )
       const deploymentSummary = getDeploymentSummary(result.details)
+      const ui = useUIStore.getState()
+      const accountLabel = (id: string) => maskAccountLabel(accountStore.accounts.find(a => a.id === id), ui.isPrivacyModeEnabled ? ui.privacyLevelNames : 0, ui.isPrivacyModeEnabled ? ui.privacyLevelEmail : 0)
+      const outcomeLines = describeDeployOutcomes(result.details, accountLabel)
+      const stopped = result.cancelled ? ` Stopped before ${result.cancelled} account${result.cancelled !== 1 ? 's' : ''}.` : ''
 
       if (result.failed === 0) {
         toast({
           title: 'Deployment Complete',
-          description: `${deploymentSummary} across ${result.success} account${result.success !== 1 ? 's' : ''}.`,
+          description: [`${deploymentSummary} across ${result.success} account${result.success !== 1 ? 's' : ''}.${stopped}`, ...outcomeLines].join(' '),
         })
       } else {
         const firstError = result.errors[0]?.error || ''
@@ -266,6 +251,13 @@ export function useSavedAddonSelectionActions({
     let failed = 0
     let notSyncing = 0
     const versionBumps: string[] = []
+    const count = selectedIds.size
+    const toastId = toast({
+      title: `Reinstalling ${count} entr${count !== 1 ? 'ies' : 'y'}...`,
+      description: 'Fetching each manifest from its source URL.',
+      duration: Infinity,
+      history: false,
+    })
 
     for (const id of selectedIds) {
       const entry = library[id]
@@ -288,6 +280,7 @@ export function useSavedAddonSelectionActions({
     const total = updated + unchanged + failed
     if (failed > 0) {
       toast({
+        id: toastId,
         title: 'Reinstall Completed with Errors',
         description: `Reinstalled ${total - failed} of ${total} entr${total !== 1 ? 'ies' : 'y'} (${failed} failed).${notSyncing > 0 ? ` ${notSyncing} not syncing.` : ''}`,
         variant: 'destructive',
@@ -295,6 +288,7 @@ export function useSavedAddonSelectionActions({
     } else {
       const bumpText = versionBumps.length > 0 && versionBumps.length <= 3 ? ` ${versionBumps.join(', ')}.` : updated > 0 ? ` ${updated} version update${updated !== 1 ? 's' : ''}.` : ' No version changes.'
       toast({
+        id: toastId,
         title: 'Reinstall Complete',
         description: `Reinstalled ${total} entr${total !== 1 ? 'ies' : 'y'}; sync pushed any changes to enabled accounts.${bumpText}${notSyncing > 0 ? ` ${notSyncing} not syncing.` : ''}`,
       })

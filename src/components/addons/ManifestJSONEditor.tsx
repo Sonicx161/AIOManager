@@ -152,7 +152,7 @@ export function ManifestJSONEditor({ manifest, onSave, embedded = false }: Manif
 
                     <div className="flex items-center justify-between">
                         <p className="text-xs text-muted-foreground">
-                            Edit the raw manifest JSON. Changes apply on save.
+                            Edit the raw manifest JSON. Apply saves it right away.
                         </p>
                         <div className="flex items-center gap-2">
                             <Tooltip content="Revert to original" side="top">
@@ -175,7 +175,7 @@ export function ManifestJSONEditor({ manifest, onSave, embedded = false }: Manif
                                 disabled={!dirty || saving}
                                 className="gap-1.5 text-xs"
                             >
-                                {saving ? 'Saving...' : 'Save'}
+                                {saving ? 'Applying...' : 'Apply'}
                             </Button>
                         </div>
                     </div>

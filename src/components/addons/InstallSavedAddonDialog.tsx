@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils'
 import { AddonTag } from './AddonTag'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import { extractAddonParams } from '@/lib/addon-params'
+import { installStopMessage } from '@/lib/bulk-result'
 
 interface InstallSavedAddonDialogProps {
   accountId: string
@@ -52,6 +53,7 @@ export function InstallSavedAddonDialog({
 
   const [selectedSavedAddonIds, setSelectedSavedAddonIds] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
   const viewMode = useUIStore(s => s.libraryViewMode)
@@ -131,6 +133,7 @@ export function InstallSavedAddonDialog({
         setSuccess(false)
       }
       setError(null)
+      setNotice(null)
       setSearchTerm('')
       onOpenChange(false)
     }
@@ -143,6 +146,7 @@ export function InstallSavedAddonDialog({
     }
 
     setError(null)
+    setNotice(null)
     setSuccess(false)
 
     try {
@@ -154,7 +158,10 @@ export function InstallSavedAddonDialog({
       )
 
 
-      if (bulkResult.failed === 0) {
+      const stopped = installStopMessage(bulkResult)
+      if (stopped) {
+        setNotice(stopped)
+      } else if (bulkResult.failed === 0) {
         setSuccess(true)
         await syncAccount(accountId)
         if (onSuccess) onSuccess()
@@ -311,11 +318,15 @@ export function InstallSavedAddonDialog({
                 filteredAddons.map((addon) => {
                   const { isInstalled, isSelected } = getAddonStatus(addon)
                   return (
-                    <div
+                    <button
+                      type="button"
                       key={addon.id}
+                      role="checkbox"
+                      aria-checked={isSelected}
+                      aria-label={addon.name}
                       data-theme-part="addon-card"
                       className={cn(
-                        "group relative cursor-pointer border transition-[transform,opacity,box-shadow] hover:border-primary/45 hover:shadow-md",
+                        "group relative cursor-pointer border text-left transition-[transform,opacity,box-shadow] hover:border-primary/45 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40",
                         viewMode === 'grid'
                           ? "flex min-h-[112px] flex-col rounded-[1.35rem] p-4 sm:min-h-[128px]"
                           : "grid grid-cols-[auto_1fr_auto] items-center gap-4 rounded-2xl p-3",
@@ -326,7 +337,7 @@ export function InstallSavedAddonDialog({
                       )}
                       onClick={() => toggleSavedAddon(addon.id)}
                     >
-                      <div className={cn(
+                      <div aria-hidden="true" className={cn(
                         "rounded-full border border-primary/20 flex items-center justify-center transition-[transform,opacity,box-shadow] z-10 shrink-0",
                         viewMode === 'grid' ? "absolute top-3 right-3 h-6 w-6" : "h-6 w-6",
                         isSelected ? "bg-primary border-primary scale-110" : "bg-background group-hover:border-primary/50"
@@ -344,13 +355,13 @@ export function InstallSavedAddonDialog({
                         />
                         <div className="min-w-0 flex-1">
                           <Tooltip content={addon.name}>
-                            <h4 className="truncate font-semibold leading-tight tracking-tight">
+                            <span className="block truncate font-semibold leading-tight tracking-tight">
                               {addon.name}
-                            </h4>
+                            </span>
                           </Tooltip>
-                          <p className="mt-1 truncate text-xs text-muted-foreground">
+                          <span className="mt-1 block truncate text-xs text-muted-foreground">
                             v{addon.manifest.version}
-                          </p>
+                          </span>
                         </div>
                       </div>
 
@@ -379,7 +390,7 @@ export function InstallSavedAddonDialog({
                           </Badge>
                         )}
                        </div>
-                    </div>
+                    </button>
                   )
                 })
               )}
@@ -402,6 +413,13 @@ export function InstallSavedAddonDialog({
             <div data-theme-tone="status" data-theme-part="panel" className="mb-4 flex items-center gap-2 rounded-xl border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
               <AlertCircle className="h-4 w-4" />
               {error}
+            </div>
+          )}
+
+          {notice && (
+            <div data-theme-tone="status" data-theme-part="panel" className="mb-4 flex items-center gap-2 rounded-xl border border-border/40 bg-muted/30 p-3 text-sm text-muted-foreground">
+              <AlertCircle className="h-4 w-4" />
+              {notice}
             </div>
           )}
 

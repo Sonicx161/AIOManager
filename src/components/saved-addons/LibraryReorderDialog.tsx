@@ -59,7 +59,7 @@ const SavedAddonReorderRow = memo(function SavedAddonReorderRow({
 
       <SavedAddonIcon
         name={addon.metadata?.customName || addon.name}
-        logo={addon.metadata?.customLogo || addon.manifest.logo}
+        addon={addon}
         alt={addon.name}
         className="h-9 w-9"
         textClassName="text-xs"

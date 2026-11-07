@@ -15,7 +15,7 @@ import {
   User,
   Pencil, Send, Layers,
   ArrowLeft, Link2,
-  Check, Compass, Info, RefreshCw
+  Check, Compass, Info, RefreshCw, X
 } from 'lucide-react'
 import { AnimatedTrashIcon } from '../ui/AnimatedIcons'
 import { OperationProgress } from '@/components/ui/operation-progress'
@@ -29,11 +29,11 @@ import { describeManifestChanges } from '@/lib/addon-manifest-diff'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { BulkEditDialog } from './BulkEditDialog'
 import { AccountPickerDialog } from '../accounts/AccountPickerDialog'
+import { BulkSaveDialog } from '../addons/BulkSaveDialog'
 import { BulkUrlReplaceDialog } from './BulkUrlReplaceDialog'
 import { FloatingActionBar } from '@/components/ui/floating-action-bar'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
-import { StatusChip } from '@/components/ui/status-chip'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { LibraryEmptyState } from '@/components/common/PageEmptyStates'
 import { useRelativeTime } from '@/hooks/use-relative-time'
@@ -81,6 +81,9 @@ export function SavedAddonLibrary() {
     updateManifestChangeHints: state.updateManifestChangeHints,
   })))
   const accounts = useAccountStore(state => state.accounts)
+  const [showImportPicker, setShowImportPicker] = useState(false)
+  const [importAccountId, setImportAccountId] = useState<string | null>(null)
+  const importAccount = importAccountId ? accounts.find(a => a.id === importAccountId) : undefined
   const { instances: aioStreamsInstances } = useAIOStreamsInstances()
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('')
@@ -127,6 +130,14 @@ export function SavedAddonLibrary() {
   const [showInjectDialog, setShowInjectDialog] = useState(false)
   const [injectAddons, setInjectAddons] = useState<SavedAddon[]>([])
   const [showMobileFilters, setShowMobileFilters] = useState(false)
+  // One-time dismissible version note; remembered in localStorage across reloads.
+  const [versionNoteDismissed, setVersionNoteDismissed] = useState(() => {
+    try { return localStorage.getItem('aioman:version-note-dismissed') === '1' } catch { return false }
+  })
+  const handleDismissVersionNote = useCallback(() => {
+    setVersionNoteDismissed(true)
+    try { localStorage.setItem('aioman:version-note-dismissed', '1') } catch { /* storage unavailable */ }
+  }, [])
   const location = useLocation()
   const navigate = useNavigate()
   const tab = location.hash.slice(1) || new URLSearchParams(location.search).get('tab')
@@ -525,27 +536,17 @@ export function SavedAddonLibrary() {
           </TabsList>
         </Tabs>
 
-        {libraryTab === 'library' && (
+        {/* No page title or saved-addons chip: the sidebar carries the count and the
+            active filter. Only a picked profile shows the back-to-all chip. */}
+        {libraryTab === 'library' && selectedProfileId && (
           <div className="flex flex-wrap items-center gap-2 min-w-0">
-            {selectedProfileId && (
-              <ToolbarShell className="w-fit max-w-full p-2" contentClassName="gap-2">
-                <Button variant="ghost" size="sm" onClick={() => setSelectedProfileId(null)} className="h-8 shrink-0 gap-1.5 rounded-xl border border-border/40 bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm hover:bg-muted/50 hover:text-foreground">
-                  <ArrowLeft className="h-4 w-4" />
-                  All Addons
-                </Button>
-              </ToolbarShell>
-            )}
-            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight truncate">
-              {selectedProfileId
-                ? selectedProfileId === 'unassigned'
-                  ? 'Unassigned Addons'
-                  : profiles.find(p => p.id === selectedProfileId)?.name || 'Profile'
-                : 'All Addons'}
-            </h1>
-            <StatusChip className="rounded-lg hidden sm:inline-flex">
-              {filteredAddons.length} saved addon{filteredAddons.length !== 1 ? 's' : ''}
-            </StatusChip>
-            {selectedProfileId && (() => {
+            <ToolbarShell className="w-fit max-w-full p-2" contentClassName="gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setSelectedProfileId(null)} className="h-8 shrink-0 gap-1.5 rounded-xl border border-border/40 bg-card px-2.5 text-xs font-medium text-muted-foreground shadow-sm hover:bg-muted/50 hover:text-foreground">
+                <ArrowLeft className="h-4 w-4" />
+                All Addons
+              </Button>
+            </ToolbarShell>
+            {(() => {
               const p = profiles.find(p => p.id === selectedProfileId)
               if (p?.description && p.description.trim() !== '' && p.description.trim() !== p.name.trim()) {
                 return <span className="text-xs font-medium text-foreground break-all hidden md:block flex-1 min-w-0">{p.description}</span>
@@ -709,10 +710,8 @@ export function SavedAddonLibrary() {
           {!loading && (
             <div className="flex flex-col gap-6">
               <LibraryToolbar
-                showMobileFilters={showMobileFilters}
                 selectedProfileId={selectedProfileId}
                 selectedTag={selectedTag}
-                profiles={profiles}
                 searchQuery={searchQuery}
                 onSearchChange={handleSearchChange}
                 searchRef={librarySearchRef}
@@ -757,14 +756,26 @@ export function SavedAddonLibrary() {
                 />
               )}
 
-              <div data-theme-part="panel" className="flex items-start gap-2.5 rounded-xl border border-border/40 bg-muted/25 px-3.5 py-2.5 text-xs text-muted-foreground">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
-                <p>
-                  <span className="font-medium text-foreground/80">Version numbers are informational.</span>{' '}
-                  An addon keeps working whether or not you update; updating just re-fetches the latest manifest. It's
-                  only worth doing when an addon's capabilities actually change, which is flagged separately as a manifest change.
-                </p>
-              </div>
+              {!versionNoteDismissed && (
+                <div data-theme-part="panel" data-ctrl="version-note" className="flex items-start gap-2.5 rounded-xl border border-border/40 bg-muted/25 px-3.5 py-2.5 text-sm text-muted-foreground">
+                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground/70" />
+                  <p>
+                    <span className="font-medium text-foreground/80">Version numbers are informational.</span>{' '}
+                    An addon keeps working whether or not you update; updating just re-fetches the latest manifest. It's
+                    only worth doing when an addon's capabilities actually change, which is flagged separately as a manifest change.
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    ripple={false}
+                    onClick={handleDismissVersionNote}
+                    className="h-8 w-8 shrink-0 rounded-full p-0 text-muted-foreground hover:text-foreground"
+                    aria-label="Dismiss note"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              )}
             </div>
           )}
 
@@ -788,7 +799,7 @@ export function SavedAddonLibrary() {
                     </Button>
                   </div>
                 ) : (
-                  <LibraryEmptyState onAdd={handleOpenAddDialog} onImport={() => setShowAccountPicker(true)} />
+                  <LibraryEmptyState onAdd={handleOpenAddDialog} onImport={() => setShowImportPicker(true)} />
                 )}
               </CardContent>
             </Card>
@@ -877,14 +888,36 @@ export function SavedAddonLibrary() {
         <ConfirmationDialog
           open={showBulkDeleteConfirmation}
           onOpenChange={setShowBulkDeleteConfirmation}
-          title={`Delete ${selectedIds.size} Saved Addons?`}
-          description="This will permanently delete these addons from your library. This action cannot be undone."
+          title={`Delete ${selectedIds.size} Saved Addon${selectedIds.size !== 1 ? 's' : ''}?`}
+          description={`This will permanently delete ${selectedIds.size !== 1 ? 'these addons' : 'this addon'} from your library. This action cannot be undone.`}
           confirmText="Delete"
           isDestructive={true}
           onConfirm={handleBulkDelete}
           isLoading={loading}
           impactItems={Array.from(selectedIds).slice(0, 10).map(id => library[id]?.name || id)}
         />
+
+        <AccountPickerDialog
+          open={showImportPicker}
+          onOpenChange={setShowImportPicker}
+          title="Import from account"
+          description="Pick the account whose addons you want to save to your library."
+          confirmLabel="Continue"
+          onConfirm={async (accountIds) => {
+            setShowImportPicker(false)
+            setImportAccountId(accountIds[0] ?? null)
+          }}
+        />
+
+        {importAccount && (
+          <BulkSaveDialog
+            open
+            onOpenChange={(next) => { if (!next) setImportAccountId(null) }}
+            addons={importAccount.addons ?? []}
+            accountId={importAccount.id}
+            title={`Import from ${importAccount.name || 'account'}`}
+          />
+        )}
 
         <AccountPickerDialog
           open={showAccountPicker}
@@ -906,7 +939,7 @@ export function SavedAddonLibrary() {
           open={showRemoveAccountPicker}
           onOpenChange={setShowRemoveAccountPicker}
           title="Remove from Accounts"
-          description={`Select accounts to REMOVE the ${selectedIds.size} selected addons from.`}
+          description={`Select accounts to REMOVE the ${selectedIds.size} selected addon${selectedIds.size !== 1 ? 's' : ''} from.`}
           onConfirm={handleRemoveFromAccounts}
           confirmLabel="Remove"
           confirmVariant="destructive"

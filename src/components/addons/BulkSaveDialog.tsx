@@ -261,7 +261,7 @@ export function BulkSaveDialog({
 
     return (
         <Dialog open={open} onOpenChange={(_val) => !saving && handleClose()}>
-            <DialogContent className="max-h-[92vh] max-w-3xl gap-0 overflow-hidden p-0 flex flex-col">
+            <DialogContent className="max-h-[92vh] sm:max-w-3xl gap-0 overflow-hidden p-0 flex flex-col">
                 <DialogHeader className="p-5 pb-2 pr-14 sm:pr-5 shrink-0">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0 space-y-1">

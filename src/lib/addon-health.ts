@@ -1,8 +1,7 @@
 
 import { SavedAddon } from '@/types/saved-addon'
 import { useSyncStore } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
-import { getSessionSyncCredential } from '@/lib/session-sync-token'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { normalizeAddonUrl } from '@/lib/utils'
 import { trace } from '@/lib/trace'
 
@@ -29,7 +28,21 @@ export function isLocalOrPrivateUrl(url: string): boolean {
   }
 }
 
-export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> {
+// Identical concurrent health checks share one request (the same URL cannot answer
+// two different ways at once). Settled results are never cached, so freshness is unchanged.
+const inflightHealthChecks = new Map<string, Promise<HealthStatus>>()
+
+export function checkAddonHealth(addonUrl: string): Promise<HealthStatus> {
+  const inflight = inflightHealthChecks.get(addonUrl)
+  if (inflight) return inflight
+  const promise = checkAddonHealthOnce(addonUrl).finally(() => {
+    if (inflightHealthChecks.get(addonUrl) === promise) inflightHealthChecks.delete(addonUrl)
+  })
+  inflightHealthChecks.set(addonUrl, promise)
+  return promise
+}
+
+async function checkAddonHealthOnce(addonUrl: string): Promise<HealthStatus> {
   const startTime = Date.now()
   trace('health', 'check-start', { url: addonUrl })
 
@@ -46,7 +59,7 @@ export async function checkAddonHealth(addonUrl: string): Promise<HealthStatus> 
     const headers: Record<string, string> = {}
     if (auth.isAuthenticated && auth.id) {
       headers['x-sync-user'] = auth.id
-      headers['x-sync-password'] = getSessionSyncCredential(auth.id)?.token ?? await deriveSyncToken(auth.password)
+      headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
 
     const response = await fetch(`/api/addon-health?url=${encodeURIComponent(addonUrl)}`, {
@@ -196,9 +209,8 @@ export async function checkAddonFunctionality(addonUrl: string): Promise<{ isHea
         const { auth } = useSyncStore.getState()
         const headers: Record<string, string> = {}
         if (auth.isAuthenticated && auth.id) {
-          const { deriveSyncToken } = await import('@/lib/crypto')
           headers['x-sync-user'] = auth.id
-          headers['x-sync-password'] = getSessionSyncCredential(auth.id)?.token ?? await deriveSyncToken(auth.password)
+          headers['x-sync-password'] = await getSyncPasswordHeader(auth)
         }
         const proxyUrl = `/api/meta-proxy?url=${encodeURIComponent(manifestUrl)}`
         const res = await fetch(proxyUrl, { signal: controller.signal, headers })

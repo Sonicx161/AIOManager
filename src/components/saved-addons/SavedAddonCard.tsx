@@ -1,5 +1,3 @@
-import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useLongPress } from '@/hooks/useLongPress'
 import {
   DropdownMenu,
@@ -18,13 +16,14 @@ import { extractAddonParams } from '@/lib/addon-params'
 import React from 'react'
 import type { SavedAddon, SavedAddonManifestChangeSummary } from '@/types/saved-addon'
 import type { Account } from '@/types/account'
-import { SavedAddonDetails } from './SavedAddonDetails'
+import { SavedAddonEditDialog, SavedAddonDeleteConfirm } from './SavedAddonEditDialog'
 import { getTagColor } from '@/lib/tag-utils'
 import { HighlightText } from '@/components/ui/highlight-text'
 import { Tooltip } from '@/components/ui/tooltip'
 import { SavedAddonDeploymentBadge } from './SavedAddonDeploymentBadge'
 import { PlatformSourceChip } from '@/components/addons/PlatformSourceChip'
 import { SavedAddonIcon } from './SavedAddonIcon'
+import { StatusDot } from '@/components/common/StatusDot'
 import { useSavedAddonActions } from './hooks/useSavedAddonActions'
 import { SourceUrlBox } from '@/components/addons/SourceUrlBox'
 
@@ -137,23 +136,19 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
               <div className="relative w-11 h-11 shrink-0">
                 <SavedAddonIcon
                   name={savedAddon.name}
-                  logo={savedAddon.metadata?.customLogo || savedAddon.manifest.logo}
+                  addon={savedAddon}
                   alt={savedAddon.name}
                   className="h-full w-full"
                   textClassName="text-lg text-foreground"
                 />
-                <Tooltip content={getHealthTooltip()} side="top">
-                  <span
-                    className={cn(
-                      "absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-card z-20",
-                      savedAddon.health
-                        ? savedAddon.health.isOnline
-                          ? "bg-success animate-pulse"
-                          : "bg-destructive"
-                        : "bg-muted-foreground/60"
-                    )}
+                {savedAddon.health && (
+                  <StatusDot
+                    tone={savedAddon.health.isOnline ? 'success' : 'destructive'}
+                    label={savedAddon.health.isOnline ? 'Online' : 'Offline'}
+                    tooltip={getHealthTooltip()}
+                    pulse={savedAddon.health.isOnline}
                   />
-                </Tooltip>
+                )}
               </div>
 
               <div className="flex flex-col min-w-0 pr-2">
@@ -340,7 +335,7 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 pt-3 mt-2">
-              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <div className={cn('flex flex-1 items-center gap-1.5', profileName ? 'min-w-[6rem]' : 'min-w-0')}>
                 {profileName && (
                   <span className="text-xs text-foreground/60 whitespace-normal break-words line-clamp-2">
                     {profileName}
@@ -363,32 +358,17 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
         </div>
       </div>
 
-      <Dialog open={showDetails} onOpenChange={setShowDetails}>
-        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
-          <DialogHeader>
-            <DialogTitle>Edit Saved Addon</DialogTitle>
-            <DialogDescription>
-              Customize how this saved addon appears and where it lives in your library.
-            </DialogDescription>
-          </DialogHeader>
-          <SavedAddonDetails savedAddon={savedAddon} deployedAccounts={deployedAccounts} onClose={() => setShowDetails(false)} />
-        </DialogContent>
-      </Dialog>
+      <SavedAddonEditDialog
+        savedAddon={savedAddon}
+        deployedAccounts={deployedAccounts}
+        open={showDetails}
+        onOpenChange={setShowDetails}
+      />
 
-      <ConfirmationDialog
+      <SavedAddonDeleteConfirm
+        savedAddon={savedAddon}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
-        title="Delete Saved Addon?"
-        description={
-          <>
-            <p>Are you sure you want to delete "{savedAddon.name}"?</p>
-            <p className="font-semibold">
-              This will NOT remove it from accounts where it's already installed.
-            </p>
-          </>
-        }
-        confirmText="Delete"
-        isDestructive={true}
         onConfirm={handleConfirmDelete}
       />
     </>

@@ -11,11 +11,14 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/hooks/use-toast'
-import { useAccountStore } from '@/store/accountStore'
+import { useAccountStore, persistAccounts } from '@/store/accountStore'
 import { useAuthStore } from '@/store/authStore'
+import { mergeRemoteIntoHub } from '@/store/account/accountSync'
+import { pushHubToStremio, updateActiveProfile } from '@/store/addon/addonDeployment'
+import { addTombstones, restoreAddonDeletions } from '@/lib/addon-tombstones'
+import { normalizeAddonUrl } from '@/lib/utils'
 import { decrypt } from '@/lib/crypto'
 import { stremioClient } from '@/api/stremio-client'
-import { updateAddons } from '@/api/addons'
 import { AddonDescriptor } from '@/types/addon'
 import { CinemetaManifest, CinemetaConfigState, CinemetaPatchStatus } from '@/types/cinemeta'
 import {
@@ -24,7 +27,6 @@ import {
   fetchOriginalCinemetaManifest,
   isCinemetaAddon,
 } from '@/lib/cinemeta-utils'
-import { normalizeAddonUrl } from '@/lib/utils'
 import { AlertTriangle } from 'lucide-react'
 
 interface CinemetaConfigurationDialogProps {
@@ -103,58 +105,59 @@ export function CinemetaConfigurationDialog({
 
       const cleanManifest = await fetchOriginalCinemetaManifest(OFFICIAL_CINEMETA_URL)
 
-      const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
+      const platformRead = await stremioClient.getAddonCollection(authKey, accountId)
 
-      const cinemetaIndex = currentAddons.findIndex((a) =>
-        a.manifest.id === addon.manifest.id ||
-        isCinemetaAddon(a) ||
-        a.transportUrl === addon.transportUrl
-      )
+      // Serialize the authoritative hub read, fold, mutation, guarded write and commit
+      // against every other account operation. syncAccount waits on the same
+      // non-reentrant mutex, so it runs only after the release (DC-03).
+      const { acquireSyncMutex } = await import('@/store/accountStore')
+      const release = await acquireSyncMutex(accountId)
+      try {
+        const localAccount = useAccountStore.getState().accounts.find(a => a.id === accountId)
+        // The hub is the collection's source of truth: platform rows only add, hub flags
+        // and policy win regardless of freshness (R3-02, DC-01).
+        const hubAddons = localAccount ? mergeRemoteIntoHub(localAccount, platformRead, { keepLocalFlags: true }) : [...platformRead]
 
-      if (cinemetaIndex === -1) {
-        throw new Error('Cinemeta addon not found in collection')
-      }
-
-      const modifiedManifest = applyCinemetaConfiguration(
-        cleanManifest,
-        config
-      )
-
-      const updatedAddons = [...currentAddons]
-      const localAccount = useAccountStore.getState().accounts.find(a => a.id === accountId)
-      const localCinemeta = localAccount?.addons.find(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addon.transportUrl))
-      const remote = currentAddons[cinemetaIndex]
-      updatedAddons[cinemetaIndex] = {
-        ...remote,
-        flags: localCinemeta?.flags ?? remote.flags,
-        catalogOverrides: localCinemeta?.catalogOverrides ?? remote.catalogOverrides,
-        note: localCinemeta?.note ?? remote.note,
-        manifest: modifiedManifest,
-        metadata: {
-          ...addon.metadata,
-          cinemetaConfig: config,
-          lastUpdated: Date.now()
-        },
-      }
-
-      await updateAddons(authKey, updatedAddons, accountId)
-
-      // Optimistically sync local store before syncAccount runs mergeAddons,
-      // otherwise isRecentLocalChange causes mergeAddons to prefer the stale local state
-      // and throw away the cinemetaConfig + patched manifest we just wrote to Stremio.
-      const storeAccounts = useAccountStore.getState().accounts
-      useAccountStore.setState({
-        accounts: storeAccounts.map(acc =>
-          acc.id !== accountId ? acc : {
-            ...acc,
-            addons: acc.addons.map(a =>
-              normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addon.transportUrl)
-                ? updatedAddons[cinemetaIndex]
-                : a
-            )
-          }
+        const cinemetaIndex = hubAddons.findIndex((a) =>
+          a.manifest.id === addon.manifest.id ||
+          isCinemetaAddon(a) ||
+          a.transportUrl === addon.transportUrl
         )
-      })
+
+        if (cinemetaIndex === -1) {
+          throw new Error('Cinemeta addon not found in collection')
+        }
+
+        const modifiedManifest = applyCinemetaConfiguration(
+          cleanManifest,
+          config
+        )
+
+        hubAddons[cinemetaIndex] = {
+          ...hubAddons[cinemetaIndex],
+          manifest: modifiedManifest,
+          metadata: {
+            ...hubAddons[cinemetaIndex].metadata,
+            ...addon.metadata,
+            cinemetaConfig: config,
+            lastUpdated: Date.now()
+          },
+        }
+
+        await pushHubToStremio(accountId, authKey, hubAddons)
+
+        // Commit the hub state the push just published against the current account
+        // state, so concurrent changes survive and the active profile stays consistent.
+        useAccountStore.setState(prev => {
+          const current = prev.accounts.find(a => a.id === accountId)
+          if (!current) return {}
+          const updatedAccount = updateActiveProfile({ ...current, addons: hubAddons }, hubAddons)
+          return { accounts: prev.accounts.map(a => a.id !== accountId ? a : updatedAccount) }
+        })
+        persistAccounts(useAccountStore.getState().accounts)
+      } finally {
+        release()
+      }
 
       await syncAccount(accountId)
 
@@ -192,50 +195,72 @@ export function CinemetaConfigurationDialog({
       const originalManifest = await fetchOriginalCinemetaManifest(OFFICIAL_CINEMETA_URL)
 
       const authKey = await decrypt(accountAuthKey, encryptionKey)
-      const currentAddons = await stremioClient.getAddonCollection(authKey, accountId)
+      const platformRead = await stremioClient.getAddonCollection(authKey, accountId)
 
-      // Use more robust matching: look for CINEMETA explicitly by typical IDs or transport URL
-      const cinemetaIndex = currentAddons.findIndex((a) =>
-        a.manifest.id === 'stremio-cinemeta' ||
-        a.manifest.id === addon.manifest.id ||
-        a.transportUrl.includes('v3-cinemeta.strem.io') ||
-        a.transportUrl === addon.transportUrl
-      )
+      // Same serialization as Apply: read, fold, mutate, guarded write and commit all
+      // run under the account mutex; syncAccount follows only after the release (DC-03).
+      const { acquireSyncMutex } = await import('@/store/accountStore')
+      const release = await acquireSyncMutex(accountId)
+      try {
+        const localAccount = useAccountStore.getState().accounts.find(a => a.id === accountId)
+        // The hub is the collection's source of truth: platform rows only add, hub flags
+        // and policy win regardless of freshness (R3-02, DC-01).
+        const hubAddons = localAccount ? mergeRemoteIntoHub(localAccount, platformRead, { keepLocalFlags: true }) : [...platformRead]
 
-      if (cinemetaIndex === -1) {
-        throw new Error('Cinemeta addon not found in your Stremio collection. Try refreshing accounts first.')
-      }
-
-      const updatedAddons = [...currentAddons]
-      updatedAddons[cinemetaIndex] = {
-        ...currentAddons[cinemetaIndex],
-        manifest: originalManifest,
-        transportUrl: OFFICIAL_CINEMETA_URL, // Reset URL to official if it was modified
-        metadata: {
-          ...currentAddons[cinemetaIndex].metadata,
-          cinemetaConfig: undefined,
-          lastUpdated: Date.now() // Force local change preference
-        }
-      }
-
-      await updateAddons(authKey, updatedAddons, accountId)
-
-      // Optimistically sync local store before syncAccount runs mergeAddons,
-      // otherwise isRecentLocalChange causes mergeAddons to prefer the stale local state
-      // and throw away the cinemetaConfig + patched manifest we just wrote to Stremio.
-      const storeAccounts = useAccountStore.getState().accounts
-      useAccountStore.setState({
-        accounts: storeAccounts.map(acc =>
-          acc.id !== accountId ? acc : {
-            ...acc,
-            addons: acc.addons.map(a =>
-              normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(addon.transportUrl)
-                ? updatedAddons[cinemetaIndex]
-                : a
-            )
-          }
+        // Use more robust matching: look for CINEMETA explicitly by typical IDs or transport URL
+        const cinemetaIndex = hubAddons.findIndex((a) =>
+          a.manifest.id === 'stremio-cinemeta' ||
+          a.manifest.id === addon.manifest.id ||
+          a.transportUrl.includes('v3-cinemeta.strem.io') ||
+          a.transportUrl === addon.transportUrl
         )
-      })
+
+        if (cinemetaIndex === -1) {
+          throw new Error('Cinemeta addon not found in your Stremio collection. Try refreshing accounts first.')
+        }
+
+        const previousUrl = hubAddons[cinemetaIndex].transportUrl
+        hubAddons[cinemetaIndex] = {
+          ...hubAddons[cinemetaIndex],
+          manifest: originalManifest,
+          transportUrl: OFFICIAL_CINEMETA_URL, // Reset URL to official if it was modified
+          metadata: {
+            ...hubAddons[cinemetaIndex].metadata,
+            cinemetaConfig: undefined,
+            lastUpdated: Date.now() // Force local change preference
+          }
+        }
+        // A changed URL is an explicit local replacement: exactly the retired normalized
+        // URL may be tombstoned. An unchanged URL, or one still installed on another row,
+        // is never retired (DC-04).
+        const retiredUrl = normalizeAddonUrl(previousUrl)
+        const retireUrl = retiredUrl && retiredUrl !== normalizeAddonUrl(OFFICIAL_CINEMETA_URL) &&
+          !hubAddons.some((row, i) => i !== cinemetaIndex && normalizeAddonUrl(row.transportUrl) === retiredUrl)
+          ? retiredUrl : null
+
+        await pushHubToStremio(accountId, authKey, hubAddons)
+
+        // After the confirmed write, commit against the current account state: the
+        // explicit Reset acknowledges any observed deletion of the official URL, and the
+        // retired URL gets a synced tombstone so a stale read or an older cloud copy
+        // cannot bring it back (DC-04).
+        useAccountStore.setState(prev => {
+          const current = prev.accounts.find(a => a.id === accountId)
+          if (!current) return {}
+          const acknowledged = restoreAddonDeletions(current.deletedAddons, current.restoredAddons, [{ transportUrl: OFFICIAL_CINEMETA_URL }])
+          const deletedAddons = retireUrl
+            ? addTombstones(acknowledged.deletedAddons, [retireUrl], Date.now(), acknowledged.restoredAddons)
+            : acknowledged.deletedAddons
+          const updatedAccount = updateActiveProfile(
+            { ...current, addons: hubAddons, deletedAddons, restoredAddons: acknowledged.restoredAddons },
+            hubAddons
+          )
+          return { accounts: prev.accounts.map(a => a.id !== accountId ? a : updatedAccount) }
+        })
+        persistAccounts(useAccountStore.getState().accounts)
+      } finally {
+        release()
+      }
 
       await syncAccount(accountId)
 
@@ -268,7 +293,7 @@ export function CinemetaConfigurationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Configure Cinemeta</DialogTitle>
           <DialogDescription>

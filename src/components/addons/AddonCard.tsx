@@ -2,6 +2,7 @@ import { Button } from '@/components/ui/button'
 import type { SavedAddonManifestChangeSummary } from '@/types/saved-addon'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
+import { isUndoPending, scheduleUndoable, useIsUndoPending } from '@/lib/undo-action'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import {
   Dialog,
@@ -23,7 +24,7 @@ import { Label } from '@/components/ui/label'
 import { useToast } from '@/hooks/use-toast'
 import { isCinemetaAddon, detectAllPatches } from '@/lib/cinemeta-utils'
 import { isAIOStreamsAddon, parseAIOStreamsUrl } from '@/lib/aiostreams-utils'
-import { getAddonInstanceKey } from '@/lib/addon-instance-identity'
+import { getLibraryActionSlot } from '@/lib/addon-library-action'
 import { isAIOMetadataAddon, parseAIOMetadataUrl } from '@/lib/aiometadata-utils'
 import { useNavigate } from 'react-router-dom'
 import { CinemetaManifest } from '@/types/cinemeta'
@@ -35,7 +36,7 @@ import { getHostnameIdentifier } from '@/lib/addon-identifier'
 import { useProfileStore } from '@/store/profileStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor } from '@/types/addon'
-import { Copy, List, Pencil, Trash2, MoreVertical, Download, Shield, EyeOff, Loader2, Star, ArrowRightLeft, BadgeCheck, Bandage, ArrowUpCircle } from 'lucide-react'
+import { Copy, List, Pencil, Trash2, MoreVertical, Download, Shield, EyeOff, Loader2, Star, ArrowRightLeft, ArrowUpCircle } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,10 +45,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-import React, { useMemo, useState, useEffect, useCallback } from 'react'
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
 import { PlatformSourceChip } from './PlatformSourceChip'
+import { addonPlatformChipState } from './platform-source'
+import { addonPropertySummary, autopilotRole, buildAddonLogoIndex, notePreview, resolveAddonLogo, type AddonLogoIndex, type AutopilotRole } from './addon-card-helpers'
+import { StatusDot } from '@/components/common/StatusDot'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { usePhoneViewport } from '@/hooks/usePhoneViewport'
+import type { Account } from '@/types/account'
+import type { SavedAddon } from '@/types/saved-addon'
 
 import { CatalogEditorDialog } from './CatalogEditorDialog'
 import { SourceUrlBox } from './SourceUrlBox'
@@ -136,7 +144,7 @@ interface AddonCardProps {
   addon: AddonDescriptor
   accountId: string
   accountAuthKey: string
-  onRemove: (accountId: string, transportUrl: string) => Promise<void>
+  onRemove: (accountId: string, transportUrl: string, index?: number) => Promise<void>
   onUpdate?: (accountId: string, transportUrl: string) => Promise<void>
   latestVersion?: string
   manifestChange?: SavedAddonManifestChangeSummary | null
@@ -155,7 +163,83 @@ interface AddonCardProps {
   isPrimary?: boolean
   isPrimaryPaused?: boolean
   isInstalled?: boolean
+  isSaved?: boolean
   compact?: boolean
+}
+
+function SaveProfileItems() {
+  const profiles = useProfileStore((state) => state.profiles)
+  return (
+    <>
+      {profiles.map(profile => (
+        <SelectItem key={profile.id} value={profile.id}>
+          {profile.name}
+        </SelectItem>
+      ))}
+    </>
+  )
+}
+
+let logoIndexCache: { accounts: Account[]; library: Record<string, SavedAddon>; index: AddonLogoIndex } | null = null
+
+function getAddonLogoIndex(accounts: Account[], library: Record<string, SavedAddon>): AddonLogoIndex {
+  if (logoIndexCache && logoIndexCache.accounts === accounts && logoIndexCache.library === library) return logoIndexCache.index
+  const sources = [...accounts.flatMap(account => account.addons || []), ...Object.values(library)]
+  logoIndexCache = { accounts, library, index: buildAddonLogoIndex(sources) }
+  return logoIndexCache.index
+}
+
+function useAddonLogo(addon: AddonDescriptor): string | undefined {
+  const own = addon.metadata?.customLogo || addon.manifest.logo
+  const library = useAddonStore((state) => (own ? null : state.library))
+  const fallback = useAccountStore((state) => (own || !library ? undefined : resolveAddonLogo(addon, getAddonLogoIndex(state.accounts, library))))
+  return own || fallback
+}
+
+function AutopilotRoleChip({ role }: { role: AutopilotRole }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-theme-part="badge"
+          aria-label={`${role.label}. Details`}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          className={cn(
+            'inline-flex shrink-0 cursor-pointer items-center justify-center rounded-full border p-1 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40',
+            role.paused ? 'border-border/40 bg-muted/40 text-muted-foreground/60 hover:bg-muted/60' : 'border-primary/25 bg-primary/12 text-primary/80 hover:bg-primary/20'
+          )}
+        >
+          {role.role === 'primary'
+            ? <Star className={cn('h-3 w-3', !role.paused && 'fill-current')} />
+            : <ArrowRightLeft className="h-3 w-3" />}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="top" className="w-64 max-w-[calc(100vw-1.5rem)] p-3 text-left">
+        <p className="text-xs font-semibold text-foreground">{role.label}</p>
+        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{role.detail}</p>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function AddonMenuHeader({ name, logo, summary, iconClassName }: { name: string; logo?: string; summary: string | null; iconClassName: string }) {
+  return (
+    <>
+      <AddonIcon name={name} logo={logo} alt="" className={cn('shrink-0', iconClassName)} textClassName="text-xs" />
+      <div className="min-w-0">
+        <p className="truncate text-sm font-semibold text-foreground">{name}</p>
+        <p className="truncate text-xs text-muted-foreground">{summary || 'Manage addon'}</p>
+      </div>
+    </>
+  )
+}
+
+function useEverTrue(flag: boolean): boolean {
+  const [seen, setSeen] = useState(flag)
+  if (flag && !seen) setSeen(true)
+  return seen || flag
 }
 
 export const AddonCard = React.memo(function AddonCard({
@@ -180,12 +264,11 @@ export const AddonCard = React.memo(function AddonCard({
   isPrimary,
   isPrimaryPaused,
   isInstalled = false,
+  isSaved = false,
   compact = false,
 }: AddonCardProps) {
   const navigate = useNavigate()
   const createSavedAddon = useAddonStore((state) => state.createSavedAddon)
-  const profiles = useProfileStore((state) => state.profiles)
-  const initProfiles = useProfileStore((state) => state.initialize)
   const createProfile = useProfileStore((state) => state.createProfile)
   const currentAccount = useAccountStore(state => state.accounts.find(a => a.id === accountId))
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
@@ -194,9 +277,13 @@ export const AddonCard = React.memo(function AddonCard({
 
   const [saving, setSaving] = useState(false)
   const [updating, setUpdating] = useState(false)
-  const [removing, setRemoving] = useState(false)
+  const [removingNow, setRemoving] = useState(false)
+  const removalId = `${accountId}::${addon.transportUrl}::${index ?? ''}`
+  const undoPending = useIsUndoPending('addon-remove', removalId)
+  const removing = removingNow || undoPending
+  const onRemoveRef = useRef(onRemove)
+  const commitRemoveRef = useRef<() => Promise<void>>(async () => {})
   const [showSaveModal, setShowSaveModal] = useState(false)
-  const [showRemoveDialog, setShowRemoveDialog] = useState(false)
   const [showCatalogEditor, setShowCatalogEditor] = useState(false)
   const [showMetadataDialog, setShowMetadataDialog] = useState(false)
   const [showAccountPicker, setShowAccountPicker] = useState(false)
@@ -215,11 +302,12 @@ export const AddonCard = React.memo(function AddonCard({
   const [showUnprotectConfirmation, setShowUnprotectConfirmation] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
 
-  const isPendingRemoval = usePendingRemoval(accountId, addon.transportUrl)
-
-  useEffect(() => {
-    initProfiles()
-  }, [initProfiles])
+  const isPendingRemoval = usePendingRemoval(accountId, addon.transportUrl) || undoPending
+  const showSaveMounted = useEverTrue(showSaveModal)
+  const showUnprotectMounted = useEverTrue(showUnprotectConfirmation)
+  const showPickerMounted = useEverTrue(showAccountPicker)
+  const showCatalogMounted = useEverTrue(showCatalogEditor)
+  const showMetadataMounted = useEverTrue(showMetadataDialog)
 
   const handleSaveMetadata = async (metadata: { customName?: string; customLogo?: string; customDescription?: string }, destinations?: AddonDescriptor['destinations'] | null) => {
     const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
@@ -242,22 +330,25 @@ export const AddonCard = React.memo(function AddonCard({
       if (import.meta.env.DEV) console.error('Metadata sync failed', err)
       toast({
         variant: 'destructive',
-        title: 'Sync Failed',
-        description: `Failed to push customization to your platform${enabledConnections.length !== 1 ? 's' : ''}.`
+        title: 'Could Not Save Changes',
+        description: err instanceof Error && err.message ? err.message : `Failed to push customization to your platform${enabledConnections.length !== 1 ? 's' : ''}.`
       })
       throw err
     }
   }
 
-  const handleRemove = useCallback(() => {
-    setShowRemoveDialog(true)
-  }, [])
+  const removalLabel = addon.metadata?.customName || addon.manifest.name || getHostnameIdentifier(addon.transportUrl)
 
-  const handleConfirmRemove = async () => {
+  const commitRemove = async () => {
+    const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
+    const current = index !== undefined ? account?.addons[index] : account?.addons.find(a => a.transportUrl === addon.transportUrl)
+    if (!current || current.transportUrl !== addon.transportUrl) {
+      toast({ variant: 'warning', title: 'Removal skipped', description: `The addon list changed, so ${removalLabel} was not removed.` })
+      return
+    }
     setRemoving(true)
     try {
-      await onRemove(accountId, addon.transportUrl)
-      setShowRemoveDialog(false)
+      await onRemoveRef.current(accountId, addon.transportUrl, index)
       toast({
         title: 'Addon Removed',
         description: `Successfully removed ${addon.manifest.name}`
@@ -269,11 +360,29 @@ export const AddonCard = React.memo(function AddonCard({
         title: 'Removal Failed',
         description: error instanceof Error ? error.message : 'Failed to remove addon'
       })
-      setShowRemoveDialog(false)
     } finally {
       setRemoving(false)
     }
   }
+
+  useEffect(() => {
+    onRemoveRef.current = onRemove
+    commitRemoveRef.current = commitRemove
+  })
+
+  const handleRemove = useCallback(() => {
+    if (isUndoPending('addon-remove', removalId)) return
+    if (addon.flags?.protected) {
+      toast({ variant: 'destructive', title: 'Removal Failed', description: `Addon "${addon.manifest.name}" is protected and cannot be removed.` })
+      return
+    }
+    scheduleUndoable({
+      scope: 'addon-remove',
+      ids: [removalId],
+      title: `Removing ${removalLabel}`,
+      commit: () => commitRemoveRef.current(),
+    })
+  }, [removalId, removalLabel, addon.flags?.protected, addon.manifest.name, toast])
 
   const handleBulkAction = async (targetAccountIds: string[]) => {
     if (targetAccountIds.length === 0) return
@@ -294,18 +403,30 @@ export const AddonCard = React.memo(function AddonCard({
       }
     }
 
-    if (pickerMode === 'move') {
+    // A move only removes the original once at least one copy landed.
+    let removedFromOrigin = false
+    if (pickerMode === 'move' && successCount > 0) {
       try {
-        await onRemove(accountId, addon.transportUrl)
+        await onRemove(accountId, addon.transportUrl, index)
+        removedFromOrigin = true
       } catch (err) {
         if (import.meta.env.DEV) console.error('Failed to remove from origin account:', err)
       }
     }
 
-    toast({
-      title: pickerMode === 'move' ? 'Move Complete' : 'Clone Complete',
-      description: `Successfully processed ${successCount} account${successCount !== 1 ? 's' : ''}. ${failCount > 0 ? `Failed: ${failCount}` : ''}`,
-    })
+    const plural = (n: number) => `${n} account${n !== 1 ? 's' : ''}`
+    if (successCount === 0) {
+      toast({
+        title: pickerMode === 'move' ? 'Move failed' : 'Clone failed',
+        description: `Could not add it to ${plural(failCount)}.${pickerMode === 'move' ? ' Nothing was removed.' : ''}`,
+        variant: 'destructive',
+      })
+    } else {
+      toast({
+        title: pickerMode === 'move' ? 'Move complete' : 'Clone complete',
+        description: `Added to ${plural(successCount)}.${failCount > 0 ? ` Failed for ${plural(failCount)}.` : ''}${pickerMode === 'move' && !removedFromOrigin ? ' The original could not be removed.' : ''}`,
+      })
+    }
     setIsActionLoading(false)
     setShowAccountPicker(false)
   }
@@ -348,25 +469,12 @@ export const AddonCard = React.memo(function AddonCard({
     ? 'Configuring Cinemeta updates your Stremio addon collection, which requires a Stremio account. This account has no Stremio login.'
     : 'Open addon configuration page'
 
-  const isExternal = useMemo(() => {
-    return !addon.flags?.protected && !addon.flags?.official
-  }, [addon.flags?.protected, addon.flags?.official])
-
-  const canSaveToLibrary = useMemo(() => {
-    return isExternal && !isInstalled
-  }, [isExternal, isInstalled])
-
-  const library = useAddonStore(s => s.library)
-  const savedInLibrary = useMemo(() => {
-    const strip = (url: string) => url.split('?')[0].replace(/\/+$/, '')
-    const transportKey = getAddonInstanceKey(addon)
-    return Object.values(library).some(
-      (s) =>
-        s.manifest.id === addon.manifest.id &&
-        (strip(s.installUrl) === strip(addon.transportUrl) ||
-          getAddonInstanceKey({ transportUrl: s.installUrl, manifest: s.manifest }) === transportKey)
-    )
-  }, [library, addon])
+  const showSaveAction = getLibraryActionSlot({
+    protected: addon.flags?.protected,
+    official: addon.flags?.official,
+    installed: isInstalled,
+    saved: isSaved,
+  }) === 'save'
 
   const hasVersionUpdate = latestVersion ? isNewerVersion(addon.manifest.version, latestVersion) : false
   const hasManifestShapeChange = !!manifestChange?.hasManifestShapeChange
@@ -374,6 +482,7 @@ export const AddonCard = React.memo(function AddonCard({
   const canUpdate = !!onUpdate
 
   const openSaveModal = () => {
+    const profiles = useProfileStore.getState().profiles
     setSaveName(addon.manifest.name || '')
     setSaveTags('')
 
@@ -613,9 +722,25 @@ export const AddonCard = React.memo(function AddonCard({
   const addonDisplayName = addon.metadata?.customName ||
     (addon.manifest.name && addon.manifest.name !== 'Unknown Addon' ? addon.manifest.name : getHostnameIdentifier(addon.transportUrl))
 
-  // Platforms this account's collection lives on (enabled connections only). Hidden when
-  // the account opts out of platform logos.
-  const showPlatformSource = !!currentAccount && !currentAccount.hidePlatformLogos
+  const phone = usePhoneViewport()
+  const addonLogo = useAddonLogo(addon)
+  const isOff = addon.flags?.enabled === false || isPendingRemoval
+  const dimClass = isOff ? 'opacity-60 grayscale-[0.8]' : ''
+  const chipState = useMemo(() => addonPlatformChipState(currentAccount, addon), [currentAccount, addon])
+  const showPlatformSource = !!currentAccount && !currentAccount.hidePlatformLogos && chipState.total > 0
+  const configureHidden = !!addon.metadata?.hideConfigure || (isCinemeta && addon.manifest?.behaviorHints?.configurable !== true)
+  const propertySummary = addonPropertySummary({ official: isCinemeta, patched: isPatched, protected: !!addon.flags?.protected, configureHidden })
+  const apRole = autopilotRole({ isPrimary, isPrimaryPaused, failoverPrimaryName, failoverPaused })
+  const healthLabel = isOnline ? 'Online' : (healthError ? `Offline: ${healthError}` : 'Offline')
+  const noteLine = notePreview(addon.note)
+  const noteAddonName = addon.metadata?.customName || addon.manifest.name || 'Addon'
+  const menuTriggerClass = '-mr-1 h-8 w-7 shrink-0 rounded-full p-0 max-sm:-mr-2 max-sm:h-11 max-sm:w-11 text-muted-foreground hover:bg-muted/45 hover:text-foreground'
+  const sheetHeader = <AddonMenuHeader name={addonDisplayName} logo={addonLogo} summary={propertySummary} iconClassName="h-9 w-9" />
+  const menuHeader = !phone && (
+    <div className="mb-1 flex min-w-0 items-center gap-2 border-b border-border/60 px-2 pb-2 pt-1.5">
+      <AddonMenuHeader name={addonDisplayName} logo={addonLogo} summary={propertySummary} iconClassName="h-7 w-7" />
+    </div>
+  )
 
   return (
     <>
@@ -626,8 +751,8 @@ export const AddonCard = React.memo(function AddonCard({
           role={isSelectionMode ? "button" : undefined}
           tabIndex={isSelectionMode ? 0 : undefined}
           className={cn(
-            'group relative rounded-[1.35rem] border border-border/45 bg-card/80 p-3 shadow-sm transition-[background-color,border-color,box-shadow,transform,opacity] duration-200 hover:-translate-y-0.5 hover:border-border/70 hover:bg-card/95 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
-            addon.flags?.enabled === false || isPendingRemoval ? 'opacity-60 grayscale-[0.8]' : '',
+            'group relative rounded-[1.35rem] border bg-card/80 p-3 shadow-sm transition-[background-color,border-color,box-shadow,transform,opacity] duration-200 hover:-translate-y-0.5 hover:border-border/70 hover:bg-card/95 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40',
+            isOff ? 'border-dashed border-border/70' : 'border-border/45',
             isSelectionMode && isSelected
               ? 'border-primary/35 bg-primary/10 ring-2 ring-primary/20'
               : isSelectionMode
@@ -650,54 +775,24 @@ export const AddonCard = React.memo(function AddonCard({
                 <div className="relative h-10 w-10 shrink-0">
                   <AddonIcon
                     name={addonDisplayName}
-                    logo={addon.metadata?.customLogo || addon.manifest.logo}
+                    logo={addonLogo}
                     alt={addonDisplayName}
-                    className="h-full w-full"
+                    className={cn('h-full w-full', dimClass)}
                     textClassName="text-xs"
                   />
                   {isOnline !== undefined && (
-                    <Tooltip content={isOnline ? 'Online' : (healthError ? `Offline: ${healthError}` : 'Offline')} side="top">
-                      <span className={`absolute -bottom-0.5 -right-0.5 z-20 h-2.5 w-2.5 rounded-full ring-2 ring-card ${isOnline ? 'bg-success' : 'bg-destructive'}`} />
-                    </Tooltip>
+                    <StatusDot tone={isOnline ? 'success' : 'destructive'} label={isOnline ? 'Online' : 'Offline'} tooltip={healthLabel} pulse={isOnline} />
                   )}
                 </div>
 
-                <div className="min-w-0 flex-1 space-y-1">
+                <div className={cn('min-w-0 flex-1 space-y-1', dimClass)}>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-sm font-semibold leading-tight">{addonDisplayName}</span>
                     <span className="text-xs text-muted-foreground/60">v{addon.manifest.version}</span>
-                    {isCinemeta && (
-                      <Tooltip content="Official Addon">
-                        <span aria-label="Official Addon" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
-                          <BadgeCheck className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
-                    {isPatched && (
-                      <Tooltip content="Cinemeta patches applied">
-                        <span aria-label="Cinemeta patches applied" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-warning/20 bg-warning/10 text-warning">
-                          <Bandage className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
                     {hasUpdate && latestVersion && (
                       <Tooltip content={`Update available: ${latestVersion}`}>
                         <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
                           <ArrowUpCircle className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
-                    {addon.flags?.protected && (
-                      <Tooltip content="Protected">
-                        <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
-                          <Shield className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
-                    {(addon.metadata?.hideConfigure || (isCinemeta && addon.manifest?.behaviorHints?.configurable !== true)) && (
-                      <Tooltip content="Configure button hidden in Stremio">
-                        <span aria-label="Configure button hidden in Stremio" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-muted-foreground/20 bg-muted/30 text-muted-foreground">
-                          <EyeOff className="h-3 w-3" />
                         </span>
                       </Tooltip>
                     )}
@@ -708,21 +803,8 @@ export const AddonCard = React.memo(function AddonCard({
                         </span>
                       </Tooltip>
                     )}
-                    {isPrimary && (
-                      <Tooltip content={isPrimaryPaused ? 'Primary failover (paused)' : 'Primary failover'}>
-                        <span aria-label={isPrimaryPaused ? 'Primary failover (paused)' : 'Primary failover'} data-theme-part="badge" className={`inline-flex items-center justify-center rounded-full border p-1 ${isPrimaryPaused ? 'border-border/40 bg-muted/40 text-muted-foreground/60' : 'border-primary/25 bg-primary/12 text-primary/80'}`}>
-                          <Star className={`h-3 w-3 ${isPrimaryPaused ? '' : 'fill-current'}`} />
-                        </span>
-                      </Tooltip>
-                    )}
-                    {failoverPrimaryName && (
-                      <Tooltip content={failoverPaused ? `Autopilot backup for ${failoverPrimaryName} (paused)` : `Autopilot backup for ${failoverPrimaryName}`}>
-                        <span aria-label={failoverPaused ? `Autopilot backup for ${failoverPrimaryName} (paused)` : `Autopilot backup for ${failoverPrimaryName}`} data-theme-part="badge" className={`inline-flex items-center justify-center rounded-full border p-1 ${failoverPaused ? 'border-border/40 bg-muted/40 text-muted-foreground/60' : 'border-primary/25 bg-primary/12 text-primary/80'}`}>
-                          <ArrowRightLeft className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
-                    {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" className="ml-1" />}
+                    {apRole && <AutopilotRoleChip role={apRole} />}
+                    {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
                   </div>
 
                   <p className="line-clamp-1 text-xs text-muted-foreground">
@@ -780,13 +862,13 @@ export const AddonCard = React.memo(function AddonCard({
 
                   <DropdownMenu onOpenChange={setIsMenuOpen}>
                     <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0 p-0" onClick={(e) => e.stopPropagation()}>
+                      <Button variant="ghost" className={menuTriggerClass} onClick={(e) => e.stopPropagation()}>
                         <span className="sr-only">Open menu</span>
                         <MoreVertical className="h-4 w-4" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-56 max-w-[calc(100vw-2rem)]">
-                      <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">Manage Addon</div>
+                    <DropdownMenuContent align="end" className="w-56 max-w-[calc(100vw-2rem)]" sheetHeader={sheetHeader}>
+                      {menuHeader}
                       {hasCatalogs && !managedCatalogs ? (
                         <DropdownMenuItem className="gap-2 sm:hidden" onClick={(e) => { e.stopPropagation(); setShowCatalogEditor(true); }} disabled={removing}>
                           <List className="h-4 w-4" />
@@ -802,13 +884,13 @@ export const AddonCard = React.memo(function AddonCard({
                         <Pencil className="h-4 w-4" />
                         Customize
                       </DropdownMenuItem>
-                      {canSaveToLibrary && !savedInLibrary && (
+                      {showSaveAction && (
                         <DropdownMenuItem className="gap-2 sm:hidden" onClick={(e) => { e.stopPropagation(); openSaveModal(); }} disabled={saving || removing}>
                           <AnimatedHeartIcon className="h-4 w-4" isAnimating={saving} />
                           Save to Library
                         </DropdownMenuItem>
                       )}
-                      {savedInLibrary && (
+                      {!showSaveAction && (
                         <DropdownMenuItem className="gap-2 sm:hidden" onClick={(e) => { e.stopPropagation(); handleUpdate(); }} disabled={loading || updating || removing}>
                           <AnimatedRefreshIcon className="h-4 w-4" isAnimating={updating} />
                           Reinstall
@@ -849,7 +931,7 @@ export const AddonCard = React.memo(function AddonCard({
 
             {!isSelectionMode && (
               <>
-              <div className="grid grid-cols-2 gap-1.5 sm:hidden">
+              <div className={cn('grid grid-cols-2 gap-1.5 sm:hidden', dimClass)}>
                 <Tooltip content={configureTooltip}>
                   <Button size="sm" onClick={handleConfigure} disabled={configureDisabled} className="h-8 gap-1.5 bg-muted/40 text-xs font-semibold text-foreground/70 shadow-none hover:bg-muted/70">
                     <AnimatedSettingsIcon className="h-3.5 w-3.5" isAnimating={configuring} />
@@ -860,8 +942,8 @@ export const AddonCard = React.memo(function AddonCard({
                 <AddonNoteEditor
                   accountId={accountId}
                   addonTransportUrl={addon.transportUrl}
-                  addonName={addon.metadata?.customName || addon.manifest.name || 'Addon'}
-                  addonLogo={addon.metadata?.customLogo || addon.manifest.logo}
+                  addonName={noteAddonName}
+                  addonLogo={addonLogo}
                   note={addon.note}
                   index={index}
                   asButton
@@ -869,7 +951,7 @@ export const AddonCard = React.memo(function AddonCard({
                 />
               </div>
 
-              <div className="hidden grid-cols-3 gap-1.5 sm:grid xl:grid-cols-6">
+              <div className={cn('hidden grid-cols-3 gap-1.5 sm:grid xl:grid-cols-5', dimClass)}>
                 <Tooltip content={configureTooltip}>
                   <Button size="sm" onClick={handleConfigure} disabled={configureDisabled} className="h-8 gap-1.5 bg-muted/40 text-xs font-semibold text-foreground/70 shadow-none hover:bg-muted/70">
                     <AnimatedSettingsIcon className="h-3.5 w-3.5" isAnimating={configuring} />
@@ -886,7 +968,7 @@ export const AddonCard = React.memo(function AddonCard({
                   </Tooltip>
                 ) : (
                   <Tooltip content={managedCatalogs ? 'Manage catalogs via addon UI' : 'No catalogs available'}>
-                    <Button size="sm" disabled className="h-8 gap-1.5 bg-muted/40 text-xs font-semibold text-foreground/70 opacity-50 shadow-none hover:bg-muted/70">
+                    <Button size="sm" aria-disabled="true" ripple={false} className="h-8 cursor-not-allowed gap-1.5 bg-muted/40 text-xs font-semibold text-foreground/70 opacity-50 shadow-none active:scale-100">
                       <List className="h-3.5 w-3.5" />
                       Catalogs
                     </Button>
@@ -900,13 +982,13 @@ export const AddonCard = React.memo(function AddonCard({
                   </Button>
                 </Tooltip>
 
-                {canSaveToLibrary && !savedInLibrary && (
+                {showSaveAction && (
                   <Button size="sm" onClick={openSaveModal} disabled={saving || removing} className="h-8 gap-1.5 border border-primary/25 bg-primary/12 text-xs font-semibold text-primary shadow-none hover:bg-primary/20">
                     <AnimatedHeartIcon className="h-3.5 w-3.5" isAnimating={saving} />
                     Save
                   </Button>
                 )}
-                {savedInLibrary && (
+                {!showSaveAction && (
                   <Tooltip content="Reinstalls this addon - also useful after making config changes to refresh settings without losing anything">
                     <Button size="sm" onClick={handleUpdate} disabled={loading || updating || removing} className="h-8 gap-1.5 bg-muted/40 text-xs font-semibold text-foreground/70 shadow-none hover:bg-muted/70">
                       <AnimatedRefreshIcon className="h-3.5 w-3.5" isAnimating={updating} />
@@ -918,20 +1000,13 @@ export const AddonCard = React.memo(function AddonCard({
                 <AddonNoteEditor
                   accountId={accountId}
                   addonTransportUrl={addon.transportUrl}
-                  addonName={addon.metadata?.customName || addon.manifest.name || 'Addon'}
-                  addonLogo={addon.metadata?.customLogo || addon.manifest.logo}
+                  addonName={noteAddonName}
+                  addonLogo={addonLogo}
                   note={addon.note}
                   index={index}
                   asButton
                   className="h-8 rounded-lg"
                 />
-
-                {!addon.flags?.protected && (
-                  <Button variant="destructive" size="sm" onClick={handleRemove} disabled={removing} className="h-8 gap-1.5 border border-destructive/20 bg-destructive/10 text-xs font-bold text-destructive transition-[transform,opacity,box-shadow] duration-200 hover:bg-destructive hover:text-white">
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Remove
-                  </Button>
-                )}
               </div>
               </>
             )}
@@ -943,7 +1018,7 @@ export const AddonCard = React.memo(function AddonCard({
         {...longPressProps}
         role={isSelectionMode ? "button" : undefined}
         tabIndex={isSelectionMode ? 0 : undefined}
-        className={`flex flex-col h-full rounded-2xl border-border/40 transition-[transform,opacity,box-shadow] duration-300 relative focus:outline-none ${addon.flags?.enabled === false || isPendingRemoval ? 'opacity-60 grayscale-[0.8] border-dashed' : ''
+        className={`flex flex-col h-full rounded-2xl transition-[transform,opacity,box-shadow] duration-300 relative focus:outline-none ${isOff ? 'border-dashed border-border/70' : 'border-border/40'
           } ${isSelectionMode && isSelected
             ? `ring-2 ${isLight ? 'ring-primary/25' : 'ring-primary/12'} border-primary/25 bg-primary/12`
             : isSelectionMode
@@ -966,60 +1041,31 @@ export const AddonCard = React.memo(function AddonCard({
             </svg>
           </div>
         )}
-        <div className={isSelectionMode ? 'pointer-events-none' : ''}>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+        <div className={cn('flex min-h-0 flex-1 flex-col', isSelectionMode && 'pointer-events-none')}>
+          <CardHeader className="flex flex-row items-start justify-between gap-2 pb-2 space-y-0">
             <div className="flex items-center gap-3 min-w-0">
-              <AddonIcon
-                name={addonDisplayName}
-                logo={addon.metadata?.customLogo || addon.manifest.logo}
-                alt={addonDisplayName}
-                className="h-11 w-11"
-                textClassName="text-sm"
-              />
-              <div className="flex flex-col min-w-0">
+              <div className="relative h-11 w-11 shrink-0">
+                <AddonIcon
+                  name={addonDisplayName}
+                  logo={addonLogo}
+                  alt={addonDisplayName}
+                  className={cn('h-11 w-11', dimClass)}
+                  textClassName="text-sm"
+                />
+                {isOnline !== undefined && (
+                  <StatusDot tone={isOnline ? 'success' : 'destructive'} label={isOnline ? 'Online' : 'Offline'} tooltip={healthLabel} pulse={isOnline} />
+                )}
+              </div>
+              <div className={cn('flex flex-col min-w-0', dimClass)}>
                 <CardTitle className="text-base font-semibold truncate leading-tight">
-                  {addon.metadata?.customName ||
-                    (addon.manifest.name && addon.manifest.name !== 'Unknown Addon' ? addon.manifest.name : getHostnameIdentifier(addon.transportUrl))}
+                  {addonDisplayName}
                 </CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
                   <span className="text-xs truncate">v{addon.manifest.version}</span>
-                  {isOnline !== undefined && (
-                    <Tooltip content={isOnline ? 'Online' : (healthError ? `Offline: ${healthError}` : 'Offline')} side="top">
-                      <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-success' : 'bg-destructive'}`} />
-                    </Tooltip>
-                  )}
-                  {isCinemeta && (
-                    <Tooltip content="Official Addon">
-                      <span aria-label="Official Addon" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
-                        <BadgeCheck className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {isPatched && (
-                    <Tooltip content="Cinemeta patches applied">
-                      <span aria-label="Cinemeta patches applied" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-warning/20 bg-warning/10 text-warning">
-                        <Bandage className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
                   {hasUpdate && latestVersion && (
                     <Tooltip content={`Update available: ${latestVersion}`}>
                       <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
                         <ArrowUpCircle className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {addon.flags?.protected && (
-                    <Tooltip content="Protected">
-                      <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
-                        <Shield className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {(addon.metadata?.hideConfigure || (isCinemeta && addon.manifest?.behaviorHints?.configurable !== true)) && (
-                    <Tooltip content="Configure button hidden in Stremio">
-                      <span aria-label="Configure button hidden in Stremio" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-muted-foreground/20 bg-muted/30 text-muted-foreground">
-                        <EyeOff className="h-3 w-3" />
                       </span>
                     </Tooltip>
                   )}
@@ -1030,27 +1076,14 @@ export const AddonCard = React.memo(function AddonCard({
                       </span>
                     </Tooltip>
                   )}
-                  {isPrimary && (
-                    <Tooltip content={isPrimaryPaused ? 'Primary failover (paused)' : 'Primary failover'}>
-                      <span aria-label={isPrimaryPaused ? 'Primary failover (paused)' : 'Primary failover'} data-theme-part="badge" className={`inline-flex items-center justify-center rounded-full border p-1 shrink-0 ${isPrimaryPaused ? 'border-border/40 bg-muted/40 text-muted-foreground/60' : 'border-primary/25 bg-primary/12 text-primary/80'}`}>
-                        <Star className={`h-3 w-3 ${isPrimaryPaused ? '' : 'fill-current'}`} />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {failoverPrimaryName && (
-                    <Tooltip content={failoverPaused ? `Autopilot backup for ${failoverPrimaryName} (paused)` : `Autopilot backup for ${failoverPrimaryName}`}>
-                      <span aria-label={failoverPaused ? `Autopilot backup for ${failoverPrimaryName} (paused)` : `Autopilot backup for ${failoverPrimaryName}`} data-theme-part="badge" className={`inline-flex items-center justify-center rounded-full border p-1 shrink-0 ${failoverPaused ? 'border-border/40 bg-muted/40 text-muted-foreground/60' : 'border-primary/25 bg-primary/12 text-primary/80'}`}>
-                        <ArrowRightLeft className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" className="ml-1" />}
+                  {apRole && <AutopilotRoleChip role={apRole} />}
+                  {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
                 </CardDescription>
               </div>
             </div>
 
-            <div className="flex items-center gap-1">
-              <div className="flex items-center gap-2 mr-2">
+            <div className="flex shrink-0 items-center gap-1">
+              <div className="mr-0.5 flex items-center">
                 <Switch
                   checked={addon.flags?.enabled !== false}
                   onCheckedChange={async (checked) => {
@@ -1077,13 +1110,13 @@ export const AddonCard = React.memo(function AddonCard({
               {!isSelectionMode && (
                 <DropdownMenu onOpenChange={setIsMenuOpen}>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-10 w-10 p-0" onClick={(e) => e.stopPropagation()}>
+                    <Button variant="ghost" className={menuTriggerClass} onClick={(e) => e.stopPropagation()}>
                       <span className="sr-only">Open menu</span>
                       <MoreVertical className="h-4 w-4" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56 max-w-[calc(100vw-2rem)]">
-                    <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">MANAGE ADDON</div>
+                  <DropdownMenuContent align="end" className="w-56 max-w-[calc(100vw-2rem)]" sheetHeader={sheetHeader}>
+                    {menuHeader}
                     <DropdownMenuItem className="gap-2" onClick={(e) => { e.stopPropagation(); handleToggleProtection(); }}>
                       <Shield className={`h-4 w-4 ${addon.flags?.protected ? 'text-primary fill-primary/20' : 'text-muted-foreground'}`} />
                       {addon.flags?.protected ? 'Unprotect Addon' : 'Protect Addon'}
@@ -1120,7 +1153,7 @@ export const AddonCard = React.memo(function AddonCard({
             </div>
           </CardHeader>
 
-          <CardContent className="flex-grow py-2 min-w-0">
+          <CardContent className={cn('flex-grow py-2 min-w-0', dimClass)}>
             <p className="text-sm text-muted-foreground line-clamp-2 mb-3 h-10 w-full">
               {addon.metadata?.customDescription ||
                 addon.manifest.description ||
@@ -1138,7 +1171,7 @@ export const AddonCard = React.memo(function AddonCard({
             />
           </CardContent>
 
-          <CardFooter className="flex flex-col gap-2 pt-2 mt-auto">
+          <CardFooter className={cn('flex flex-col gap-2 pt-2 mt-auto', dimClass)}>
             {canUpdate && hasUpdate && (
               <Button
                 variant="outline"
@@ -1181,8 +1214,9 @@ export const AddonCard = React.memo(function AddonCard({
                 <Tooltip content={managedCatalogs ? 'Manage catalogs via addon UI' : 'No catalogs available'}>
                   <Button
                     size="sm"
-                    disabled
-                    className="font-semibold text-xs opacity-50 gap-1.5 bg-muted/40 text-foreground/70 border border-border/40 hover:bg-muted/70 shadow-none"
+                    aria-disabled="true"
+                    ripple={false}
+                    className="font-semibold text-xs opacity-50 cursor-not-allowed gap-1.5 bg-muted/40 text-foreground/70 border border-border/40 shadow-none active:scale-100"
                   >
                     <List className="h-3.5 w-3.5" />
                     Catalogs
@@ -1202,7 +1236,7 @@ export const AddonCard = React.memo(function AddonCard({
                 </Button>
               </Tooltip>
 
-              {canSaveToLibrary && !savedInLibrary && (
+              {showSaveAction && (
                 <Button
                   size="sm"
                   onClick={openSaveModal}
@@ -1213,7 +1247,7 @@ export const AddonCard = React.memo(function AddonCard({
                   Save to Library
                 </Button>
               )}
-              {savedInLibrary && (
+              {!showSaveAction && (
                 <Tooltip content="Reinstalls this addon - also useful after making config changes to refresh settings without losing anything">
                   <Button
                     size="sm"
@@ -1227,36 +1261,26 @@ export const AddonCard = React.memo(function AddonCard({
                 </Tooltip>
               )}
 
+            </div>
+
+            <div className="flex min-h-6 w-full items-center gap-2">
+              <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{noteLine}</p>
               <AddonNoteEditor
                 accountId={accountId}
                 addonTransportUrl={addon.transportUrl}
-                addonName={addon.metadata?.customName || addon.manifest.name || 'Addon'}
-                addonLogo={addon.metadata?.customLogo || addon.manifest.logo}
+                addonName={noteAddonName}
+                addonLogo={addonLogo}
                 note={addon.note}
                 index={index}
-                asButton
-                className={addon.flags?.protected ? 'col-span-2' : undefined}
+                className="relative ml-auto shrink-0 max-sm:after:absolute max-sm:after:-inset-x-[9px] max-sm:after:-inset-y-[9px] max-sm:after:content-['']"
               />
-
-              {!addon.flags?.protected && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleRemove}
-                  disabled={removing}
-                  className="font-bold gap-2 bg-destructive/10 hover:bg-destructive text-destructive hover:text-white border border-destructive/20 transition-[transform,opacity,box-shadow] duration-200"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Remove Addon
-                </Button>
-              )}
             </div>
           </CardFooter>
         </div >
       </Card >
       )}
 
-      <Dialog open={showSaveModal} onOpenChange={(open) => !open && closeSaveModal()}>
+      {showSaveMounted && <Dialog open={showSaveModal} onOpenChange={(open) => !open && closeSaveModal()}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Save to Library</DialogTitle>
@@ -1310,11 +1334,7 @@ export const AddonCard = React.memo(function AddonCard({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="unassigned">Unassigned</SelectItem>
-                    {profiles.map(profile => (
-                      <SelectItem key={profile.id} value={profile.id}>
-                        {profile.name}
-                      </SelectItem>
-                    ))}
+                    <SaveProfileItems />
                   </SelectContent>
                 </Select>
               )}
@@ -1340,20 +1360,9 @@ export const AddonCard = React.memo(function AddonCard({
             </Button>
           </DialogFooter>
         </DialogContent>
-      </Dialog>
+      </Dialog>}
 
-      <ConfirmationDialog
-        open={showRemoveDialog}
-        onOpenChange={setShowRemoveDialog}
-        title="Remove Addon?"
-        description={`Remove "${addon.metadata?.customName || addon.manifest.name || getHostnameIdentifier(addon.transportUrl)}"?`}
-        confirmText={removing ? "Removing..." : "Remove"}
-        isDestructive={true}
-        onConfirm={handleConfirmRemove}
-        disabled={removing}
-      />
-
-      <ConfirmationDialog
+      {showUnprotectMounted && <ConfirmationDialog
         open={showUnprotectConfirmation}
         onOpenChange={setShowUnprotectConfirmation}
         title="Unprotect Cinemeta?"
@@ -1369,16 +1378,18 @@ export const AddonCard = React.memo(function AddonCard({
         confirmText="Confirm Unprotect"
         isDestructive={true}
         onConfirm={confirmUnprotectCinemeta}
-      />
+      />}
 
-      <AccountPickerDialog
+      {showPickerMounted && <AccountPickerDialog
         open={showAccountPicker}
         onOpenChange={setShowAccountPicker}
         title={pickerMode === 'move' ? "Move Addon" : "Clone Addon"}
         description={pickerMode === 'move' ? "Select accounts to move this addon to. It will be removed from the current account." : "Select accounts to clone this addon to."}
         onConfirm={handleBulkAction}
         confirmLabel={pickerMode === 'move' ? 'Move' : 'Clone'}
-      />
+        confirmPendingLabel={pickerMode === 'move' ? 'Moving...' : 'Cloning...'}
+        excludeAccountIds={[accountId]}
+      />}
 
       {isCinemeta && (
         <CinemetaConfigurationDialog
@@ -1392,7 +1403,7 @@ export const AddonCard = React.memo(function AddonCard({
 
 
 
-      {!managedCatalogs && (
+      {!managedCatalogs && showCatalogMounted && (
         <CatalogEditorDialog
           open={showCatalogEditor}
           onOpenChange={setShowCatalogEditor}
@@ -1401,14 +1412,14 @@ export const AddonCard = React.memo(function AddonCard({
         />
       )}
 
-      <AddonMetadataDialog
+      {showMetadataMounted && <AddonMetadataDialog
         open={showMetadataDialog}
         onOpenChange={setShowMetadataDialog}
         addon={addon}
         accountId={accountId}
         onSave={handleSaveMetadata}
         onReplaceUrl={handleReplaceUrl}
-      />
+      />}
 
     </>
   )

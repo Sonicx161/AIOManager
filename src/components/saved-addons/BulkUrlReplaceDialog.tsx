@@ -10,11 +10,19 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAddonStore } from '@/store/addonStore'
+import { useUIStore } from '@/store/uiStore'
 import { AlertTriangle, Check, Loader2, Wand2, X, ArrowRight } from 'lucide-react'
 import { useEffect, useState, useMemo } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Checkbox } from '@/components/ui/checkbox'
 import { cn, normalizeAddonUrl } from '@/lib/utils'
 import { SavedAddonIcon } from './SavedAddonIcon'
+import {
+    formatReplaceRunSummary,
+    maskReplaceUrl,
+    resolveReplaceDisplayItems,
+    summarizeReplaceRun,
+} from './url-replace-display'
 import type { AddonDescriptor } from '@/types/addon'
 
 function escapeRegExp(s: string) {
@@ -67,10 +75,14 @@ function getBlockReasonLabel(reason?: ReplaceResult['blockReason']) {
 export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAddons, accountName }: BulkUrlReplaceDialogProps) {
     const library = useAddonStore(s => s.library)
     const isAccountScope = !!accountId
+    const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+    const privacyLevelUrls = useUIStore(s => s.privacyLevelUrls)
+    const urlPrivacyLevel = isPrivacyModeEnabled ? privacyLevelUrls : 0
     const [findText, setFindText] = useState('')
     const [replaceText, setReplaceText] = useState('')
     const [results, setResults] = useState<ReplaceResult[]>([])
     const [isExecuting, setIsExecuting] = useState(false)
+    const [showFullUrls, setShowFullUrls] = useState(false)
 
     // Normalize the two sources (full library vs. a single account's installed addons)
     // into one shape so the preview and run logic stay identical for both modes.
@@ -159,6 +171,12 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
         [previewItems]
     )
     const blockedCount = previewItems.length - runnableItems.length
+    // After a run starts, keep showing the rows captured when the run began.
+    const displayItems = useMemo(
+        () => resolveReplaceDisplayItems(results, previewItems),
+        [results, previewItems]
+    )
+    const runSummary = results.length > 0 && !isExecuting ? summarizeReplaceRun(results) : null
     const resultsById = useMemo(
         () => new Map(results.map(result => [result.id, result])),
         [results]
@@ -170,6 +188,7 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
             setReplaceText('')
             setResults([])
             setIsExecuting(false)
+            setShowFullUrls(false)
         }
     }, [open])
 
@@ -274,9 +293,9 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
                             <div className="flex items-center justify-between px-1">
                                 <h4 className="text-xs font-medium uppercase text-muted-foreground flex items-center gap-2">
                                     {isExecuting ? 'Running Changes' : 'Before You Run This'}
-                                    {previewItems.length > 0 && (
+                                    {displayItems.length > 0 && (
                                         <span data-theme-part="badge" className="bg-primary/12 text-primary px-1.5 py-0.5 rounded-full text-xs">
-                                            {previewItems.length} matches
+                                            {displayItems.length} matches
                                         </span>
                                     )}
                                     {blockedCount > 0 && (
@@ -285,11 +304,24 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
                                         </span>
                                     )}
                                 </h4>
+                                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                                    <Checkbox
+                                        checked={showFullUrls}
+                                        onCheckedChange={(checked) => setShowFullUrls(checked === true)}
+                                    />
+                                    Show full URLs
+                                </label>
                             </div>
+
+                            {runSummary && (
+                                <p className="px-1 text-xs text-muted-foreground" role="status">
+                                    {formatReplaceRunSummary(runSummary)}
+                                </p>
+                            )}
 
                             <ScrollArea className="h-[300px] w-full rounded-xl border bg-muted/20">
                                 <div className="p-4 space-y-4">
-                                    {previewItems.length === 0 ? (
+                                    {displayItems.length === 0 ? (
                                         <div className="h-[260px] flex flex-col items-center justify-center text-center space-y-2 opacity-60">
                                             <div className="p-4 rounded-full bg-muted">
                                                 <X className="h-8 w-8 text-muted-foreground" />
@@ -298,9 +330,11 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
                                             <p className="text-xs text-muted-foreground">Enter text in Find to preview matching add-ons.</p>
                                         </div>
                                     ) : (
-                                        previewItems.map((item) => {
+                                        displayItems.map((item) => {
                                             const executionState = resultsById.get(item.id) ?? item
                                             const blockReasonLabel = getBlockReasonLabel(item.blockReason)
+                                            const displayOldUrl = showFullUrls ? item.oldUrl : maskReplaceUrl(item.oldUrl, findText, urlPrivacyLevel)
+                                            const displayNewUrl = showFullUrls ? item.newUrl : maskReplaceUrl(item.newUrl, replaceText, urlPrivacyLevel)
 
                                             return (
                                                 <div key={item.id} data-theme-part="addon-card" className={cn(
@@ -346,7 +380,7 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
                                                         <div className="space-y-2 pt-1 border-t border-dashed">
                                                             <div className="flex flex-col gap-1">
                                                                 <span className="text-xs font-bold text-muted-foreground uppercase opacity-50">Old URL</span>
-                                                                {renderUrlWithHighlight(item.oldUrl, findText)}
+                                                                {renderUrlWithHighlight(displayOldUrl, findText)}
                                                             </div>
 
                                                             <div className="flex justify-center -my-1">
@@ -356,7 +390,7 @@ export function BulkUrlReplaceDialog({ open, onOpenChange, accountId, accountAdd
                                                             <div className="flex flex-col gap-1">
                                                                 <span className="text-xs font-bold text-primary/70 uppercase">New URL</span>
                                                                 <span className="break-all font-mono text-xs leading-tight text-primary/80 italic">
-                                                                    {item.newUrl}
+                                                                    {displayNewUrl}
                                                                 </span>
                                                             </div>
                                                         </div>

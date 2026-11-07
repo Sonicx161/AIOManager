@@ -18,6 +18,8 @@ import { useToast } from '@/hooks/use-toast'
 import { getStoredAIOStreamsPassword } from '@/lib/aiostreams-utils'
 import { performInjection } from '@/lib/aiostreams-inject'
 import { useAccountStore } from '@/store/accountStore'
+import { useUIStore } from '@/store/uiStore'
+import { maskNameLevel } from '@/lib/utils'
 import { mapConcurrent } from '@/lib/concurrency'
 import type { AIOStreamsInstance } from '@/hooks/useAIOStreamsInstances'
 import type { SavedAddon } from '@/types/saved-addon'
@@ -72,6 +74,9 @@ export function LibraryInjectDialog({
   instances,
 }: LibraryInjectDialogProps) {
   const { toast } = useToast()
+  const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
+  const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
+  const namePrivacy = isPrivacyModeEnabled ? privacyLevelNames : 0
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [phase, setPhase] = useState<Phase>('select')
   const [progressCurrent, setProgressCurrent] = useState(0)
@@ -129,7 +134,7 @@ export function LibraryInjectDialog({
       const res: InstanceResult = {
         key: instanceKey(inst),
         displayName: inst.addonName || 'AIOStreams',
-        accountNames: inst.accounts.map(a => a.accountName).join(', '),
+        accountNames: inst.accounts.map(a => maskNameLevel(a.accountName, namePrivacy)).join(', '),
         host: hostOf(inst.baseUrl),
         succeeded: 0,
         alreadyExists: 0,
@@ -244,7 +249,7 @@ export function LibraryInjectDialog({
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium">{addon.name}</p>
                           <p className="truncate text-xs text-muted-foreground">
-                            {addon.manifest?.id || 'addon'}
+                            {addon.manifest?.version ? `v${addon.manifest.version}` : 'addon'}
                           </p>
                         </div>
                       </div>
@@ -291,7 +296,7 @@ export function LibraryInjectDialog({
                       const checked = selected.has(key)
                       const host = hostOf(inst.baseUrl)
                       const isDefault = !inst.addonName || inst.addonName === 'AIOStreams'
-                      const accountNames = inst.accounts.map(a => a.accountName).join(', ')
+                      const accountNames = inst.accounts.map(a => maskNameLevel(a.accountName, namePrivacy)).join(', ')
                       const primaryLabel = isDefault ? accountNames : inst.addonName
                       const secondaryLabel = isDefault ? host : `${accountNames} · ${host}`
                       return (

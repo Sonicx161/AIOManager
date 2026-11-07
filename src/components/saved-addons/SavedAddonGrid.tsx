@@ -115,6 +115,7 @@ export function SavedAddonGrid({
           disabled={count < 2}
           className="h-7 w-7 text-muted-foreground hover:text-foreground"
           aria-label="Reorder this section"
+          data-ctrl="group-reorder"
         >
           <GripVertical className="h-3.5 w-3.5" />
         </Button>
@@ -142,20 +143,22 @@ export function SavedAddonGrid({
         const isExpanded = !collapsedProfiles.has(profile.id)
 
         return (
-          <div key={profile.id} data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-3 space-y-3 shadow-sm">
+          <div key={profile.id} data-theme-part="panel" data-ctrl="group" className="rounded-2xl border border-border/40 bg-card/50 p-3 space-y-3 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <Button
                 variant="ghost"
                 ripple={false}
                 className="h-auto justify-start flex items-center gap-2.5 px-2 py-1 rounded-full group hover:bg-muted/50 transition-[transform,opacity,box-shadow] [&_svg]:!size-3.5"
                 onClick={() => onToggleProfile(profile.id)}
+                data-ctrl="group-chevron"
+                aria-label={`Collapse ${profile.name}`}
               >
                 <ChevronDown className={cn(
                   'h-3.5 w-3.5 text-foreground/60 transition-transform shrink-0',
                   collapsedProfiles.has(profile.id) && '-rotate-90'
                 )} />
-                <span className="text-sm font-semibold text-foreground/70 group-hover:text-foreground transition-colors flex items-center gap-2">
-                  <User className="h-3.5 w-3.5 shrink-0" />
+                <span data-ctrl="group-name" className="text-sm font-semibold text-foreground/70 group-hover:text-foreground transition-colors flex items-center gap-2">
+                  <User data-ctrl="group-icon" className="h-3.5 w-3.5 shrink-0" />
                   {profile.name}
                 </span>
               </Button>
@@ -184,20 +187,22 @@ export function SavedAddonGrid({
         const isExpanded = !collapsedProfiles.has('unassigned')
 
         return (
-          <div data-theme-part="panel" className="rounded-2xl border border-border/40 bg-card/50 p-3 space-y-3 shadow-sm">
+          <div data-theme-part="panel" data-ctrl="group" className="rounded-2xl border border-border/40 bg-card/50 p-3 space-y-3 shadow-sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <Button
                 variant="ghost"
                 ripple={false}
                 className="h-auto justify-start flex items-center gap-2.5 px-2 py-1 rounded-full group hover:bg-muted/50 transition-[transform,opacity,box-shadow] [&_svg]:!size-3.5"
                 onClick={() => onToggleProfile('unassigned')}
+                data-ctrl="group-chevron"
+                aria-label="Collapse Unassigned"
               >
                 <ChevronDown className={cn(
                   'h-3.5 w-3.5 text-foreground/60 transition-transform shrink-0',
                   collapsedProfiles.has('unassigned') && '-rotate-90'
                 )} />
-                <span className="text-sm font-semibold text-foreground/60 group-hover:text-foreground/80 transition-colors flex items-center gap-2">
-                  <Package className="h-3.5 w-3.5 shrink-0" />
+                <span data-ctrl="group-name" className="text-sm font-semibold text-foreground/60 group-hover:text-foreground/80 transition-colors flex items-center gap-2">
+                  <Package data-ctrl="group-icon" className="h-3.5 w-3.5 shrink-0" />
                   Unassigned
                 </span>
               </Button>

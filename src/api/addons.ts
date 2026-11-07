@@ -1,12 +1,13 @@
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
-import { stremioClient } from './stremio-client'
+import { stremioClient, isRecoveredAddonCollection } from './stremio-client'
 import { checkAddonHealth, HealthStatus, isLocalOrPrivateUrl } from '@/lib/addon-health'
 import { getAddonVersionKey, isNewerVersion, normalizeAddonUrl } from '@/lib/utils'
 import { getEffectiveManifest } from '@/lib/addon-utils'
 import { getPendingFetch, setPendingFetch } from '@/lib/manifest-cache'
 import { getHostnameIdentifier, identifyAddon } from '@/lib/addon-identifier'
-import { dedupeAddonsByTransportUrl, getAddonUrlKey } from '@/lib/addon-dedupe'
+import { dedupeAddonsByUrl, getAddonUrlKey } from '@/lib/addon-dedupe'
 import { compareManifestShape } from '@/lib/addon-manifest-diff'
+import { restoreKnownManifests } from '@/lib/manifest-placeholder'
 import { shouldBlockShrink } from '@/lib/shrink-guard'
 import { ACCOUNT_CONTEXT_UPDATE_CHECK, ACCOUNT_CONTEXT_LIBRARY_UPDATE } from '@/lib/account-contexts'
 import { trace, briefAddons } from '@/lib/trace'
@@ -69,15 +70,19 @@ export async function getAddons(authKey: string, accountContext: string = 'Unkno
       const retry = await stremioClient.getAddonCollection(authKey, accountContext).catch(() => addons)
       if (retry.length > addons.length) addons = retry
       trace('read', 'shrink-retry', { accountId: accountContext, before: addons.length, afterRetry: retry.length })
-      if (addons.length === 0 && cached?.data?.length) return cached.data
+      if (addons.length === 0 && cached?.data?.length) {
+        return cached.data
+      }
     }
+    // A recovered lastGood collection is a stale snapshot, not a live read: never cache it or learn its count.
+    const recovered = isRecoveredAddonCollection(addons)
     if ((addonCollectionVersions.get(authKey) || 0) === version) {
-      if (addons.length > 0) {
+      if (addons.length > 0 && !recovered) {
         knownAddonCounts.set(authKey, addons.length)
       }
-      addonCollectionCache.set(authKey, { data: addons, ts: Date.now() })
+      if (!recovered) addonCollectionCache.set(authKey, { data: addons, ts: Date.now() })
     }
-    trace('getAddons', 'fetched', { accountId: accountContext, knownCount, count: addons.length, addons: briefAddons(addons) })
+    trace('getAddons', 'fetched', { accountId: accountContext, knownCount, count: addons.length, recovered, addons: briefAddons(addons) })
     return addons
   })()
 
@@ -99,7 +104,7 @@ function invalidateAddonCache(authKey: string) {
 }
 
 function prepareAddonForStremio(addon: AddonDescriptor): AddonDescriptor {
-  const effectiveManifest = getEffectiveManifest(addon)
+  const effectiveManifest = getEffectiveManifest(restoreKnownManifests([addon])[0])
   const identifiedManifest = identifyAddon(addon.transportUrl, effectiveManifest)
   const fallbackName = getHostnameIdentifier(addon.transportUrl)
   const manifest: AddonManifest = {
@@ -140,7 +145,7 @@ function prepareAddonForStremio(addon: AddonDescriptor): AddonDescriptor {
 }
 
 function prepareAddonCollectionForStremio(addons: AddonDescriptor[]): AddonDescriptor[] {
-  return dedupeAddonsByTransportUrl(
+  return dedupeAddonsByUrl(
     (addons || [])
       .filter(addon => addon.flags?.enabled !== false)
       .map(prepareAddonForStremio)

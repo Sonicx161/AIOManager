@@ -7,6 +7,7 @@ import { Info, Plus, RefreshCw, ShieldAlert, Trash2, Users, Tag, Layers } from '
 import { Tooltip } from '@/components/ui/tooltip'
 import { SavedAddonIcon } from './SavedAddonIcon'
 import { extractAddonParams } from '@/lib/addon-params'
+import { summarizeDeployTargets } from '@/lib/deploy-targets'
 
 interface DeploymentPreviewProps {
   selectedAddonIds: Set<string>
@@ -81,12 +82,14 @@ export function DeploymentPreview({
         accountEmoji?: string
         installs: number
         refreshes: number
+        asks: number
         removals: number
         missing: number
         protectedSkips: number
       }>,
       installs: 0,
       refreshes: 0,
+      asks: 0,
       removals: 0,
       missing: 0,
       protectedSkips: 0,
@@ -102,32 +105,26 @@ export function DeploymentPreview({
 
       let installs = 0
       let refreshes = 0
+      let asks = 0
       let removals = 0
       let missing = 0
       let protectedSkips = 0
 
-      selectedAddons.forEach(savedAddon => {
-        const existing = installedByUrl.get(normalizeAddonUrl(savedAddon.installUrl))
-
-        if (operation === 'remove') {
-          if (!existing) {
-            missing += 1
-          } else if (existing.flags?.protected && !allowProtected) {
-            protectedSkips += 1
-          } else {
-            removals += 1
-          }
-          return
-        }
-
-        if (!existing) {
-          installs += 1
-        } else if (existing.flags?.protected && !allowProtected) {
-          protectedSkips += 1
-        } else {
-          refreshes += 1
-        }
-      })
+      if (operation === 'remove') {
+        selectedAddons.forEach(savedAddon => {
+          const existing = installedByUrl.get(normalizeAddonUrl(savedAddon.installUrl))
+          if (!existing) missing += 1
+          else if (existing.flags?.protected && !allowProtected) protectedSkips += 1
+          else removals += 1
+        })
+      } else {
+        // Deploy counts come from the merge's own planner, so the estimate matches the result.
+        const counts = summarizeDeployTargets(account.addons, selectedAddons, Object.values(library), allowProtected)
+        installs = counts.installs
+        refreshes = counts.refreshes
+        asks = counts.asks
+        protectedSkips = counts.protectedSkips
+      }
 
       const row = {
         accountId: account.id,
@@ -135,6 +132,7 @@ export function DeploymentPreview({
         accountEmoji: account.emoji,
         installs,
         refreshes,
+        asks,
         removals,
         missing,
         protectedSkips,
@@ -143,13 +141,14 @@ export function DeploymentPreview({
       totals.rows.push(row)
       totals.installs += row.installs
       totals.refreshes += row.refreshes
+      totals.asks += row.asks
       totals.removals += row.removals
       totals.missing += row.missing
       totals.protectedSkips += row.protectedSkips
     })
 
     return totals
-  }, [accountIds, accounts, allowProtected, operation, selectedAddons])
+  }, [accountIds, accounts, allowProtected, library, operation, selectedAddons])
 
   if (selectedAddons.length === 0 || preview.rows.length === 0) return null
 
@@ -196,6 +195,13 @@ export function DeploymentPreview({
         tone: preview.refreshes > 0 ? 'success' : 'muted',
         icon: <RefreshCw className="h-3.5 w-3.5" />,
       },
+      ...(preview.asks > 0 ? [{
+        label: 'May ask',
+        value: preview.asks,
+        detail: 'older copy, you choose',
+        tone: 'warning' as const,
+        icon: <Info className="h-3.5 w-3.5" />,
+      }] : []),
       ...(preview.protectedSkips > 0 ? [{
         label: 'Locked kept',
         value: preview.protectedSkips,
@@ -276,7 +282,7 @@ export function DeploymentPreview({
             <div className="shrink-0 text-muted-foreground">
               {operation === 'remove'
                 ? `${row.removals} to remove${row.protectedSkips > 0 ? `, ${row.protectedSkips} locked` : ''}`
-                : `${row.installs} to add, ${row.refreshes} to update`}
+                : `${row.installs} to add, ${row.refreshes} to update${row.asks > 0 ? `, ${row.asks} may ask` : ''}`}
             </div>
           </div>
         ))}

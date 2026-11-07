@@ -29,6 +29,7 @@ import { StaggerContainer, StaggerItem } from '@/components/ui/stagger'
 import { getAccountEmail } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { maskNameLevel } from '@/lib/utils'
+import { maskSecretUrl } from '@/lib/mask-secret-url'
 
 type SyncFilter = 'all' | 'outOfSync'
 
@@ -187,13 +188,13 @@ export function LibrarySyncTab({
                     <div className="flex items-start gap-3">
                       <SavedAddonIcon
                         name={displayName}
-                        logo={addon.metadata?.customLogo || addon.manifest.logo}
+                        addon={addon}
                         className="h-8 w-8"
                         textClassName="text-xs"
                       />
                       <div className="flex-1 min-w-0">
                         <p className="font-semibold text-sm leading-tight truncate">{displayName}</p>
-                        <Tooltip content={addon.installUrl} side="top">
+                        <Tooltip content={maskSecretUrl(addon.installUrl)} side="top">
                           <p className="truncate font-mono text-xs text-muted-foreground/80">{hostOf(addon.installUrl)}</p>
                         </Tooltip>
                         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -279,7 +280,7 @@ export function LibrarySyncTab({
                   <div className="flex items-start gap-3">
                     <SavedAddonIcon
                       name={displayName}
-                      logo={addon.metadata?.customLogo || addon.manifest.logo}
+                      addon={addon}
                       className="h-8 w-8"
                       textClassName="text-xs"
                     />
@@ -301,7 +302,7 @@ export function LibrarySyncTab({
                       <p className="text-xs text-muted-foreground flex items-center gap-1 flex-wrap mt-0.5">
                         <span>v{addon.manifest.version}</span>
                         <span className="text-muted-foreground/60">·</span>
-                        <Tooltip content={addon.installUrl} side="top">
+                        <Tooltip content={maskSecretUrl(addon.installUrl)} side="top">
                           <span className="truncate font-mono">{hostOf(addon.installUrl)}</span>
                         </Tooltip>
                         {profile && (
