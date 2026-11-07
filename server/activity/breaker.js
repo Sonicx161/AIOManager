@@ -51,5 +51,24 @@ export function createFailureBreaker({
         size() {
             return entries.size
         },
+
+        // Owner-scoped inspection and clearing (Dashboard repairs): the predicate sees
+        // the raw key string, callers parse their own key convention.
+        inspectMatching(fn) {
+            const out = []
+            for (const [key, entry] of entries.entries()) if (fn(key, entry)) out.push({ key, ...entry })
+            return out
+        },
+
+        clearMatching(fn) {
+            let cleared = 0
+            for (const key of [...entries.keys()]) {
+                if (fn(key, entries.get(key))) {
+                    entries.delete(key)
+                    cleared++
+                }
+            }
+            return cleared
+        },
     }
 }

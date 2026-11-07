@@ -1,5 +1,6 @@
 import db from '../db.js'
 import { verifyAuth } from '../auth.js'
+import { assertWritablePrimary } from '../admin/account-state.js'
 
 const HOUSEHOLD_ACCOUNT_ID = '__household__'
 
@@ -10,6 +11,7 @@ export function registerWatchlistRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { itemId, type, name, poster, accountId } = request.body || {}
         if (!itemId || typeof itemId !== 'string') {
@@ -41,6 +43,7 @@ export function registerWatchlistRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { itemId, accountId } = request.body || {}
         if (!itemId) { reply.status(400); return { error: 'itemId required' } }

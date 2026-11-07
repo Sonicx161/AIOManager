@@ -2,7 +2,9 @@ import db from '../db.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { verifyAuth } from '../auth.js'
-import { isSafeUrlResolved } from '../utils/ssrf.js'
+import { assertWritablePrimary } from '../admin/account-state.js'
+import { isSafeUrl } from '../utils/ssrf.js'
+import { guardedWebFetch } from '../utils/safe-fetch.js'
 import { maskContext } from '../utils/log-helpers.js'
 import { invalidateUserKey } from '../lib/user-key-cache.js'
 
@@ -101,6 +103,7 @@ export function registerMetadataKeysRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { provider: rawProvider, key: rawKey } = request.body || {}
         const provider = normalizeProvider(rawProvider)
@@ -196,6 +199,7 @@ export function registerMetadataKeysRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const rawProvider = request.params.provider
         if (typeof rawProvider !== 'string' || !/^[a-z0-9_-]+$/i.test(rawProvider)) {
@@ -308,6 +312,7 @@ export function registerMetadataKeysRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { aiometadataUrl: rawUrl, uuid: rawUuid, password, addonPassword } = request.body || {}
         const baseUrl = typeof rawUrl === 'string' ? rawUrl.trim().replace(/\/+$/, '') : ''
@@ -317,7 +322,7 @@ export function registerMetadataKeysRoutes(fastify) {
         }
 
         const targetUrl = `${baseUrl}/api/config/load/${encodeURIComponent(uuid)}`
-        if (!(await isSafeUrlResolved(targetUrl))) {
+        if (!isSafeUrl(targetUrl)) {
             reply.status(400); return { error: 'Invalid AIOMetadata URL' }
         }
 
@@ -327,7 +332,7 @@ export function registerMetadataKeysRoutes(fastify) {
             const timeout = setTimeout(() => controller.abort(), 15000)
             let response
             try {
-                response = await fetch(targetUrl, {
+                response = await guardedWebFetch(targetUrl, {
                     method: 'POST',
                     signal: controller.signal,
                     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -354,6 +359,7 @@ export function registerMetadataKeysRoutes(fastify) {
                 reply.status(502); return { error: 'Could not reach AIOMetadata instance' }
             }
         } catch (err) {
+            if (err && err.code === 'ssrf-blocked') { reply.status(400); return { error: 'Invalid AIOMetadata URL' } }
             const aborted = err && err.name === 'AbortError'
             fastify.log.warn({ category: 'MetadataKeys' }, `AIOMetadata import fetch failed: ${aborted ? 'timeout' : err.message}`)
             reply.status(502); return { error: 'Could not reach AIOMetadata instance' }

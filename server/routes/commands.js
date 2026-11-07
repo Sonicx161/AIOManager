@@ -4,6 +4,7 @@ import { verifyAuth } from '../auth.js'
 import { createStremioDriver } from '../providers/stremio-driver.js'
 import { maskContext } from '../utils/log-helpers.js'
 import { resolveStremioAuthKey } from '../lib/stremio-credentials.js'
+import { assertAccountActive, assertWritablePrimary, gateCode } from '../admin/account-state.js'
 
 // Phase 1b proof commands. Registry ids from src/components/accounts/bulk-actions/registry.ts
 // are the command names; only the subset the server can execute on its own is wired here.
@@ -98,6 +99,23 @@ async function runJob(fastify, jobId) {
 
         try { accountIds = JSON.parse(job.account_ids) || [] } catch { accountIds = [] }
 
+        // Account state gate: the owner may have been blocked between enqueue and run.
+        // A dedicated refusal records a non-write failure; the driver is never created.
+        try {
+            await assertAccountActive(job.sync_user)
+        } catch (stateErr) {
+            const code = gateCode(stateErr)
+            if (code) {
+                fastify.log.warn({ category: 'Commands' }, `Job ${jobId} (${job.command}) refused for user ${maskContext(job.sync_user || '')}: ${code}.`)
+                await db.run(
+                    `UPDATE commands SET status = 'failed', error = $1, updated_at = $2 WHERE id = $3`,
+                    [code, Date.now(), jobId]
+                ).catch((updateErr) => fastify.log.error({ category: 'Commands' }, `Job ${jobId} status update failed: ${updateErr?.message}`))
+                return
+            }
+            throw stateErr
+        }
+
         const now = Date.now()
         await db.run(`UPDATE commands SET status = 'running', updated_at = $1 WHERE id = $2`, [now, jobId])
         fastify.log.info({ category: 'Commands' }, `Job ${jobId} (${job.command}) running for ${accountIds.length} account(s).`)
@@ -116,6 +134,14 @@ async function runJob(fastify, jobId) {
         if (!handler) throw new Error(`Unknown command: ${job.command}`)
 
         const results = await runWithConcurrency(accountIds, ACCOUNT_CONCURRENCY, async (accountId) => {
+            try {
+                // Per-account re-assert: the owner may be blocked while lanes run.
+                await assertAccountActive(job.sync_user)
+            } catch (stateErr) {
+                const code = gateCode(stateErr)
+                if (code) return { accountId, ok: false, error: code }
+                throw stateErr
+            }
             try {
                 return await handler(fastify, job.sync_user, accountId)
             } catch (err) {
@@ -210,6 +236,7 @@ export function registerCommandsRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { id: command, accountIds } = request.body || {}
         if (!Object.prototype.hasOwnProperty.call(COMMAND_HANDLERS, command)) {

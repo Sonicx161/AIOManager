@@ -1,5 +1,5 @@
 // Regenerates the repo-root .env.example from the schema in server/lib/env.js.
-// Usage: npm --prefix server run gen:env
+// Usage: npm --prefix server run gen:env (add -- --stdout to print instead of writing)
 
 import fs from 'fs'
 import path from 'path'
@@ -103,11 +103,16 @@ for (const group of ENV_GROUPS) {
         out.push(`# --- ${name} ---`)
         for (const line of wrap(meta.desc)) out.push(`# ${line}`)
         out.push(specLine(name))
+        if (meta.example) out.push(`# Example: ${name}=${meta.example}`)
         const value = valueFor(name)
         out.push(ACTIVE.has(name) ? `${name}=${value}` : `#${name}=${value}`)
     }
 }
 
 out.push('')
-fs.writeFileSync(TARGET, out.join('\n') + '\n', 'utf8')
-console.log(`Wrote ${TARGET} (${metaKeys.length} variables, ${ENV_GROUPS.length} groups)`)
+if (process.argv.includes('--stdout')) {
+    process.stdout.write(out.join('\n') + '\n')
+} else {
+    fs.writeFileSync(TARGET, out.join('\n') + '\n', 'utf8')
+    console.log(`Wrote ${TARGET} (${metaKeys.length} variables, ${ENV_GROUPS.length} groups)`)
+}

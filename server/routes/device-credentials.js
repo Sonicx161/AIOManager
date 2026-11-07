@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import db from '../db.js'
 import { verifyAuth } from '../auth.js'
+import { assertWritablePrimary } from '../admin/account-state.js'
 import { invalidateCachedAuth, invalidateCachedAuthPrefix } from '../state.js'
 import { hashSyncPassword } from '../lib/sync-password.js'
 
@@ -30,6 +31,7 @@ export function registerDeviceCredentialRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const body = request.body || {}
         const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : ''
@@ -73,6 +75,7 @@ export function registerDeviceCredentialRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const body = request.body || {}
         const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : ''
@@ -100,6 +103,7 @@ export function registerDeviceCredentialRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         try {
             const account = await db.get('SELECT credential_epoch FROM kv_store WHERE key = $1', [authUser])
@@ -121,6 +125,7 @@ export function registerDeviceCredentialRoutes(fastify) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const body = request.body || {}
         const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : ''

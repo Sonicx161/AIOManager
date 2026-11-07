@@ -1,9 +1,17 @@
 import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
-import { trace } from '../utils/trace.js'
+import { trace, traceEnabled } from '../utils/trace.js'
 import { connectionEffectiveAddons, connectionExcludedUrls, chainGuardFailureWithExclusions } from '../utils/addon-destinations.js'
 import { REFRESH_BUFFER_MS } from './token-refresh.js'
+import { isLocalHostname } from '../hydra/client.js'
+import { invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
+import { AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
+
+// Typed account-state refusals always surface: request paths map them to the fixed
+// 403 or 503 body, background cycles record the skip. Never collapsed into a
+// generic connection failure.
+const isStateRefusal = (err) => err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError
 
 const BACKOFF_THRESHOLD = 3
 const BACKOFF_SLOTS = [1, 2, 4, 8, 16]
@@ -23,6 +31,28 @@ export function invalidateConnectionCache(syncUser = null) {
     for (const [key, entry] of connectionCache) {
         if (entry.syncUser === syncUser) connectionCache.delete(key)
     }
+}
+
+// Owner-scoped helpers for the Dashboard cache-clear repair: they delete only that
+// owner's cache entries and never touch the generation, so no live connection
+// object of any owner can read stale and trigger a token refresh.
+export function dropConnectionCacheForOwner(syncUser) {
+    if (!syncUser) return 0
+    let dropped = 0
+    for (const [key, entry] of connectionCache) {
+        if (entry.syncUser === syncUser) {
+            connectionCache.delete(key)
+            dropped++
+        }
+    }
+    return dropped
+}
+
+export function connectionCacheCountForOwner(syncUser) {
+    if (!syncUser) return 0
+    let n = 0
+    for (const entry of connectionCache.values()) if (entry.syncUser === syncUser) n++
+    return n
 }
 
 function getBackoffSkip(consecutiveFailures) {
@@ -320,6 +350,7 @@ async function readPlatformAddons(driver, connection) {
     }
     return []
 }
+
 export function applyCustomMetadata(addon) {
     const meta = addon?.metadata
     if (!meta || (!meta.customName && !meta.customLogo && !meta.customDescription && !meta.hideConfigure)) return addon
@@ -341,6 +372,28 @@ export function applyCustomMetadata(addon) {
         updated = { ...updated, manifest: { ...m, behaviorHints: { ...m.behaviorHints, configurable: false } } }
     }
     return updated
+}
+
+// Hydra targets return spec-flat rows, so compare only the fields that round-trip.
+function flatManifestMismatch(platformRow, canonicalManifest) {
+    for (const field of ['id', 'version']) {
+        const live = platformRow?.manifest?.[field] ?? platformRow?.[field]
+        const expected = canonicalManifest?.[field]
+        if (typeof live === 'string' && live && typeof expected === 'string' && expected && live !== expected) return true
+    }
+    return false
+}
+
+function orderedUrls(addons) {
+    const seen = new Set()
+    const out = []
+    for (const a of addons) {
+        const url = normalizeUrl(a?.transportUrl || a?.url)
+        if (seen.has(url)) continue
+        seen.add(url)
+        out.push(url)
+    }
+    return out
 }
 
 function manifestSignature(m) {
@@ -395,28 +448,31 @@ function enqueuePlatformWrite(connection, run) {
 // their *state* is mirrored from the platform here, which makes concurrent writers agree
 // regardless of write order. URLs this rule does not manage are still written from the canonical
 // list, so genuine additions are unaffected, and with no sibling chains this is a no-op.
-// Only the NAMED members are mirrored: every other live row is one the canonical list
+// Only the NAMED members are mirrored or rehydrated: every other live row is one the canonical list
 // deliberately omits (a retired addon mid-delete, a manual removal), and re-adding it would
 // resurrect a deletion this write is supposed to land.
 // `excludedUrls` (normalized) are this connection's destination-policy removals: a
 // deliberately excluded member must never be mirrored back as a foreign row either.
-async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null) {
+async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null, managedChains = null, preserveUrls = null) {
     const foreign = new Set((Array.isArray(foreignChainUrls) ? foreignChainUrls : []).map(u => normalizeUrl(u)))
-    if (foreign.size === 0) return canonical
     const own = new Set((Array.isArray(requiredUrls) ? requiredUrls : []).map(u => normalizeUrl(u)))
+    const preserved = new Set((Array.isArray(preserveUrls) ? preserveUrls : []).map(normalizeUrl).filter(Boolean))
+    if (foreign.size === 0 && own.size === 0 && preserved.size === 0) return canonical
     const excluded = excludedUrls instanceof Set && excludedUrls.size > 0 ? excludedUrls : null
     const urlOf = (a) => normalizeUrl(a?.transportUrl || a?.url || '')
     let live = []
     try {
         live = await readPlatformAddons(driver, connection)
     } catch (err) {
+        if (preserved.size > 0) return null
         // Conservative fallback: with no live read the stored snapshot is the only source.
         trace('reconciler', 'reconcileForeignChains.readFailed', { platform: connection.platform, error: err.message })
         return canonical
     }
-    if (!Array.isArray(live) || live.length === 0) return canonical
+    if (!Array.isArray(live)) return preserved.size > 0 ? null : canonical
+    if (live.length === 0 && preserved.size === 0) return canonical
 
-    const out = canonical.filter(a => !foreign.has(urlOf(a)))
+    let out = canonical.filter(a => !foreign.has(urlOf(a)))
     const present = new Set(out.map(urlOf))
     for (const row of live) {
         const url = urlOf(row)
@@ -427,23 +483,72 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
         // Destination policy: a member this connection deliberately excludes is
         // intentionally absent — the mirror must not resurrect it.
         if (excluded && excluded.has(url)) continue
-        if (present.has(url) || own.has(url)) continue
+        if (present.has(url)) continue
         if ((row.flags?.enabled ?? row.enabled) === false) continue
         present.add(url)
         out.push({
             transportUrl: row.transportUrl || row.url,
             manifest: row.manifest || { name: row.name || '' },
-            flags: { ...(row.flags || {}), enabled: true },
+            flags: { ...(row.flags || {}), enabled: (row.flags?.enabled ?? row.enabled) !== false },
         })
+    }
+    // Rehydrate this writer's own chain from the same live snapshot. This is
+    // the recovery path for connection-only rules whose encrypted addon_list
+    // no longer carries any exact member of the chain.
+    for (const row of live) {
+        const url = urlOf(row)
+        if (!url || !own.has(url) || excluded?.has(url) || present.has(url)) continue
+        present.add(url)
+        out.push({
+            transportUrl: row.transportUrl || row.url,
+            manifest: row.manifest || { name: row.name || '' },
+            flags: { ...(row.flags || {}), enabled: (row.flags?.enabled ?? row.enabled) !== false },
+        })
+    }
+    // A stale connection-only snapshot can contain a managed chain only as
+    // disabled rows (or omit it entirely). Once the live provider has supplied
+    // the named members, apply the decided target before the final guard. This
+    // remains fail-closed: a missing target is still rejected by the guard.
+    for (const chain of managedChains || []) {
+        const members = new Set((chain?.urls || []).map(u => normalizeUrl(u)).filter(Boolean))
+        if (members.size === 0) continue
+        const target = normalizeUrl(chain.target || '')
+        if (!target) continue
+        out = out.map(row => {
+            const url = urlOf(row)
+            if (!members.has(url)) return row
+            return { ...row, flags: { ...(row.flags || {}), enabled: url === target } }
+        })
+    }
+    if (preserved.size > 0) {
+        out = out.filter(row => !preserved.has(urlOf(row)))
+        for (const row of live) {
+            const url = urlOf(row)
+            if (!preserved.has(url) || excluded?.has(url)) continue
+            out.push({
+                ...row,
+                transportUrl: row.transportUrl || row.url,
+                manifest: row.manifest || { name: row.name || '' },
+                flags: { ...(row.flags || {}), enabled: (row.flags?.enabled ?? row.enabled) !== false },
+            })
+        }
     }
     trace('reconciler', 'reconcileForeignChains.merged', { platform: connection.platform, foreign: foreign.size, count: out.length })
     return out
 }
 
+// An empty RealStream projection is never a clear in this beta (R2-08): the
+// authorized-clear path is removed, so an empty write skips at the driver and is
+// reported as a skipped outcome, never as a confirmed write. Autopilot and
+// reconcile share that behavior; the global empty-canonical guard above still
+// applies to every platform unchanged.
+
 // `prep` runs inside the per-connection queue slot, so the read it needs, the guard it
 // applies and the write that follows cannot interleave with another writer's (the read
 // target is the platform's own list, which a concurrent writer would otherwise change
 // between our read and our write). It returns { list } or { skip, reason }.
+// R2-08: a zero-row RealStream write is never an authorized clear anymore: the driver
+// resolves every empty projection as a skip, which the caller reports honestly.
 async function writePlatformAddons(driver, connection, addons, source, prep = null) {
     const c = connection.credentials
     return enqueuePlatformWrite(connection, async () => {
@@ -453,7 +558,14 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
             if (outcome.skip) return { skipped: true, reason: outcome.reason || 'prep-skip' }
             if (Array.isArray(outcome.list)) list = outcome.list
         }
-        const prepared = (list || []).map(a => {
+        // RealStream stores collection membership as enabled state and ignores
+        // the internal flags field. Keep the existing one-active contract by
+        // omitting disabled rows on that wire; Nuvio/Hydra retain explicit
+        // enabled flags and receive the full projected list.
+        const wireList = connection.platform === 'realstream'
+            ? (list || []).filter(a => (a?.flags?.enabled ?? a?.enabled) !== false)
+            : (list || [])
+        const prepared = wireList.map(a => {
             const withMeta = applyCustomMetadata(a)
             // R9: drivers and the provider wire receive projected provider data only.
             // The internal destination policy never ships — unlike note/metadata it
@@ -462,10 +574,14 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
             const { destinations, ...rest } = withMeta
             return rest
         })
-        trace('reconciler', 'writePlatformAddons', { platform: connection.platform, source, count: prepared.length, urls: prepared.map(a => a.transportUrl || '') })
+        trace('reconciler', 'writePlatformAddons', { platform: connection.platform, source, count: prepared.length, urls: traceEnabled() ? prepared.map(a => a.transportUrl || '') : undefined })
         if (connection.platform === 'stremio' && !isHydraOutbound(connection)) {
             if (!c?.authKey) { const e = new Error('Stremio credentials not loaded'); e.isAuthError = true; throw e }
-            return driver.writeAddons(c.authKey, prepared)
+            try {
+                return await driver.writeAddons(c.authKey, prepared)
+            } finally {
+                invalidateCanonicalByAuthKey(c.authKey)
+            }
         }
         if (connection.platform === 'nuvio') {
             if (!c?.accessToken) { const e = new Error('Nuvio credentials not loaded, re-authenticate this connection'); e.isAuthError = true; throw e }
@@ -556,7 +672,7 @@ export function createReconciler(fastify) {
     const EXPIRED_RETRY_COOLDOWN_MS = 30 * 60 * 1000 // 30 minutes; Supabase rate-limits auth to 6 req/min per IP. Hammering it gets users banned.
     const NETWORK_ERROR_COOLDOWN_MS = 2 * 60 * 1000  // 2 minutes for transient network issues
 
-    const shouldSkip = (accountId, connId) => {
+    const skipReasonFor = (accountId, connId) => {
         // A fresh client collection write means the hub is momentarily behind the platforms.
         const writes = fastify.clientCollectionWrites
         if (writes) {
@@ -566,22 +682,23 @@ export function createReconciler(fastify) {
                 writes.get('Profile Swap') || 0,
                 writes.get('Clear All') || 0
             )
-            if (Date.now() - last < 20000) return true
+            if (Date.now() - last < 20000) return 'recent-write'
         }
         const state = getState(accountId, connId)
         if (state.status === 'expired') {
             // Auth errors get a LONG cooldown. Supabase bans IPs that hit auth too frequently.
             const timeSinceError = state.lastErrorAt ? Date.now() - state.lastErrorAt : Infinity
-            if (timeSinceError < EXPIRED_RETRY_COOLDOWN_MS) return true
+            if (timeSinceError < EXPIRED_RETRY_COOLDOWN_MS) return 'auth-cooldown'
         }
         if (state.status === 'error' && state.consecutiveFailures >= BACKOFF_THRESHOLD) {
             if (state.skipCyclesRemaining > 0) {
                 setState(accountId, connId, { ...state, skipCyclesRemaining: state.skipCyclesRemaining - 1 })
-                return true
+                return 'backoff'
             }
         }
-        return false
+        return null
     }
+    const shouldSkip = (accountId, connId) => skipReasonFor(accountId, connId) !== null
 
     const tickCycleCounter = (accountId) => {
         evictStaleState()
@@ -597,14 +714,23 @@ export function createReconciler(fastify) {
 
         // Stremio uses client-side sync pipeline, not server-side reconciliation
         const targetConnections = connections.filter(c => c.enabled && (isHydraOutbound(c) || c.platform !== 'stremio'))
+        // Per-connection result: written | unchanged | skipped (reason) | failed (error).
+        const outcomes = {}
+        for (const c of connections) {
+            if (!targetConnections.includes(c)) outcomes[c.id] = { outcome: 'skipped', reason: 'not-a-target' }
+        }
 
         if ((canonical.length === 0 && !opts.allowCollectionShrink) || targetConnections.length === 0) {
+            for (const c of targetConnections) outcomes[c.id] = { outcome: 'skipped', reason: 'empty-canonical' }
             trace('reconciler', 'reconcileAccount.complete', { accountId, skipped: true, reason: targetConnections.length === 0 ? 'no-targets' : 'empty-canonical', timing: Date.now() - start })
-            return { changes: [], canonical }
+            return { changes: [], canonical, outcomes }
         }
 
         const canonicalManifestByUrl = new Map(
             canonical.map(a => [normalizeUrl(a.transportUrl), manifestSignature(a.manifest)])
+        )
+        const canonicalRawManifestByUrl = new Map(
+            canonical.map(a => [normalizeUrl(a.transportUrl), a.manifest])
         )
         const customNameByUrl = new Map(
             canonical
@@ -621,17 +747,24 @@ export function createReconciler(fastify) {
 
         for (const connection of targetConnections) {
             const connId = connection.id
-            if (shouldSkip(accountId, connId)) {
-                fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): in backoff`)
+            const skipReason = skipReasonFor(accountId, connId)
+            if (skipReason) {
+                outcomes[connId] = { outcome: 'skipped', reason: skipReason }
+                fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): ${skipReason}`)
                 continue
             }
 
             try {
                 const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
-                if (!driver) continue
+                if (!driver) { outcomes[connId] = { outcome: 'skipped', reason: 'no-driver' }; continue }
 
+                const hydraOutbound = isHydraOutbound(connection)
                 const effective = connectionEffectiveAddons(canonical, connection)
-                const effectiveUrlSet = new Set(effective.map(a => normalizeUrl(a.transportUrl)))
+                // The Hydra client drops local and unparseable URLs on the wire; compare what it sends.
+                const compared = hydraOutbound
+                    ? effective.filter(a => !isLocalHostname(a?.transportUrl || a?.url || ''))
+                    : effective
+                const effectiveUrlSet = new Set(compared.map(a => normalizeUrl(a.transportUrl)))
 
                 let needsWrite = true
                 try {
@@ -650,28 +783,41 @@ export function createReconciler(fastify) {
                         })
                         const manifestMismatch = platformAddons.some(p => {
                             const url = normalizeUrl(p.transportUrl || p.url)
+                            if (hydraOutbound) {
+                                return canonicalRawManifestByUrl.has(url) && flatManifestMismatch(p, canonicalRawManifestByUrl.get(url))
+                            }
                             const canonicalManifest = canonicalManifestByUrl.get(url)
                             if (canonicalManifest === undefined) return false
                             if (!p.manifest) return false
                             return manifestSignature(p.manifest) !== canonicalManifest
                         })
-                        needsWrite = nameMismatch || manifestMismatch
+                        // Nuvio stores sort_order and reads it back ordered, so a reorder converges after one write.
+                        const orderMismatch = connection.platform === 'nuvio' &&
+                            orderedUrls(platformAddons).join('\n') !== orderedUrls(compared).join('\n')
+                        needsWrite = nameMismatch || manifestMismatch || orderMismatch
                     }
                 } catch { /* can't read, assume needs write */ }
 
                 if (needsWrite) {
-                    await writePlatformAddons(driver, connection, effective, 'reconcile')
+                    const outcome = await writePlatformAddons(driver, connection, effective, 'reconcile', opts.canWrite ? async list => {
+                        if (!await opts.canWrite()) return { skip: true, reason: 'rule-paused' }
+                        return { list }
+                    } : null)
+                    if (outcome?.skipped) { outcomes[connId] = { outcome: 'skipped', reason: outcome.reason }; continue }
                     changes.push({ type: 'restore', url: '', platform: connection.platform, primary: false })
                 }
                 recordSuccess(accountId, connId)
+                outcomes[connId] = { outcome: needsWrite ? 'written' : 'unchanged' }
             } catch (err) {
+                if (isStateRefusal(err)) throw err
                 recordFailure(accountId, connId, err, err.isAuthError)
+                outcomes[connId] = { outcome: 'failed', error: err?.message || String(err) }
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
         }
 
         trace('reconciler', 'reconcileAccount.complete', { accountId, changes: changes.length, platforms: changes.map(c => c.platform), timing: Date.now() - start })
-        return { changes, canonical }
+        return { changes, canonical, outcomes }
     }
 
     const enforceAccount = async (accountId, connections, canonical, opts = {}) => {
@@ -681,6 +827,7 @@ export function createReconciler(fastify) {
         const start = Date.now()
         trace('reconciler', 'enforceAccount.start', { accountId, canonicalCount: canon.length })
         const synced = []
+        const syncedIds = []
 
         // Chain guard (spec F2): an enforced list that would drop every managed
         // chain member (all disabled -> "neither installed") or lose the active
@@ -692,10 +839,14 @@ export function createReconciler(fastify) {
         // projected list; a data problem must not back off the connection
         // (skip means NO write, NO recordSuccess — arming the fresh-in-sync guard
         // with an unwritten list would poison it — and NO recordFailure).
-        const managedChains = Array.isArray(opts.managedChains) && opts.managedChains.length > 0
+        const configuredChains = Array.isArray(opts.managedChains) && opts.managedChains.length > 0
             ? opts.managedChains
             : (Array.isArray(requiredUrls) && requiredUrls.length > 0 ? [{ urls: requiredUrls, target: requiredActiveUrl }] : [])
+        const preserved = new Set((Array.isArray(opts.preserveUrls) ? opts.preserveUrls : []).map(normalizeUrl).filter(Boolean))
+        const managedChains = configuredChains.filter(chain => !preserved.has(normalizeUrl(chain.target || '')))
+            .map(chain => ({ ...chain, urls: (chain.urls || []).filter(url => !preserved.has(normalizeUrl(url))) }))
         let chainGuardSkipped = false
+        let recoveredAddons = []
 
         for (const connection of (connections || []).filter(c => c.enabled)) {
             const connId = connection.id
@@ -711,9 +862,21 @@ export function createReconciler(fastify) {
                 // The guard's PRE list is the unfiltered canon: the exclusion
                 // explanation ("every canon-carried member was deliberately
                 // excluded HERE") is only derivable against the pre-projection set.
-                const effective = connectionEffectiveAddons(canon, connection)
+                let effective = connectionEffectiveAddons(canon, connection)
                 const excludedUrls = connectionExcludedUrls(canon, connection)
-                const preFailure = chainGuardFailureWithExclusions(canon, effective, managedChains, excludedUrls)
+                const foreignUrls = new Set((Array.isArray(opts.foreignChainUrls) ? opts.foreignChainUrls : []).map(normalizeUrl).filter(Boolean))
+                // A chain that is completely absent from the canonical snapshot
+                // may be rehydrated by the in-slot live mirror. Keep the early
+                // guard strict for every chain that has carried members; defer
+                // only explicitly named foreign/rehydrated chains.
+                const preManagedChains = managedChains.filter(chain => {
+                    const members = (chain?.urls || []).map(normalizeUrl).filter(Boolean)
+                    const target = normalizeUrl(chain?.target || '')
+                    const carriesTarget = !!target && canon.some(a => normalizeUrl(a?.transportUrl || '') === target)
+                    const deferred = members.length > 0 && members.every(url => foreignUrls.has(url)) && !carriesTarget
+                    return !deferred
+                })
+                const preFailure = chainGuardFailureWithExclusions(canon, effective, preManagedChains, excludedUrls)
                 if (preFailure) {
                     fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Chain guard: enforced list drops a managed chain (${preFailure}); skipping write.`)
                     trace('reconciler', 'enforceAccount.chainGuard', { accountId, platform: connection.platform, chains: managedChains.length, failure: preFailure })
@@ -724,13 +887,15 @@ export function createReconciler(fastify) {
                 // writes Stremio itself (it holds the authKey), so an API-driven enforce —
                 // e.g. an AIOMetadata "sync to all" push — can never silently skip Stremio.
                 if (connection.platform === 'stremio' && !isHydraOutbound(connection) && stremioWriter) {
+                    if (opts.canWrite && !await opts.canWrite()) { chainGuardSkipped = true; continue }
                     await stremioWriter(connection)
                 } else {
                     if (canon.length === 0) continue
                     const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
                     if (!driver) continue
                     const outcome = await writePlatformAddons(driver, connection, effective, 'enforce', async (list) => {
-                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls)
+                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls, managedChains, opts.preserveUrls)
+                        if (merged === null) return { skip: true, reason: 'The live collection could not be read to preserve contested addons.' }
                         // Belt-and-braces: no merge step may ride an excluded row
                         // back onto this connection's write (E2).
                         const finalList = excludedUrls.size > 0
@@ -741,37 +906,46 @@ export function createReconciler(fastify) {
                         // merged list is a by-design drop, not an accidental one.
                         const urlOf = (a) => normalizeUrl(a?.transportUrl || a?.url || '')
                         const preSet = new Set((list || []).map(urlOf).filter(Boolean))
+                        const canonSet = new Set((canon || []).map(urlOf).filter(Boolean))
                         const postSet = new Set((finalList || []).map(urlOf).filter(Boolean))
                         const byDesign = new Set()
                         for (const u of (Array.isArray(opts.foreignChainUrls) ? opts.foreignChainUrls : [])) {
                             const norm = normalizeUrl(u)
-                            if (norm && preSet.has(norm) && !postSet.has(norm)) byDesign.add(norm)
+                            if (norm && (preSet.has(norm) || canonSet.has(norm)) && !postSet.has(norm)) byDesign.add(norm)
                         }
                         const failure = chainGuardFailureWithExclusions(canon, finalList, managedChains, excludedUrls, byDesign)
                         if (failure) {
                             fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Chain guard: merged list would drop a managed chain (${failure}); skipping write.`)
                             return { skip: true, reason: failure }
                         }
+                        const canonicalUrls = new Set((list || []).map(urlOf).filter(Boolean))
+                        recoveredAddons = finalList.filter(row => {
+                            const url = urlOf(row)
+                            return url && !canonicalUrls.has(url)
+                        })
+                        if (opts.canWrite && !await opts.canWrite()) return { skip: true, reason: 'Rule was paused or removed.' }
                         return { list: finalList }
                     })
                     if (outcome && outcome.skipped) { chainGuardSkipped = true; continue }
                 }
                 recordSuccess(accountId, connId)
                 synced.push(connection.platform)
+                syncedIds.push(connId)
             } catch (err) {
+                if (isStateRefusal(err)) throw err
                 recordFailure(accountId, connId, err, err.isAuthError)
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
         }
 
         trace('reconciler', 'enforceAccount.complete', { accountId, synced, timing: Date.now() - start })
-        return { synced, connectionStates: getConnectionStates(accountId), chainGuardSkipped }
+        return { synced, syncedIds, connectionStates: getConnectionStates(accountId), chainGuardSkipped, recoveredAddons }
     }
 
     // Nuvio instances that reject the optional plugins table; skip after the first 401
     const nuvioPluginsUnsupported = new Set()
 
-    const reconcilePlugins = async (accountId, connection) => {
+    const reconcilePlugins = async (accountId, connection, opts = {}) => {
         if (connection.platform !== 'nuvio') return
         if (!connection.enabled) return
         if (shouldSkip(accountId, connection.id)) return
@@ -797,6 +971,9 @@ export function createReconciler(fastify) {
                 [...platformUrls].some(u => !canonicalUrls.has(u))
 
             if (needsPush && canonicalPlugins.length > 0) {
+                // Write boundary: a blocked owner (or any canWrite refusal) skips the
+                // push entirely, without punishing the connection state.
+                if (opts.canWrite && !await opts.canWrite()) return
                 await driver.writePlugins(
                     connection.credentials.accessToken,
                     canonicalPlugins,
@@ -805,6 +982,7 @@ export function createReconciler(fastify) {
             }
             recordSuccess(accountId, connection.id)
         } catch (err) {
+            if (isStateRefusal(err)) throw err
             if (err.isAuthError) {
                 // Token was just refreshed, so this 401 means plugins aren't offered on this instance
                 nuvioPluginsUnsupported.add(connection.id)
@@ -867,6 +1045,66 @@ export function createReconciler(fastify) {
         return states
     }
 
+    // Dashboard repair helpers: auth-cooldown (status expired) and backoff state are
+    // keyed per (account, connection) with no owner on the key, and two owners may
+    // share a platform account id. Ownership is resolved to the exact connection
+    // identities the owner's credentials and rules produce (mirroring the ids
+    // resolveConnections builds), and state keys match by both parts, never by
+    // account id alone. One predicate drives the dry run and the run; healthy
+    // connection state is preserved. Zero DB writes.
+    const ownerConnectionKeys = async (syncUser) => {
+        const keys = new Set()
+        const creds = await db.query('SELECT account_id, connection_id, credential_type FROM server_credentials WHERE sync_user = $1', [syncUser])
+        for (const row of creds) {
+            if (!row.account_id) continue
+            const type = row.credential_type || 'stremio'
+            const connId = row.connection_id || `${row.account_id}:${type}`
+            keys.add(`${row.account_id}:${connId}`)
+        }
+        const rules = await db.query('SELECT account_id, connection_id, platform FROM autopilot_rules WHERE owner_sync_user = $1', [syncUser])
+        for (const row of rules) {
+            if (!row.account_id) continue
+            // The synthetic account-level Stremio identity belongs to unified Stremio
+            // rules only (platform stremio, or a legacy row with neither platform nor
+            // connection); a connection-scoped rule owns exactly its own connection id.
+            const platform = row.platform || 'stremio'
+            if (!row.connection_id && platform === 'stremio') keys.add(`${row.account_id}:${row.account_id}:stremio`)
+            if (row.connection_id) keys.add(`${row.account_id}:${row.connection_id}`)
+        }
+        return keys
+    }
+
+    const loginBackoffEntry = (state) => (state.status === 'expired' && state.lastErrorAt != null)
+        || state.consecutiveFailures >= BACKOFF_THRESHOLD
+        || state.skipCyclesRemaining > 0
+
+    const loginBackoffSummaryForOwner = async (syncUser) => {
+        const owned = await ownerConnectionKeys(syncUser)
+        let entries = 0
+        let authCooldown = 0
+        let backoff = 0
+        for (const [key, state] of connectionState.entries()) {
+            if (!owned.has(key)) continue
+            if (!loginBackoffEntry(state)) continue
+            entries++
+            if (state.status === 'expired' && state.lastErrorAt != null) authCooldown++
+            else backoff++
+        }
+        return { entries, authCooldown, backoff }
+    }
+
+    const resetLoginBackoffForOwner = async (syncUser) => {
+        const owned = await ownerConnectionKeys(syncUser)
+        let cleared = 0
+        for (const key of [...connectionState.keys()]) {
+            if (!owned.has(key)) continue
+            if (!loginBackoffEntry(connectionState.get(key))) continue
+            connectionState.delete(key)
+            cleared++
+        }
+        return cleared
+    }
+
     return {
         reconcileAccount,
         enforceAccount,
@@ -876,6 +1114,8 @@ export function createReconciler(fastify) {
         getConnectionStates,
         recordSuccess,
         recordFailure,
-        getState
+        getState,
+        loginBackoffSummaryForOwner,
+        resetLoginBackoffForOwner,
     }
 }

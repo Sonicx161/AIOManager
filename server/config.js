@@ -3,12 +3,15 @@ import { fileURLToPath } from 'url'
 import fs from 'fs'
 import pinoPretty from 'pino-pretty'
 import { env } from './lib/env.js'
+import { teeLogStream } from './admin/log-ring.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
 
 export const VERSION = pkg.build ? `${pkg.version} (Build ${pkg.build})` : pkg.version
+// The release pipeline's build stamp (a commit short hash) when present; null in a plain checkout.
+export const BUILD_ID = typeof pkg.build === 'string' && pkg.build ? pkg.build : null
 // Validated + coerced by the schema in lib/env.js; invalid values exit the process at import time.
 export const PORT = env.PORT
 export const DATA_DIR = env.DATA_DIR
@@ -17,7 +20,8 @@ export const MAX_QUEUE_SIZE = 500
 export const MAX_QUEUE_PER_KEY = 30
 export const DOMAIN_THROTTLE_MS = 200
 export const IMAGE_PROXY_TIMEOUT_MS = env.IMAGE_PROXY_TIMEOUT_MS
-export const IMAGE_PROXY_QUEUE_LIMIT = env.IMAGE_PROXY_QUEUE_LIMIT
+// Posters never take more than 60% of the shared proxy queue.
+export const IMAGE_PROXY_QUEUE_LIMIT = Math.min(env.IMAGE_PROXY_QUEUE_LIMIT, Math.floor(MAX_QUEUE_SIZE * 0.6))
 export const IMAGE_PROXY_THROTTLE_MS = env.IMAGE_PROXY_THROTTLE_MS
 export const IMAGE_CACHE_TTL_MS = env.IMAGE_CACHE_TTL_MS
 export const IMAGE_CACHE_MAX_BYTES = env.IMAGE_CACHE_MAX_BYTES
@@ -66,10 +70,14 @@ const filteredStream = {
     }
 }
 
+// With the Dashboard on, lines are also offered to its redacted in-memory tail.
+const dashboardLogs = ['1', 'true', 'yes', 'on'].includes(String(process.env.ADMIN_ENABLED || '').toLowerCase())
+const plainStdout = { write: (chunk) => process.stdout.write(chunk) }
+
 export const loggerConfig = env.LOG_PRETTY_PRINT ? {
     level: env.LOG_LEVEL,
-    stream: filteredStream
-} : { level: env.LOG_LEVEL }
+    stream: dashboardLogs ? teeLogStream(filteredStream) : filteredStream
+} : dashboardLogs ? { level: env.LOG_LEVEL, stream: teeLogStream(plainStdout) } : { level: env.LOG_LEVEL }
 
 export function ensureDataDirectory(fastify) {
     if (!fs.existsSync(DATA_DIR)) {

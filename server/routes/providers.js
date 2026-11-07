@@ -7,6 +7,8 @@ import { normalizeAddonUrl } from '../utils/addon-url.js'
 import { applyOneActiveFlags } from '../autopilot/one-active.js'
 import { listStremioCredentialedAccountIds, stremioCredentialVersion } from '../lib/stremio-credentials.js'
 import { mapNuvioLoginError, nuvioDriverFrom } from './nuvio-route-helpers.js'
+import { ACCOUNT_DELETED_ERROR, isAccountTombstoned, withAccountWriteLock } from '../lib/account-tombstones.js'
+import { assertWritablePrimary, ownerCanWriteOrFail, AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
 
 // An authenticated user "owns" an accountId iff they have a stored credential or canonical row for
 // it. Used to reject cross-tenant access (the sync/status endpoints take an accountId from the URL,
@@ -126,6 +128,11 @@ export function registerProviderRoutes(fastify, reconciler) {
         if (!(await accountBelongsTo(accountId, authUser))) {
             return { synced: true, changes: [], connectionStates: {} }
         }
+        assertWritablePrimary()
+        // Owner-state write boundary: the reconciler consults this before every
+        // platform write (addons and plugins); a refusal surfaces as the mapped
+        // 403/503 through the route, never as a silent skip.
+        const ownerCanWriteState = () => ownerCanWriteOrFail(authUser)
 
         try {
             const clientConnections = Array.isArray(connections)
@@ -155,13 +162,13 @@ export function registerProviderRoutes(fastify, reconciler) {
             }
 
             const result = overlayBlocked
-                ? { changes: [], canonical: [] }
+                ? { changes: [], canonical: [], outcomes: Object.fromEntries(resolvedConnections.map(c => [c.id, { outcome: 'skipped', reason: 'overlay-fail-closed' }])) }
                 : await reconciler.reconcileAccount(
                     accountId,
                     primaryConnectionId,
                     resolvedConnections,
                     effectiveAddons,
-                    { allowCollectionShrink: allowCollectionShrink === true }
+                    { allowCollectionShrink: allowCollectionShrink === true, canWrite: ownerCanWriteState }
                 )
 
             if (result.changes.length > 0) {
@@ -169,7 +176,7 @@ export function registerProviderRoutes(fastify, reconciler) {
             }
 
             for (const conn of resolvedConnections.filter(c => c.platform === 'nuvio')) {
-                await reconciler.reconcilePlugins(accountId, conn)
+                await reconciler.reconcilePlugins(accountId, conn, { canWrite: ownerCanWriteState })
             }
 
             const states = reconciler.getConnectionStates(accountId)
@@ -177,9 +184,11 @@ export function registerProviderRoutes(fastify, reconciler) {
             return {
                 synced: true,
                 changes: result.changes,
-                connectionStates: states
+                connectionStates: states,
+                connectionOutcomes: result.outcomes || {}
             }
         } catch (err) {
+            if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             fastify.log.error({ category: 'Reconciler' }, `[${accountId}] Sync failed: ${err.message}`)
             reply.code(500)
             return { error: 'Sync failed' }
@@ -219,6 +228,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { accountId } = request.params
         const { name } = request.body || {}
@@ -233,11 +243,11 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // Re-auth from a device that lacks the instance URL must never erase the row's stored
     // self-hosted baseUrl: a baseUrl-less bundle makes every server-side push target api.nuvio.tv.
-    async function preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, syncUser) {
+    async function preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, syncUser, conn = db) {
         let incoming = null
         try { incoming = typeof credentialValue === 'string' ? JSON.parse(credentialValue) : credentialValue } catch { return credentialValue }
         if (!incoming || typeof incoming !== 'object' || incoming.baseUrl) return credentialValue
-        const existing = await db.get(
+        const existing = await conn.get(
             "SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = 'nuvio' AND sync_user = $2 AND account_id = $3 ORDER BY updated_at DESC LIMIT 1",
             [connectionId, syncUser, accountId]
         )
@@ -258,55 +268,69 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { connectionId } = request.params
-        const { accountId, credential, credentialType } = request.body || {}
+        const { accountId, credential, credentialType, connectionGeneration } = request.body || {}
         if (!accountId || !credential) { reply.code(400); return { error: 'Missing accountId or credential' } }
+        // Incarnation token of the connection (SOL-R1-BETA-04): stamps the row so a
+        // delayed cleanup of a previous same-id incarnation cannot claim it.
+        const generationToken = typeof connectionGeneration === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(connectionGeneration.trim()) ? connectionGeneration.trim() : null
+        return withAccountWriteLock(authUser, [accountId], async (conn) => {
+            if (await isAccountTombstoned(authUser, accountId, conn)) { reply.code(409); return { error: ACCOUNT_DELETED_ERROR } }
 
-        // 'stremio' registers a SECONDARY login's raw auth key as a per-connection row
-        // (`stremio:${accountId}:${connectionId}`) — the same id shape /api/credentials/sync
-        // writes, one row per login, never collapsing and never touching the canonical
-        // account-level row (the canonical login keeps the legacy account-level shape).
-        if (credentialType != null && !['nuvio', 'realstream', 'hydra', 'stremio'].includes(credentialType)) {
-            reply.code(400); return { error: 'Unsupported credential type' }
-        }
+            // 'stremio' registers a SECONDARY login's raw auth key as a per-connection row
+            // (`stremio:${accountId}:${connectionId}`) ; the same id shape /api/credentials/sync
+            // writes, one row per login, never collapsing and never touching the canonical
+            // account-level row (the canonical login keeps the legacy account-level shape).
+            if (credentialType != null && !['nuvio', 'realstream', 'hydra', 'stremio'].includes(credentialType)) {
+                reply.code(400); return { error: 'Unsupported credential type' }
+            }
 
-        let credObj = null
-        if (typeof credential === 'object') credObj = credential
-        else if (typeof credential === 'string') { try { credObj = JSON.parse(credential) } catch { } }
-        if (credObj && typeof credObj === 'object' && credObj.baseUrl && !(await isSafeUrlResolved(credObj.baseUrl))) {
-            reply.code(400); return { error: 'Invalid or unsafe baseUrl' }
-        }
+            let credObj = null
+            if (typeof credential === 'object') credObj = credential
+            else if (typeof credential === 'string') { try { credObj = JSON.parse(credential) } catch { } }
+            if (credObj && typeof credObj === 'object' && credObj.baseUrl && !(await isSafeUrlResolved(credObj.baseUrl))) {
+                reply.code(400); return { error: 'Invalid or unsafe baseUrl' }
+            }
 
-        const type = credentialType || 'hydra'
-        let credentialValue = typeof credential === 'object' ? JSON.stringify(credential) : credential
-        if (type === 'nuvio') {
-            credentialValue = await preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, authUser)
-        }
-        const encrypted = encrypt(credentialValue, PRIMARY_KEY)
-        const id = `${type}:${accountId}:${connectionId}`
+            const type = credentialType || 'hydra'
+            let credentialValue = typeof credential === 'object' ? JSON.stringify(credential) : credential
+            if (type === 'nuvio') {
+                credentialValue = await preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, authUser, conn)
+            }
+            const encrypted = encrypt(credentialValue, PRIMARY_KEY)
+            const id = `${type}:${accountId}:${connectionId}`
 
-        const existing = await db.get('SELECT sync_user FROM server_credentials WHERE id = $1', [id])
-        if (existing && existing.sync_user !== authUser) {
-            reply.code(403); return { error: 'Forbidden' }
-        }
+            const existing = await conn.get('SELECT sync_user FROM server_credentials WHERE id = $1', [id])
+            if (existing && existing.sync_user !== authUser) {
+                reply.code(403); return { error: 'Forbidden' }
+            }
 
-        if (db.type === 'postgres') {
-            await db.run(`
-                INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                ON CONFLICT (id) DO UPDATE SET auth_key = $4, credential_type = $6, updated_at = $7
-            `, [id, authUser, accountId, encrypted, connectionId, type, Date.now()])
-        } else {
-            await db.run(`
-                INSERT OR REPLACE INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-            `, [id, authUser, accountId, encrypted, connectionId, type, Date.now()])
-        }
-        const { invalidateConnectionCache } = await import('../providers/reconciler.js')
-        invalidateConnectionCache(authUser)
+            if (db.type === 'postgres') {
+                await conn.run(`
+                    INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (id) DO UPDATE SET auth_key = $4, credential_type = $6, updated_at = $7,
+                        connection_generation = COALESCE($8, server_credentials.connection_generation)
+                `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
+            } else {
+                // R2-07: COALESCE keeps a legacy (generationless) write from downgrading a
+                // known stamp; INSERT OR REPLACE cannot reference the existing row, so this
+                // branch uses the same upsert shape as postgres (excluded.* avoids reusing
+                // positional parameters under the sqlite placeholder expansion).
+                await conn.run(`
+                    INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, credential_type = excluded.credential_type, updated_at = excluded.updated_at,
+                        connection_generation = COALESCE(excluded.connection_generation, connection_generation)
+                `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
+            }
+            const { invalidateConnectionCache } = await import('../providers/reconciler.js')
+            invalidateConnectionCache(authUser)
 
-        return { ok: true }
+            return { ok: true }
+        })
     })
 
     fastify.delete('/api/providers/connections/:connectionId/credentials', {
@@ -314,6 +338,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { connectionId } = request.params
         await db.run(
@@ -327,16 +352,20 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // Vends a fresh Nuvio access token to the client. The server is the single owner of the
     // rotating refresh token (refreshNuvioToken is single-flighted), so client push + failover
-    // never double-rotate it.
+    // never double-rotate it. rejectedTokenHash (sha256 hex of a token the platform rejected)
+    // forces one renewal of that stored token per cooldown; repeats inside the cooldown get
+    // a 401 re-authenticate instead of the rejected token.
     fastify.post('/api/providers/connections/:connectionId/token', {
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { connectionId } = request.params
-        const { accountId, platform, baseUrl } = request.body || {}
+        const { accountId, platform, baseUrl, rejectedTokenHash } = request.body || {}
         if (!accountId || !['nuvio', 'realstream'].includes(platform)) { reply.code(400); return { error: 'Missing accountId or unsupported platform' } }
+        const refreshOptions = typeof rejectedTokenHash === 'string' ? { rejectedTokenHash } : {}
         if (baseUrl && typeof baseUrl === 'string' && !(await isSafeUrlResolved(baseUrl))) {
             reply.code(400); return { error: 'Invalid or unsafe baseUrl' }
         }
@@ -350,7 +379,7 @@ export function registerProviderRoutes(fastify, reconciler) {
                 if (!owned) { reply.code(404); return { error: 'Connection not found' } }
 
                 const { refreshNuvioToken } = await import('../providers/token-refresh.js')
-                const bundle = await refreshNuvioToken(connectionId, accountId, { baseUrl: typeof baseUrl === 'string' && baseUrl ? baseUrl : undefined }, authUser)
+                const bundle = await refreshNuvioToken(connectionId, accountId, { baseUrl: typeof baseUrl === 'string' && baseUrl ? baseUrl : undefined }, authUser, refreshOptions)
                 if (!bundle?.accessToken) { reply.code(401); return { error: 'Nuvio session expired, re-authenticate' } }
                 return { accessToken: bundle.accessToken, expiresAt: bundle.expiresAt, profileId: bundle.profileId ?? null }
             } catch (err) {
@@ -370,7 +399,7 @@ export function registerProviderRoutes(fastify, reconciler) {
             if (!owned) { reply.code(404); return { error: 'Connection not found' } }
 
             const { refreshRealStreamToken } = await import('../providers/token-refresh.js')
-            const bundle = await refreshRealStreamToken(connectionId, accountId, authUser)
+            const bundle = await refreshRealStreamToken(connectionId, accountId, authUser, refreshOptions)
             if (!bundle?.accessToken) { reply.code(401); return { error: 'RealStream session expired, re-authenticate' } }
             return { accessToken: bundle.accessToken, expiresAt: bundle.expiresAt, profileId: null }
         } catch (err) {
@@ -387,6 +416,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { connectionId } = request.params
         const { profileId } = request.body || {}
@@ -430,6 +460,8 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        // The export can rotate and persist the Nuvio token, so it is a write.
+        assertWritablePrimary()
 
         const { accountId, connectionId } = request.body || {}
         if (!accountId || !connectionId) { reply.code(400); return { error: 'Missing accountId or connectionId' } }
@@ -465,6 +497,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { email, password, baseUrl } = request.body || {}
         if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
@@ -492,6 +525,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { deviceNonce, deviceName, baseUrl } = request.body || {}
         if (!deviceNonce) { reply.code(400); return { error: 'Missing deviceNonce' } }
@@ -551,6 +585,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { code, deviceNonce, baseUrl } = request.body || {}
         if (!code || !deviceNonce) { reply.code(400); return { error: 'Missing code or deviceNonce' } }
@@ -574,6 +609,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { email, password, baseUrl } = request.body || {}
         if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
@@ -606,6 +642,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { email, password, publishableKey, baseUrl } = request.body || {}
         if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
@@ -633,6 +670,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
+        assertWritablePrimary()
 
         const { email, password, name, baseUrl } = request.body || {}
         if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
@@ -667,6 +705,18 @@ export function registerProviderRoutes(fastify, reconciler) {
             const { createHydraClient } = await import('../hydra/client.js')
             const client = await createHydraClient({ baseUrl, authType, authHeader, authValue })
             const status = await client.status()
+            // A public status endpoint accepts any credential, so when auth is
+            // configured prove it on an authenticated read before reporting success.
+            if (authType && authType !== 'none') {
+                try {
+                    await client.readAddons()
+                } catch (err) {
+                    if (/\b(401|403)\b/.test(String(err && err.message))) {
+                        reply.code(400)
+                        return { error: 'The server rejected this API key or token. Check the credential and try again.' }
+                    }
+                }
+            }
             return status
         } catch (err) {
             reply.code(502)

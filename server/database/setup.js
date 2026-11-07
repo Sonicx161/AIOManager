@@ -1,6 +1,8 @@
 import path from 'path'
 import db from '../db.js'
 import { DATA_DIR, isReadOnlyReplica } from '../config.js'
+import { ADMIN_TABLES } from '../admin/schema.js'
+import { registerTask } from '../lib/ops-metrics.js'
 import { domainLastRequestTime, globalHealthCache, proxyQueue, serverState } from '../state.js'
 
 export async function migrateKvStoreColumns(log = console) {
@@ -43,10 +45,13 @@ export async function initializeDatabase(fastify) {
 
         // Schedule VACUUM weekly instead of on every startup (prevents blocking request handling)
         const VACUUM_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
+        let vacuumLastRunAt = null
+        registerTask('sqlite-vacuum', { label: 'Weekly SQLite VACUUM', intervalMs: VACUUM_INTERVAL_MS, lastRunAt: () => vacuumLastRunAt })
         const scheduleVacuum = () => {
             setTimeout(async () => {
                 try {
                     fastify.log.info({ category: 'Database' }, 'Running scheduled weekly VACUUM...')
+                    vacuumLastRunAt = Date.now()
                     await db.exec('VACUUM')
                     fastify.log.info({ category: 'Database' }, 'VACUUM complete.')
                 } catch (e) {
@@ -96,6 +101,7 @@ export async function initializeDatabase(fastify) {
         addon_list TEXT,
         active_url TEXT,
         webhook_url TEXT,
+        notify_enabled INTEGER,
         stabilization TEXT,
         is_active INTEGER DEFAULT 1,
         is_automatic INTEGER DEFAULT 1,
@@ -108,7 +114,9 @@ export async function initializeDatabase(fastify) {
         owner_sync_user TEXT,
         platform TEXT DEFAULT 'stremio',
         connection_id TEXT,
-        custom_check_urls TEXT DEFAULT NULL
+        connection_generation TEXT,
+        custom_check_urls TEXT DEFAULT NULL,
+        edited_at BIGINT
       );
 
 
@@ -128,9 +136,6 @@ export async function initializeDatabase(fastify) {
       CREATE INDEX IF NOT EXISTS idx_history_account_ts ON failover_history (account_id, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_history_rule_ts ON failover_history (rule_id, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_rules_account ON autopilot_rules (account_id);
-      CREATE INDEX IF NOT EXISTS idx_rules_active_check ON autopilot_rules (is_active, last_check, id);
-      CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id);
-      CREATE INDEX IF NOT EXISTS idx_rules_worker_scan ON autopilot_rules (is_active, is_automatic, id);
 
       CREATE TABLE IF NOT EXISTS autopilot_rule_stats (
         rule_id TEXT PRIMARY KEY,
@@ -216,15 +221,9 @@ export async function initializeDatabase(fastify) {
                 await db.exec(createDdl)
             }
 
-            if (db.type !== 'sqlite' && addColumnDdls) {
-                for (const ddl of Object.values(addColumnDdls)) {
-                    try {
-                        await db.run(ddl.replace(/\bADD COLUMN\b/i, 'ADD COLUMN IF NOT EXISTS'))
-                    } catch (e) {
-                        fastify.log.warn({ category: 'Database' }, `${tableName} idempotent column ensure failed: ${e.message}`)
-                    }
-                }
-            }
+            // PG note: missing columns are already migrated above via the guarded
+            // information_schema check; SQLite has no ADD COLUMN IF NOT EXISTS, so
+            // no unconditional per-column ALTER pass is needed for either backend.
 
             for (const idx of indexDdls) {
                 try {
@@ -313,6 +312,7 @@ export async function initializeDatabase(fastify) {
         is_in_progress INTEGER,
         overall_time_watched BIGINT,
         mtime BIGINT,
+        time_watched BIGINT,
         source TEXT NOT NULL DEFAULT 'stremio',
         PRIMARY KEY (sync_user, account_id, item_id)
       );
@@ -331,6 +331,7 @@ export async function initializeDatabase(fastify) {
         is_in_progress: 'ALTER TABLE activity_snapshots ADD COLUMN is_in_progress INTEGER',
         overall_time_watched: 'ALTER TABLE activity_snapshots ADD COLUMN overall_time_watched BIGINT',
         mtime: 'ALTER TABLE activity_snapshots ADD COLUMN mtime BIGINT',
+        time_watched: 'ALTER TABLE activity_snapshots ADD COLUMN time_watched BIGINT',
         source: 'ALTER TABLE activity_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT \'stremio\'',
     }, ['sync_user', 'account_id', 'item_id'])
 
@@ -344,7 +345,8 @@ export async function initializeDatabase(fastify) {
         updated_at BIGINT,
         connection_id TEXT,
         canonical_connection_id TEXT,
-        credential_type TEXT DEFAULT 'stremio'
+        credential_type TEXT DEFAULT 'stremio',
+        connection_generation TEXT
       );
     `, [
         `CREATE INDEX IF NOT EXISTS idx_creds_sync_user ON server_credentials (sync_user)`,
@@ -360,6 +362,7 @@ export async function initializeDatabase(fastify) {
         connection_id: 'ALTER TABLE server_credentials ADD COLUMN connection_id TEXT',
         canonical_connection_id: 'ALTER TABLE server_credentials ADD COLUMN canonical_connection_id TEXT',
         credential_type: 'ALTER TABLE server_credentials ADD COLUMN credential_type TEXT DEFAULT \'stremio\'',
+        connection_generation: 'ALTER TABLE server_credentials ADD COLUMN connection_generation TEXT',
     }, ['id'])
 
     await ensureTable('account_api_keys', `
@@ -575,20 +578,47 @@ export async function initializeDatabase(fastify) {
 
     try {
         if (db.type === 'postgres') {
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration is_active: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS addon_list TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration addon_list: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS active_url TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration active_url: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS webhook_url TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration webhook_url: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration is_automatic: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS stabilization TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration stabilization: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_notification BIGINT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration last_notification: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS name TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration name: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS cooldown_ms INTEGER`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration cooldown_ms: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS message_template TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration message_template: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS owner_sync_user TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration owner_sync_user: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'stremio'`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration platform: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS connection_id TEXT`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration connection_id: ${e?.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS custom_check_urls TEXT DEFAULT NULL`) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration custom_check_urls: ${e?.message}`) }
+            // Legacy column migration. On current schemas every column below already
+            // exists (the CREATE TABLE above includes them all), so check once per
+            // table instead of issuing 14 no-op ALTER round trips on every boot.
+            // The ALTERs keep IF NOT EXISTS so a concurrently booting replica of
+            // this process cannot fail on the check-then-add gap; if the column
+            // read itself fails we fall back to running every ALTER unguarded.
+            const ruleColNames = await db.query(
+                `SELECT column_name FROM information_schema.columns WHERE table_name = 'autopilot_rules' AND table_schema = 'public'`
+            ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
+            const ruleColumnAdds = [
+                ['is_active', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`],
+                ['last_check', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_check BIGINT`],
+                ['addon_list', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS addon_list TEXT`],
+                ['active_url', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS active_url TEXT`],
+                ['webhook_url', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS webhook_url TEXT`],
+                ['is_automatic', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_automatic INTEGER DEFAULT 1`],
+                ['stabilization', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS stabilization TEXT`],
+                ['last_notification', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_notification BIGINT`],
+                ['name', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS name TEXT`],
+                ['cooldown_ms', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS cooldown_ms INTEGER`],
+                ['message_template', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS message_template TEXT`],
+                ['owner_sync_user', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS owner_sync_user TEXT`],
+                ['platform', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT 'stremio'`],
+                ['connection_id', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS connection_id TEXT`],
+                ['connection_generation', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS connection_generation TEXT`],
+                ['custom_check_urls', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS custom_check_urls TEXT DEFAULT NULL`],
+                ['notify_enabled', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS notify_enabled INTEGER`],
+            ]
+            for (const [ruleCol, ruleAddDdl] of ruleColumnAdds) {
+                if (ruleColNames?.has(ruleCol)) continue
+                try { await db.run(ruleAddDdl) } catch (e) { if (!String(e?.message).includes('already exists')) fastify.log.warn({ category: 'Database' }, `PG migration ${ruleCol}: ${e?.message}`) }
+            }
+
+            // edited_at is stamped only by user rule saves (the engine never writes it); existing
+            // rows start from their last updated_at so current orphans age out from here.
+            if (!ruleColNames?.has('edited_at')) {
+                try {
+                    await db.run(`ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS edited_at BIGINT`)
+                    await db.run(`UPDATE autopilot_rules SET edited_at = updated_at WHERE edited_at IS NULL`)
+                } catch (e) { fastify.log.warn({ category: 'Database' }, `PG migration edited_at: ${e.message}`) }
+            }
 
             try {
                 const platformBackfill = await db.run(`UPDATE autopilot_rules SET platform = 'stremio' WHERE platform IS NULL`)
@@ -604,17 +634,38 @@ export async function initializeDatabase(fastify) {
             try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN addon_list TYPE TEXT USING addon_list::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN stabilization TYPE TEXT USING stabilization::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
 
-            try { await db.run(`ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS content_hash TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
-            try { await db.run(`ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS content_hint TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
-            try { await db.run(`ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS credential_epoch INTEGER NOT NULL DEFAULT 1`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            // Same guarded check as autopilot_rules above: current schemas already
+            // carry all three columns; only legacy databases pay the ALTER cost.
+            const kvColNames = await db.query(
+                `SELECT column_name FROM information_schema.columns WHERE table_name = 'kv_store' AND table_schema = 'public'`
+            ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
+            const kvColumnAdds = [
+                ['content_hash', `ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS content_hash TEXT`],
+                ['content_hint', `ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS content_hint TEXT`],
+                ['credential_epoch', `ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS credential_epoch INTEGER NOT NULL DEFAULT 1`],
+            ]
+            for (const [kvCol, kvAddDdl] of kvColumnAdds) {
+                if (kvColNames?.has(kvCol)) continue
+                try { await db.run(kvAddDdl) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            }
 
-            try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_owner ON autopilot_rules (owner_sync_user)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            // These indexes sit on migration-added columns (is_active, last_check,
+            // is_automatic): creating them in the top schema exec crashed boot on
+            // databases that predate the columns (#17). They are created here,
+            // after the column adds, idempotently.
+            try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_active_check ON autopilot_rules (is_active, last_check, id)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_worker_scan ON autopilot_rules (is_active, is_automatic, id)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_owner ON autopilot_rules (owner_sync_user)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_platform ON autopilot_rules (platform)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_connection ON autopilot_rules (connection_id)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
 
-            try { await db.run(`ALTER TABLE failover_history ADD COLUMN IF NOT EXISTS latency_ms INTEGER`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            const fhColNames = await db.query(
+                `SELECT column_name FROM information_schema.columns WHERE table_name = 'failover_history' AND table_schema = 'public'`
+            ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
+            if (!fhColNames?.has('latency_ms')) {
+                try { await db.run(`ALTER TABLE failover_history ADD COLUMN IF NOT EXISTS latency_ms INTEGER`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            }
 
             try {
                 const pruned = await db.run(`DELETE FROM account_api_keys a USING account_api_keys b WHERE a.sync_user = b.sync_user AND a.api_key_hash = b.api_key_hash AND a.ctid < b.ctid`)
@@ -676,6 +727,12 @@ export async function initializeDatabase(fastify) {
                 await db.run(`ALTER TABLE autopilot_rules ADD COLUMN is_active INTEGER DEFAULT 1`)
                 fastify.log.info({ category: 'Database' }, 'Migrated: Added is_active column to autopilot_rules')
             }
+            // autopilot_rules.last_check is a legacy mirror; the live value is autopilot_rule_stats.last_check.
+            const hasLastCheck = tableInfo.some(col => col.name === 'last_check')
+            if (!hasLastCheck) {
+                await db.run(`ALTER TABLE autopilot_rules ADD COLUMN last_check BIGINT`)
+                fastify.log.info({ category: 'Database' }, 'Migrated: Added last_check column to autopilot_rules')
+            }
             const hasMessageTemplate = tableInfo.some(col => col.name === 'message_template')
             if (!hasMessageTemplate) {
                 await db.run(`ALTER TABLE autopilot_rules ADD COLUMN message_template TEXT`)
@@ -696,10 +753,25 @@ export async function initializeDatabase(fastify) {
                 await db.run(`ALTER TABLE autopilot_rules ADD COLUMN connection_id TEXT`)
                 fastify.log.info({ category: 'Database' }, 'Migrated: Added connection_id column to autopilot_rules')
             }
+            const hasConnectionGeneration = tableInfo.some(col => col.name === 'connection_generation')
+            if (!hasConnectionGeneration) {
+                await db.run(`ALTER TABLE autopilot_rules ADD COLUMN connection_generation TEXT`)
+                fastify.log.info({ category: 'Database' }, 'Migrated: Added connection_generation column to autopilot_rules')
+            }
             const hasCustomCheckUrls = tableInfo.some(col => col.name === 'custom_check_urls')
             if (!hasCustomCheckUrls) {
                 await db.run(`ALTER TABLE autopilot_rules ADD COLUMN custom_check_urls TEXT DEFAULT NULL`)
                 fastify.log.info({ category: 'Database' }, 'Migrated: Added custom_check_urls column to autopilot_rules')
+            }
+            const hasNotifyEnabled = tableInfo.some(col => col.name === 'notify_enabled')
+            if (!hasNotifyEnabled) {
+                await db.run(`ALTER TABLE autopilot_rules ADD COLUMN notify_enabled INTEGER`)
+                fastify.log.info({ category: 'Database' }, 'Migrated: Added notify_enabled column to autopilot_rules')
+            }
+            if (!tableInfo.some(col => col.name === 'edited_at')) {
+                await db.run(`ALTER TABLE autopilot_rules ADD COLUMN edited_at BIGINT`)
+                await db.run(`UPDATE autopilot_rules SET edited_at = updated_at WHERE edited_at IS NULL`)
+                fastify.log.info({ category: 'Database' }, 'Migrated: Added edited_at column to autopilot_rules')
             }
             if (!hasPlatform) {
                 try {
@@ -716,6 +788,12 @@ export async function initializeDatabase(fastify) {
                 await db.run(`ALTER TABLE failover_history ADD COLUMN latency_ms INTEGER`)
                 fastify.log.info({ category: 'Database' }, 'Migrated: Added latency_ms column to failover_history')
             }
+            // Same as the Postgres branch: these indexes sit on migration-added
+            // columns, so they run after the column adds above, not in the top
+            // schema exec (boot crash on pre-column databases, #17).
+            try {
+                await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_active_check ON autopilot_rules (is_active, last_check, id)`)
+            } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try {
                 await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_active_id ON autopilot_rules (is_active, id)`)
             } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
@@ -812,7 +890,9 @@ export async function initializeDatabase(fastify) {
             }
             try {
                 await db.run(`CREATE INDEX IF NOT EXISTS idx_creds_connection ON server_credentials (connection_id)`)
-                await db.run(`CREATE INDEX IF NOT EXISTS idx_creds_type_updated ON server_credentials (credential_type, updated_at DESC, id ASC)`)
+                // idx_creds_type_updated is owned by the ensureTable('server_credentials')
+                // index list above (byte-identical DDL); re-issuing it here was a second
+                // no-op round trip on every boot.
             } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
         } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
     } catch (migrationErr) {
@@ -909,6 +989,16 @@ export async function initializeDatabase(fastify) {
         updated_at: `ALTER TABLE commands ADD COLUMN updated_at BIGINT NOT NULL DEFAULT 0`,
     }, ['id'])
 
+    // Deleted-account guard for rule and credential writes; keep DDL in sync with migrations/004_account_server_tombstones.sql.
+    await ensureTable('account_server_tombstones', `CREATE TABLE IF NOT EXISTS account_server_tombstones (
+            sync_user TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            deleted_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (sync_user, account_id)
+        );`, [], ['sync_user', 'account_id', 'deleted_at'], {
+        deleted_at: `ALTER TABLE account_server_tombstones ADD COLUMN deleted_at BIGINT NOT NULL DEFAULT 0`,
+    }, ['sync_user', 'account_id'])
+
     // Remembered-device credentials; keep DDL in sync with migrations/003_device_credentials.sql.
     const deviceCredentialsDdl = db.type === 'postgres'
         ? `CREATE TABLE IF NOT EXISTS device_credentials (
@@ -948,6 +1038,11 @@ export async function initializeDatabase(fastify) {
         last_used_at: `ALTER TABLE device_credentials ADD COLUMN last_used_at BIGINT`,
         credential_epoch: `ALTER TABLE device_credentials ADD COLUMN credential_epoch INTEGER NOT NULL DEFAULT 1`,
     }, ['id'])
+
+    // Dashboard tables; keep DDL in sync with migrations/006_admin.sql.
+    for (const table of ADMIN_TABLES) {
+        await ensureTable(table.name, table.ddl, table.indexes, table.columns, table.addColumns || null, table.pk)
+    }
 
     try {
         const MIGRATION_KEY = 'migration:activity_season_clamp_v1'

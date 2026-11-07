@@ -21,8 +21,8 @@ before(async () => {
     await app.register(fastifyStatic, {
         root: tmpRoot,
         prefix: '/',
-        setHeaders: (res, filePath) => {
-            if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache')
+        setHeaders: (reply, filePath) => {
+            if (filePath.endsWith('.html')) reply.header('Cache-Control', 'no-cache')
         },
     })
 
@@ -75,17 +75,22 @@ test('non-HTML static assets serve without the no-cache header', async () => {
     assert.notEqual(res.headers['cache-control'], 'no-cache')
 })
 
-test('index.js static setHeaders uses the raw Node response API, not Fastify reply', async () => {
-    // The setHeaders callback receives Node's ServerResponse (setHeader), never a
-    // Fastify reply (header). A reply.* call there throws on every static response
-    // over a real socket and takes the whole SPA down — inject cannot reproduce the
-    // socket path, so this guards the registration source directly.
-    const source = fs.readFileSync(path.resolve(import.meta.dirname, '../index.js'), 'utf8')
-    const m = source.match(/setHeaders:\s*\((\w+),\s*\w+\)\s*=>\s*\{[\s\S]*?\}/)
-    assert.ok(m, 'static setHeaders registration not found in server/index.js')
-    const rawResName = m[1]
-    assert.equal(rawResName, 'res', `setHeaders first param should be named 'res' to signal raw Node response, got '${rawResName}'`)
-    const body = m[0]
-    assert.ok(!body.includes('reply.'), 'setHeaders must not call Fastify reply API (reply.header throws on raw ServerResponse)')
-    assert.ok(body.includes('res.setHeader'), 'setHeaders must use res.setHeader for raw Node response')
+test('main.js static setHeaders matches the installed @fastify/static callback contract', async () => {
+    // @fastify/static 9 passed Node's ServerResponse (setHeader); 10 passes the
+    // Fastify reply (header). Calling the wrong API throws on every static
+    // response over a real socket while /api/health stays green, so the SPA
+    // hangs behind a passing health check. inject cannot reproduce the socket
+    // path, so this pins the registration source to the installed major.
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '../node_modules/@fastify/static/package.json'), 'utf8'))
+    const major = Number(pkg.version.split('.')[0])
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, '../main.js'), 'utf8')
+    const m = source.match(/setHeaders:\s*\((\w+),\s*\w+\)\s*=>\s*\{[\s\S]*?\n\s*\}/)
+    assert.ok(m, 'static setHeaders registration not found in server/main.js')
+    const [body, param] = m
+    if (major >= 10) {
+        assert.ok(body.includes(`${param}.header(`), `@fastify/static ${pkg.version} passes a Fastify reply: setHeaders must call ${param}.header()`)
+        assert.ok(!body.includes('.setHeader('), `@fastify/static ${pkg.version} passes a Fastify reply: setHeader() does not exist on it`)
+    } else {
+        assert.ok(body.includes(`${param}.setHeader(`), `@fastify/static ${pkg.version} passes a raw ServerResponse: setHeaders must call ${param}.setHeader()`)
+    }
 })

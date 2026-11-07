@@ -5,6 +5,9 @@ import { FALLBACK_KEYS } from './keys.js'
 import { getCachedAuth, setCachedAuth, hashAuthPassword } from './state.js'
 import { verifySyncPassword, upgradeLegacyPasswordHash } from './lib/sync-password.js'
 import { trace } from './utils/trace.js'
+import { isAdminPath } from './admin/paths.js'
+import { isReadOnlyReplica } from './config.js'
+import { assertAccountActive, AuthStateError, StateUnavailableError } from './admin/account-state.js'
 
 export const timingSafeEqual = (a, b) => {
     try {
@@ -44,6 +47,7 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
         if (Number(account.credential_epoch) !== Number(row.credential_epoch)) return { ok: false, reason: 'generation' }
         return { ok: true, accountUuid: row.account_uuid, row }
     } catch (err) {
+        if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
         // surface DB failures instead of collapsing them into the generic 'unknown' reason
         trace('auth', 'deviceCredential.error', { user: syncUser, deviceId, error: err?.message })
         return { ok: false, reason: 'unknown' }
@@ -59,10 +63,15 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
 // every security action (enroll/revoke/revoke-everywhere); a revocation that bypasses
 // those is honored within the same 60s TTL window the password cache already accepts.
 export async function deviceAuthHook(request, reply) {
+    // Sync credentials never reach the Dashboard API.
+    if (isAdminPath(request.url)) return
     const deviceId = request.headers['x-sync-device']
     if (!deviceId) return
     const syncUser = request.headers['x-sync-user']
     const presented = request.headers['x-sync-password']
+    // Account state gate: ahead of the cache accept, the DB accept and every telemetry
+    // write, and outside the try below so a gate refusal can never be swallowed.
+    await assertAccountActive(syncUser)
     const cacheKey = 'device:' + syncUser + ':' + deviceId
     const cachedTokenHash = getCachedAuth(cacheKey)
     if (cachedTokenHash && timingSafeEqual(cachedTokenHash, hashAuthPassword(presented))) {
@@ -77,9 +86,15 @@ export async function deviceAuthHook(request, reply) {
     if (outcome.ok) {
         request.deviceAuth = { accountUuid: outcome.accountUuid }
         setCachedAuth(cacheKey, presented)
-        try {
-            await db.run('UPDATE device_credentials SET last_used_at = $1 WHERE id = $2', [Date.now(), outcome.row.id])
-        } catch { /* best-effort telemetry write; auth already succeeded and must not fail because of it */ }
+        // A replica never writes, not even best-effort telemetry, against the follower.
+        if (!isReadOnlyReplica()) {
+            try {
+                await db.run('UPDATE device_credentials SET last_used_at = $1 WHERE id = $2', [Date.now(), outcome.row.id])
+            } catch (err) {
+                if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
+                /* best-effort telemetry write; auth already succeeded and must not fail because of it */
+            }
+        }
         trace('auth', 'deviceAuth.accept', { user: syncUser, deviceId, source: 'db' })
         return
     }
@@ -89,6 +104,8 @@ export async function deviceAuthHook(request, reply) {
 }
 
 export async function verifyAuth(request) {
+    // Account state gate ahead of every auth path (device early return, cache, DB).
+    await assertAccountActive(request.deviceAuth?.accountUuid || request.headers['x-sync-user'])
     if (request.deviceAuth?.accountUuid) return request.deviceAuth.accountUuid
     const syncUser = request.headers['x-sync-user']
     const syncPassword = request.headers['x-sync-password']
@@ -124,12 +141,15 @@ export async function verifyAuth(request) {
         trace('auth', 'verifyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
         return syncUser
     } catch (err) {
+        if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
         trace('auth', 'verifyAuth.reject', { user: syncUser, reason: 'error', error: err?.message })
         return null
     }
 }
 
 export async function requireProxyAuth(request, reply) {
+    // Account state gate ahead of every auth path (device early return, cache, DB).
+    await assertAccountActive(request.deviceAuth?.accountUuid || request.headers['x-sync-user'])
     if (request.deviceAuth?.accountUuid) return null
     const syncUser = request.headers['x-sync-user']
     const syncPassword = request.headers['x-sync-password']
@@ -167,6 +187,7 @@ export async function requireProxyAuth(request, reply) {
         setCachedAuth('sync:' + syncUser, syncPassword)
         trace('auth', 'proxyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
     } catch (err) {
+        if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
         trace('auth', 'proxyAuth.reject', { user: syncUser, reason: 'error', error: err?.message })
         reply.status(401)
         return { error: 'Unauthorized' }
