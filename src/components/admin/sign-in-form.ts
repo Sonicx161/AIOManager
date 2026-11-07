@@ -31,7 +31,7 @@ export function signInErrorText(err: unknown): string {
   const serverText = err.message
   const generic = !serverText || serverText.startsWith('Request failed')
   const fallback: Record<number, string> = {
-    400: 'Blocked by the proxy configuration: X-Forwarded-* headers arrived with TRUST_PROXY_HOPS unset. Check the reverse proxy setup.',
+    400: 'Blocked by the proxy configuration. Check TRUST_PROXY_HOPS and TRUSTED_PROXY_CIDRS.',
     401: 'Username or password is incorrect.',
     403: 'Sign-in refused here: plain HTTP from this network is not allowed, or this instance is a read-only replica.',
   }

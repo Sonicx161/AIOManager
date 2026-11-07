@@ -77,6 +77,18 @@ function string(def, desc, extraMeta = {}) {
     }
 }
 
+const PROXY_HOPS_PATTERN = /^(auto|[0-9]|10)$/
+
+function proxyHops(desc) {
+    return {
+        schema: z
+            .preprocess((raw) => (raw == null || raw === '' ? 'auto' : String(raw).trim().toLowerCase()),
+                z.string().regex(PROXY_HOPS_PATTERN, { error: 'must be auto or a whole number from 0 to 10' }))
+            .describe(desc),
+        meta: { type: 'string', default: 'auto', desc, defaultLabel: 'auto' },
+    }
+}
+
 function optionalString(desc, extraMeta = {}) {
     return {
         schema: z
@@ -151,9 +163,9 @@ export const FIELDS = {
 
     // --- Dashboard (instance admin, opt-in) ---
     ADMIN_ENABLED: bool(false,
-        'Turn on the instance Dashboard at /dashboard (API under /api/admin). Off by default: when off, no Dashboard route exists at all (404). The Dashboard manages the instance only; it can never read user contents, credentials or watch history. Sign-in lockouts are kept in memory, so restarting the server clears them. On a READ_ONLY_REPLICA the Dashboard refuses sign-in; use the primary.'),
+        'Turn on the Dashboard at /dashboard. It manages the instance only; it can never read user addons, credentials or watch history. When off, the Dashboard does not exist (404).'),
     ADMIN_CREDENTIALS: optionalString(
-        'Dashboard sign-in as username:password. Choose your own username (1 to 64 characters) and nonempty password (up to 1024 characters, no minimum length or complexity rule); quote the full value in .env. Split on the first colon, so the password may contain colons and spaces. The server hashes the password internally. Takes precedence over ADMIN_SECRET_HASH, ADMIN_USERNAME and browser setup. Invalid credentials keep the Dashboard off; they never enable setup or fall back to stored credentials. Change this value and restart to change the sign-in.',
+        'Dashboard sign-in as username:password, in quotes. Everything before the first colon is the username and everything after it is the password, so the password may contain colons. Change it and restart to change the sign-in.',
         { example: '"Sonic:SonicsPassword"' }),
     ADMIN_SECRET_HASH: optionalString(
         'Alternative Dashboard password as a scrypt hash (never the plaintext). Generate it with: npm --prefix server run admin:hash. Used when ADMIN_CREDENTIALS is empty; takes precedence over a username and password chosen through ADMIN_SETUP. An invalid value keeps the Dashboard off with a log line.'),
@@ -163,12 +175,12 @@ export const FIELDS = {
         'Set to token to choose the Dashboard username and password in the browser instead of ADMIN_SECRET_HASH: while none exists, boot prints a single-use Dashboard setup token to stdout (valid 15 minutes). Restart with token again to issue a new one.'),
     ADMIN_ALLOW_IPS: optionalString(
         'Optional comma-separated IPs or CIDR ranges allowed to reach the Dashboard, e.g. 192.168.1.0/24,10.0.0.5. Others get a plain 404 before any password check. Empty allows every address.'),
-    ADMIN_ALLOW_HTTP_LAN: bool(false,
-        'Allow Dashboard sign-in over plain HTTP, but only from loopback or private network addresses (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, fe80::/10, resolved through TRUST_PROXY_HOPS). Public addresses over HTTP stay refused. WARNING: without HTTPS the Dashboard password and session cookie cross your network unencrypted, so anyone on that network can capture them. The cookie keeps HttpOnly and SameSite=Strict but loses Secure. Prefer HTTPS; enable this only on a network you trust.'),
-    TRUST_PROXY_HOPS: int(0, { min: 0, max: 10 },
-        'Number of reverse proxies in front of the server. The Dashboard reads the client IP from the X-Forwarded-For entry this many hops from the right, and trusts X-Forwarded-Proto/Host, only when the connection comes from a trusted proxy (loopback, private ranges, or TRUSTED_PROXY_CIDRS) and the chain is at least this long. 0 uses the socket peer. The backend port must only be reachable through the proxy: publish the proxy, not the server port. Behind a proxy on the same host that sends no forwarding headers, every client looks like loopback and they all share the loopback bucket, so one attacker locks out everyone and the known-device cookie does not help; configure the proxy to send X-Forwarded-For.'),
+    ADMIN_ALLOW_HTTP_LAN: bool(true,
+        'Allow Dashboard sign-in over plain HTTP from your own network (loopback and private addresses such as 192.168.x.x). Sign-in from a public address always needs HTTPS. Set to false to require HTTPS on your network too; without HTTPS the password and session cookie cross your network unencrypted.'),
+    TRUST_PROXY_HOPS: proxyHops(
+        'How the Dashboard finds the real client address behind a reverse proxy (Traefik, nginx, Caddy). auto (default): a proxy on the same machine, a Docker network or your LAN is detected from the X-Forwarded-* headers it sends, so nothing needs setting. A number from 1 to 10 sets the exact count of proxies in a chain. 0 turns proxy support off. Publish the proxy, not the server port: if the server port is also reachable on your network, another device could claim any address to slip past the sign-in lockout. A proxy that sends no X-Forwarded-For makes every visitor share one sign-in lockout; Traefik, Caddy and most nginx setups send it.'),
     TRUSTED_PROXY_CIDRS: optionalString(
-        'Optional comma-separated IPs or CIDR ranges of your reverse proxies, e.g. 172.18.0.0/16. When set, only these (plus loopback) may supply X-Forwarded-* headers to the Dashboard; when empty, loopback and private ranges are trusted. Only used with TRUST_PROXY_HOPS.'),
+        'Optional comma-separated IPs or CIDR ranges of your reverse proxies, e.g. 172.18.0.0/16. Leave empty to trust any proxy on the same machine, a Docker network or your LAN. Set it to pin trust to your exact proxy, or to allow a proxy on a public address.'),
 
     // --- Logging ---
     LOG_LEVEL: enumString('info', ['fatal', 'error', 'warn', 'info', 'debug', 'trace'],
@@ -280,7 +292,8 @@ export const ENV_GROUPS = [
     { title: 'ESSENTIAL SETUP', vars: ['PORT', 'NODE_ENV', 'DATA_DIR', 'MAX_SYNC_PAYLOAD_SIZE'] },
     { title: 'DATABASE', note: 'Pool settings are ignored when DB_TYPE=sqlite.', vars: ['DB_TYPE', 'DATABASE_URL', 'DB_SSL_REJECT_UNAUTHORIZED', 'DB_POOL_SIZE', 'DB_CONNECTION_TIMEOUT', 'DB_MAX_RETRIES', 'READ_ONLY_REPLICA'] },
     { title: 'SECURITY', vars: ['ENCRYPTION_KEY', 'CORS_ORIGINS', 'SSRF_ALLOW_PRIVATE', 'TRUST_PROXY', 'CUSTOM_HTML', 'REGISTRATIONS_CLOSED', 'UNIFIED_ENFORCEMENT'] },
-    { title: 'DASHBOARD (OPT-IN)', note: 'Instance Dashboard for self-hosters. Off unless ADMIN_ENABLED=true.', vars: ['ADMIN_ENABLED', 'ADMIN_CREDENTIALS', 'ADMIN_SECRET_HASH', 'ADMIN_USERNAME', 'ADMIN_SETUP', 'ADMIN_ALLOW_IPS', 'ADMIN_ALLOW_HTTP_LAN', 'TRUST_PROXY_HOPS', 'TRUSTED_PROXY_CIDRS'] },
+    { title: 'DASHBOARD (OPT-IN)', note: 'Instance Dashboard for self-hosters at /dashboard. To turn it on, set ADMIN_ENABLED=true and ADMIN_CREDENTIALS. Proxies and home networks work without any other setting.', vars: ['ADMIN_ENABLED', 'ADMIN_CREDENTIALS'] },
+    { title: 'DASHBOARD ADVANCED (OPTIONAL)', note: 'Leave these empty unless you need them. The defaults work behind Traefik, nginx or Caddy and on your home network.', vars: ['ADMIN_ALLOW_IPS', 'ADMIN_ALLOW_HTTP_LAN', 'TRUST_PROXY_HOPS', 'TRUSTED_PROXY_CIDRS', 'ADMIN_SECRET_HASH', 'ADMIN_USERNAME', 'ADMIN_SETUP'] },
     { title: 'LOGGING', vars: ['LOG_LEVEL', 'LOG_PRETTY_PRINT'] },
     { title: 'PROXY & IMAGE CACHING', vars: ['PROXY_CONCURRENCY_LIMIT', 'AIOSTREAMS_USER_API_THROTTLE_MS', 'IMAGE_PROXY_TIMEOUT_MS', 'IMAGE_PROXY_QUEUE_LIMIT', 'IMAGE_PROXY_THROTTLE_MS', 'IMAGE_CACHE_TTL_MS', 'IMAGE_CACHE_MAX_BYTES', 'IMAGE_CACHE_MAX_ITEM_BYTES', 'DATASTORE_META_BATCH_MAX', 'DATASTORE_META_BATCH_CONCURRENCY', 'DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS'] },
     { title: 'ACTIVITY ENGINE (OPT-IN)', note: 'Safe defaults shown. Only relevant when you explicitly opt into server-side activity capture via ACTIVITY_ENGINE_ENABLED. Events are kept permanently so Activity can behave like Replay.', vars: ['ACTIVITY_ENGINE_ENABLED', 'ACTIVITY_SCAN_INTERVAL_MS', 'ACTIVITY_SCAN_JITTER_MS', 'ACTIVITY_INITIAL_DELAY_MS', 'ACTIVITY_CYCLE_BUDGET_MS', 'ACTIVITY_MAX_ACCOUNTS_PER_CYCLE', 'ACTIVITY_MAX_EVENTS_PER_CYCLE', 'ACTIVITY_MAX_SNAPSHOT_WRITES_PER_CYCLE', 'ACTIVITY_BATCH_SIZE', 'ACTIVITY_FETCH_TIMEOUT_MS', 'ACTIVITY_HASH_CACHE_TTL_MS', 'ACTIVITY_HASH_CACHE_MAX', 'ACTIVITY_SCAN_CONCURRENCY', 'ACTIVITY_BREAKER_THRESHOLD', 'ACTIVITY_BREAKER_BASE_MS', 'ACTIVITY_BREAKER_MAX_MS'] },

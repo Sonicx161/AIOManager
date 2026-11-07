@@ -14,11 +14,22 @@ export const adminUsernameEnv = () => {
     const raw = process.env.ADMIN_USERNAME
     return raw && raw.trim() ? raw.trim() : null
 }
-export const adminAllowHttpLan = () => TRUTHY.includes(String(process.env.ADMIN_ALLOW_HTTP_LAN || '').toLowerCase())
+// On unless set to a falsy value: plain HTTP sign-in from private addresses only.
+export const adminAllowHttpLan = () => {
+    const raw = String(process.env.ADMIN_ALLOW_HTTP_LAN ?? '').trim().toLowerCase()
+    return raw === '' || TRUTHY.includes(raw)
+}
 export const adminAllowIps = () => String(process.env.ADMIN_ALLOW_IPS || '').split(',').map((s) => s.trim()).filter(Boolean)
 export const trustedProxyCidrs = () => String(process.env.TRUSTED_PROXY_CIDRS || '').split(',').map((s) => s.trim()).filter(Boolean)
+// Unset or "auto": a trusted peer (loopback, private range or TRUSTED_PROXY_CIDRS) that sends
+// forwarding headers counts as one proxy. A number pins the hop count; 0 turns proxy trust off.
+export const proxyHopsAuto = () => {
+    const raw = String(process.env.TRUST_PROXY_HOPS ?? '').trim().toLowerCase()
+    return raw === '' || raw === 'auto'
+}
 export const trustProxyHops = () => {
-    const n = Number.parseInt(process.env.TRUST_PROXY_HOPS || '0', 10)
+    if (proxyHopsAuto()) return 0
+    const n = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10)
     return Number.isFinite(n) && n > 0 ? Math.min(n, 10) : 0
 }
 export const adminReadOnly = () => isReadOnlyReplica()

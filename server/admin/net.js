@@ -1,6 +1,6 @@
 import crypto from 'crypto'
 import net from 'net'
-import { adminAllowIps, trustProxyHops, trustedProxyCidrs } from './config.js'
+import { adminAllowIps, proxyHopsAuto, trustProxyHops, trustedProxyCidrs } from './config.js'
 
 function expandV6Groups(s) {
     let text = s
@@ -76,17 +76,21 @@ export function isTrustedProxy(peer) {
     return trustedCache.list.check(peer, net.isIPv4(peer) ? 'ipv4' : 'ipv6')
 }
 
-// Forwarded headers count only with TRUST_PROXY_HOPS=N, a trusted socket peer and a chain of
-// at least N entries; the client is the entry N hops from the right. Otherwise the socket
-// peer is the client and X-Forwarded-Proto/Host are ignored. Never request.ip: TRUST_PROXY
-// trusts every hop and lets clients pick an IP.
+// Forwarded headers count only from a trusted socket peer: with TRUST_PROXY_HOPS=N the chain
+// must hold at least N entries and the client is the entry N hops from the right; in auto
+// mode the peer is one proxy (its X-Forwarded-For entry, or itself when it sends none).
+// Otherwise the socket peer is the client and X-Forwarded-Proto/Host are ignored. Never
+// request.ip: TRUST_PROXY trusts every hop and lets clients pick an IP.
 export function forwardedInfo(request) {
     if (request.adminForwarded) return request.adminForwarded
     const peer = normalize(request.raw?.socket?.remoteAddress) || 'unknown'
-    const hops = trustProxyHops()
     const present = Boolean(request.headers['x-forwarded-for'] || request.headers['x-forwarded-proto'] || request.headers['x-forwarded-host'])
+    const auto = proxyHopsAuto()
+    const hops = auto ? (present ? 1 : 0) : trustProxyHops()
     let info = { ip: peer, peer, trusted: false, present, error: null }
-    if (hops && isTrustedProxy(peer)) {
+    if (auto && present && isTrustedProxy(peer) && !request.headers['x-forwarded-for']) {
+        info = { ...info, trusted: true }
+    } else if (hops && isTrustedProxy(peer)) {
         const chain = headerList(request.headers['x-forwarded-for']).map(normalize)
         // The candidate and every entry right of it were written by trusted proxies, so all of
         // them must be IP addresses; entries further left are client-supplied and ignored.

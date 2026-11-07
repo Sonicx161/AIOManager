@@ -29,6 +29,7 @@ export function SignInScreen({ mode, setupAvailable = true, readOnlyReplica = fa
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const setup = mode === 'setup'
+  const plainHttp = typeof window !== 'undefined' && window.location.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -70,6 +71,9 @@ export function SignInScreen({ mode, setupAvailable = true, readOnlyReplica = fa
               <p role="note" className="rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-xs font-medium text-warning">
                 This instance is a read-only replica; sign-in is refused here. Make changes on the primary.
               </p>
+            )}
+            {plainHttp && (
+              <p role="note" className="text-xs text-muted-foreground">This connection is not encrypted. Use HTTPS when you can.</p>
             )}
             {setup && !setupAvailable && (
               <p role="note" className="rounded-xl border border-warning/25 bg-warning/10 px-3 py-2 text-xs font-medium text-warning">

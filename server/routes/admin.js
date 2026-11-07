@@ -3,7 +3,7 @@ import db from '../db.js'
 import { PRIMARY_KEY } from '../keys.js'
 import { proxyQueue, proxyQueueKeyCounts, serverState } from '../state.js'
 import { metadataCache } from '../lib/metadata-cache.js'
-import { ADMIN_LIMITS, isAdminEnabled, adminSetupMode, adminCredentialsEnv, adminSecretHashEnv, adminUsernameEnv, adminReadOnly, trustProxyHops, adminAllowHttpLan, adminAllowIps, trustedProxyCidrs } from '../admin/config.js'
+import { ADMIN_LIMITS, isAdminEnabled, adminSetupMode, adminCredentialsEnv, adminSecretHashEnv, adminUsernameEnv, adminReadOnly, proxyHopsAuto, trustProxyHops, adminAllowHttpLan, adminAllowIps, trustedProxyCidrs } from '../admin/config.js'
 import { adminHashProblem, verifyAdminLogin, hashAdminPassphrase, passphraseProblem, usernameProblem, normalizeAdminUsername, parseAdminCredentials, LEGACY_ADMIN_USERNAME } from '../admin/passphrase.js'
 import { adminClientIp, isDirectLoopback, limiterKey, forwardedInfo, forwardedHost, isAllowedIp, isLoopback, isPrivateOrLoopback, isSecureRequest, ipPrefix, uaHash, uaFamily, allowlistProblems } from '../admin/net.js'
 import { createLoginLimiter } from '../admin/limiter.js'
@@ -24,7 +24,7 @@ const LOGIN_INCORRECT = { error: 'Username or password is incorrect.' }
 const UNAUTHORIZED = { error: 'Unauthorized' }
 const SSE_HEARTBEAT_MS = 25_000
 const SSE_RECHECK_MS = 60_000
-const ORIGIN_MISMATCH = 'Origin not allowed: the host in the browser Origin does not match the Host header this server received. Behind a reverse proxy, forward the original host (nginx: proxy_set_header Host $host;), or send X-Forwarded-Host from a trusted proxy with TRUST_PROXY_HOPS set.'
+const ORIGIN_MISMATCH = 'Origin not allowed: the host in the browser Origin does not match the Host header this server received. Behind a reverse proxy, forward the original host (nginx: proxy_set_header Host $host;), or send X-Forwarded-Host from a trusted proxy.'
 // Settings writes carry up to 8192 characters of custom HTML, which in non-ASCII text is about 32 KB.
 const SETTINGS_BODY_LIMIT = 64 * 1024
 const USERS_FAIL_TTL_MS = 30_000
@@ -120,8 +120,8 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
     }
     const badAllow = allowlistProblems()
     if (badAllow.length) log.warn({ category: 'Dashboard' }, `ADMIN_ALLOW_IPS has ${badAllow.length} unparseable entr${badAllow.length === 1 ? 'y' : 'ies'}; they match nothing.`)
-    if (['1', 'true', 'yes', 'on'].includes(String(process.env.TRUST_PROXY || '').toLowerCase()) && !trustProxyHops()) {
-        log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY is on but TRUST_PROXY_HOPS is 0, so the Dashboard sees the proxy as the client and refuses sign-in when forwarded headers arrive. Set TRUST_PROXY_HOPS to the number of proxies in front of the server.')
+    if (['1', 'true', 'yes', 'on'].includes(String(process.env.TRUST_PROXY || '').toLowerCase()) && !proxyHopsAuto() && !trustProxyHops()) {
+        log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY is on but TRUST_PROXY_HOPS is 0, so the Dashboard refuses sign-in when forwarded headers arrive. Remove TRUST_PROXY_HOPS to detect the proxy automatically, or set it to the number of proxies in front of the server.')
     }
     if (trustProxyHops() && !trustedProxyCidrs().length) {
         log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY_HOPS is set without TRUSTED_PROXY_CIDRS, so any loopback or private-range host can act as a proxy and set X-Forwarded-For. Set TRUSTED_PROXY_CIDRS to the proxy addresses.')
@@ -175,16 +175,21 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
     const auditBestEffort = (request, entry) => appendAudit({ ...auditCtx(request), ...entry })
         .catch((err) => log.warn({ category: 'Dashboard' }, `Audit write failed for ${entry.event}: ${err.message}`))
 
-    // A proxy on the same host with TRUST_PROXY_HOPS=0 would make every client look like
-    // loopback; refuse sign-in and say how to fix it, logging the hint once.
-    let warnedHopsZero = false
+    // Forwarded headers the Dashboard will not trust would make every client look like the
+    // proxy (one shared lockout bucket); refuse sign-in and say how to fix it, logging once.
+    let warnedUntrustedProxy = false
     function proxyMisconfig(request) {
-        if (trustProxyHops() || !forwardedInfo(request).present) return null
-        if (!warnedHopsZero) {
-            warnedHopsZero = true
-            log.warn({ category: 'Dashboard' }, 'Dashboard sign-in refused: X-Forwarded-* headers arrived but TRUST_PROXY_HOPS is 0. Set TRUST_PROXY_HOPS to the number of proxies in front of the server.')
+        const info = forwardedInfo(request)
+        if (!info.present || info.trusted || info.error) return null
+        if (!proxyHopsAuto() && trustProxyHops()) return null
+        const message = proxyHopsAuto()
+            ? 'This request came through a proxy whose address is not on a private network. Add the proxy address to TRUSTED_PROXY_CIDRS, then sign in again.'
+            : 'This request came through a proxy, but TRUST_PROXY_HOPS=0 turns proxy support off. Remove TRUST_PROXY_HOPS so the proxy is detected automatically, then sign in again.'
+        if (!warnedUntrustedProxy) {
+            warnedUntrustedProxy = true
+            log.warn({ category: 'Dashboard' }, `Dashboard sign-in refused: ${message}`)
         }
-        return 'This request came through a proxy (X-Forwarded-* headers are present) but TRUST_PROXY_HOPS is 0. Set TRUST_PROXY_HOPS to the number of proxies in front of the server, then sign in again.'
+        return message
     }
 
     function transportProblem(request) {
@@ -194,7 +199,9 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
         // Opt-in plain HTTP for home networks: private clients only, never public, and
         // loopback only when it is the direct peer.
         if (adminAllowHttpLan() && isPrivateOrLoopback(ip) && !isLoopback(ip)) return null
-        return 'The Dashboard only signs in over HTTPS. Serve the instance over HTTPS (or set TRUST_PROXY_HOPS behind a TLS proxy), or set ADMIN_ALLOW_HTTP_LAN=true to allow plain HTTP from private network addresses, and try again.'
+        return adminAllowHttpLan()
+            ? 'Signing in from outside your network needs HTTPS. Serve the instance over HTTPS (a TLS proxy on a public address also needs TRUSTED_PROXY_CIDRS), or sign in from your home network.'
+            : 'The Dashboard only signs in over HTTPS because ADMIN_ALLOW_HTTP_LAN=false. Serve the instance over HTTPS, or remove that setting to allow plain HTTP from your home network.'
     }
 
     async function issueSession(request, reply, { remember = false } = {}) {
@@ -295,7 +302,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
                 reply.status(400)
                 return reply.send({
                     error: chainError === 'short-chain'
-                        ? 'The X-Forwarded-For chain has fewer entries than TRUST_PROXY_HOPS. Set TRUST_PROXY_HOPS to the number of proxies in front of the server.'
+                        ? 'The X-Forwarded-For chain has fewer entries than TRUST_PROXY_HOPS. Set TRUST_PROXY_HOPS to the number of proxies in front of the server, or remove it to detect one proxy automatically.'
                         : 'An X-Forwarded-For entry written by a trusted proxy is not an IP address. Check that each proxy appends the client address and nothing else.',
                 })
             }
