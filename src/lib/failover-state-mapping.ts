@@ -27,9 +27,12 @@ export function rebuildRuleFromServerState(payload: Record<string, unknown>, acc
         lastCheck: payload.lastCheck ? new Date(payload.lastCheck as string | number) : undefined,
         stabilization: (payload.stabilization as Record<string, number | AutopilotStabilizationEntry>) || {},
         status: 'idle',
-        // Server '' means nothing stored; a stored value is the resolved override-or-global URL,
-        // which only round-trips if it becomes the rule override again (syncRuleToServer sends `rule.webhookUrl || global`).
+        // Server '' means nothing stored (per-rule off or default); a stored value is the
+        // per-rule override. The off/on decision rides on notifyEnabled, not on the empty URL.
         webhookUrl: payload.webhookUrl ? String(payload.webhookUrl) : undefined,
+        // Only a boolean is a server statement; omitted (older server, legacy row) stays
+        // undefined so the spread-merge preserves the local notification mode.
+        notifyEnabled: typeof payload.notifyEnabled === 'boolean' ? payload.notifyEnabled : undefined,
         // Server sends [] for "none configured"; undefined-valued keys are stripped so the
         // spread-merge preserves local-only edits.
         customCheckUrls: Array.isArray(payload.customCheckUrls) && payload.customCheckUrls.length > 0

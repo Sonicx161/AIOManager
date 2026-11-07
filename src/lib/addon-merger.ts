@@ -1,24 +1,31 @@
 import { AddonDescriptor } from '@/types/addon'
-import { SavedAddon, MergeResult } from '@/types/saved-addon'
+import { SavedAddon, MergeResult, DeployChoice, DeployDecider } from '@/types/saved-addon'
 import { fetchAddonManifest } from '@/api/addons'
 import { normalizeAddonUrl } from './utils'
 import { getCachedManifest, setCachedManifest } from '@/lib/manifest-cache'
 import { mapConcurrent } from './concurrency'
-import { dedupeAddonsByTransportUrl } from '@/lib/addon-dedupe'
-import { getAddonInstanceKey } from '@/lib/addon-instance-identity'
+import { dedupeAddonsByUrl } from '@/lib/addon-dedupe'
+import { planDeployTargets } from '@/lib/deploy-targets'
+import { getAddonConfigLabel } from '@/lib/addon-config-label'
 import { getEffectiveManifest } from '@/lib/addon-utils'
 
 export async function mergeAddons(
   currentAddons: AddonDescriptor[],
   savedAddons: SavedAddon[],
   accountId: string = 'Unknown',
-  allowProtected: boolean = false
+  allowProtected: boolean = false,
+  library: SavedAddon[] = savedAddons,
+  decide?: DeployDecider
 ): Promise<{ addons: AddonDescriptor[]; result: MergeResult }> {
   const result: MergeResult = {
     added: [],
     updated: [],
     skipped: [],
     protected: [],
+    pending: [],
+    outcomes: [],
+    replaced: [],
+    candidates: {},
   }
 
   const updatedAddons = [...currentAddons]
@@ -37,7 +44,9 @@ export async function mergeAddons(
     } catch {}
   })
 
-  for (const savedAddon of savedAddons) {
+  const targets = planDeployTargets(currentAddons, savedAddons, library)
+
+  savedAddons.forEach((savedAddon, savedIndex) => {
     const addonId = savedAddon.manifest.id
     const installUrl = savedAddon.installUrl
 
@@ -48,19 +57,25 @@ export async function mergeAddons(
       effectiveMetadata.customName = savedAddon.name
     }
 
-    // This prevents duplicates if the URL protocol/trailing-slash changed.
-    // Instance-key fallback: deploying a saved config-URL addon (AIOStreams,
-    // AIOMetadata) whose encrypted config segment changed must REPLACE the
-    // same-instance entry in place ("reinstall in its own spot"), not append a
-    // second card. Distinct instance uuids/origins keep distinct keys, so
-    // multiple instances of one manifest id are still never collapsed.
-    const normInstallUrl = normalizeAddonUrl(installUrl)
-    const savedInstanceKey = getAddonInstanceKey({ transportUrl: installUrl, manifest: savedAddon.manifest })
-    const existingIndex = updatedAddons.findIndex((a) => {
-      const normA = normalizeAddonUrl(a.transportUrl)
-      // STRICT: Match ONLY by URL (or instance key) to support multiple instances of same Manifest ID
-      return normA === normInstallUrl || getAddonInstanceKey(a) === savedInstanceKey
-    })
+    const target = targets[savedIndex]
+    const name = savedAddon.name || savedAddon.manifest.name
+    let choice: DeployChoice | undefined
+    if (target.kind === 'ask') {
+      const candidate = { key: normalizeAddonUrl(updatedAddons[target.index].transportUrl), index: target.index }
+      choice = decide?.(savedAddon.id, candidate)
+      if (!choice) {
+        result.candidates![savedAddon.id] = candidate
+        result.pending!.push({
+          savedAddonId: savedAddon.id,
+          addonId,
+          name,
+          existingLabel: getAddonConfigLabel(updatedAddons[target.index].transportUrl),
+          libraryLabel: getAddonConfigLabel(installUrl),
+        })
+        return
+      }
+    }
+    const existingIndex = target.kind === 'append' || choice === 'keep' ? -1 : target.index
 
     if (existingIndex >= 0) {
       const existing = updatedAddons[existingIndex]
@@ -70,7 +85,7 @@ export async function mergeAddons(
           addonId,
           name: existing.manifest.name,
         })
-        continue
+        return
       }
 
       const cached = getCachedManifest(installUrl)
@@ -85,9 +100,15 @@ export async function mergeAddons(
         metadata: { ...existing.metadata, ...effectiveMetadata },
         catalogOverrides: savedAddon.catalogOverrides || existing.catalogOverrides,
         note: existing.note,
+        // The entry's per-connection policy survives every in-place write (R1).
+        destinations: existing.destinations,
       }
 
       updatedAddons[existingIndex] = updatedDescriptor
+      if (choice === 'replace') result.replaced!.push({ oldUrl: existing.transportUrl, newUrl: installUrl })
+      result.outcomes!.push(choice === 'replace'
+        ? { savedAddonId: savedAddon.id, name, outcome: 'replaced', replacedLabel: getAddonConfigLabel(existing.transportUrl) }
+        : { savedAddonId: savedAddon.id, name, outcome: 'updated' })
       result.updated.push({
         addonId,
         oldUrl: existing.transportUrl,
@@ -107,6 +128,7 @@ export async function mergeAddons(
       }
 
       updatedAddons.push(newDescriptor)
+      result.outcomes!.push({ savedAddonId: savedAddon.id, name, outcome: choice === 'keep' ? 'kept-both' : 'added' })
 
       result.added.push({
         addonId,
@@ -114,9 +136,10 @@ export async function mergeAddons(
         installUrl: installUrl,
       })
     }
-  }
+  })
 
-  const merged = dedupeAddonsByTransportUrl(updatedAddons)
+  // The planner already placed every same-instance write; fold nothing else.
+  const merged = dedupeAddonsByUrl(updatedAddons)
     .map(addon => ({ ...addon, manifest: getEffectiveManifest(addon) }))
     .filter(addon => addon.manifest?.id && addon.manifest?.name && addon.manifest?.version)
 

@@ -1,4 +1,4 @@
-import { addonEndpointUrl } from './addon-endpoint-url'
+import { addonEndpointUrl } from './addon-endpoint-url.ts'
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
 import type { AddonDescriptor } from '@/types/addon'
@@ -8,6 +8,7 @@ import { getHostnameIdentifier } from './addon-identifier.ts'
 import { normalizeAddonUrl as _normalizeAddonUrl } from './addon-url.ts'
 import { mergeDestinationsPolicy } from './addon-destinations.ts'
 import { trace } from './trace.ts'
+import { isPlaceholderManifest } from './manifest-placeholder.ts'
 import { claimInstanceRemotes } from './addon-instance-identity.ts'
 
 const NON_ALPHANUMERIC_REGEX = /[^a-z0-9]/g
@@ -82,6 +83,16 @@ export function maskNameLevel(name: string, level: number): string {
     return `${name[0]}***${name[name.length - 1]}`
   }
   return '****'
+}
+
+/** Display label for an account under privacy levels: emails use the email level, names the name level, never a raw id. */
+export function maskAccountLabel(account: { name?: string | null; email?: string | null } | null | undefined, nameLevel: number, emailLevel: number): string {
+  const name = account?.name || account?.email || ''
+  return (name.includes('@') ? maskEmailLevel(name, emailLevel) : maskNameLevel(name, nameLevel)) || 'Unnamed Account'
+}
+
+export function maskedInitial(name: string, level: number): string {
+  return maskNameLevel(name, level).charAt(0).toUpperCase()
 }
 
 export function maskUrlLevel(url: string, level: number): string {
@@ -215,6 +226,8 @@ export function getLatestAddonVersion(
 export function isNewerVersion(current?: string, latest?: string): boolean {
   if (!latest || !current) return false
   if (latest === current) return false
+  // 0.0.0 is the placeholder version: an unknown install is not an outdated one.
+  if (current.replace(/^v/i, '') === '0.0.0') return false
 
   const parseVersion = (v: string) => {
     const lower = v.toLowerCase().replace(/^v/, '')
@@ -281,9 +294,15 @@ export function hasFallbackAddonIdentity(addon: Pick<AddonDescriptor, 'transport
  * read-side protection: URLs listed there survive even when `keepMissingLocal` is false
  * (their absence from the source is EXPECTED — the row is deliberately excluded from
  * that source).
+ *
+ * `keepLocalFlags` is the hub-authoritative flag mode: for matched rows the
+ * local (hub) flags win outright and `enabled` follows the local state
+ * regardless of the manifest freshness grace period. Every read fold
+ * (mergeRemoteIntoHub) and the deploy/Cinemeta folds pass it; rows discovered
+ * only on the platform still arrive with the platform's flag.
  */
 
-export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonDescriptor[], options: { keepMissingLocal?: boolean; keepMissingLocalUrls?: Set<string>; instanceMatch?: 'adopt-remote-url' | 'keep-local-url' } = {}) {
+export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonDescriptor[], options: { keepMissingLocal?: boolean; keepMissingLocalUrls?: Set<string>; instanceMatch?: 'adopt-remote-url' | 'keep-local-url'; keepLocalFlags?: boolean } = {}) {
   trace('merge', 'enter', { local: localAddons.length, remote: remoteAddons.length, keepMissingLocal: !!options.keepMissingLocal })
   let merged = 0, netNew = 0, keptMissingLocal = 0, keptSpecial = 0, dropped = 0, instanceMatched = 0
   const remoteAddonMap = new Map<string, AddonDescriptor>()
@@ -350,7 +369,11 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
         }
       }
 
-      const finalManifest = useLocalManifest ? localManifest : remoteManifest;
+      let finalManifest = useLocalManifest ? localManifest : remoteManifest;
+      if (isPlaceholderManifest(finalManifest)) {
+        const alternate = finalManifest === localManifest ? remoteManifest : localManifest
+        if (!isPlaceholderManifest(alternate)) finalManifest = alternate
+      }
 
       finalAddons.push({
         ...matchedRemote,
@@ -361,11 +384,17 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
           ? (options.instanceMatch === 'keep-local-url' ? localAddon.transportUrl : instanceRemote.transportUrl)
           : localAddon.transportUrl,
         manifest: finalManifest,
-        flags: {
-          ...matchedRemote.flags,
-          protected: localAddon.flags?.protected,
-          enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : (matchedRemote.flags?.enabled !== false),
-        },
+        flags: options.keepLocalFlags
+          ? {
+              ...matchedRemote.flags,
+              ...localAddon.flags,
+              enabled: localAddon.flags?.enabled !== false,
+            }
+          : {
+              ...matchedRemote.flags,
+              protected: localAddon.flags?.protected,
+              enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : (matchedRemote.flags?.enabled !== false),
+            },
         metadata: mergedMetadata,
         catalogOverrides: localAddon.catalogOverrides,
         note: localAddon.note,
@@ -380,13 +409,15 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
       else merged++
     } else {
       const hasCustomizations = localAddon.metadata?.customName || localAddon.metadata?.customLogo || localAddon.metadata?.customDescription;
-      const isProtected = localAddon.flags?.protected;
+      // Protected/official rows are shielded everywhere else (pushes, destination policy);
+      // a merge that drops missing locals must not quietly drop them from the hub either.
+      const isShielded = localAddon.flags?.protected || localAddon.flags?.official;
       const hasNote = Boolean(localAddon.note?.trim());
 
       if (localAddon.flags?.enabled === false) {
         finalAddons.push({ ...localAddon })
         keptSpecial++
-      } else if (isRecentLocalChange || hasCustomizations || isProtected || hasNote) {
+      } else if (isRecentLocalChange || hasCustomizations || isShielded || hasNote) {
         finalAddons.push({ ...localAddon })
         keptSpecial++
       } else if (options.keepMissingLocal || options.keepMissingLocalUrls?.has(normLocal)) {
@@ -412,8 +443,40 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
     }
   })
 
-  trace('merge', 'result', { local: localAddons.length, remote: remoteAddons.length, out: finalAddons.length, merged, netNew, keptMissingLocal, keptSpecial, dropped, instanceMatched })
-  return finalAddons
+  // A stale platform read can contain the same URL more than once. The merge
+  // maps remote rows by URL, but local rows are intentionally walked in order;
+  // without this final boundary the duplicate local rows would survive every
+  // sync and make the next reorder appear to revert. Keep the first position
+  // (the user's ordering) and the last merged descriptor (the freshest fields).
+  const seen = new Map<string, number>()
+  const deduped: AddonDescriptor[] = []
+  finalAddons.forEach((addon) => {
+    const key = normalizeAddonUrl(addon.transportUrl)
+    if (!key) {
+      deduped.push(addon)
+      return
+    }
+    const existing = seen.get(key)
+    if (existing === undefined) {
+      seen.set(key, deduped.length)
+      deduped.push(addon)
+      return
+    }
+    const mergedFlags = { ...(addon.flags || {}), ...(deduped[existing].flags || {}) }
+    const mergedMetadata = { ...(deduped[existing].metadata || {}), ...(addon.metadata || {}) }
+    deduped[existing] = {
+      ...deduped[existing],
+      ...addon,
+      transportUrl: addon.transportUrl || deduped[existing].transportUrl,
+      flags: Object.keys(mergedFlags).length > 0 ? mergedFlags : undefined,
+      metadata: Object.keys(mergedMetadata).length > 0 ? mergedMetadata : undefined,
+      catalogOverrides: addon.catalogOverrides || deduped[existing].catalogOverrides,
+      note: addon.note ?? deduped[existing].note,
+      destinations: mergeDestinationsPolicy(deduped[existing].destinations, addon.destinations),
+    }
+  })
+  trace('merge', 'result', { local: localAddons.length, remote: remoteAddons.length, out: deduped.length, merged, netNew, keptMissingLocal, keptSpecial, dropped, instanceMatched })
+  return deduped
 }
 
 export const ACCOUNT_COLORS = [

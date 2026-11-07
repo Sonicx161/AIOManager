@@ -239,7 +239,7 @@ export async function switchProfile(accountId: string, targetProfileId: string) 
             await useFailoverStore.getState().toggleAllRulesForAccount(accountId, true)
         } catch (rollbackErr) {
             if (import.meta.env.DEV) console.error('Failed to restore autopilot rules after setup switch failure:', rollbackErr)
-            toast({ variant: 'destructive', title: 'Autopilot rules may need manual re-enablement' })
+            toast({ variant: 'destructive', title: 'Autopilot rules may need manual re-enablement', href: `/account/${encodeURIComponent(accountId)}` })
         }
         store.setState({ error: error instanceof Error ? error.message : 'Failed to switch setup' })
         throw error

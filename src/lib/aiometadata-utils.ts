@@ -1,7 +1,8 @@
 import { AddonDescriptor } from '@/types/addon'
 import { useVaultStore } from '@/store/vaultStore'
+import type { VaultKey } from '@/types/vault'
 import { useSyncStore } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import {
     AIOMETADATA_SESSION_KEYS,
     buildAIOMetadataUpdateBody,
@@ -60,7 +61,7 @@ async function authHeaders(): Promise<Record<string, string>> {    const auth = 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     return headers
 }
@@ -77,7 +78,7 @@ export async function fetchAIOMetadataStatus(baseUrl: string): Promise<AIOMetada
         const headers: Record<string, string> = {}
         if (auth.isAuthenticated) {
             headers['x-sync-user'] = auth.id
-            headers['x-sync-password'] = await deriveSyncToken(auth.password)
+            headers['x-sync-password'] = await getSyncPasswordHeader(auth)
         }
         const params = new URLSearchParams({ baseUrl })
         const res = await fetch(`/api/aiometadata-status?${params}`, { headers })
@@ -95,7 +96,7 @@ export async function checkAIOMetadataTrusted(baseUrl: string, uuid: string): Pr
         const headers: Record<string, string> = {}
         if (auth.isAuthenticated) {
             headers['x-sync-user'] = auth.id
-            headers['x-sync-password'] = await deriveSyncToken(auth.password)
+            headers['x-sync-password'] = await getSyncPasswordHeader(auth)
         }
         const params = new URLSearchParams({ baseUrl, uuid })
         const res = await fetch(`/api/aiometadata-check?${params}`, { headers })
@@ -218,6 +219,46 @@ export async function removeAIOMetadataPassword(baseUrl: string, uuid: string): 
         (k.addonUuid === uuid || k.name === lookupName)
     )
     if (entry) await useVaultStore.getState().removeKey(entry.id)
+}
+
+// Instance addon password storage (connection pictures, scope change 2026-11-05).
+//
+// The addon password is a different secret from the config password above:
+// entries carry NO addonUuid and a distinct name so the password lookups can
+// never return the addon password and vice versa. Same vault, same encryption,
+// same sync/export path as every other stored credential.
+
+export function addonPasswordEntryName(baseUrl: string, uuid: string): string {
+    const host = baseUrl.replace(/^https?:\/\//, '')
+    const shortUuid = uuid.slice(0, 8)
+    return `AIOMetadata Addon · ${host} · ${shortUuid}`
+}
+
+function findAIOMetadataAddonPasswordEntry(keys: VaultKey[], baseUrl: string, uuid: string) {
+    const name = addonPasswordEntryName(baseUrl, uuid)
+    return keys.find(k => k.provider === 'aiometadata' && !k.addonUuid && k.name === name)
+}
+
+export function getStoredAIOMetadataAddonPassword(baseUrl: string, uuid: string): string | null {
+    const { keys, isLocked } = useVaultStore.getState()
+    if (isLocked) return null
+    return findAIOMetadataAddonPasswordEntry(keys, baseUrl, uuid)?.value ?? null
+}
+
+export async function saveAIOMetadataAddonPassword(baseUrl: string, uuid: string, addonPassword: string): Promise<void> {
+    const name = addonPasswordEntryName(baseUrl, uuid)
+    const { keys } = useVaultStore.getState()
+    const existing = findAIOMetadataAddonPasswordEntry(keys, baseUrl, uuid)
+    if (existing) {
+        await useVaultStore.getState().updateKey(existing.id, { value: addonPassword, serverUrl: baseUrl })
+    } else {
+        await useVaultStore.getState().addKey({ name, provider: 'aiometadata', value: addonPassword, serverUrl: baseUrl })
+    }
+}
+
+export async function removeAIOMetadataAddonPassword(baseUrl: string, uuid: string): Promise<void> {
+    const existing = findAIOMetadataAddonPasswordEntry(useVaultStore.getState().keys, baseUrl, uuid)
+    if (existing) await useVaultStore.getState().removeKey(existing.id)
 }
 
 // Config shaping -------------------------------------------------------------

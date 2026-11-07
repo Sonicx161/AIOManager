@@ -63,6 +63,8 @@ export interface AddonDescriptor {
     lastUpdated?: number
     cinemetaConfig?: import('./cinemeta').CinemetaConfigState
     hideConfigure?: boolean
+    // Pre-customization name/logo/description, captured locally so Reset works offline.
+    originalManifest?: { name?: string; logo?: string; description?: string }
   }
   catalogOverrides?: CatalogOverrides
   syncToLibrary?: boolean

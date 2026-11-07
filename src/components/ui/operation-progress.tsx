@@ -29,8 +29,9 @@ export function OperationProgress({
 
     const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0
     const isRunning = status === 'running' || status === 'cancelling'
+    const hasTotal = total > 0
     const defaultLabel = isRunning
-        ? `${current} of ${total}`
+        ? hasTotal ? `${current} of ${total}` : current > 0 ? `${current} processed` : 'Working...'
         : status === 'complete'
             ? 'Complete'
             : status === 'error'
@@ -44,7 +45,7 @@ export function OperationProgress({
                 status === 'error' ? 'bg-destructive/10' : 'bg-primary/10',
             )}>
                 {isRunning
-                    ? <RefreshCw className="h-4 w-4 text-primary animate-spin" />
+                    ? <RefreshCw className="h-4 w-4 text-primary animate-spin motion-reduce:animate-none" />
                     : status === 'error'
                         ? <AlertCircle className="h-4 w-4 text-destructive" />
                         : <XCircle className="h-4 w-4 text-muted-foreground" />}
@@ -57,7 +58,7 @@ export function OperationProgress({
                     <div className="truncate text-xs text-muted-foreground">{detail}</div>
                 )}
             </div>
-            {showPercent && total > 0 && (
+            {showPercent && hasTotal && (
                 <span className="shrink-0 text-sm font-bold tabular-nums text-primary">
                     {percent}%
                 </span>
@@ -65,10 +66,11 @@ export function OperationProgress({
         </div>
     )
 
-    const bar = total > 0
-        ? <Progress value={percent} shimmer={isRunning} className="h-1.5" />
+    const barLabel = label || defaultLabel
+    const bar = hasTotal
+        ? <Progress value={percent} shimmer={isRunning} aria-label={barLabel} className="h-1.5" />
         : isRunning
-            ? <Progress value={100} shimmer className="h-1.5" />
+            ? <Progress indeterminate aria-label={barLabel} className="h-1.5" />
             : null
 
     if (variant === 'bare') {

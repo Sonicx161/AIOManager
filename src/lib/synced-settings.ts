@@ -1,5 +1,7 @@
 import { useUIStore } from '@/store/uiStore'
 import { mergeCustomThemes, persistCustomThemes } from '@/lib/theme-utils'
+import { normalizeAutoUpdateSettings, type AutoUpdateSettings } from '@/lib/auto-update'
+import { normalizeVaultHeaderSettings, type VaultHeaderSettings } from '@/lib/vault-header-keys'
 
 export const SYNCED_SETTINGS_EVENT = 'aio-synced-settings-change'
 
@@ -39,6 +41,8 @@ export interface SyncedSettings {
     changelog?: unknown[]
     activity?: ActivitySettings
     notesGraph?: NotesGraphSettings
+    autoUpdate?: AutoUpdateSettings
+    vaultHeader?: VaultHeaderSettings
 }
 
 const STORAGE_KEYS = {
@@ -54,6 +58,8 @@ const STORAGE_KEYS = {
     hideDisabledAddons: 'aioman:hide-disabled-addons',
     addonPreviewCount: 'aioman:addon-preview-count',
     customThemes: 'aio-custom-themes',
+    autoUpdate: 'aioman:auto-update',
+    vaultHeader: 'aioman:vault-header',
     activityTimeFilter: 'activity-time-filter',
     activitySinceDate: 'activity-since-date',
     activityViewMode: 'activity-view-mode',
@@ -68,6 +74,51 @@ const STORAGE_KEYS = {
 } as const
 
 const isBrowser = () => typeof window !== 'undefined'
+
+// Per-storage-key value the cloud last applied or a confirmed push published. A stored value
+// that differs was edited locally after that point, so it is an unsynced edit: a later pull
+// (even one judged "remote newer" from lastSyncedAt) never overwrites it, and the marker
+// survives until a successful push republishes the local value.
+const SYNCED_VALUES_KEY = 'aio:synced-settings-values'
+const settingsStorageKeys = [...new Set(Object.values(STORAGE_KEYS))]
+
+function readSyncedValueMap(): Record<string, string> {
+    try {
+        const parsed = JSON.parse(getStorageItem(SYNCED_VALUES_KEY) || '{}')
+        return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+        return {}
+    }
+}
+
+function writeSyncedValueMap(values: Record<string, string>): void {
+    setStorageItem(SYNCED_VALUES_KEY, JSON.stringify(values))
+}
+
+function isUnsyncedLocalEdit(storageKey: string): boolean {
+    const known = readSyncedValueMap()[storageKey]
+    const stored = getStorageItem(storageKey)
+    // A key this device never stored holds the default, which is not a local edit.
+    return typeof known === 'string' && stored !== null && stored !== known
+}
+
+/** The storage form of the settings a push sends, defaults included, so keys edited mid-push stay unsynced. */
+export function snapshotSyncedSettingsValues(sent: SyncedSettings): Record<string, string | null> {
+    const values: Record<string, string | null> = Object.fromEntries(settingsStorageKeys.map(key => [key, null] as const))
+    for (const [key, value] of incomingStoredValues(sent)) values[key] = value
+    return values
+}
+
+/** A confirmed push made the sent values the cloud copy; keys edited since that snapshot stay unsynced. */
+export function markSyncedSettingsPushed(sent?: Record<string, string | null>): void {
+    const values = readSyncedValueMap()
+    for (const key of settingsStorageKeys) {
+        if (getStorageItem(key) === null) continue
+        const value = sent ? sent[key] : getStorageItem(key)
+        if (value !== null && value !== undefined) values[key] = value
+    }
+    writeSyncedValueMap(values)
+}
 
 function getStorageItem(key: string): string | null {
     if (!isBrowser()) return null
@@ -212,6 +263,40 @@ function dispatchSettingsChanged(detail: SyncedSettings): void {
     window.dispatchEvent(new CustomEvent(SYNCED_SETTINGS_EVENT, { detail }))
 }
 
+export function readAutoUpdateSettings(): AutoUpdateSettings {
+    const stored = getStorageItem(STORAGE_KEYS.autoUpdate)
+    if (!stored) return normalizeAutoUpdateSettings(undefined)
+    try {
+        return normalizeAutoUpdateSettings(JSON.parse(stored))
+    } catch {
+        return normalizeAutoUpdateSettings(undefined)
+    }
+}
+
+export function writeAutoUpdateSettings(next: AutoUpdateSettings): AutoUpdateSettings {
+    const normalized = normalizeAutoUpdateSettings(next)
+    setStorageItem(STORAGE_KEYS.autoUpdate, JSON.stringify(normalized))
+    dispatchSettingsChanged({ autoUpdate: normalized })
+    return normalized
+}
+
+export function readVaultHeaderSettings(): VaultHeaderSettings {
+    const stored = getStorageItem(STORAGE_KEYS.vaultHeader)
+    if (!stored) return normalizeVaultHeaderSettings(undefined)
+    try {
+        return normalizeVaultHeaderSettings(JSON.parse(stored))
+    } catch {
+        return normalizeVaultHeaderSettings(undefined)
+    }
+}
+
+export function writeVaultHeaderSettings(next: VaultHeaderSettings): VaultHeaderSettings {
+    const normalized = normalizeVaultHeaderSettings(next)
+    setStorageItem(STORAGE_KEYS.vaultHeader, JSON.stringify(normalized))
+    dispatchSettingsChanged({ vaultHeader: normalized })
+    return normalized
+}
+
 export function readSyncedSettings(): SyncedSettings {
     const uiState = useUIStore.getState()
     return {
@@ -227,6 +312,8 @@ export function readSyncedSettings(): SyncedSettings {
         hideDisabledAddons: readBoolean(STORAGE_KEYS.hideDisabledAddons, false),
         addonPreviewCount: readNumber(STORAGE_KEYS.addonPreviewCount, 4),
         customThemes: readJsonArray(STORAGE_KEYS.customThemes),
+        autoUpdate: readAutoUpdateSettings(),
+        ...(hasStorageItem(STORAGE_KEYS.vaultHeader) ? { vaultHeader: readVaultHeaderSettings() } : {}),
         activity: {
             timeFilter: isActivityTimeFilter(getStorageItem(STORAGE_KEYS.activityTimeFilter))
                 ? getStorageItem(STORAGE_KEYS.activityTimeFilter) as ActivityTimeFilter
@@ -247,14 +334,56 @@ export function readSyncedSettings(): SyncedSettings {
     }
 }
 
-export function applySyncedSettings(settings: SyncedSettings | undefined, overwrite = true): void {
+/** Incoming settings as their storage strings; only keys the payload actually carries. */
+function incomingStoredValues(settings: SyncedSettings): Array<[string, string]> {
+    const pairs: Array<[string, string]> = []
+    const add = (key: string, value: string) => { pairs.push([key, value]) }
+    if (typeof settings.theme === 'string' && settings.theme) add(STORAGE_KEYS.theme, settings.theme)
+    if (typeof settings.privacyMode === 'boolean') add(STORAGE_KEYS.privacyMode, JSON.stringify(settings.privacyMode))
+    if (typeof settings.privacyLevelNames === 'number') add(STORAGE_KEYS.privacyLevelNames, String(settings.privacyLevelNames))
+    if (typeof settings.privacyLevelUrls === 'number') add(STORAGE_KEYS.privacyLevelUrls, String(settings.privacyLevelUrls))
+    if (typeof settings.privacyLevelProfiles === 'number') add(STORAGE_KEYS.privacyLevelProfiles, String(settings.privacyLevelProfiles))
+    if (typeof settings.privacyLevelEmail === 'number') add(STORAGE_KEYS.privacyLevelEmail, String(settings.privacyLevelEmail))
+    if (isViewMode(settings.libraryViewMode)) add(STORAGE_KEYS.libraryViewMode, settings.libraryViewMode)
+    if (isViewMode(settings.accountsView)) add(STORAGE_KEYS.accountsView, settings.accountsView)
+    if (isViewMode(settings.addonListView)) add(STORAGE_KEYS.addonListView, settings.addonListView)
+    if (typeof settings.hideDisabledAddons === 'boolean') add(STORAGE_KEYS.hideDisabledAddons, String(settings.hideDisabledAddons))
+    if (typeof settings.addonPreviewCount === 'number') add(STORAGE_KEYS.addonPreviewCount, String(settings.addonPreviewCount))
+    if (Array.isArray(settings.customThemes)) add(STORAGE_KEYS.customThemes, JSON.stringify(settings.customThemes))
+    if (settings.autoUpdate && typeof settings.autoUpdate === 'object') add(STORAGE_KEYS.autoUpdate, JSON.stringify(normalizeAutoUpdateSettings(settings.autoUpdate)))
+    if (settings.vaultHeader && typeof settings.vaultHeader === 'object') add(STORAGE_KEYS.vaultHeader, JSON.stringify(normalizeVaultHeaderSettings(settings.vaultHeader)))
+    const activity = getIncomingActivitySettings(settings)
+    if (activity) {
+        if (activity.timeFilter) add(STORAGE_KEYS.activityTimeFilter, activity.timeFilter)
+        if (typeof activity.sinceDate === 'string') add(STORAGE_KEYS.activitySinceDate, activity.sinceDate)
+        if (activity.viewMode) add(STORAGE_KEYS.activityViewMode, activity.viewMode)
+    }
+    const notesGraph = getIncomingNotesGraphSettings(settings)
+    if (notesGraph) {
+        if (notesGraph.linkDistance !== undefined) add(STORAGE_KEYS.notesGraphLinkDistance, String(notesGraph.linkDistance))
+        if (notesGraph.repelStrength !== undefined) add(STORAGE_KEYS.notesGraphRepel, String(notesGraph.repelStrength))
+        if (notesGraph.centerGravity !== undefined) add(STORAGE_KEYS.notesGraphGravity, String(notesGraph.centerGravity))
+        if (notesGraph.rotation !== undefined) add(STORAGE_KEYS.notesGraphRotation, String(notesGraph.rotation))
+        if (notesGraph.showTags !== undefined) add(STORAGE_KEYS.notesGraphTags, String(notesGraph.showTags))
+        if (notesGraph.showOrphans !== undefined) add(STORAGE_KEYS.notesGraphOrphans, String(notesGraph.showOrphans))
+        if (notesGraph.nodeScale !== undefined) add(STORAGE_KEYS.notesGraphNodeScale, String(notesGraph.nodeScale))
+        if (notesGraph.transform) add(STORAGE_KEYS.notesGraphTransform, JSON.stringify(notesGraph.transform))
+    }
+    return pairs
+}
+
+export function applySyncedSettings(settings: SyncedSettings | undefined, overwrite = true, options: { protectLocalEdits?: boolean } = {}): void {
     if (!settings) return
     const applied: SyncedSettings = {}
-    const shouldWrite = (key: string) => overwrite || !hasStorageItem(key)
+    const shouldWrite = (key: string) => (overwrite || !hasStorageItem(key)) && !(options.protectLocalEdits && isUnsyncedLocalEdit(key))
 
+    const themesEditedLocally = !!options.protectLocalEdits && isUnsyncedLocalEdit(STORAGE_KEYS.customThemes)
     if (Array.isArray(settings.customThemes) && settings.customThemes.length > 0) {
         const existing = readJsonArray(STORAGE_KEYS.customThemes)
-        const merged = mergeCustomThemes(settings.customThemes as unknown[], existing as unknown[])
+        // A locally edited theme list keeps its same-ID winners: local becomes the merge priority.
+        const merged = themesEditedLocally
+            ? mergeCustomThemes(existing, settings.customThemes as unknown[])
+            : mergeCustomThemes(settings.customThemes as unknown[], existing as unknown[])
         persistCustomThemes(merged)
         applied.customThemes = merged
     }
@@ -324,6 +453,18 @@ export function applySyncedSettings(settings: SyncedSettings | undefined, overwr
         applied.addonPreviewCount = settings.addonPreviewCount
     }
 
+    if (settings.autoUpdate && typeof settings.autoUpdate === 'object' && shouldWrite(STORAGE_KEYS.autoUpdate)) {
+        const autoUpdate = normalizeAutoUpdateSettings(settings.autoUpdate)
+        setStorageItem(STORAGE_KEYS.autoUpdate, JSON.stringify(autoUpdate))
+        applied.autoUpdate = autoUpdate
+    }
+
+    if (settings.vaultHeader && typeof settings.vaultHeader === 'object' && shouldWrite(STORAGE_KEYS.vaultHeader)) {
+        const vaultHeader = normalizeVaultHeaderSettings(settings.vaultHeader)
+        setStorageItem(STORAGE_KEYS.vaultHeader, JSON.stringify(vaultHeader))
+        applied.vaultHeader = vaultHeader
+    }
+
     const activity = getIncomingActivitySettings(settings)
     if (activity) {
         const appliedActivity: ActivitySettings = {}
@@ -368,6 +509,21 @@ export function applySyncedSettings(settings: SyncedSettings | undefined, overwr
             appliedNotesGraph.transform = notesGraph.transform
         }
         if (Object.keys(appliedNotesGraph).length > 0) applied.notesGraph = appliedNotesGraph
+    }
+
+    if (options.protectLocalEdits) {
+        // Incoming keys whose stored value now equals the incoming value are the cloud copy,
+        // unchanged-equal included; keys a local edit moved away keep their unsynced marker.
+        const values = readSyncedValueMap()
+        for (const [key, value] of incomingStoredValues(settings)) {
+            if (key === STORAGE_KEYS.customThemes) {
+                const stored = getStorageItem(key)
+                if (!themesEditedLocally && stored !== null) values[key] = stored
+                continue
+            }
+            if (getStorageItem(key) === value) values[key] = value
+        }
+        writeSyncedValueMap(values)
     }
 
     if (Object.keys(applied).length > 0) {

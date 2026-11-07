@@ -1,7 +1,8 @@
 import { AddonDescriptor } from '@/types/addon'
 import { useVaultStore } from '@/store/vaultStore'
+import type { VaultKey } from '@/types/vault'
 import { useSyncStore } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { useAccountStore } from '@/store/accountStore'
 import { getAIOStreamsConfigureUrl, parseAIOStreamsUrl } from './aiostreams-url.ts'
 import {
@@ -64,7 +65,7 @@ export async function fetchAIOStreamsUser(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     const res = await fetch('/api/aiostreams-proxy/user', {
         method: 'POST',
@@ -101,7 +102,7 @@ export async function updateAIOStreamsUser(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     const res = await fetch('/api/aiostreams-proxy', {
         method: 'PUT',
@@ -129,7 +130,7 @@ export async function createAIOStreamsUser(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     const res = await fetch('/api/aiostreams-proxy', {
         method: 'POST',
@@ -155,7 +156,7 @@ export async function deleteAIOStreamsUser(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     const res = await fetch('/api/aiostreams-proxy', {
         method: 'DELETE',
@@ -174,7 +175,7 @@ export async function fetchAIOStreamsStatus(
         const headers: Record<string, string> = {}
         if (auth.isAuthenticated) {
             headers['x-sync-user'] = auth.id
-            headers['x-sync-password'] = await deriveSyncToken(auth.password)
+            headers['x-sync-password'] = await getSyncPasswordHeader(auth)
         }
         const params = new URLSearchParams({ baseUrl })
         const res = await fetch(`/api/aiostreams-status?${params}`, { headers })
@@ -534,6 +535,46 @@ export async function removeAIOStreamsPassword(baseUrl: string, uuid: string): P
     if (entry) {
         await useVaultStore.getState().removeKey(entry.id)
     }
+}
+
+// Instance access key storage (connection pictures, scope change 2026-11-05).
+//
+// The instance access key is a different secret from the config password
+// above: entries carry NO addonUuid and a distinct name so the password
+// lookups can never return an access key and vice versa. Same vault, same
+// encryption, same sync/export path as every other stored credential.
+
+export function accessKeyEntryName(baseUrl: string, uuid: string): string {
+    const host = baseUrl.replace(/^https?:\/\//, '')
+    const shortUuid = uuid.slice(0, 8)
+    return `AIOStreams Access · ${host} · ${shortUuid}`
+}
+
+function findAIOStreamsAccessKeyEntry(keys: VaultKey[], baseUrl: string, uuid: string) {
+    const name = accessKeyEntryName(baseUrl, uuid)
+    return keys.find(k => k.provider === 'aiostreams' && !k.addonUuid && k.name === name)
+}
+
+export function getStoredAIOStreamsAccessKey(baseUrl: string, uuid: string): string | null {
+    const { keys, isLocked } = useVaultStore.getState()
+    if (isLocked) return null
+    return findAIOStreamsAccessKeyEntry(keys, baseUrl, uuid)?.value ?? null
+}
+
+export async function saveAIOStreamsAccessKey(baseUrl: string, uuid: string, accessKey: string): Promise<void> {
+    const name = accessKeyEntryName(baseUrl, uuid)
+    const { keys } = useVaultStore.getState()
+    const existing = findAIOStreamsAccessKeyEntry(keys, baseUrl, uuid)
+    if (existing) {
+        await useVaultStore.getState().updateKey(existing.id, { value: accessKey, serverUrl: baseUrl })
+    } else {
+        await useVaultStore.getState().addKey({ name, provider: 'aiostreams', value: accessKey, serverUrl: baseUrl })
+    }
+}
+
+export async function removeAIOStreamsAccessKey(baseUrl: string, uuid: string): Promise<void> {
+    const existing = findAIOStreamsAccessKeyEntry(useVaultStore.getState().keys, baseUrl, uuid)
+    if (existing) await useVaultStore.getState().removeKey(existing.id)
 }
 
 export const PREDEFINED_FORMATTERS = [

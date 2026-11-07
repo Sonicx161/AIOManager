@@ -4,8 +4,9 @@ import { ACCOUNT_CONTEXT_BULK_OP } from '@/lib/account-contexts'
 import { getAddons, updateAddons, fetchAddonManifest } from '@/api/addons'
 import { identifyAddon } from '@/lib/addon-identifier'
 import { mergeAddons, removeAddons } from '@/lib/addon-merger'
-import { dedupeAddonsByTransportUrl, getAddonUrlKey } from '@/lib/addon-dedupe'
-import { normalizeAddonUrl, getAddonVersionKey } from '@/lib/utils'
+import { dedupeAddonsByUrl, findInstallSlot, getAddonUrlKey } from '@/lib/addon-dedupe'
+import { normalizeAddonUrl, getAddonVersionKey, maskAccountLabel } from '@/lib/utils'
+import { askDeployDecision } from '@/store/deployDecisionStore'
 import { normalizeUrl, saveAccountAddonStates, saveAddonLibrary } from '@/lib/addon-storage'
 import { useAuthStore } from '@/store/authStore'
 import { getCachedAuthKey, persistAccounts } from '@/store/accountStore'
@@ -16,6 +17,10 @@ import type {
   AccountAddonState,
   BulkResult,
   InstalledAddon,
+  DeployCandidate,
+  DeployChoice,
+  DeployDecider,
+  DeployDecisionItem,
   MergeResult,
   SavedAddon,
 } from '@/types/saved-addon'
@@ -65,13 +70,25 @@ async function canonicalStremioDeployProjection(accountId: string, addons: Addon
         const url = normalizeAddonUrl(a.transportUrl)
         return url && policyByUrl.has(url) && !a.destinations ? { ...a, destinations: policyByUrl.get(url) } : a
     })
+    const projected = effectiveAddonsFor(withPolicy, target)
     return {
-        list: effectiveAddonsFor(withPolicy, target),
+        list: projected,
         authorizedRemovals: excludedUrlsFor(withPolicy, target),
     }
 }
-import { restoreAddonDeletions } from '@/lib/addon-tombstones'
-import { trace, briefAddons } from '@/lib/trace'
+
+/**
+ * The common guarded destination-aware push for single-target user writes: the
+ * canonical Stremio login receives the enabled destination projection of the
+ * caller's hub list, with policy removals authorized for the anti-wipe guard.
+ */
+export async function pushHubToStremio(accountId: string, authKey: string, addons: AddonDescriptor[]): Promise<void> {
+    if (!(await shouldPushToStremio(accountId))) return
+    const projection = await canonicalStremioDeployProjection(accountId, addons)
+    await updateAddons(authKey, projection.list, accountId, { authorizedRemovals: projection.authorizedRemovals })
+}
+import { addTombstones, restoreAddonDeletions } from '@/lib/addon-tombstones'
+import { trace } from '@/lib/trace'
 import { cloneAddonsWithMode } from '@/lib/clone-mode'
 import type { CloneMode } from '@/lib/clone-mode'
 
@@ -88,7 +105,7 @@ const getEncryptionKey = () => {
   return key
 }
 
-function updateActiveProfile(account: Account, updatedAddons: AddonDescriptor[]): Account {
+export function updateActiveProfile(account: Account, updatedAddons: AddonDescriptor[]): Account {
   if (!account.activeProfileId || !account.profiles) return account
   return {
     ...account,
@@ -118,7 +135,8 @@ async function acknowledgeExplicitInstall(accountId: string, result: MergeResult
   persistAccounts(useAccountStore.getState().accounts)
 }
 
-export const SAVED_ADDON_ACCOUNT_CONCURRENCY = 5
+import { SAVED_ADDON_ACCOUNT_CONCURRENCY } from './deployment-constants'
+export { SAVED_ADDON_ACCOUNT_CONCURRENCY }
 
 const createEmptyMergeResult = (): MergeResult => ({
   added: [],
@@ -286,6 +304,8 @@ export async function applySavedAddonToAccount(
 ): Promise<MergeResult> {
   const useAddonStore = await getStore()
   useAddonStore.setState({ loading: true, error: null })
+  const { acquireSyncMutex } = await import('../accountStore')
+  const release = await acquireSyncMutex(accountId)
   try {
     const savedAddon = useAddonStore.getState().library[savedAddonId]
     if (!savedAddon) {
@@ -293,24 +313,36 @@ export async function applySavedAddonToAccount(
     }
 
     const authKey = await getCachedAuthKey(accountAuthKey, getEncryptionKey())
-    const currentAddons = await getAddons(authKey, accountId)
+    const platformRead = await getAddons(authKey, accountId)
+    // The hub is the deploy's source of truth: platform rows only add, hub flags and
+    // policy win regardless of lastUpdated, tombstoned remote rows stay suppressed (R3-01, DC-01).
+    const { useAccountStore } = await import('../accountStore')
+    const { mergeRemoteIntoHub } = await import('../account/accountSync')
+    const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
+    const currentAddons = account ? mergeRemoteIntoHub(account, platformRead, { keepLocalFlags: true }) : platformRead
     trace('deploy.apply', 'read', { savedAddonId, accountId, current: currentAddons.length })
 
     const { addons: updatedAddons, result } = await mergeAddons(
       currentAddons,
       [savedAddon],
       accountId,
-      true
+      true,
+      Object.values(useAddonStore.getState().library),
+      () => 'keep'
     )
 
-    if (await shouldPushToStremio(accountId)) {
-      const stremioProjection = await canonicalStremioDeployProjection(accountId, updatedAddons)
-      await updateAddons(authKey, stremioProjection.list, accountId, { authorizedRemovals: stremioProjection.authorizedRemovals })
-      await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    await pushHubToStremio(accountId, authKey, updatedAddons)
+    await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    const current = useAccountStore.getState()
+    const hubAccount = current.accounts.find(a => a.id === accountId)
+    if (hubAccount) {
+      const updatedAccount = updateActiveProfile({ ...hubAccount, addons: updatedAddons, lastSync: new Date() }, updatedAddons)
+      useAccountStore.setState({ accounts: current.accounts.map(a => a.id === accountId ? updatedAccount : a) })
+      persistAccounts(useAccountStore.getState().accounts)
     }
     trace('deploy.apply', 'pushed', { savedAddonId, accountId, count: updatedAddons.length })
     const { pushToConnections } = await import('../account/accountAddonOps')
-    pushToConnections(accountId).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
+    pushToConnections(accountId, { addons: updatedAddons }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
 
     const library = { ...useAddonStore.getState().library }
     library[savedAddonId] = { ...savedAddon, lastUsed: new Date() }
@@ -326,6 +358,7 @@ export async function applySavedAddonToAccount(
     useAddonStore.setState({ error: message })
     throw error
   } finally {
+    release()
     useAddonStore.setState({ loading: false })
   }
 }
@@ -355,24 +388,38 @@ export async function applyTagToAccount(
   }
 
   useAddonStore.setState({ loading: true, error: null })
+  const { acquireSyncMutex } = await import('../accountStore')
+  const release = await acquireSyncMutex(accountId)
   try {
     const authKey = await getCachedAuthKey(accountAuthKey, getEncryptionKey())
-    const currentAddons = await getAddons(authKey, accountId)
+    const platformRead = await getAddons(authKey, accountId)
+    // The hub is the deploy's source of truth: platform rows only add, hub flags and
+    // policy win regardless of lastUpdated, tombstoned remote rows stay suppressed (R3-01, DC-01).
+    const { useAccountStore } = await import('../accountStore')
+    const { mergeRemoteIntoHub } = await import('../account/accountSync')
+    const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
+    const currentAddons = account ? mergeRemoteIntoHub(account, platformRead, { keepLocalFlags: true }) : platformRead
 
     const { addons: updatedAddons, result } = await mergeAddons(
       currentAddons,
       savedAddons,
       accountId,
-      true
+      true,
+      Object.values(useAddonStore.getState().library),
+      () => 'keep'
     )
 
-    if (await shouldPushToStremio(accountId)) {
-      const stremioProjection = await canonicalStremioDeployProjection(accountId, updatedAddons)
-      await updateAddons(authKey, stremioProjection.list, accountId, { authorizedRemovals: stremioProjection.authorizedRemovals })
-      await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    await pushHubToStremio(accountId, authKey, updatedAddons)
+    await acknowledgeExplicitInstall(accountId, result, updatedAddons)
+    const current = useAccountStore.getState()
+    const hubAccount = current.accounts.find(a => a.id === accountId)
+    if (hubAccount) {
+      const updatedAccount = updateActiveProfile({ ...hubAccount, addons: updatedAddons, lastSync: new Date() }, updatedAddons)
+      useAccountStore.setState({ accounts: current.accounts.map(a => a.id === accountId ? updatedAccount : a) })
+      persistAccounts(useAccountStore.getState().accounts)
     }
     const { pushToConnections } = await import('../account/accountAddonOps')
-    pushToConnections(accountId).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
+    pushToConnections(accountId, { addons: updatedAddons }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
 
     const library = { ...useAddonStore.getState().library }
     savedAddons.forEach((savedAddon) => {
@@ -389,6 +436,7 @@ export async function applyTagToAccount(
     useAddonStore.setState({ error: message })
     throw error
   } finally {
+    release()
     useAddonStore.setState({ loading: false })
   }
 }
@@ -403,7 +451,8 @@ export async function applyTagToAccounts(
 export async function bulkApplySavedAddons(
   savedAddonIds: string[],
   accountIds: Array<{ id: string; authKey: string }>,
-  allowProtected = true
+  allowProtected = true,
+  options: { batch?: AbortController } = {}
 ): Promise<BulkResult> {
   const useAddonStore = await getStore()
   useAddonStore.setState({ loading: true, error: null })
@@ -429,7 +478,14 @@ export async function bulkApplySavedAddons(
       details: [],
     }
 
-    await mapConcurrent(accountIds, SAVED_ADDON_ACCOUNT_CONCURRENCY, async ({ id: accountId, authKey: accountAuthKey }) => {
+    type Awaiting = { pending: DeployDecisionItem[]; candidates: Record<string, DeployCandidate> }
+    const awaiting = new Map<string, Awaiting>()
+    // An account with a question nothing has answered (or whose answer no longer
+    // matches its candidate) is held back unwritten and its questions are returned.
+    // A cancelled batch (Cancel on any of its questions, or the batch's own Cancel) stops
+    // every account before its first write; 'stopped' marks an account it stopped.
+    const batchCancelled = () => !!options.batch?.signal.aborted
+    const deployToAccount = async ({ id: accountId, authKey: accountAuthKey }: { id: string; authKey: string }, decide?: DeployDecider): Promise<Awaiting | 'stopped' | undefined> => {
       try {
         const { useAccountStore } = await import('../accountStore')
         const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
@@ -443,21 +499,34 @@ export async function bulkApplySavedAddons(
           currentAddons = account?.addons || []
         } else {
           authKey = await getCachedAuthKey(accountAuthKey, getEncryptionKey())
-          currentAddons = await getAddons(authKey, accountId)
+          const platformRead = await getAddons(authKey, accountId)
+          // The hub is the deploy's source of truth: platform rows only add, hub flags
+          // and policy win regardless of lastUpdated, tombstoned remote rows stay
+          // suppressed (R3-01, DC-01).
+          const { mergeRemoteIntoHub } = await import('../account/accountSync')
+          currentAddons = account ? mergeRemoteIntoHub(account, platformRead, { keepLocalFlags: true }) : platformRead
         }
 
-        trace('deploy', 'before-merge', { accountId, isLocalAccount, hasNonStremioConnections, current: currentAddons.length, saving: savedAddons.length, savingUrls: savedAddons.map(s => s.installUrl.slice(-48)), currentAddons: briefAddons(currentAddons) })
+        trace('deploy', 'before-merge', { accountId, isLocalAccount, hasNonStremioConnections, current: currentAddons.length, saving: savedAddons.length, savingIds: savedAddons.map(s => s.manifest.id), currentIds: currentAddons.map(a => a.manifest?.id || '?') })
 
         const { addons: mergedAddons, result: mergeResult } = await mergeAddons(
           currentAddons,
           savedAddons,
           accountId,
-          allowProtected
+          allowProtected,
+          Object.values(useAddonStore.getState().library),
+          decide
         )
 
-        trace('deploy', 'after-merge', { accountId, added: mergeResult.added.map(a => a.installUrl?.slice(-48) || a.addonId), updated: mergeResult.updated.map(u => u.addonId), skipped: mergeResult.skipped.map(s => s.addonId), protected: mergeResult.protected.map(p => p.addonId), merged: mergedAddons.length })
+        if (mergeResult.pending?.length) {
+          trace('deploy', 'awaiting-decision', { accountId, pending: mergeResult.pending.map(p => p.addonId) })
+          return { pending: mergeResult.pending, candidates: mergeResult.candidates || {} }
+        }
 
-        const updatedAddons = dedupeAddonsByTransportUrl(mergedAddons).map(addon => ({
+        trace('deploy', 'after-merge', { accountId, added: mergeResult.added.map(a => a.addonId), updated: mergeResult.updated.map(u => u.addonId), skipped: mergeResult.skipped.map(s => s.addonId), protected: mergeResult.protected.map(p => p.addonId), merged: mergedAddons.length })
+
+        // mergeAddons already deduped and kept the planner's separate copies apart.
+        const updatedAddons = mergedAddons.map(addon => ({
           ...addon,
           metadata: {
             ...(addon.metadata || {}),
@@ -465,12 +534,31 @@ export async function bulkApplySavedAddons(
           }
         }))
         const installed = explicitMergeAddons(mergeResult, updatedAddons)
+        // A Replace answer removed exactly these old URLs: tombstone them (never one still
+        // installed, never the new copy) so a stale sync or cloud snapshot cannot bring them back.
+        const stillInstalled = new Set(updatedAddons.map(a => normalizeAddonUrl(a.transportUrl)))
+        const replacedOld = (mergeResult.replaced || []).filter(r => !stillInstalled.has(normalizeAddonUrl(r.oldUrl)))
+        // A Stremio read carries no Hub policy: the replaced Hub row's destinations move onto
+        // the library copy before any write or connection fan-out is projected (R1).
+        if (!isLocalAccount) {
+          for (const r of replacedOld) {
+            const policy = account?.addons.find(row => normalizeAddonUrl(row.transportUrl) === normalizeAddonUrl(r.oldUrl))?.destinations
+            const i = updatedAddons.findIndex(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(r.newUrl))
+            if (policy && i >= 0 && !updatedAddons[i].destinations) updatedAddons[i] = { ...updatedAddons[i], destinations: policy }
+          }
+        }
+        const withReplaceTombstones = (state: { deletedAddons: Record<string, number>; restoredAddons: Record<string, number> }) =>
+          replacedOld.length === 0 ? state : { ...state, deletedAddons: addTombstones(state.deletedAddons, replacedOld.map(r => r.oldUrl), Date.now(), state.restoredAddons) }
 
+        if (batchCancelled()) {
+          trace('deploy', 'stopped', { accountId })
+          return 'stopped'
+        }
         if (isLocalAccount) {
           const state = useAccountStore.getState()
           const localAccount = state.accounts.find(a => a.id === accountId)
           if (localAccount) {
-            const deletionState = restoreAddonDeletions(localAccount.deletedAddons, localAccount.restoredAddons, installed)
+            const deletionState = withReplaceTombstones(restoreAddonDeletions(localAccount.deletedAddons, localAccount.restoredAddons, installed))
             let updatedAccount: Account = { ...localAccount, addons: updatedAddons, ...deletionState, lastSync: new Date() }
             updatedAccount = updateActiveProfile(updatedAccount, updatedAddons)
             useAccountStore.setState({
@@ -480,27 +568,57 @@ export async function bulkApplySavedAddons(
           }
           if (isConnectedNonStremio) {
             const { pushToConnections } = await import('../account/accountAddonOps')
-            pushToConnections(accountId).catch(err => { if (import.meta.env.DEV) console.error('Failed to push to connections:', err) })
+            pushToConnections(accountId, { signal: options.batch?.signal }).catch(err => { if (import.meta.env.DEV) console.error('Failed to push to connections:', err) })
           }
         } else {
-          trace('deploy', 'stremio-push', { accountId, pushing: updatedAddons.length, addons: briefAddons(updatedAddons) })
-          if (await shouldPushToStremio(accountId)) {
-            const stremioProjection = await canonicalStremioDeployProjection(accountId, updatedAddons)
-            await updateAddons(authKey, stremioProjection.list, accountId, { authorizedRemovals: stremioProjection.authorizedRemovals })
-          }
           const state = useAccountStore.getState()
           const stremioAccount = state.accounts.find(a => a.id === accountId)
-          if (stremioAccount) {
-            const deletionState = restoreAddonDeletions(stremioAccount.deletedAddons, stremioAccount.restoredAddons, installed)
-            useAccountStore.setState({ accounts: state.accounts.map(a => a.id === accountId ? { ...a, ...deletionState } : a) })
-            persistAccounts(useAccountStore.getState().accounts)
+          let finalAddons = updatedAddons
+          if (stremioAccount && replacedOld.length > 0) {
+            // The Hub row of a replaced copy becomes the library copy in place, keeping
+            // its own flags and policy, so no stale copy is listed next to the new one.
+            finalAddons = updatedAddons.map(addon => {
+              const swap = replacedOld.find(r => normalizeAddonUrl(r.newUrl) === normalizeAddonUrl(addon.transportUrl))
+              const hubRow = swap && stremioAccount.addons.find(row => normalizeAddonUrl(row.transportUrl) === normalizeAddonUrl(swap.oldUrl))
+              return hubRow ? { ...hubRow, transportUrl: addon.transportUrl, manifest: addon.manifest, metadata: { ...hubRow.metadata, ...addon.metadata } } : addon
+            })
           }
+          trace('deploy', 'stremio-push', { accountId, pushing: finalAddons.length, ids: finalAddons.map(a => a.manifest?.id || '?') })
+          if (await shouldPushToStremio(accountId)) {
+            const stremioProjection = await canonicalStremioDeployProjection(accountId, finalAddons)
+            // Last check before the remote write; once it lands, the Hub, tombstone and rule
+            // bookkeeping below always follows so the account stays consistent.
+            if (batchCancelled()) {
+              trace('deploy', 'stopped', { accountId })
+              return 'stopped'
+            }
+            await updateAddons(authKey, stremioProjection.list, accountId, { authorizedRemovals: stremioProjection.authorizedRemovals })
+          }
+          // Commit only this account against the LATEST store state: sibling accounts in
+          // the same batch may have committed while this write was in flight, and their
+          // installs and tombstones must survive (DC-02). The deletion bookkeeping is
+          // derived from the latest target account inside the update.
+          useAccountStore.setState(prev => {
+            const current = prev.accounts.find(a => a.id === accountId)
+            if (!current) return {}
+            const deletionState = withReplaceTombstones(restoreAddonDeletions(current.deletedAddons, current.restoredAddons, installed))
+            const updatedAccount = updateActiveProfile({ ...current, addons: finalAddons, ...deletionState, lastSync: new Date() }, finalAddons)
+            return { accounts: prev.accounts.map(a => a.id === accountId ? updatedAccount : a) }
+          })
+          persistAccounts(useAccountStore.getState().accounts)
           const { pushToConnections } = await import('../account/accountAddonOps')
-          pushToConnections(accountId, { addons: updatedAddons }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
-          // Refresh account.addons through the metadata-preserving passive merge so the deploy
-          // surfaces promptly without the deploy path overwriting local flags.
+          pushToConnections(accountId, { addons: finalAddons, signal: options.batch?.signal }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
+          // Debounced additive refresh keeps manifests and bookkeeping current.
           const { scheduleSyncAccount } = await import('../account/accountSync')
           scheduleSyncAccount(accountId)
+        }
+
+        // Failover rules follow a replaced copy like every other URL swap (best effort).
+        if (replacedOld.length > 0) {
+          const { useFailoverStore } = await import('@/store/failoverStore')
+          for (const r of replacedOld) {
+            await useFailoverStore.getState().replaceUrlInRules(r.oldUrl, r.newUrl, accountId).catch(() => {})
+          }
         }
 
         result.success++
@@ -514,7 +632,78 @@ export async function bulkApplySavedAddons(
           error: error instanceof Error ? error.message : 'Unknown error',
         })
       }
+    }
+
+    // Every read, merge and write runs under the account's sync mutex; an account that
+    // must ask releases it while the question is open and re-reads under it to write.
+    const { acquireSyncMutex: lockAccount } = await import('../accountStore')
+    await mapConcurrent(accountIds, SAVED_ADDON_ACCOUNT_CONCURRENCY, async target => {
+      const release = await lockAccount(target.id)
+      let held: Awaiting | 'stopped' | undefined
+      try {
+        held = batchCancelled() ? 'stopped' : await deployToAccount(target)
+      } finally {
+        release()
+      }
+      if (held === 'stopped') result.cancelled = (result.cancelled || 0) + 1
+      else if (held) awaiting.set(target.id, held)
     })
+
+    // Accounts holding an older different-config copy ask one question per copy,
+    // in account order; each account is written right after its answers.
+    const asking = accountIds.filter(target => awaiting.has(target.id))
+    if (asking.length > 0) {
+      const { useAccountStore, acquireSyncMutex } = await import('../accountStore')
+      const { useUIStore } = await import('../uiStore')
+      const ui = useUIStore.getState()
+      const nameLevel = ui.isPrivacyModeEnabled ? ui.privacyLevelNames : 0
+      const emailLevel = ui.isPrivacyModeEnabled ? ui.privacyLevelEmail : 0
+      let total = asking.reduce((n, target) => n + (awaiting.get(target.id)?.pending.length || 0), 0)
+      let asked = 0
+      let sticky: DeployChoice | null = null
+      let cancelled = false
+      for (const [position, target] of asking.entries()) {
+        if (cancelled || batchCancelled()) { cancelled = true; result.cancelled = (result.cancelled || 0) + 1; continue }
+        const account = useAccountStore.getState().accounts.find(a => a.id === target.id)
+        const accountLabel = maskAccountLabel(account, nameLevel, emailLevel)
+        // A Replace answer binds to the exact entry it was asked about. The write replans
+        // under the account's sync mutex; if a sync changed or removed that entry meanwhile,
+        // the account is asked again (keep both once questions run out).
+        const approvals = new Map<string, { choice: DeployChoice } & DeployCandidate>()
+        const decide: DeployDecider = (savedAddonId, candidate) => {
+          const approval = approvals.get(savedAddonId)
+          if (!approval) return undefined
+          if (approval.choice === 'keep') return 'keep'
+          return approval.key === candidate.key && approval.index === candidate.index ? 'replace' : undefined
+        }
+        let held: Awaiting | undefined = awaiting.get(target.id)
+        for (let round = 0; held && !cancelled; round++) {
+          for (const item of held.pending) {
+            const candidate = held.candidates[item.savedAddonId]
+            if (round > 0) total++
+            asked++
+            if (round >= 3) { approvals.set(item.savedAddonId, { choice: 'keep', ...candidate }); continue }
+            if (sticky && round === 0) { approvals.set(item.savedAddonId, { choice: sticky, ...candidate }); continue }
+            const answer = await askDeployDecision({ accountLabel, addonName: item.name, existingLabel: item.existingLabel, libraryLabel: item.libraryLabel, index: asked, total, remainingAccounts: asking.length - position - 1 }, options.batch?.signal)
+            if (answer === 'cancel') { cancelled = true; options.batch?.abort(); break }
+            const choice = answer?.choice ?? 'keep'
+            approvals.set(item.savedAddonId, { choice, ...candidate })
+            if (answer?.applyToRest) sticky = choice
+          }
+          if (cancelled) break
+          trace('deploy', 'decided', { accountId: target.id, round, choices: [...approvals.values()].map(a => a.choice) })
+          const release = await acquireSyncMutex(target.id)
+          try {
+            const outcome = batchCancelled() ? 'stopped' : await deployToAccount(target, decide)
+            if (outcome === 'stopped') cancelled = true
+            else held = outcome
+          } finally {
+            release()
+          }
+        }
+        if (cancelled) { result.cancelled = (result.cancelled || 0) + 1; continue }
+      }
+    }
 
     const library = { ...useAddonStore.getState().library }
     savedAddons.forEach((applied) => {
@@ -843,7 +1032,8 @@ export async function bulkReinstallAddons(
   addonIds: string[],
   accountIds: Array<{ id: string; authKey: string }>,
   allowProtected = false,
-  onProgress?: (current: number, total: number) => void
+  onProgress?: (current: number, total: number) => void,
+  options: { skipConnectionPlatforms?: string[] } = {}
 ): Promise<BulkResult> {
   const m = await import('../addonStore') as typeof import('../addonStore')
   const useAddonStore: StoreRef = m.useAddonStore
@@ -1009,7 +1199,7 @@ export async function bulkReinstallAddons(
         }
 
         const { pushToConnections } = await import('../account/accountAddonOps')
-        pushToConnections(accountId).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
+        pushToConnections(accountId, { addons: updateResults.length > 0 ? targetCollection : undefined, skipPlatforms: options.skipConnectionPlatforms }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
 
         await useAddonStore.getState().syncAccountState(accountId, accountAuthKey, targetCollection)
 
@@ -1200,13 +1390,13 @@ export async function bulkInstallFromUrls(
           mergeResultDetails.skipped.push({ addonId: url, reason: 'fetch-failed' })
         })
 
+        const preExisting = updatedAddons.length
+        const taken = new Set<number>()
         for (const newAddon of validDescriptors) {
-          const normNew = getAddonUrlKey(newAddon.transportUrl)
-          const existingIndex = updatedAddons.findIndex(
-            (a) => getAddonUrlKey(a.transportUrl) === normNew
-          )
+          const existingIndex = findInstallSlot(updatedAddons, newAddon, preExisting, taken)
 
           if (existingIndex >= 0) {
+            taken.add(existingIndex)
             const existing = updatedAddons[existingIndex]
             if (existing.flags?.protected && !allowProtected) {
               mergeResultDetails.protected.push({
@@ -1218,8 +1408,10 @@ export async function bulkInstallFromUrls(
 
             const finalDescriptor = {
               ...newAddon,
+              flags: existing.flags ?? newAddon.flags,
               metadata: { ...existing.metadata, ...newAddon.metadata },
               catalogOverrides: existing.catalogOverrides,
+              destinations: existing.destinations,
             }
 
             updatedAddons[existingIndex] = finalDescriptor
@@ -1238,7 +1430,7 @@ export async function bulkInstallFromUrls(
           }
         }
 
-        const dedupedAddons = dedupeAddonsByTransportUrl(updatedAddons)
+        const dedupedAddons = dedupeAddonsByUrl(updatedAddons)
         const installed = explicitMergeAddons(mergeResultDetails, dedupedAddons)
 
         if (isLocalAccount) {
@@ -1270,7 +1462,7 @@ export async function bulkInstallFromUrls(
             persistAccounts(useAccountStore.getState().accounts)
           }
           const { pushToConnections } = await import('../account/accountAddonOps')
-          pushToConnections(accountId, { addons: dedupedAddons }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.' }) })
+          pushToConnections(accountId, { addons: dedupedAddons }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
           const { scheduleSyncAccount } = await import('../account/accountSync')
           scheduleSyncAccount(accountId)
         }
@@ -1598,10 +1790,9 @@ export async function syncAccountState(accountId: string, accountAuthKey: string
         ? linkedSavedAddonIds.has(syncableSavedAddon.id)
         : false
 
+      // Keep in sync is one-way (library to accounts): an account's own URL stays on its
+      // record and never rewrites the shared library entry from a read.
       if (syncableSavedAddon && syncableSavedAddon.installUrl !== addon.transportUrl && alreadyLinked) {
-        if (import.meta.env.DEV) console.log(`[AddonStore] Inbound Sync: Updating library URL for "${syncableSavedAddon.name}" from account ${accountId}`)
-        useAddonStore.getState().replaceTransportUrlUniversally(syncableSavedAddon.id, syncableSavedAddon.installUrl, addon.transportUrl, accountId).catch(e => { if (import.meta.env.DEV) console.error(e) })
-
         installedAddons.push({
           savedAddonId: syncableSavedAddon.id,
           addonId,

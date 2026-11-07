@@ -1,34 +1,81 @@
 import { useCallback, useState, useEffect } from 'react'
 
+export const DEFAULT_TOAST_DURATION = 5000
+
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
+
 export interface Toast {
   id: string
   title: string
   description?: React.ReactNode
   variant?: 'default' | 'destructive' | 'warning'
   className?: string
+  action?: ToastAction
+  duration?: number
+  href?: string
+  accountId?: string
+  history?: boolean
+  createdAt: number
 }
 
+type ToastInput = Omit<Toast, 'id' | 'createdAt'> & { id?: string }
+
 let toastListeners: ((toasts: Toast[]) => void)[] = []
+let toastSinks: ((toast: Toast) => void)[] = []
 let toasts: Toast[] = []
 
 const notifyListeners = () => {
   toastListeners.forEach((listener) => listener([...toasts]))
 }
 
-// Standalone toast function that can be used outside of React components
-export function toast({ title, description, variant = 'default', className }: Omit<Toast, 'id'>) {
-  const id = crypto.randomUUID()
-  const newToast: Toast = { id, title, description, variant, className }
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  toasts = [...toasts, newToast]
+export function subscribeToToasts(sink: (toast: Toast) => void) {
+  toastSinks.push(sink)
+  return () => {
+    toastSinks = toastSinks.filter((s) => s !== sink)
+  }
+}
+
+function removeToast(id: string) {
+  const timer = toastTimers.get(id)
+  if (timer) clearTimeout(timer)
+  toastTimers.delete(id)
+  toasts = toasts.filter((t) => t.id !== id)
   notifyListeners()
+}
 
-  setTimeout(() => {
-    toasts = toasts.filter((t) => t.id !== id)
-    notifyListeners()
-  }, 5000)
+// Standalone toast function that can be used outside of React components
+export function toast({ id: givenId, title, description, variant = 'default', className, action, duration, href, accountId, history }: ToastInput) {
+  const id = givenId ?? crypto.randomUUID()
+  const newToast: Toast = { id, title, description, variant, className, action, duration, href, accountId, history, createdAt: Date.now() }
+
+  const existingTimer = toastTimers.get(id)
+  if (existingTimer) clearTimeout(existingTimer)
+  toastTimers.delete(id)
+  toasts = [...toasts.filter((t) => t.id !== id), newToast]
+  notifyListeners()
+  toastSinks.forEach((sink) => {
+    try {
+      sink(newToast)
+    } catch {
+      // a recorder failure must never block the toast
+    }
+  })
+
+  const ms = duration ?? DEFAULT_TOAST_DURATION
+  if (Number.isFinite(ms) && ms > 0) {
+    toastTimers.set(id, setTimeout(() => removeToast(id), ms))
+  }
 
   return id
+}
+
+export function dismissToast(toastId: string) {
+  removeToast(toastId)
 }
 
 export function useToast() {
@@ -42,10 +89,7 @@ export function useToast() {
     }
   }, [])
 
-  const dismiss = useCallback((toastId: string) => {
-    toasts = toasts.filter((t) => t.id !== toastId)
-    notifyListeners()
-  }, [])
+  const dismiss = useCallback((toastId: string) => dismissToast(toastId), [])
 
   return {
     toast,

@@ -6,6 +6,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { useToast } from '@/hooks/use-toast'
 import { fetchAddonManifest } from '@/api/addons'
 import { cn, getStremioLink, maskUrlLevel } from '@/lib/utils'
+import { maskSecretUrl } from '@/lib/mask-secret-url'
+import { compactAddonUrl } from './addon-card-helpers'
 import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor, AddonManifest } from '@/types/addon'
@@ -47,7 +49,8 @@ export function SourceUrlBox({
   const [pendingDescriptor, setPendingDescriptor] = useState<AddonDescriptor | null>(null)
   const [needsConfirm, setNeedsConfirm] = useState(false)
 
-  const displayUrl = maskUrlLevel(sourceUrl, privacyMode ? privacyLevelUrls : 0)
+  const levelMasked = maskUrlLevel(sourceUrl, privacyMode ? privacyLevelUrls : 0)
+  const displayUrl = levelMasked === sourceUrl ? compactAddonUrl(maskSecretUrl(sourceUrl)) : levelMasked
   const currentId = sourceManifest?.id || 'unknown'
   const pendingId = pendingDescriptor?.manifest?.id || 'unknown'
 

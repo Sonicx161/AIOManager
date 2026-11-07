@@ -10,7 +10,11 @@ import { invalidateCanonicalAddons } from './hydra.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
 import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash } from '../lib/sync-password.js'
 import { isRegistrationsClosed } from '../config.js'
+import { assertAccountActive, assertWritablePrimary, refreshAccountAdminState } from '../admin/account-state.js'
+import { invalidateSyncResponseCache, getSyncResponseCache, setSyncResponseCache, syncResponseCacheStats } from '../lib/sync-response-cache.js'
+import { noteSyncWrite } from '../lib/wal-checkpoint.js'
 import { trace } from '../utils/trace.js'
+import { maskContext } from '../utils/log-helpers.js'
 
 function buildMultiRowPlaceholders(numRows, numCols) {
     const rows = []
@@ -106,6 +110,8 @@ export function registerSyncRoutes(fastify) {
             }
         }
     }, async (request, reply) => {
+        // Account state gate: first statement, outside the try below, before any read.
+        await assertAccountActive(request.params.id)
         const { id } = request.params
         const password = request.headers['x-sync-password']
         const start = Date.now()
@@ -141,7 +147,7 @@ export function registerSyncRoutes(fastify) {
                     authorized = !!decryptedPassword && timingSafeEqual(decryptedPassword, password)
                 }
                 if (!authorized) {
-                    fastify.log.warn({ category: 'Sync' }, `[${id}] Unauthorized: Password mismatch.`)
+                    fastify.log.warn({ category: 'Sync', fmt: 'sync.auth_rejected', acct: id }, `[${maskContext(id)}] Unauthorized: Password mismatch.`)
                     trace('syncRoute', 'pull.error', { accountId: id, error: 'password-mismatch' })
                     reply.status(401);
                     return { error: 'Unauthorized: Invalid credentials' }
@@ -156,12 +162,23 @@ export function registerSyncRoutes(fastify) {
                 return reply.send()
             }
 
+            // Response cache: content_hash exactly identifies the stored blob, so a
+            // hit can serve the previously serialized (already canonicalAddons-stripped)
+            // bytes without decrypt/parse. Auth above already gated this request.
+            const cachedResponse = row.content_hash ? getSyncResponseCache(id, row.content_hash) : null
+            if (cachedResponse) {
+                trace('syncRoute', 'pull.success', { accountId: id, bytes: cachedResponse.bytes, cache: 'hit', cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
+                reply.header('ETag', row.content_hash)
+                reply.header('content-type', 'application/json; charset=utf-8')
+                return reply.send(cachedResponse.serialized)
+            }
+
             const decryptedValueStr = decrypt(row.value, FALLBACK_KEYS)
             const needsMigration = (row.password && typeof row.password === 'string' && !isScryptHash(row.password)) ||
                 (row.value && typeof row.value === 'string' && !row.value.includes(':'))
 
             if (needsMigration) {
-                fastify.log.info({ category: 'Sync' }, `[${id}] Upgrading sync data to Zero-Knowledge storage.`)
+                fastify.log.info({ category: 'Sync', fmt: 'sync.zk_upgrade', acct: id, ms: Date.now() - start }, `[${maskContext(id)}] Upgrading sync data to Zero-Knowledge storage.`)
                 // Device-authed requests carry a token in x-sync-password; it must never become the stored account password.
                 const storedPass = request.deviceAuth
                     ? row.password
@@ -169,7 +186,7 @@ export function registerSyncRoutes(fastify) {
                 const encryptedVal = encrypt(decryptedValueStr, PRIMARY_KEY)
                 db.run('UPDATE kv_store SET password = $1, value = $2, updated_at = $3 WHERE key = $4',
                     [storedPass, encryptedVal, Date.now(), id]).catch(err => {
-                        fastify.log.error({ category: 'Sync' }, `[${id}] Migration write failed: ${err.message}`)
+                        fastify.log.error({ category: 'Sync' }, `[${maskContext(id)}] Migration write failed: ${err.message}`)
                     })
             }
 
@@ -178,7 +195,7 @@ export function registerSyncRoutes(fastify) {
                 try {
                     syncData = typeof decryptedValueStr === 'string' ? JSON.parse(decryptedValueStr) : decryptedValueStr
                 } catch (e) {
-                    fastify.log.warn({ category: 'Sync' }, `[${id}] Failed to parse sync data: ${e.message}`)
+                    fastify.log.warn({ category: 'Sync' }, `[${maskContext(id)}] Failed to parse sync data: ${e.message}`)
                     syncData = {}
                 }
             }
@@ -187,11 +204,21 @@ export function registerSyncRoutes(fastify) {
             if (syncData && typeof syncData === 'object' && !Array.isArray(syncData)) {
                 delete syncData.canonicalAddons
             }
-            trace('syncRoute', 'pull.success', { accountId: id, bytes: payloadBytes, timing: Date.now() - start })
+            if (syncData && typeof syncData === 'object' && !Array.isArray(syncData) && row.content_hash) {
+                // Serialize once with the route's own serializer; a later hit returns
+                // these exact bytes (probe-verified identical to the object path).
+                const serialized = reply.serialize(syncData)
+                setSyncResponseCache(id, row.content_hash, serialized)
+                trace('syncRoute', 'pull.success', { accountId: id, bytes: payloadBytes, cache: 'miss', cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
+                if (row.content_hash) reply.header('ETag', row.content_hash)
+                reply.header('content-type', 'application/json; charset=utf-8')
+                return reply.send(serialized)
+            }
+            trace('syncRoute', 'pull.success', { accountId: id, bytes: payloadBytes, cache: 'bypass', timing: Date.now() - start })
             if (row.content_hash) reply.header('ETag', row.content_hash)
             return syncData && typeof syncData === 'object' ? syncData : {}
         } catch (err) {
-            fastify.log.error({ category: 'Sync' }, `[${id}] GET Error: ${err.message}`)
+            fastify.log.error({ category: 'Sync', fmt: 'sync.error', op: 'pull', acct: id, err }, `[${maskContext(id)}] GET Error: ${err.message}`)
             trace('syncRoute', 'pull.error', { accountId: id, error: err.message, timing: Date.now() - start })
             reply.status(500);
             return { error: 'Server error, please try again later.' }
@@ -212,6 +239,9 @@ export function registerSyncRoutes(fastify) {
         }
     }, async (request, reply) => {
         const postStart = Date.now()
+        // Account state gate ahead of the transaction; outside the try below.
+        await assertAccountActive(request.params.id)
+        await assertWritablePrimary()
         try {
         const { id } = request.params
         const password = request.headers['x-sync-password']
@@ -262,9 +292,13 @@ export function registerSyncRoutes(fastify) {
         // scrypt (N=16384) must never run while the global SQLite tx queue is held
         // (finding #4): the hash depends only on headers, so compute it before the tx.
         // Device-authed pushes keep the stored password, so no hash is needed for them.
-        const precomputedHashedPass = request.deviceAuth ? null : await hashSyncPassword(password)
+        // For an EXISTING row the stored scrypt hash already verifies this exact
+        // password (a mismatch 401s below), so the UPDATE below keeps row.password and
+        // only a possible REGISTRATION (row missing) pays the KDF — still outside the tx.
+        const rowMayExist = request.deviceAuth || !!(await db.get('SELECT 1 AS ok FROM kv_store WHERE key = $1', [id]))
+        const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
 
-        return await db.tx(async (tx) => {
+        const pushOutcome = await db.tx(async (tx) => {
             const row = await tx.get(
                 db.type === 'postgres'
                     ? 'SELECT password, content_hash, content_hint, updated_at FROM kv_store WHERE key = $1 FOR UPDATE'
@@ -273,6 +307,7 @@ export function registerSyncRoutes(fastify) {
             )
 
             if (row) {
+                let storedPassword = row.password
                 const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth('sync:' + id)
                 if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
                 } else if (request.deviceAuth?.accountUuid !== id) {
@@ -282,7 +317,7 @@ export function registerSyncRoutes(fastify) {
                         const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
                         if (decryptedPassword && timingSafeEqual(decryptedPassword, password)) {
                             authorized = true
-                            await upgradeLegacyPasswordHash(tx, id, password)
+                            storedPassword = await upgradeLegacyPasswordHash(tx, id, password) || storedPassword
                         }
                     }
                     if (!authorized) {
@@ -325,7 +360,8 @@ export function registerSyncRoutes(fastify) {
 
                 const encryptedVal = encrypt(storedStr, PRIMARY_KEY)
                 // Device-authed pushes carry a token in x-sync-password; it must never become the stored account password.
-                const hashedPass = request.deviceAuth ? row.password : precomputedHashedPass
+                // An existing row keeps its verified scrypt hash (no re-salt churn per push).
+                const hashedPass = request.deviceAuth ? storedPassword : (precomputedHashedPass ?? storedPassword)
                 await tx.run(`
                     UPDATE kv_store
                     SET value = $1, password = $2, updated_at = $3, content_hash = $4, content_hint = $5
@@ -336,6 +372,13 @@ export function registerSyncRoutes(fastify) {
                 if (request.deviceAuth) {
                     reply.status(401);
                     return { error: 'Unauthorized: Password mismatch' }
+                }
+                // Race guard: the pre-tx existence check saw a row but the tx does not
+                // (account deleted mid-request). Never INSERT a null password hash —
+                // fail closed and let the client retry.
+                if (!precomputedHashedPass) {
+                    reply.status(409);
+                    return { error: 'Account changed during push; please retry' }
                 }
                 if (isRegistrationsClosed()) {
                     reply.status(403);
@@ -394,7 +437,7 @@ export function registerSyncRoutes(fastify) {
                                     if (Array.isArray(parsed) && parsed.length > 0) {
                                         const idx = canonicalWrites.findIndex(([aid]) => aid === accountId)
                                         if (idx >= 0) canonicalWrites.splice(idx, 1)
-                                        fastify.log.warn({ category: 'Sync' }, `Canonical shrink guard: kept ${parsed.length} stored addon(s) for account ${accountId} (push carried an empty list — likely unfolded external write).`)
+                                        fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'empty-push' }, `Canonical shrink guard: kept ${parsed.length} stored addon(s) for account ${accountId} (push carried an empty list — likely unfolded external write).`)
                                     }
                                 } catch {}
                             }
@@ -412,10 +455,25 @@ export function registerSyncRoutes(fastify) {
                         : `INSERT OR IGNORE INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ${placeholders}`
                     await tx.run(sql, params)
                 }
+                const foreignIds = new Set()
+                for (let i = 0; i < canonicalRows.length; i += CANONICAL_CHUNK) {
+                    const ids = canonicalRows.slice(i, i + CANONICAL_CHUNK).map(r => r[0])
+                    const inList = ids.map((_, j) => `$${j + 2}`).join(', ')
+                    const others = await tx.query(
+                        `SELECT account_id FROM account_canonical_addons WHERE sync_user NOT IN ($1, '') AND account_id IN (${inList})`,
+                        [id, ...ids],
+                    )
+                    for (const r of others) foreignIds.add(r.account_id)
+                }
+                for (let i = canonicalWrites.length - 1; i >= 0; i--) {
+                    if (!foreignIds.has(canonicalWrites[i][0])) continue
+                    fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: canonicalWrites[i][0], reason: 'other-workspace' }, `Canonical write skipped: account ${maskContext(canonicalWrites[i][0])} belongs to another workspace.`)
+                    canonicalWrites.splice(i, 1)
+                }
                 for (const [accountId, addons] of canonicalWrites) {
                     await writeEncryptedIfChanged(
                         'account_canonical_addons',
-                        { sql: 'account_id = $1', params: [accountId] },
+                        { sql: "account_id = $1 AND sync_user IN ($2, '')", params: [accountId, id] },
                         'addon_list',
                         JSON.stringify(addons),
                         { alsoSet: { sync_user: id, updated_at: now }, runner: tx },
@@ -423,15 +481,25 @@ export function registerSyncRoutes(fastify) {
                 }
             }
 
-            invalidateCachedAuth('sync:' + id)
+            invalidateSyncResponseCache(id)
+            // A successful push does NOT change the account password (it stores the
+            // same verified value), so the 60s password cache stays valid — exactly
+            // like the no-op/conflict early returns above. Restore and delete keep
+            // their invalidations because they swap or remove the password.
             for (const [accountId] of canonicalWrites) {
                 invalidateCanonicalAddons(accountId, id)
             }
             trace('syncRoute', 'push.success', { accountId: id, bytes: storedStr.length, timing: Date.now() - postStart })
             return { success: true, syncedAt: serverTime, contentHash, serverStremioCredentialedAccounts }
         })
+        // Bounded WAL checkpoint after a real write only (skip/conflict return inside the
+        // tx): an archive plus rewrite moves roughly twice the envelope into the WAL.
+        if (db.type === 'sqlite' && pushOutcome?.success && !pushOutcome.skipped && !pushOutcome.conflict) {
+            noteSyncWrite(storedStr.length * 2)
+        }
+        return pushOutcome
         } catch (err) {
-            fastify.log.error({ category: 'Sync' }, `POST /api/sync error: ${err.message}`)
+            fastify.log.error({ category: 'Sync', fmt: 'sync.error', op: 'push', acct: request.params?.id ?? null, err }, `POST /api/sync error: ${err.message}`)
             trace('syncRoute', 'push.error', { accountId: request.params?.id, error: err.message, timing: Date.now() - postStart })
             reply.status(500)
             return { error: 'Internal sync error' }
@@ -441,6 +509,9 @@ export function registerSyncRoutes(fastify) {
     fastify.post('/api/sync/:id/restore', {
         config: { rateLimit: { max: 5, timeWindow: '1 minute' } }
     }, async (request, reply) => {
+        // Account state gate ahead of the archived-history read; outside the try below.
+        await assertAccountActive(request.params.id)
+        await assertWritablePrimary()
         const restoreStart = Date.now()
         const { id } = request.params
         const password = request.headers['x-sync-password']
@@ -491,6 +562,7 @@ export function registerSyncRoutes(fastify) {
             })
 
             invalidateCachedAuth('sync:' + id)
+            if (result?.restored) invalidateSyncResponseCache(id)
             trace('syncRoute', 'restore.done', { accountId: id, restored: result?.restored, timing: Date.now() - restoreStart })
             if (!result?.restored) {
                 reply.status(404)
@@ -498,7 +570,7 @@ export function registerSyncRoutes(fastify) {
             }
             return { success: true, restored: true }
         } catch (err) {
-            fastify.log.error({ category: 'Sync' }, `POST /api/sync/${id}/restore error: ${err.message}`)
+            fastify.log.error({ category: 'Sync', fmt: 'sync.error', op: 'restore', acct: id, err }, `POST /api/sync/${maskContext(id)}/restore error: ${err.message}`)
             trace('syncRoute', 'restore.error', { accountId: id, error: err.message, timing: Date.now() - restoreStart })
             reply.status(500)
             return { error: 'Internal restore error' }
@@ -508,16 +580,19 @@ export function registerSyncRoutes(fastify) {
     fastify.delete('/api/sync/:id', {
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
+        // Account state gate ahead of the password read and cascade; outside the try below.
+        await assertAccountActive(request.params.id)
+        await assertWritablePrimary()
         const delStart = Date.now()
         try {
         const { id } = request.params
         const password = request.headers['x-sync-password']
         trace('syncRoute', 'delete.start', { accountId: id })
 
-        fastify.log.info({ category: 'Server' }, `Received DELETE request for ID: ${id}`)
+        fastify.log.info({ category: 'Server' }, `Received DELETE request for ID: ${maskContext(id)}`)
 
         if (!id || !password) {
-            fastify.log.warn({ category: 'Server' }, `DELETE failed: Missing header for ID ${id}`)
+            fastify.log.warn({ category: 'Server' }, `DELETE failed: Missing header for ID ${maskContext(id)}`)
             trace('syncRoute', 'delete.error', { accountId: id, error: 'missing-credentials' })
             reply.status(400);
             return { error: 'Missing ID or Password header' }
@@ -526,7 +601,7 @@ export function registerSyncRoutes(fastify) {
         const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [id])
 
         if (!row) {
-            fastify.log.warn({ category: 'Server' }, `DELETE failed: ID ${id} not found`)
+            fastify.log.warn({ category: 'Server' }, `DELETE failed: ID ${maskContext(id)} not found`)
             trace('syncRoute', 'delete.error', { accountId: id, error: 'not-found' })
             reply.status(401);
             return { error: 'Unauthorized: Invalid credentials' }
@@ -542,7 +617,7 @@ export function registerSyncRoutes(fastify) {
                 authorized = !!decryptedPassword && timingSafeEqual(decryptedPassword, password)
             }
             if (!authorized) {
-                fastify.log.warn({ category: 'Server' }, `DELETE failed: Password mismatch for ID ${id}`)
+                fastify.log.warn({ category: 'Server' }, `DELETE failed: Password mismatch for ID ${maskContext(id)}`)
                 trace('syncRoute', 'delete.error', { accountId: id, error: 'password-mismatch' })
                 reply.status(401);
                 return { error: 'Unauthorized: Invalid credentials' }
@@ -550,7 +625,7 @@ export function registerSyncRoutes(fastify) {
             setCachedAuth('sync:' + id, password)
         }
 
-        fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${id}`)
+        fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${maskContext(id)}`)
         await db.tx(async (tx) => {
             await tx.run('DELETE FROM activity_events WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM activity_snapshots WHERE sync_user = $1', [id])
@@ -564,10 +639,15 @@ export function registerSyncRoutes(fastify) {
             await tx.run('DELETE FROM autopilot_rule_stats WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
             await tx.run('DELETE FROM failover_history WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
             await tx.run('DELETE FROM autopilot_rules WHERE owner_sync_user = $1', [id])
+            await tx.run('DELETE FROM account_admin_state WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM account_notices WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM kv_store WHERE key = $1', [id])
             await tx.run('DELETE FROM kv_store_history WHERE key = $1', [id])
         })
         invalidateCachedAuth('sync:' + id)
+        invalidateSyncResponseCache(id)
+        // The cascade cleared any admin state and notices for the user; pick that up now.
+        await refreshAccountAdminState().catch(() => {})
         const { invalidateConnectionCache } = await import('../providers/reconciler.js')
         invalidateConnectionCache(id)
         trace('syncRoute', 'delete.success', { accountId: id, timing: Date.now() - delStart })

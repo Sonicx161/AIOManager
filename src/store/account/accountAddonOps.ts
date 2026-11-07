@@ -7,12 +7,15 @@ import { getAddonVersionKey, normalizeAddonUrl, mergeAddons } from '@/lib/utils'
 import { addTombstones, restoreAddonDeletions, filterResurrected } from '@/lib/addon-tombstones'
 import { effectiveAddonsFor, normalizeDestinations, stripDestinationsForWire } from '@/lib/addon-destinations'
 import { AddonDescriptor } from '@/types/addon'
-import { dedupeAddonsByTransportUrl } from '@/lib/addon-dedupe'
+import { dedupeAddonsByUrl, findInstallSlot } from '@/lib/addon-dedupe'
 import { mapConcurrent } from '@/lib/concurrency'
+import { normalizeFailedConnectionState } from '@/lib/sync/push-outcome'
 import { syncManager } from '@/lib/sync/syncManager'
 import { autopilotManager } from '@/lib/autopilot/autopilotManager'
 import { getEffectiveManifest } from '@/lib/addon-utils'
 import { getCachedManifest, setCachedManifest } from '@/lib/manifest-cache'
+import { isPlaceholderManifest } from '@/lib/manifest-placeholder'
+import { captureOriginalDetails, planDetailReset, applyDetailReset } from '@/lib/addon-original-details'
 import { trace, briefAddons } from '@/lib/trace'
 import { toast } from '@/hooks/use-toast'
 import {
@@ -66,29 +69,47 @@ async function reconcileInstallBase(account: Account): Promise<AddonDescriptor[]
 
 const pluginUrlKey = (url?: string): string => (url ? url.trim().replace(/\/+$/, '').toLowerCase() : '')
 
-async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId: string, activeProfileId?: string, ownership?: SyncOwnership) {
+// Stop points of a connection push: lost sync ownership, or a cancelled deploy batch.
+function assertLive(ownership?: SyncOwnership, signal?: AbortSignal) {
+    ownership?.assert()
+    if (signal?.aborted) throw Object.assign(new Error('Deploy batch cancelled'), { name: 'AbortError' })
+}
+
+async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId: string, activeProfileId?: string, ownership?: SyncOwnership, signal?: AbortSignal) {
     const creds = (conn.credentials || {}) as Record<string, string>
     const { nuvioDriverFor } = await import('@/lib/drivers/factory')
-    ownership?.assert()
+    assertLive(ownership, signal)
     const driver = nuvioDriverFor(conn)
-    const { fetchConnectionToken } = await import('@/api/connection')
-    ownership?.assert()
-    const token = await fetchConnectionToken(accountId, conn.id, 'nuvio')
-    ownership?.assert()
+    const { fetchConnectionToken, hashRejectedToken } = await import('@/api/connection')
+    assertLive(ownership, signal)
+    let token = await fetchConnectionToken(accountId, conn.id, 'nuvio')
+    assertLive(ownership, signal)
     const { setCachedNuvioToken } = await import('@/lib/nuvio-token-cache')
-    ownership?.assert()
+    assertLive(ownership, signal)
     setCachedNuvioToken(conn.id, token)
     const { resolveNuvioPushProfile } = await import('@/lib/nuvio-profile-resolve')
-    ownership?.assert()
-    const profileId = resolveNuvioPushProfile(conn, activeProfileId, token.profileId ?? creds.profileIndex ?? creds.profileId)
+    assertLive(ownership, signal)
+    let profileId = resolveNuvioPushProfile(conn, activeProfileId, token.profileId ?? creds.profileIndex ?? creds.profileId)
     // R9: the provider wire carries projected provider data only — internal
     // destination policy is stripped before the driver. The plugin mirror below is
     // a separate per-connection list and never carries addon policy.
-    await driver.writeAddons(token.accessToken, stripDestinationsForWire(addons), profileId)
+    // A rejected session heals only through a server-side forced revalidation: one retry, never more.
+    try {
+        await driver.writeAddons(token.accessToken, stripDestinationsForWire(addons), profileId)
+    } catch (err) {
+        if (!isAuthError(err)) throw err
+        assertLive(ownership, signal)
+        token = await fetchConnectionToken(accountId, conn.id, 'nuvio', undefined, { rejectedTokenHash: await hashRejectedToken(token.accessToken) })
+        assertLive(ownership, signal)
+        setCachedNuvioToken(conn.id, token)
+        profileId = resolveNuvioPushProfile(conn, activeProfileId, token.profileId ?? creds.profileIndex ?? creds.profileId)
+        await driver.writeAddons(token.accessToken, stripDestinationsForWire(addons), profileId)
+    }
     ownership?.assert()
 
+    // The addon write has landed; a cancelled batch only skips the separate plugin write.
     const canonicalPlugins = conn.pluginList || []
-    if (canonicalPlugins.length > 0) {
+    if (canonicalPlugins.length > 0 && !signal?.aborted) {
         try {
             const platformPlugins = await driver.readPlugins(token.accessToken, profileId)
             ownership?.assert()
@@ -97,63 +118,98 @@ async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId:
             const needsPush = platformUrls.size !== canonicalUrls.size
                 || [...canonicalUrls].some(u => !platformUrls.has(u))
                 || [...platformUrls].some(u => !canonicalUrls.has(u))
-            if (needsPush) await driver.writePlugins(token.accessToken, canonicalPlugins, profileId)
+            if (needsPush && !signal?.aborted) await driver.writePlugins(token.accessToken, canonicalPlugins, profileId)
         } catch (err) {
             if (isAuthError(err)) throw err
         }
     }
 }
 
-async function pushRealStream(conn: Connection, addons: AddonDescriptor[], accountId: string, ownership?: SyncOwnership) {
-    const { fetchConnectionToken } = await import('@/api/connection')
-    ownership?.assert()
-    const token = await fetchConnectionToken(accountId, conn.id, 'realstream')
-    ownership?.assert()
+async function pushRealStream(conn: Connection, addons: AddonDescriptor[], accountId: string, ownership?: SyncOwnership, signal?: AbortSignal) {
+    const { fetchConnectionToken, hashRejectedToken } = await import('@/api/connection')
+    assertLive(ownership, signal)
+    let token = await fetchConnectionToken(accountId, conn.id, 'realstream')
+    assertLive(ownership, signal)
 
     const { realStreamDriverFor } = await import('@/lib/drivers/factory')
-    ownership?.assert()
+    assertLive(ownership, signal)
     // userId is a stable PocketBase identity set at auth time; it never changes between refreshes.
     const userId = conn.credentials?.userId || ''
     if (!userId) throw Object.assign(new Error('RealStream user ID missing; re-authenticate this connection'), { isAuthError: true })
 
     // R9: strip internal destination policy before the provider wire.
-    await realStreamDriverFor(conn).writeAddons(token.accessToken, stripDestinationsForWire(addons), userId)
+    // A rejected session heals only through a server-side forced revalidation: one retry, never more.
+    const write = () => realStreamDriverFor(conn).writeAddons(token.accessToken, stripDestinationsForWire(addons), userId)
+    try {
+        return await write()
+    } catch (err) {
+        if (!isAuthError(err)) throw err
+        assertLive(ownership, signal)
+        token = await fetchConnectionToken(accountId, conn.id, 'realstream', undefined, { rejectedTokenHash: await hashRejectedToken(token.accessToken) })
+        assertLive(ownership, signal)
+        return await write()
+    }
 }
 
 // Hydra (CORS-fragile against arbitrary servers) + any client-side failure fall back to the server.
-async function serverReconcile(accountId: string, account: Account, connections: Connection[], options: { addons?: AddonDescriptor[]; allowCollectionShrink?: boolean; ownership?: SyncOwnership } = {}) {
+async function serverReconcile(accountId: string, account: Account, connections: Connection[], options: { addons?: AddonDescriptor[]; allowCollectionShrink?: boolean; ownership?: SyncOwnership; signal?: AbortSignal } = {}) {
     try {
         const { triggerReconciliation } = await import('@/api/connection')
-        options.ownership?.assert()
+        assertLive(options.ownership, options.signal)
         const addons = options.addons ?? account.addons
         const result = await triggerReconciliation(accountId, account.primaryConnectionId, connections, addons, { allowCollectionShrink: options.allowCollectionShrink })
         options.ownership?.assert()
-        if (result.connectionStates && Object.keys(result.connectionStates).length > 0) {
+        const states = { ...(result.connectionStates || {}) }
+        // The sync envelope is HTTP 200 even when individual connections failed, and a
+        // first failure below the reconciler's backoff threshold still reports status
+        // "active": one shared normalization (also used by user Sync) keeps those
+        // connections visibly errored with the platform's message.
+        const failures: string[] = []
+        for (const conn of connections) {
+            const failed = normalizeFailedConnectionState(result.connectionOutcomes?.[conn.id], states[conn.id])
+            if (!failed) continue
+            failures.push(failed.message)
+            states[conn.id] = failed.state
+        }
+        if (Object.keys(states).length > 0) {
             const { useConnectionStore } = await import('@/store/connectionStore')
             options.ownership?.assert()
             useConnectionStore.setState(s => ({
                 connectionStates: {
                     ...s.connectionStates,
-                    [accountId]: { ...(s.connectionStates[accountId] || {}), ...result.connectionStates },
+                    [accountId]: { ...(s.connectionStates[accountId] || {}), ...states },
                 },
             }))
         }
+        if (failures.length > 0) {
+            const shown = failures.slice(0, 2).join(' | ')
+            toast({
+                title: 'Connection sync failed',
+                description: failures.length > 2 ? `${shown} (+${failures.length - 2} more)` : shown,
+                variant: 'destructive',
+                href: `/account/${encodeURIComponent(accountId)}`,
+            })
+        }
     } catch (e) {
-        if (options.ownership && !options.ownership.current()) return
+        if ((options.ownership && !options.ownership.current()) || options.signal?.aborted) return
         toast({
             title: 'Connection sync failed',
             description: e instanceof Error ? e.message : 'One or more connections could not be updated.',
             variant: 'destructive',
+            href: `/account/${encodeURIComponent(accountId)}`,
         })
     }
 }
 
-export async function pushToConnections(accountId: string, options: { addons?: AddonDescriptor[]; allowCollectionShrink?: boolean; ownership?: SyncOwnership } = {}) {
+export async function pushToConnections(accountId: string, options: { addons?: AddonDescriptor[]; allowCollectionShrink?: boolean; ownership?: SyncOwnership; skipPlatforms?: string[]; signal?: AbortSignal } = {}) {
     const ownership = options.ownership
+    // A cancelled deploy batch stops the fan-out at the same points a lost ownership does.
+    const stopped = () => !!options.signal?.aborted
     const store = await getStore()
-    if (ownership && !ownership.current()) return
+    if (stopped() || (ownership && !ownership.current())) return
     const account = getAccountById(store.getState().accounts, accountId)
-    const eligible = (account?.connections || []).filter(c => c.enabled && isSyncEligibleConnection(c))
+    const skipPlatforms = options.skipPlatforms
+    const eligible = (account?.connections || []).filter(c => c.enabled && isSyncEligibleConnection(c) && !skipPlatforms?.includes(c.platform))
     if (!account || eligible.length === 0) return
 
     const sourceAddons = options.addons ?? account.addons ?? []
@@ -164,7 +220,8 @@ export async function pushToConnections(accountId: string, options: { addons?: A
     // write — including an EMPTY write when every row is excluded there (policy-
     // authorized clear, R2). The global empty-guard below still applies to the
     // whole hub: a fully-empty canonical list is only pushed with explicit
-    // allowCollectionShrink, never because of policy.
+    // allowCollectionShrink, never because of policy. The payload is exactly what
+    // the hub shows; nothing is held back.
     const effectiveFor = (conn: Connection) => effectiveAddonsFor(enabledAddons, { platform: conn.platform, connectionId: conn.id })
     trace('push', 'connections-start', { accountId, eligible: eligible.map(c => c.platform), source: sourceAddons.length, enabled: enabledAddons.length, allowCollectionShrink: !!options.allowCollectionShrink })
     if (enabledAddons.length === 0 && !options.allowCollectionShrink) {
@@ -173,8 +230,9 @@ export async function pushToConnections(accountId: string, options: { addons?: A
     }
 
     const { useConnectionStore } = await import('@/store/connectionStore')
-    if (ownership && !ownership.current()) return
+    if (stopped() || (ownership && !ownership.current())) return
     const now = Date.now()
+    // Bookkeeping for a write that already happened: a cancelled batch does not skip it.
     const setStatus = (connId: string, status: Connection['status'], lastError: string | null = null) => {
         if (ownership && !ownership.current()) return
         useConnectionStore.setState(s => ({
@@ -209,17 +267,30 @@ export async function pushToConnections(accountId: string, options: { addons?: A
     let authFailures = 0
 
     for (const conn of eligible) {
-        if (ownership && !ownership.current()) return
+        if (stopped() || (ownership && !ownership.current())) return
         if (conn.platform !== 'nuvio' && conn.platform !== 'realstream') {
             serverConnections.push(conn)
             continue
         }
+        const payload = effectiveFor(conn)
         try {
-            if (conn.platform === 'nuvio') await pushNuvio(conn, effectiveFor(conn), accountId, account.activeProfileId, ownership)
-            else await pushRealStream(conn, effectiveFor(conn), accountId, ownership)
+            if (conn.platform === 'nuvio') await pushNuvio(conn, payload, accountId, account.activeProfileId, ownership, options.signal)
+            else {
+                // R2-08: an empty projection to RealStream, authorized or not, is never
+                // a confirmed write. The driver resolves it as a skip with a plain
+                // reason; the connection keeps its prior confirmation and never falls
+                // back to the server reconciler as success.
+                const result = await pushRealStream(conn, payload, accountId, ownership, options.signal)
+                if (result?.skipped) {
+                    const reason = (result as { reason?: string }).reason || 'empty projection without clear authorization'
+                    trace('push', 'connection-skipped', { accountId, platform: conn.platform, connId: conn.id, reason })
+                    setStatus(conn.id, 'error', reason)
+                    continue
+                }
+            }
             setStatus(conn.id, 'active')
         } catch (err) {
-            if (ownership && !ownership.current()) return
+            if (stopped() || (ownership && !ownership.current())) return
             const msg = err instanceof Error ? err.message : 'Connection sync failed'
             trace('push', 'connection-error', { accountId, platform: conn.platform, connId: conn.id, auth: isAuthError(err), error: msg })
             if (isAuthError(err)) {
@@ -232,17 +303,20 @@ export async function pushToConnections(accountId: string, options: { addons?: A
         }
     }
 
-    if (ownership && !ownership.current()) return
+    if (stopped() || (ownership && !ownership.current())) return
     if (authFailures > 0) {
         toast({
             title: 'Connection re-authentication needed',
             description: `${authFailures} connection(s) need to be re-authenticated. Check the Connections tab.`,
             variant: 'destructive',
+            href: `/account/${encodeURIComponent(accountId)}`,
         })
     }
 
     if (serverConnections.length > 0) {
-        await serverReconcile(accountId, account, serverConnections, { addons: sourceAddons, allowCollectionShrink: options.allowCollectionShrink, ownership })
+        // The server reconciler projects each connection's destination policy itself (twin module).
+        if (stopped()) return
+        await serverReconcile(accountId, account, serverConnections, { addons: sourceAddons, allowCollectionShrink: options.allowCollectionShrink, ownership, signal: options.signal })
     }
 }
 
@@ -272,12 +346,14 @@ function backgroundSync(accountId: string, account: Account, updatedAddons: Addo
                                 ? 'Session expired. Re-authenticate your connection.'
                                 : 'A secondary Stremio login expired. Re-authenticate it from its connection card.',
                             variant: 'destructive',
+                            href: `/account/${encodeURIComponent(accountId)}`,
                         })
                     } else {
                         toast({
                             title: failure.isPrimary ? 'Sync failed' : 'Secondary Stremio sync failed',
                             description: failure.error instanceof Error ? failure.error.message : 'Unknown error',
                             variant: 'destructive',
+                            href: `/account/${encodeURIComponent(accountId)}`,
                         })
                     }
                 }
@@ -330,7 +406,7 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
 
         const baseAddons = await reconcileInstallBase(account)
         const mergedAddons = mergeAddons(baseAddons, [normalizedAddon], { keepMissingLocal: true, instanceMatch: 'adopt-remote-url' })
-        const finalAddons = dedupeAddonsByTransportUrl(mergedAddons).map(addon => ({
+        const finalAddons = dedupeAddonsByUrl(mergedAddons).map(addon => ({
             ...addon,
             manifest: getEffectiveManifest(addon)
         }))
@@ -342,6 +418,7 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
         store.setState({ accounts })
         persistAccounts(accounts)
 
+        // An install is a plain user push: the hub row lands on every destination (rule 1).
         backgroundSync(accountId, account, finalAddons)
 
         const { useAddonStore } = await import('@/store/addonStore')
@@ -399,16 +476,17 @@ export async function installAddonsToAccount(accountId: string, addonUrls: strin
         const now = Date.now()
 
         const updatedAddons = [...await reconcileInstallBase(account)]
+        const preExisting = updatedAddons.length
+        const taken = new Set<number>()
         fetchedAddons.forEach((newAddon) => {
             const normalized: AddonDescriptor = {
                 ...newAddon,
                 manifest: sanitizeAddonManifest(newAddon.manifest, newAddon.transportUrl),
                 metadata: { ...newAddon.metadata, lastUpdated: now },
             }
-            const existingIndex = updatedAddons.findIndex(
-                (addon) => normalizeAddonUrl(addon.transportUrl) === normalizeAddonUrl(newAddon.transportUrl)
-            )
+            const existingIndex = findInstallSlot(updatedAddons, newAddon, preExisting, taken)
             if (existingIndex >= 0) {
+                taken.add(existingIndex)
                 const existing = updatedAddons[existingIndex]
                 updatedAddons[existingIndex] = {
                     ...normalized,
@@ -424,7 +502,7 @@ export async function installAddonsToAccount(accountId: string, addonUrls: strin
             }
         })
 
-        const finalAddons = dedupeAddonsByTransportUrl(updatedAddons).map(addon => ({
+        const finalAddons = dedupeAddonsByUrl(updatedAddons).map(addon => ({
             ...addon,
             manifest: getEffectiveManifest(addon)
         }))
@@ -438,6 +516,7 @@ export async function installAddonsToAccount(accountId: string, addonUrls: strin
         store.setState({ accounts })
         persistAccounts(accounts)
 
+        // A batch install is a plain user push of the new hub rows (rule 1).
         backgroundSync(accountId, account, finalAddons)
 
         const { useAddonStore } = await import('@/store/addonStore')
@@ -486,6 +565,7 @@ export async function removeAddonFromAccount(accountId: string, transportUrl: st
             if (import.meta.env.DEV) console.warn('[RemoveAddon] Failover chain cleanup failed:', e)
         }
 
+        const removedAddon = account.addons.find(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(transportUrl))
         const updatedAddons = account.addons.filter(
             (a) => normalizeAddonUrl(a.transportUrl) !== normalizeAddonUrl(transportUrl)
         )
@@ -498,7 +578,6 @@ export async function removeAddonFromAccount(accountId: string, transportUrl: st
 
         backgroundSync(accountId, account, updatedAddons, { allowCollectionShrink: true }, 'remove')
 
-        const removedAddon = account.addons.find(a => normalizeAddonUrl(a.transportUrl) === normalizeAddonUrl(transportUrl))
         const removedAddonName = removedAddon?.metadata?.customName || removedAddon?.manifest.name || 'Unknown Addon'
         const removedAddonLogo = removedAddon?.metadata?.customLogo || removedAddon?.manifest.logo
 
@@ -582,7 +661,35 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
 
 export async function reorderAddons(accountId: string, newOrder: AddonDescriptor[], options: { explicitInstallUrls?: string[] } = {}) {
     const store = await getStore()
-    const timestampedOrder = newOrder.map(addon => ({
+    // Reorder is also a repair boundary: stale platform reads can hand us the
+    // same URL more than once. Preserve the first occurrence's position so a
+    // save cannot make the duplicate permanent or shuffle the user's order.
+    const seenUrls = new Map<string, number>()
+    const uniqueOrder: AddonDescriptor[] = []
+    newOrder.forEach(addon => {
+        const key = normalizeAddonUrl(addon.transportUrl)
+        if (!key) {
+            uniqueOrder.push(addon)
+            return
+        }
+        const existingIndex = seenUrls.get(key)
+        if (existingIndex === undefined) {
+            seenUrls.set(key, uniqueOrder.length)
+            uniqueOrder.push(addon)
+            return
+        }
+        const existing = uniqueOrder[existingIndex]
+        uniqueOrder[existingIndex] = {
+            ...existing,
+            ...addon,
+            transportUrl: addon.transportUrl || existing.transportUrl,
+            flags: { ...(addon.flags || {}), ...(existing.flags || {}) },
+            metadata: { ...(existing.metadata || {}), ...(addon.metadata || {}) },
+            catalogOverrides: addon.catalogOverrides || existing.catalogOverrides,
+            note: addon.note ?? existing.note,
+        }
+    })
+    const timestampedOrder = uniqueOrder.map(addon => ({
         ...addon,
         metadata: {
             ...addon.metadata,
@@ -605,7 +712,9 @@ export async function reorderAddons(accountId: string, newOrder: AddonDescriptor
         const finalOrder = filterResurrected(timestampedOrder, [], deletionState.deletedAddons)
         if (options.explicitInstallUrls !== undefined) {
             const keptUrls = new Set(finalOrder.map(addon => normalizeAddonUrl(addon.transportUrl)))
-            const removedUrls = account.addons.filter(addon => !keptUrls.has(normalizeAddonUrl(addon.transportUrl))).map(addon => addon.transportUrl)
+            const removedUrls = account.addons
+                .filter(addon => !keptUrls.has(normalizeAddonUrl(addon.transportUrl)))
+                .map(addon => addon.transportUrl)
             deletionState.deletedAddons = addTombstones(deletionState.deletedAddons, removedUrls, Date.now(), deletionState.restoredAddons)
         }
         let updatedAccount: Account = { ...account, addons: finalOrder, ...deletionState, lastSync: new Date() }
@@ -614,6 +723,8 @@ export async function reorderAddons(accountId: string, newOrder: AddonDescriptor
         store.setState({ accounts })
         persistAccounts(accounts)
 
+        // A collection import is a plain user push of its rows (rule 1); the tombstones
+        // above already guard the removals it replaced.
         backgroundSync(accountId, account, finalOrder, { allowCollectionShrink: true }, 'reorder')
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to reorder addons'
@@ -1018,33 +1129,38 @@ export async function updateAddonSettings(
                     })
                     newAddon.metadata = cleanMetadata
 
-                    const fieldMap: Record<string, string> = {
-                        customName: 'name',
-                        customLogo: 'logo',
-                        customDescription: 'description'
+                    const customFields = addon.metadata as Partial<Record<'customName' | 'customLogo' | 'customDescription', string>> | undefined
+                    let storedOriginal = addon.metadata?.originalManifest
+                    if (!isPlaceholderManifest(addon.manifest)) {
+                        storedOriginal = captureOriginalDetails(addon.manifest, customFields, storedOriginal, settingsMetadata)
                     }
-                    if (clearedFields.some(f => fieldMap[f])) {
-                        let originalManifest = getCachedManifest(addon.transportUrl)
-                        if (!originalManifest) {
-                            try {
-                                const fetched = await apiFetchAddonManifest(addon.transportUrl, accountId, true)
-                                originalManifest = fetched.manifest
-                                setCachedManifest(addon.transportUrl, originalManifest)
-                            } catch (e) {
-                                if (import.meta.env.DEV) console.warn('[Reset] Could not fetch original manifest:', e)
-                            }
-                        }
-                        if (originalManifest) {
-                            const baseManifest = { ...newAddon.manifest }
-                            for (const field of clearedFields) {
-                                const manifestKey = fieldMap[field]
-                                if (manifestKey && (originalManifest as unknown as Record<string, unknown>)[manifestKey]) {
-                                    (baseManifest as unknown as Record<string, unknown>)[manifestKey] = (originalManifest as unknown as Record<string, unknown>)[manifestKey]
+
+                    const plan = planDetailReset(clearedFields, customFields, storedOriginal)
+                    if (plan.resetFields.length > 0) {
+                        let remoteOriginal: AddonDescriptor['manifest'] | null = null
+                        if (plan.needsRemote) {
+                            remoteOriginal = getCachedManifest(addon.transportUrl)
+                            if (!remoteOriginal) {
+                                try {
+                                    const fetched = await apiFetchAddonManifest(addon.transportUrl, accountId, true)
+                                    remoteOriginal = fetched.manifest
+                                    setCachedManifest(addon.transportUrl, remoteOriginal)
+                                } catch (e) {
+                                    if (import.meta.env.DEV) console.warn('[Reset] Could not fetch original manifest:', e)
                                 }
                             }
-                            newAddon.manifest = baseManifest
+                            if (!remoteOriginal) {
+                                throw new Error('Could not restore the original details because the addon host is unreachable. Nothing was changed; try again when it is online.')
+                            }
                         }
+                        const reset = applyDetailReset(newAddon.manifest, plan.resetFields, storedOriginal, remoteOriginal)
+                        newAddon.manifest = reset.manifest
+                        storedOriginal = reset.stored
                     }
+                    const nextMetadata = { ...cleanMetadata } as NonNullable<AddonDescriptor['metadata']>
+                    if (storedOriginal && Object.keys(storedOriginal).length > 0) nextMetadata.originalManifest = storedOriginal
+                    else delete nextMetadata.originalManifest
+                    newAddon.metadata = nextMetadata
 
                     newAddon.manifest = getEffectiveManifest(newAddon)
                 }
@@ -1077,22 +1193,6 @@ export async function updateAddonSettings(
         store.setState({ accounts })
         persistAccounts(accounts)
         backgroundSync(accountId, account, updatedAddons)
-
-        if (settings.metadata) {
-            const { useAddonStore } = await import('@/store/addonStore')
-            const addonStore = useAddonStore.getState()
-
-            const savedAddon = Object.values(addonStore.library).find(s =>
-                normalizeAddonUrl(s.installUrl) === normalizeAddonUrl(transportUrl)
-                && s.syncWithInstalled === true
-                && (!Array.isArray(s.syncAccountIds) || s.syncAccountIds.includes(accountId))
-            )
-
-            if (savedAddon) {
-                if (import.meta.env.DEV) console.log(`[AccountStore] Inbound Sync: Updating library metadata for "${savedAddon.name}"`)
-                await addonStore.updateSavedAddonMetadata(savedAddon.id, settings.metadata)
-            }
-        }
     } finally {
         releaseMutex()
     }
@@ -1169,11 +1269,13 @@ export async function removeLocalAddons(accountId: string, idsOrUrls: string[]) 
                 const normTarget = normalizeAddonUrl(target)
                 return addon.manifest.id === target || normA === normTarget
             })
-            if (shouldRemove) removedUrls.push(addon.transportUrl)
+            if (shouldRemove) {
+                removedUrls.push(addon.transportUrl)
+            }
             return !shouldRemove
         })
 
-        const updatedAccount = updateActiveProfile({ ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, removedUrls, Date.now(), account.restoredAddons) }, updatedAddons)
+        const updatedAccount = updateActiveProfile({ ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [...removedUrls], Date.now(), account.restoredAddons) }, updatedAddons)
         const accounts = store.getState().accounts.map((acc) =>
             acc.id === accountId ? updatedAccount : acc
         )
@@ -1195,7 +1297,10 @@ export async function removeLocalAddons(accountId: string, idsOrUrls: string[]) 
     }
 }
 
-export async function replaceTransportUrl(oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: AddonDescriptor['metadata']) {
+// A function merges into the copy's metadata as read under the account mutex.
+export type ReplaceMetadata = AddonDescriptor['metadata'] | ((current: AddonDescriptor['metadata']) => AddonDescriptor['metadata'])
+
+export async function replaceTransportUrl(oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: ReplaceMetadata) {
     const ownerIsCurrent = captureAddonOwner()
     const store = await getStore()
     const normOld = normalizeAddonUrl(oldUrl)
@@ -1238,7 +1343,7 @@ export async function replaceTransportUrl(oldUrl: string, newUrl: string, accoun
                         ...addon,
                         transportUrl: newUrl,
                         manifest: freshManifest || addon.manifest,
-                        metadata: { ...(metadata || addon.metadata), lastUpdated: Date.now() }
+                        metadata: { ...(typeof metadata === 'function' ? metadata(addon.metadata) : (metadata || addon.metadata)), lastUpdated: Date.now() }
                     }
                 }
                 return addon

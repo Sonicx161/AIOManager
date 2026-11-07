@@ -1,4 +1,6 @@
 import { triggerSync } from '@/lib/sync-trigger'
+import { legacyConnectionGeneration } from '@/lib/connection-generation'
+import { migrateConnectionPictures, CONNECTION_PICTURES_SCHEMA_VERSION } from '@/lib/connection-pictures/sync-merge'
 import {
       getAddons,
 } from '@/api/addons'
@@ -15,11 +17,13 @@ import { Account, AddonChangelogEntry } from '@/types/account'
 import { AddonDescriptor } from '@/types/addon'
 import { identifyAddon } from '@/lib/addon-identifier'
 import type { AddonCollectionDiff } from '@/lib/addon-collection-diff'
+import type { ReplaceMetadata } from './account/accountAddonOps'
 import localforage from 'localforage'
 import { trace } from '@/lib/trace'
 import { deleteAccountIds, mergeAccountMembership, type AccountMembership, type AccountListImport } from '@/lib/account-membership'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
+import { rememberKnownManifests, restoreKnownManifests } from '@/lib/manifest-placeholder'
 
 import { create } from 'zustand'
 
@@ -38,8 +42,29 @@ export const safeUUID = () => {
     }
 }
 
-let _persistTimer: ReturnType<typeof setTimeout> | null = null
-let _accountPersistQueue: Promise<void> = Promise.resolve()
+const accountPersist = {
+    timer: null as ReturnType<typeof setTimeout> | null,
+    queue: Promise.resolve() as Promise<void>,
+}
+
+// A placeholder manifest never reaches disk over a known-good one. Rows keep count and order.
+export const protectAccountsForWrite = (accounts: Account[]): Account[] => {
+    for (const acc of accounts) rememberKnownManifests(acc.addons)
+    let changed = false
+    const out = accounts.map((acc) => {
+        const addons = restoreKnownManifests(acc.addons || [])
+        const profiles = acc.profiles?.map((profile) => {
+            if (!profile.addons) return profile
+            const profileAddons = restoreKnownManifests(profile.addons)
+            return profileAddons === profile.addons ? profile : { ...profile, addons: profileAddons }
+        })
+        const profilesChanged = !!profiles && profiles.some((profile, i) => profile !== acc.profiles?.[i])
+        if (addons === acc.addons && !profilesChanged) return acc
+        changed = true
+        return { ...acc, addons, ...(profilesChanged ? { profiles } : {}) }
+    })
+    return changed ? out : accounts
+}
 
 // Recheck ownership when the deferred write actually runs.
 export const persistAccounts = (accounts: Account[], ownership?: { current: () => boolean }) => {
@@ -47,13 +72,13 @@ export const persistAccounts = (accounts: Account[], ownership?: { current: () =
     // Local edits remain durable if an unrelated pull starts and fails. Imports
     // pass their stricter generation fence; all writes stay workspace-scoped.
     const current = ownership?.current ?? (() => getActiveWorkspaceId() === workspace)
-    if (_persistTimer) clearTimeout(_persistTimer)
-    _persistTimer = setTimeout(async () => {
-        _persistTimer = null
+    if (accountPersist.timer) clearTimeout(accountPersist.timer)
+    accountPersist.timer = setTimeout(async () => {
+        accountPersist.timer = null
         if (!current()) return
-        _accountPersistQueue = _accountPersistQueue.then(async () => {
+        accountPersist.queue = accountPersist.queue.then(async () => {
             if (!current()) return
-            await localforage.setItem(STORAGE_KEY, accounts)
+            await localforage.setItem(STORAGE_KEY, protectAccountsForWrite(accounts))
         }).catch(e => { if (import.meta.env.DEV) console.error('[persistAccounts] Failed to save accounts:', e) })
     }, 300)
 }
@@ -61,26 +86,36 @@ export const persistAccounts = (accounts: Account[], ownership?: { current: () =
 // Deletion intent reaches disk before the list. If a tab closes between writes,
 // initialize filters the older list (and the recovery backup) through the markers.
 export async function persistAccountMembership(accounts: Account[], membership: AccountMembership, ownership: SyncOwnership): Promise<void> {
-    if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null }
-    const write = _accountPersistQueue.then(async () => {
+    if (accountPersist.timer) { clearTimeout(accountPersist.timer); accountPersist.timer = null }
+    const write = accountPersist.queue.then(async () => {
         ownership.assert()
         await localforage.setItem(ACCOUNT_MEMBERSHIP_KEY, membership)
         ownership.assert()
-        await localforage.setItem(STORAGE_KEY, accounts)
+        await localforage.setItem(STORAGE_KEY, protectAccountsForWrite(accounts))
         ownership.assert()
     })
-    _accountPersistQueue = write.catch(() => {})
+    accountPersist.queue = write.catch(() => {})
     await write
 }
 
+// Flush a pending debounced account persist now instead of waiting out the 300 ms
+// timer: a phone backgrounding or closing the page must not lose the last local edit.
+export const flushPendingAccountPersist = (): boolean => {
+    if (!accountPersist.timer) return false
+    clearTimeout(accountPersist.timer)
+    accountPersist.timer = null
+    const { accounts } = useAccountStore.getState()
+    localforage.setItem(STORAGE_KEY, protectAccountsForWrite(accounts)).catch((e) => { if (import.meta.env.DEV) console.error('[accountStore] unload persist failed:', e) })
+    return true
+}
+
 if (typeof window !== 'undefined') {
-    window.addEventListener('beforeunload', () => {
-        if (_persistTimer) {
-            clearTimeout(_persistTimer)
-            _persistTimer = null
-            const { accounts } = useAccountStore.getState()
-            localforage.setItem(STORAGE_KEY, accounts).catch((e) => { if (import.meta.env.DEV) console.error('[accountStore] beforeunload persist failed:', e) })
-        }
+    window.addEventListener('beforeunload', flushPendingAccountPersist)
+    // Phones suspend straight from pagehide or a hidden visibility change; the
+    // deferred 300 ms timer would otherwise never fire (Sol P1-SYNC-01).
+    window.addEventListener('pagehide', flushPendingAccountPersist)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushPendingAccountPersist()
     })
 }
 
@@ -342,14 +377,26 @@ export const setAccountsLoading = (accountIds: string[]) => {
   useAccountStore.setState({ loadingAccounts: new Set([...store.loadingAccounts, ...accountIds]) })
 }
 
-export const clearAccountsLoading = (accountIds: string[]) => {
-  const store = useAccountStore.getState()
-  const toRemove = new Set(accountIds)
-  useAccountStore.setState({ loadingAccounts: new Set([...store.loadingAccounts].filter(id => !toRemove.has(id))) })
-}
-
 export const clearAllAccountLoading = () => {
   useAccountStore.setState({ loadingAccounts: new Set<string>() })
+}
+
+// Incarnation tokens on load (R2-06, R3-03): connections persisted before the feature
+// (or restored from a legacy blob) get a generation minted exactly once; existing
+// tokens are never replaced, so the stamp stays stable across loads. The minted
+// token is a deterministic digest of account and connection ids, so two devices
+// holding the same legacy connection converge on one incarnation.
+export async function mintMissingConnectionGenerations<T extends Account>(accounts: T[]): Promise<{ accounts: T[]; minted: boolean }> {
+  let minted = false
+  const out = await Promise.all(accounts.map(async acc => {
+    if (!acc.connections?.some(c => !c.generation)) return acc
+    minted = true
+    return {
+      ...acc,
+      connections: await Promise.all(acc.connections.map(async c => c.generation ? c : { ...c, generation: await legacyConnectionGeneration(acc.id, c.id) })),
+    }
+  }))
+  return { accounts: out, minted }
 }
 
 export interface ReplaceTransportUrlResult {
@@ -372,8 +419,8 @@ export interface AccountStore {
       addAccountByCredentials: (email: string, password: string, name: string, accentColor?: string, emoji?: string, avatar?: string, intent?: 'login' | 'signup') => Promise<void>
       addLocalAccount: (name: string, accentColor?: string, emoji?: string, avatar?: string) => Promise<string>
       removeAccount: (id: string) => Promise<void>
-      syncAccount: (id: string, forceRefresh?: boolean) => Promise<void>
-      syncAllAccounts: (silent?: boolean) => Promise<void>
+      syncAccount: (id: string, forceRefresh?: boolean, intent?: import('./account/accountSync').SyncIntent) => Promise<void>
+      syncAllAccounts: (silent?: boolean) => Promise<boolean>
       repairAccount: (id: string) => Promise<void>
       installAddonToAccount: (accountId: string, addonUrl: string, savedMetadata?: import('@/types/addon').AddonDescriptor['metadata']) => Promise<void>
       installAddonsToAccount: (accountId: string, addonUrls: string[], concurrency?: number) => Promise<{ successCount: number; failCount: number }>
@@ -427,12 +474,13 @@ export interface AccountStore {
       bulkSetHideConfigure: (accountId: string, hideConfigure: boolean) => Promise<number>
       bulkSetHideConfigureSelected: (accountId: string, transportUrls: string[], hideConfigure: boolean) => Promise<number>
       removeLocalAddons: (accountId: string, transportUrls: string[]) => Promise<void>
-      replaceTransportUrl: (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: AddonDescriptor['metadata']) => Promise<ReplaceTransportUrlResult>
+      replaceTransportUrl: (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: ReplaceMetadata) => Promise<ReplaceTransportUrlResult>
       reinstallAddon: (accountId: string, transportUrl: string) => Promise<void>
       reinstallAddons: (accountId: string, transportUrls: string[], concurrency?: number, onProgress?: (current: number, total: number) => void) => Promise<{ successCount: number; failCount: number }>
       syncAutopilotRules: (accountId: string) => Promise<void>
       clearError: () => void
       reset: () => Promise<void>
+      wipeAccounts: () => Promise<void>
       addChangelogEntry: (entry: Omit<AddonChangelogEntry, 'id' | 'timestamp'>) => Promise<void>
       clearChangelog: (accountId?: string, maxAgeMs?: number) => Promise<void>
       createSubProfile: (accountId: string, name: string, cloneFromCurrent?: boolean) => Promise<string | undefined>
@@ -469,9 +517,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
       initialize: async () => {
             const ownership = captureSyncOwnership()
             try {
-                  let storedAccounts = await localforage.getItem<Account[]>(STORAGE_KEY)
-                  const storedChangelog = await localforage.getItem<AddonChangelogEntry[]>(CHANGELOG_KEY)
-                  const membership = mergeAccountMembership(await localforage.getItem<AccountMembership>(ACCOUNT_MEMBERSHIP_KEY) || {})
+                  // Independent localforage keys: one IDB round trip each, so
+                  // read them concurrently instead of serially.
+                  const [storedAccountsRead, storedChangelog, storedMembership] = await Promise.all([
+                        localforage.getItem<Account[]>(STORAGE_KEY),
+                        localforage.getItem<AddonChangelogEntry[]>(CHANGELOG_KEY),
+                        localforage.getItem<AccountMembership>(ACCOUNT_MEMBERSHIP_KEY),
+                  ])
+                  let storedAccounts = storedAccountsRead
+                  const membership = mergeAccountMembership(storedMembership || {})
                   ownership.assert()
 
                   // This catches the case where a corrupted re-login wiped accounts between sessions.
@@ -492,9 +546,11 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               ...acc,
                               lastSync: new Date(acc.lastSync),
                         }))
+                        for (const acc of accounts) rememberKnownManifests(acc.addons)
 
                         // One-time migration: colorIndex -> accentColor
                         let didHubMigrate = false
+                        let didConnectionPicturesMigrate = false
                         let migratedAccounts = accounts.map(acc => {
                               const connections = acc.connections || []
                               const needsHubMigration = acc.authKey && acc.authKey.length > 60 && connections.length === 0
@@ -502,6 +558,23 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     ...acc,
                                     profiles: acc.profiles ?? [],
                                     apiKey: acc.apiKey || safeUUID(),
+                              }
+
+                              // Versioned migration (schema v3): drop malformed
+                              // rows and rows for the removed platforms
+                              // (Stremio, Nuvio, RealStream) from older blobs.
+                              if (acc.connectionPictures !== undefined) {
+                                    const migratedPictures = migrateConnectionPictures(acc.connectionPictures)
+                                    if (JSON.stringify(migratedPictures ?? null) !== JSON.stringify(acc.connectionPictures ?? null)) {
+                                          didConnectionPicturesMigrate = true
+                                          migrated = migratedPictures
+                                                ? { ...migrated, connectionPictures: migratedPictures }
+                                                : (() => { const { connectionPictures: _cp, ...rest } = migrated as Record<string, unknown> & { connectionPictures?: unknown }; return rest as typeof migrated })()
+                                    }
+                                    if (migrated.connectionPictures && migrated.connectionPicturesSchemaVersion !== CONNECTION_PICTURES_SCHEMA_VERSION) {
+                                          didConnectionPicturesMigrate = true
+                                          migrated = { ...migrated, connectionPicturesSchemaVersion: CONNECTION_PICTURES_SCHEMA_VERSION }
+                                    }
                               }
 
                               if ('colorIndex' in migrated && (migrated as Record<string, unknown>).colorIndex !== undefined && !migrated.accentColor) {
@@ -558,17 +631,32 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               persistAccounts(cleaned)
                         }
 
+                         // R2-06: legacy connections gain an incarnation token once, at load.
+                         const generationMint = await mintMissingConnectionGenerations(migratedAccounts)
+                         migratedAccounts = generationMint.accounts
+
                         set({ accounts: migratedAccounts })
                         if (didHubMigrate) {
                             persistAccounts(migratedAccounts)
                             triggerSync()
                         }
+                        if (didConnectionPicturesMigrate) {
+                            persistAccounts(migratedAccounts)
+                        }
+                         if (generationMint.minted) {
+                               persistAccounts(migratedAccounts)
+                         }
                   }
 
                   if (storedChangelog && Array.isArray(storedChangelog)) {
                         set({ changelog: storedChangelog })
                   }
                   set({ hydrated: true })
+                  // One-time heal: oversized stored avatar data URIs shrink in the
+                  // background (worker), but only after an authenticated session has
+                  // completed its initial sync; local hydration alone (pre-login)
+                  // never arms it (Sol P1-AVATAR-01).
+                  void armAvatarHealAfterSession()
             } catch (error) {
                   if (!ownership.current()) return
                   if (import.meta.env.DEV) console.error('Failed to load accounts from storage:', error)
@@ -849,6 +937,28 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             removeAuthKeyHash(id)
             triggerSync()
             try {
+                  const { useSyncStore } = await import('./syncStore')
+                  const { auth, serverUrl } = useSyncStore.getState()
+                  if (auth.isAuthenticated) {
+                        const baseUrl = serverUrl || ''
+                        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+                        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+                        const syncToken = await getSyncPasswordHeader(auth)
+                        ownership.assert()
+                        const res = await fetch(`${apiPath}/accounts/${encodeURIComponent(id)}/server-state`, {
+                              method: 'DELETE',
+                              headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
+                        })
+                        if (!res.ok) throw new Error(`Server state delete failed (${res.status})`)
+                        trace('account', 'server-state.deleted', { accountId: id })
+                  }
+            } catch (serverStateErr) {
+                  ownership.assert()
+                  trace('account', 'server-state.pending', { accountId: id, error: serverStateErr instanceof Error ? serverStateErr.message : 'unknown' })
+                  const { queuePendingAccountServerCleanup } = await import('@/lib/account-server-cleanup')
+                  await queuePendingAccountServerCleanup(id)
+            }
+            try {
                   const { useFailoverStore } = await import('@/store/failoverStore')
                   ownership.assert()
                   const failoverState = useFailoverStore.getState()
@@ -863,8 +973,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               if (auth.isAuthenticated) {
                                     const baseUrl = serverUrl || ''
                                     const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-                                    const { deriveSyncToken } = await import('@/lib/crypto')
-                                    const syncToken = await deriveSyncToken(auth.password)
+                                    const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+                                    const syncToken = await getSyncPasswordHeader(auth)
                                     ownership.assert()
                                     await fetch(`${apiPath}/autopilot/account/${id}`, {
                                         method: 'DELETE',
@@ -902,8 +1012,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                               if (auth.isAuthenticated) {
                                     const baseUrl = serverUrl || ''
                                     const credApiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-                                    const { deriveSyncToken } = await import('@/lib/crypto')
-                                    const syncToken = await deriveSyncToken(auth.password)
+                                    const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+                                    const syncToken = await getSyncPasswordHeader(auth)
                                     for (const connId of connIds) {
                                           ownership.assert()
                                           await fetch(`${credApiPath}/providers/connections/${connId}/credentials`, {
@@ -943,9 +1053,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      syncAccount: async (id: string, forceRefresh: boolean = false) => {
+      syncAccount: async (id: string, forceRefresh: boolean = false, intent?: import('./account/accountSync').SyncIntent) => {
             const { syncAccount } = await import('./account/accountSync')
-            return syncAccount(id, forceRefresh)
+            return syncAccount(id, forceRefresh, intent)
       },
 
       syncAllAccounts: async (silent: boolean = false) => {
@@ -1017,8 +1127,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                   const updatedAccount: Account = {
                         ...account,
                         name: data.name ?? account.name,
-                        accentColor: data.accentColor ?? account.accentColor,
-                        emoji: data.emoji ?? account.emoji,
+                        // Present-but-undefined means cleared (Remove photo, color Off); only an absent key keeps the old value.
+                        accentColor: 'accentColor' in data ? data.accentColor : account.accentColor,
+                        emoji: 'emoji' in data ? data.emoji : account.emoji,
                         avatar: 'avatar' in data ? data.avatar : account.avatar,
                         note: data.note ?? (account.note ?? undefined),
                         hideLastWatched: data.hideLastWatched ?? (account.hideLastWatched ?? false),
@@ -1163,7 +1274,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             return removeLocalAddons(accountId, transportUrls)
       },
 
-      replaceTransportUrl: async (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: AddonDescriptor['metadata']) => {
+      replaceTransportUrl: async (oldUrl: string, newUrl: string, accountId?: string, freshManifest?: AddonDescriptor['manifest'], metadata?: ReplaceMetadata) => {
             const { replaceTransportUrl } = await import('./account/accountAddonOps')
             return replaceTransportUrl(oldUrl, newUrl, accountId, freshManifest, metadata)
       },
@@ -1206,6 +1317,27 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             // Keep deletion markers with the recovery backup; a full workspace wipe
             // clears both. Resetting memory must not revive removed backup rows.
             await localforage.removeItem(CHANGELOG_KEY)
+      },
+
+      wipeAccounts: async () => {
+            const ownership = captureSyncOwnership()
+            const releaseMembership = await acquireSyncMutex(ACCOUNT_MEMBERSHIP_MUTEX)
+            try {
+                  ownership.assert()
+                  const ids = get().accounts.map(a => a.id)
+                  const membership = deleteAccountIds(mergeAccountMembership(get()), ids)
+                  await persistAccountMembership([], membership, ownership)
+                  ownership.assert()
+                  await localforage.removeItem(BACKUP_KEY)
+                  ownership.assert()
+                  await localforage.setItem(CHANGELOG_KEY, [])
+                  ownership.assert()
+                  set({ accounts: [], ...membership, loadingAccounts: new Set<string>(), error: null, changelog: [] })
+                  resetAuthKeyHashes()
+                  triggerSync()
+            } finally {
+                  releaseMembership()
+            }
       },
 
       addChangelogEntry: async (entry) => {
@@ -1258,3 +1390,129 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             return switchProfile(accountId, targetProfileId)
       }
 }))
+
+// One-time heal per valid session: shrink stored oversized avatar data URIs. The shrink
+// runs in the avatar GIF worker (never the main thread) and is armed only once an
+// authenticated, unlocked session has completed its initial sync; local hydration
+// before login never arms it (Sol P1-AVATAR-01). Before every await and every write
+// the session gates are re-checked (authenticated, vault unlocked, no re-auth needed,
+// accounts-hydration marker still set, same session id and sync-ownership
+// generation); a cancelled run releases the
+// latch so the next valid session can heal, while a completed run holds it for the app
+// load. The routine is deterministic, so two devices healing the same picture converge
+// on sync. Only the exact oversized avatar string is replaced; https links and other
+// fields are never touched, and a second pass is a no-op.
+const avatarHealState = { latched: false }
+
+export function avatarHealSessionReady(gates: {
+    authenticated: boolean
+    locked: boolean
+    needsReauth: boolean
+    initialSyncCompleted: boolean
+    hydrationComplete: boolean
+}): boolean {
+    return gates.hydrationComplete && gates.authenticated && !gates.locked && !gates.needsReauth && gates.initialSyncCompleted
+}
+
+let avatarHealWatch: (() => void) | null = null
+
+// Arm the heal from the first valid session onward: watch the sync store and schedule
+// once the gates turn green. Subscribed for the app lifetime; the latch keeps a
+// completed heal from ever repeating, and a cancelled run re-arms on the next valid
+// session transition.
+async function armAvatarHealAfterSession(): Promise<void> {
+    if (avatarHealWatch) return
+    const [{ useSyncStore }, { isAccountsHydrationComplete }] = await Promise.all([
+        import('./syncStore'),
+        import('./sync-store-helpers'),
+    ])
+    if (avatarHealWatch) return
+    const arm = () => {
+        if (avatarHealState.latched) return
+        const sync = useSyncStore.getState()
+        if (avatarHealSessionReady({
+            authenticated: sync.auth.isAuthenticated,
+            locked: useAuthStore.getState().isLocked,
+            needsReauth: sync.needsReauth,
+            initialSyncCompleted: sync.isInitialSyncCompleted,
+            hydrationComplete: isAccountsHydrationComplete(),
+        })) scheduleAvatarHeal()
+    }
+    avatarHealWatch = useSyncStore.subscribe(arm)
+    arm()
+}
+
+function scheduleAvatarHeal(): void {
+    const ric = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback
+    if (typeof ric === 'function') ric(() => { void healOversizedAvatars() }, { timeout: 10_000 })
+    else setTimeout(() => { void healOversizedAvatars() }, 3_000)
+}
+
+async function healOversizedAvatars(): Promise<void> {
+    if (avatarHealState.latched) return
+    avatarHealState.latched = true
+    const cancel = () => { avatarHealState.latched = false }
+    try {
+        // auth.id is the stable account id: a same-account sign-out/sign-in restores
+        // it, so it cannot identify a session. The sync ownership generation is
+        // bumped by logout and never rewinds; capture it before any await.
+        const ownership = captureSyncOwnership()
+        // The session id arrives with the first import; until then only the
+        // statically importable gate is checkable.
+        let gatesCheck: (() => boolean) | null = null
+        const cancelled = () => !ownership.current() || (gatesCheck ? gatesCheck() : useAuthStore.getState().isLocked)
+        if (cancelled()) return cancel()
+        const [{ isAccountsHydrationComplete }, { useSyncStore }] = await Promise.all([
+            import('./sync-store-helpers'),
+            import('./syncStore'),
+        ])
+        const session = useSyncStore.getState().auth.id
+        gatesCheck = () => {
+            const sync = useSyncStore.getState()
+            return sync.auth.id !== session || !avatarHealSessionReady({
+                authenticated: sync.auth.isAuthenticated,
+                locked: useAuthStore.getState().isLocked,
+                needsReauth: sync.needsReauth,
+                initialSyncCompleted: sync.isInitialSyncCompleted,
+                hydrationComplete: isAccountsHydrationComplete(),
+            })
+        }
+        if (cancelled()) return cancel()
+        // Never overlap a running sync: wait for the sync engine to settle (bounded).
+        for (let attempt = 0; ; attempt++) {
+            if (cancelled()) return cancel()
+            if (!useSyncStore.getState().isSyncing) break
+            if (attempt >= 30) return cancel()
+            await new Promise(resolve => setTimeout(resolve, 2_000))
+        }
+        if (cancelled()) return cancel()
+        const [{ healAccountAvatars }, { shrinkAvatarDataUrlOffMain }] = await Promise.all([
+            import('@/lib/avatar-heal'),
+            import('@/lib/avatar-gif-worker-client'),
+        ])
+        if (cancelled()) return cancel()
+        const result = await healAccountAvatars(useAccountStore.getState().accounts, shrinkAvatarDataUrlOffMain, cancelled)
+        if (result.cancelled || cancelled()) return cancel()
+        for (const heal of result.heals) {
+            if (cancelled()) return cancel()
+            const releaseMutex = await acquireSyncMutex(heal.id)
+            try {
+                if (cancelled()) return cancel()
+                const workspace = getActiveWorkspaceId()
+                const accounts = useAccountStore.getState().accounts.map(acc =>
+                    acc.id === heal.id && acc.avatar === heal.from ? { ...acc, avatar: heal.to } : acc)
+                useAccountStore.setState({ accounts })
+                // The 300 ms delayed write stays fenced to this exact session
+                // and workspace (Sol P1-AVATAR-01 recheck).
+                persistAccounts(accounts, { current: () => getActiveWorkspaceId() === workspace && !cancelled() })
+                trace('account', 'avatar.healed', { accountId: heal.id })
+            } finally {
+                releaseMutex()
+            }
+        }
+        if (result.heals.length > 0) triggerSync()
+    } catch (e) {
+        cancel()
+        if (import.meta.env.DEV) console.warn('[AccountStore] Avatar heal failed:', e)
+    }
+}

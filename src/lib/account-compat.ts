@@ -76,7 +76,8 @@ export interface StremioFanoutResult {
  * minus that login's exclusions — platform-wide stremio entries and exact
  * connection-id entries both apply). The rows policy removes are handed to
  * updateAddons as `authorizedRemovals` so the anti-wipe guard can distinguish a
- * deliberate per-target clear from an accidental wipe (R2).
+ * deliberate per-target clear from an accidental wipe (R2). The payload is exactly
+ * what the hub shows; nothing is held back.
  */
 export async function pushAddonsToStremioConnections(
     account: Account,
@@ -91,15 +92,16 @@ export async function pushAddonsToStremioConnections(
     const context = options?.allowCollectionShrink ? ACCOUNT_CONTEXT_CLEAR_ALL : account.id
     const written: string[] = []
     const failed: StremioFanoutFailure[] = []
+    const writeOptions = options ?? {}
     for (const target of targets) {
         const destination = { platform: 'stremio', connectionId: target.connectionId }
-        const effective = effectiveAddonsFor(addons, destination)
+        const projected = effectiveAddonsFor(addons, destination)
         const authorizedRemovals = excludedUrlsFor(addons, destination)
         try {
             const authKey = await getCachedAuthKey(target.encryptedAuthKey, encryptionKey)
-            await updateAddons(authKey, effective, context, target.isPrimary
-                ? { ...options, authorizedRemovals }
-                : { allowCollectionShrink: options?.allowCollectionShrink, authorizedRemovals })
+            await updateAddons(authKey, projected, context, target.isPrimary
+                ? { ...writeOptions, authorizedRemovals }
+                : { allowCollectionShrink: writeOptions.allowCollectionShrink, authorizedRemovals })
             written.push(target.connectionId)
         } catch (error) {
             failed.push({ connectionId: target.connectionId, isPrimary: target.isPrimary, error })

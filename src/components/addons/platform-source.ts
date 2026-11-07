@@ -189,6 +189,29 @@ export function accountSyncTargets(account: PlatformSourceAccount | null | undef
     return { targets: Array.from(byPlatform.values()), paused }
 }
 
+export interface AddonPlatformChipState {
+    reached: number
+    total: number
+    failing: boolean
+}
+
+// The addon card always shows its platforms; partial reach and failing targets are called out.
+export function addonPlatformChipState(
+    account: PlatformSourceAccount | null | undefined,
+    addon: Pick<AddonDescriptor, 'transportUrl' | 'destinations'>,
+): AddonPlatformChipState {
+    if (!account) return { reached: 0, total: 0, failing: false }
+    const total = addonPlatformSources(account).length
+    const scoped = accountForAddonTargets(account, addon)
+    const reached = addonPlatformSources(scoped).length
+    const failing = accountSyncTargets(scoped).targets.some(t => t.status === 'error' || t.status === 'expired' || t.status === 'degraded')
+    return { reached, total, failing }
+}
+
+// Hover text for the zero-reach chip: the account has platforms but this addon reaches
+// none, so the empty list must never be interpolated into a "Syncs to ..." sentence.
+export const ZERO_PLATFORM_REACH_HOVER_TEXT = "Not synced to any of this account's platforms"
+
 export interface PlatformSourceSummary {
     // Union of platforms the collections live on, in first-seen order.
     platforms: string[]

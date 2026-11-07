@@ -23,7 +23,7 @@ export const StremioCredentialRepairNotice = memo(function StremioCredentialRepa
         <div className={cn('flex flex-col gap-1.5', className)}>
             <p className="flex items-start gap-1.5 text-xs font-medium text-warning">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                Stremio sync needs reconnecting
+                This server is missing its Stremio sign-in
             </p>
             <p className="text-xs leading-relaxed text-muted-foreground">Your API key works, but changes from other apps can’t reach Stremio yet. Repair the connection using your saved sign-in.</p>
             <div className="flex flex-wrap items-center gap-2">

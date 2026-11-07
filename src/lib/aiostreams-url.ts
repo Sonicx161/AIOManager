@@ -1,4 +1,6 @@
-import { addonEndpointUrl } from './addon-endpoint-url'
+// Extension-explicit so this leaf module stays resolvable under the node:test
+// runner (same pattern as utils.ts); bundler resolution is unchanged.
+import { addonEndpointUrl } from './addon-endpoint-url.ts'
 
 export function parseAIOStreamsUrl(transportUrl: string): { baseUrl: string; uuid: string } | null {
     try {

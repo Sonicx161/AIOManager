@@ -115,6 +115,37 @@ export interface MergeResult {
     addonId: string
     name: string
   }>
+  // An older different-config copy is on the account: nothing was written for these.
+  pending?: DeployDecisionItem[]
+  outcomes?: DeployOutcome[]
+  // In memory only: the old copies a Replace answer removed, and the exact entry
+  // each pending decision is about (normalized URL + position) so an answer binds to it.
+  replaced?: Array<{ oldUrl: string; newUrl: string }>
+  candidates?: Record<string, DeployCandidate>
+}
+
+export interface DeployCandidate {
+  key: string
+  index: number
+}
+
+export type DeployChoice = 'keep' | 'replace'
+
+export type DeployDecider = (savedAddonId: string, candidate: DeployCandidate) => DeployChoice | undefined
+
+export interface DeployDecisionItem {
+  savedAddonId: string
+  addonId: string
+  name: string
+  existingLabel: string | null
+  libraryLabel: string | null
+}
+
+export interface DeployOutcome {
+  savedAddonId: string
+  name: string
+  outcome: 'added' | 'updated' | 'replaced' | 'kept-both'
+  replacedLabel?: string | null
 }
 
 /**
@@ -125,6 +156,7 @@ export interface BulkResult {
   failed: number
   errors: Array<{ accountId: string; error: string }>
   details: Array<{ accountId: string; result: MergeResult }>
+  cancelled?: number
 }
 
 /**

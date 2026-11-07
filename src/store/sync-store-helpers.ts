@@ -21,9 +21,61 @@ export const syncRuntime = {
     lastPulledCloudAvatar: null as string | null,
     pendingRetry: false,
     syncDebounceTimer: null as ReturnType<typeof setTimeout> | null,
+    // When the current deferral window opened (first unsynced change), for the max-wait cap.
+    syncDebounceFirstAt: null as number | null,
+    // Wire size of the last built push body; sizes the next auto-push debounce window.
+    lastPushedEnvelopeBytes: null as number | null,
+    // Workspace+markedAt of the pending-push marker this boot already retried (one attempt per marker).
+    pendingPushMarkerAttemptKey: null as string | null,
     lastSyncedAccountCount: null as number | null,
     onlineHandler: null as (() => void) | null,
     syncBC: null as BroadcastChannel | null,
+}
+
+// Size-aware push debounce: discrete saves each re-upload the whole envelope, so the
+// auto-push coalescing window scales with the last measured push body. Small envelopes
+// keep the 1.5 s window; multi-MB ones wait up to 10 s. The max-wait cap bounds how long
+// a continuously re-armed change can be held. Explicit syncs bypass this entirely.
+export const SYNC_DEBOUNCE_BASE_MS = 1500
+export const SYNC_DEBOUNCE_MAX_MS = 10_000
+export const SYNC_DEBOUNCE_MAX_WAIT_MS = 30_000
+export const SYNC_DEBOUNCE_FULL_SCALE_BYTES = 4 * 1024 * 1024
+
+export function pushDebounceDelayMs(lastEnvelopeBytes: number | null, now: number, firstDeferredAt: number | null): number {
+    const sized = lastEnvelopeBytes && lastEnvelopeBytes > 0
+        ? SYNC_DEBOUNCE_BASE_MS + (SYNC_DEBOUNCE_MAX_MS - SYNC_DEBOUNCE_BASE_MS) * Math.min(1, lastEnvelopeBytes / SYNC_DEBOUNCE_FULL_SCALE_BYTES)
+        : SYNC_DEBOUNCE_BASE_MS
+    if (firstDeferredAt === null) return Math.round(sized)
+    return Math.round(Math.max(0, Math.min(sized, SYNC_DEBOUNCE_MAX_WAIT_MS - (now - firstDeferredAt))))
+}
+
+export interface SyncDebounceRuntime {
+    syncDebounceTimer: ReturnType<typeof setTimeout> | null
+    syncDebounceFirstAt: number | null
+    lastPushedEnvelopeBytes: number | null
+}
+
+// Supersede any armed timer and schedule the deferred push; the callback resets the
+// deferral window so the next change gets a fresh max-wait budget.
+export function armSyncPushDebounce(runtime: SyncDebounceRuntime, fire: () => void, now: number = Date.now()): void {
+    if (runtime.syncDebounceTimer) clearTimeout(runtime.syncDebounceTimer)
+    if (runtime.syncDebounceFirstAt === null) runtime.syncDebounceFirstAt = now
+    const delayMs = pushDebounceDelayMs(runtime.lastPushedEnvelopeBytes, now, runtime.syncDebounceFirstAt)
+    runtime.syncDebounceTimer = setTimeout(() => {
+        runtime.syncDebounceTimer = null
+        runtime.syncDebounceFirstAt = null
+        fire()
+    }, delayMs)
+}
+
+// Fire an armed deferred push now (page hide/unload) instead of losing the window.
+export function flushSyncPushDebounce(runtime: SyncDebounceRuntime, fire: () => void): boolean {
+    if (!runtime.syncDebounceTimer) return false
+    clearTimeout(runtime.syncDebounceTimer)
+    runtime.syncDebounceTimer = null
+    runtime.syncDebounceFirstAt = null
+    fire()
+    return true
 }
 
 export class SyncOwnershipLostError extends Error {
@@ -64,6 +116,39 @@ export async function computeHash(data: string): Promise<string> {
     const encoded = new TextEncoder().encode(data)
     const hashBuffer = await crypto.subtle.digest('SHA-256', encoded)
     return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Pure "when did we last look" stamps: accountStates.*.lastSync (addonDeployment.syncAccountState
+// restamps it on every passive sync) and failover rule lastCheck (advanced by autopilot state pulls).
+// They must not defeat the push-skip hash; the pushed payload keeps them. Everything else
+// (edits, deletions, tombstones, ordering, settings, credentials) still changes the hash.
+export function normalizeStateForSkipHash(state: Record<string, unknown>): Record<string, unknown> {
+    const normalized = { ...state }
+    if (normalized.accountStates && typeof normalized.accountStates === 'object') {
+        const accountStates: Record<string, unknown> = {}
+        for (const [id, s] of Object.entries(normalized.accountStates as Record<string, unknown>)) {
+            if (s && typeof s === 'object') {
+                const { lastSync: _lastSync, ...rest } = s as Record<string, unknown>
+                accountStates[id] = rest
+            } else {
+                accountStates[id] = s
+            }
+        }
+        normalized.accountStates = accountStates
+    }
+    const failover = normalized.failover
+    if (failover && typeof failover === 'object' && Array.isArray((failover as Record<string, unknown>).rules)) {
+        const fo = failover as Record<string, unknown>
+        normalized.failover = {
+            ...fo,
+            rules: (fo.rules as unknown[]).map(r => {
+                if (!r || typeof r !== 'object') return r
+                const { lastCheck: _lastCheck, ...rest } = r as Record<string, unknown>
+                return rest
+            }),
+        }
+    }
+    return normalized
 }
 
 let _syncLock: Promise<void> | null = null

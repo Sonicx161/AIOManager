@@ -7,6 +7,22 @@ export interface ResilientFetchOptions extends RequestInit {
     idempotent?: boolean;
 }
 
+// Sync uploads carry multi-MB encrypted envelopes (avatars, backfill events); the 10 s
+// default aborts every push on a slow uplink. Budget a conservative 128 KB/s on top of a
+// generous base, capped so a stuck socket still fails within a few minutes.
+export const SYNC_UPLOAD_FLOOR_MS = 30_000;
+export const SYNC_UPLOAD_MAX_MS = 300_000;
+const SYNC_UPLOAD_CHUNK_BYTES = 128 * 1024;
+
+export function syncUploadTimeoutMs(bodyLength: number): number {
+    const sizeMs = Math.ceil(Math.max(0, bodyLength) / SYNC_UPLOAD_CHUNK_BYTES) * 1000;
+    return Math.min(SYNC_UPLOAD_FLOOR_MS + sizeMs, SYNC_UPLOAD_MAX_MS);
+}
+
+// Pull/mirror responses can be equally large with no up-front size hint, so budget a
+// generous fixed floor.
+export const SYNC_PULL_TIMEOUT_MS = 60_000;
+
 export async function resilientFetch(
     url: string,
     options: ResilientFetchOptions = {}
@@ -30,7 +46,7 @@ export async function resilientFetch(
 
     for (let attempt = 0; attempt <= retries; attempt++) {
         const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), timeout);
+        const id = setTimeout(() => controller.abort(new DOMException(`Request timed out after ${Math.round(timeout / 1000)}s`, 'TimeoutError')), timeout);
 
         let combinedSignal: AbortSignal;
         if (fetchOptions.signal) {

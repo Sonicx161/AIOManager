@@ -15,6 +15,7 @@ import { useAccountStore, type ReplaceTransportUrlResult } from '@/store/account
 import { AddonManifest, AddonDescriptor } from '@/types/addon'
 import type { Account } from '@/types/account'
 import { getEffectiveManifest } from '@/lib/addon-utils'
+import { isPlaceholderManifest, getKnownManifest } from '@/lib/manifest-placeholder'
 import {
   AccountAddonState,
   BulkResult,
@@ -29,11 +30,56 @@ import { restorationManager } from '@/lib/autopilot/restorationManager'
 import type { CloneMode } from '@/lib/clone-mode'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
 
-import { applySavedAddonToAccount, applySavedAddonToAccounts, applyTagToAccount, applyTagToAccounts, bulkApplySavedAddons, bulkApplyTag, bulkRemoveAddons, bulkRemoveByTag, bulkReinstallAddons, bulkInstallFromUrls, bulkReplaceUrl, bulkCloneAccount, bulkSyncOrder, bulkReinstallAllOnAccount, syncAccountState, syncAllAccountStates, replaceTransportUrlUniversally, SAVED_ADDON_ACCOUNT_CONCURRENCY } from './addon/addonDeployment'
+import { SAVED_ADDON_ACCOUNT_CONCURRENCY } from './addon/deployment-constants'
+import { guardedImport } from '@/lib/lazy-chunk'
+
+// Deployment code stays out of the boot chunk; a failed chunk load (deploy
+// window, transient network error) reloads the tab once instead of surfacing
+// every deploy action as a bare rejection.
+const loadAddonDeployment = guardedImport(() => import('./addon/addonDeployment'))
 import { updateSavedAddonManifest } from './addon/addonManifest'
 import { mapConcurrent } from '@/lib/concurrency'
 
 export const _outboundSyncInProgress = new Set<string>()
+
+// Linked copies that run their own URL (for example a person's own config). Keep in sync
+// leaves that URL and its manifest alone but still sends them the library's name, logo
+// and description.
+function linkedOwnUrlCopies(saved: SavedAddon, accountStates: Record<string, AccountAddonState>): Array<{ accountId: string; url: string }> {
+  const scope = Array.isArray(saved.syncAccountIds) ? new Set(saved.syncAccountIds) : null
+  const libraryUrl = normalizeAddonUrl(saved.installUrl)
+  const copies: Array<{ accountId: string; url: string }> = []
+  for (const [accountId, state] of Object.entries(accountStates)) {
+    if (scope && !scope.has(accountId)) continue
+    for (const installed of state?.installedAddons || []) {
+      if (installed.savedAddonId === saved.id && normalizeAddonUrl(installed.installUrl) !== libraryUrl) {
+        copies.push({ accountId, url: installed.installUrl })
+      }
+    }
+  }
+  return copies
+}
+
+const LIBRARY_DISPLAY_KEYS = ['customName', 'customLogo', 'customDescription'] as const
+
+async function pushMetadataToOwnUrlCopies(saved: SavedAddon, accountStates: Record<string, AccountAddonState>, metadata: SavedAddon['metadata']) {
+  await mapConcurrent(linkedOwnUrlCopies(saved, accountStates), SAVED_ADDON_ACCOUNT_CONCURRENCY, async ({ accountId, url }) => {
+    try {
+      const mergeDisplay = (current: AddonDescriptor['metadata']) => {
+        const merged: Record<string, unknown> = { ...(current || {}) }
+        for (const key of LIBRARY_DISPLAY_KEYS) {
+          const value = metadata?.[key]
+          if (value === undefined) delete merged[key]
+          else merged[key] = value
+        }
+        return merged as AddonDescriptor['metadata']
+      }
+      await useAccountStore.getState().replaceTransportUrl(url, url, accountId, undefined, mergeDisplay)
+    } catch (error) {
+      if (import.meta.env.DEV) console.error(`[AddonStore] Metadata sync failed for account ${accountId}:`, error)
+    }
+  })
+}
 
 function anyTargetAccountHasUrl(url: string, targetAccountIds: string[] | null): boolean {
   const norm = normalizeAddonUrl(url)
@@ -176,7 +222,8 @@ export interface AddonStore {
   bulkApplySavedAddons: (
     savedAddonIds: string[],
     accountIds: Array<{ id: string; authKey: string }>,
-    allowProtected?: boolean
+    allowProtected?: boolean,
+    options?: { batch?: AbortController }
   ) => Promise<BulkResult>
   bulkApplyTag: (
     tag: string,
@@ -196,7 +243,8 @@ export interface AddonStore {
     addonIds: string[],
     accountIds: Array<{ id: string; authKey: string }>,
     allowProtected?: boolean,
-    onProgress?: (current: number, total: number) => void
+    onProgress?: (current: number, total: number) => void,
+    options?: { skipConnectionPlatforms?: string[] }
   ) => Promise<BulkResult>
   bulkInstallFromUrls: (
     urls: string[],
@@ -454,6 +502,8 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     try {
       let manifest = (existingManifest as unknown as Record<string, unknown> & { manifest?: AddonManifest })?.manifest || existingManifest
 
+      if (manifest && isPlaceholderManifest(manifest)) manifest = getKnownManifest(installUrl) ?? manifest
+
       if (!manifest) {
         const addonDescriptor = await fetchAddonManifest(installUrl, 'System-Check')
         manifest = getEffectiveManifest({ ...addonDescriptor, catalogOverrides })
@@ -654,6 +704,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
               updatedSavedAddon.metadata
             )
           }
+          await pushMetadataToOwnUrlCopies(updatedSavedAddon, get().accountStates, updatedSavedAddon.metadata)
         } finally {
           _outboundSyncInProgress.delete(id)
         }
@@ -733,6 +784,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
               cleanMetadata
             )
           }
+          await pushMetadataToOwnUrlCopies(updatedSavedAddon, get().accountStates, cleanMetadata)
         } finally {
           _outboundSyncInProgress.delete(id)
         }
@@ -924,19 +976,23 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
   },
 
   applySavedAddonToAccount: async (savedAddonId, accountId, accountAuthKey) => {
-    return applySavedAddonToAccount(savedAddonId, accountId, accountAuthKey)
+    const deployment = await loadAddonDeployment()
+    return deployment.applySavedAddonToAccount(savedAddonId, accountId, accountAuthKey)
   },
 
   applySavedAddonToAccounts: async (savedAddonId, accountIds) => {
-    return applySavedAddonToAccounts(savedAddonId, accountIds)
+    const deployment = await loadAddonDeployment()
+    return deployment.applySavedAddonToAccounts(savedAddonId, accountIds)
   },
 
   applyTagToAccount: async (tag, accountId, accountAuthKey) => {
-    return applyTagToAccount(tag, accountId, accountAuthKey)
+    const deployment = await loadAddonDeployment()
+    return deployment.applyTagToAccount(tag, accountId, accountAuthKey)
   },
 
   applyTagToAccounts: async (tag, accountIds) => {
-    return applyTagToAccounts(tag, accountIds)
+    const deployment = await loadAddonDeployment()
+    return deployment.applyTagToAccounts(tag, accountIds)
   },
 
   importAccountStates: async (states: Record<string, AccountAddonState>, ownership?: SyncOwnership) => {
@@ -948,52 +1004,64 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     await localforage.setItem('aioman:account-addons', currentStates)
   },
 
-  bulkApplySavedAddons: async (savedAddonIds, accountIds, allowProtected?) => {
-    return bulkApplySavedAddons(savedAddonIds, accountIds, allowProtected)
+  bulkApplySavedAddons: async (savedAddonIds, accountIds, allowProtected?, options?) => {
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkApplySavedAddons(savedAddonIds, accountIds, allowProtected, options)
   },
 
   bulkApplyTag: async (tag, accountIds) => {
-    return bulkApplyTag(tag, accountIds)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkApplyTag(tag, accountIds)
   },
 
   bulkRemoveAddons: async (addonIds, accountIds, allowProtected?) => {
-    return bulkRemoveAddons(addonIds, accountIds, allowProtected)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkRemoveAddons(addonIds, accountIds, allowProtected)
   },
 
   bulkRemoveByTag: async (tag, accountIds, allowProtected?) => {
-    return bulkRemoveByTag(tag, accountIds, allowProtected)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkRemoveByTag(tag, accountIds, allowProtected)
   },
 
-      bulkReinstallAddons: async (addonIds, accountIds, allowProtected?, onProgress?) => {
-            return bulkReinstallAddons(addonIds, accountIds, allowProtected, onProgress)
+      bulkReinstallAddons: async (addonIds, accountIds, allowProtected?, onProgress?, options?) => {
+            const deployment = await loadAddonDeployment()
+            return deployment.bulkReinstallAddons(addonIds, accountIds, allowProtected, onProgress, options)
   },
 
   bulkInstallFromUrls: async (urls, accountIds, allowProtected?) => {
-    return bulkInstallFromUrls(urls, accountIds, allowProtected)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkInstallFromUrls(urls, accountIds, allowProtected)
   },
 
   bulkReplaceUrl: async (find, replace, accountIds) => {
-    return bulkReplaceUrl(find, replace, accountIds)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkReplaceUrl(find, replace, accountIds)
   },
 
   bulkCloneAccount: async (sourceAccount, targetAccountIds, overwrite?, cloneMode?) => {
-    return bulkCloneAccount(sourceAccount, targetAccountIds, { overwrite, cloneMode })
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkCloneAccount(sourceAccount, targetAccountIds, { overwrite, cloneMode })
   },
 
   bulkSyncOrder: async (sourceAccountId, targetAccountIds) => {
-    return bulkSyncOrder(sourceAccountId, targetAccountIds)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkSyncOrder(sourceAccountId, targetAccountIds)
   },
 
   bulkReinstallAllOnAccount: async (accountId, accountAuthKey) => {
-    return bulkReinstallAllOnAccount(accountId, accountAuthKey)
+    const deployment = await loadAddonDeployment()
+    return deployment.bulkReinstallAllOnAccount(accountId, accountAuthKey)
   },
 
   syncAccountState: async (accountId, accountAuthKey, addons?) => {
-    return syncAccountState(accountId, accountAuthKey, addons)
+    const deployment = await loadAddonDeployment()
+    return deployment.syncAccountState(accountId, accountAuthKey, addons)
   },
 
   syncAllAccountStates: async (accounts) => {
-    return syncAllAccountStates(accounts)
+    const deployment = await loadAddonDeployment()
+    return deployment.syncAllAccountStates(accounts)
   },
 
   exportLibrary: (forSync = false) => {
@@ -1090,6 +1158,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
 
         if (newItem.manifest && (newItem.manifest as unknown as Record<string, unknown>).manifest) {
           newItem.manifest = (newItem.manifest as unknown as Record<string, unknown> & { manifest: AddonManifest }).manifest
+        }
+
+        if (!newItem.manifest || isPlaceholderManifest(newItem.manifest as AddonManifest)) {
+          const known = getKnownManifest(newItem.installUrl as string)
+          if (known) newItem.manifest = known
         }
 
         if (!newItem.manifest) {
@@ -1324,7 +1397,8 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     ])
   },
   replaceTransportUrlUniversally: async (savedAddonId, oldUrl, newUrl, accountId, descriptor) => {
-    return replaceTransportUrlUniversally(savedAddonId, oldUrl, newUrl, accountId, descriptor)
+    const deployment = await loadAddonDeployment()
+    return deployment.replaceTransportUrlUniversally(savedAddonId, oldUrl, newUrl, accountId, descriptor)
   },
 }))
 

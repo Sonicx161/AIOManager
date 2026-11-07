@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-import { useAccountStore, getStremioAuthKey } from './accountStore'
+import { useAccountStore, getStremioAuthKey, getStremioConnections } from './accountStore'
 import type { AddonDescriptor } from '@/types/addon'
 import { useAddonStore } from './addonStore'
 import { useProfileStore } from './profileStore'
@@ -10,10 +10,11 @@ import { useAuthStore } from './authStore'
 import { useVaultStore } from './vaultStore'
 import { toast } from '@/hooks/use-toast'
 import { deriveSyncToken } from '@/lib/crypto'
-import { resilientFetch } from '@/lib/api-resilience'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
+import { resilientFetch, syncUploadTimeoutMs, SYNC_PULL_TIMEOUT_MS } from '@/lib/api-resilience'
 import { compressSyncPayload, decompressSyncPayload } from '@/lib/sync-payload-codec'
 import { decodeSyncBlob, isValidAvatarPayload, isValidWatchPayload } from '@/lib/sync-blob-decode'
-import { applySyncedSettings, readSyncedSettings } from '@/lib/synced-settings'
+import { applySyncedSettings, markSyncedSettingsPushed, readSyncedSettings, snapshotSyncedSettingsValues } from '@/lib/synced-settings'
 import { resolveRestoreSaltPolicy } from '@/lib/salt-policy'
 import { serverHasStremioCredential, canonicalMembershipChanged } from '@/lib/canonical-visibility'
 import { needsCredentialHeal } from '@/lib/credential-heal'
@@ -21,6 +22,13 @@ import { mergeDeletedEventMaps } from '@/lib/event-tombstones'
 import { mergeNotesTrash, filterNotesByTrash } from '@/lib/notes-tombstones'
 import { shouldSendPullEtag, readServerSyncTimestamp, shouldMirrorAccountPull } from '@/lib/pull-restore'
 import { setActiveWorkspace, getActiveWorkspaceId, ANON_WORKSPACE_ID } from '@/lib/workspace-persistence'
+import {
+    readPendingPushMarker,
+    writePendingPushMarker,
+    pendingPushDue,
+    noteConfirmedPush,
+    readLastConfirmedPushAt,
+} from '@/lib/pending-push-marker'
 import {
     bindRepublishHost,
     learnServerCredentialedAccounts,
@@ -37,6 +45,7 @@ import { resetAllStores } from '@/lib/store-coordinator'
 import { trace } from '@/lib/trace'
 import {
     computeHash,
+    normalizeStateForSkipHash,
     acquireSyncLock,
     readIdentityProfile,
     writeIdentityProfile,
@@ -49,6 +58,8 @@ import {
     isAccountsHydrationComplete,
     LEGACY_SYNC_PASSWORD_KEY,
     syncRuntime,
+    armSyncPushDebounce,
+    flushSyncPushDebounce,
     resolveCloudIdentity,
     captureSyncOwnership,
     type SyncOwnership,
@@ -58,9 +69,20 @@ import {
     getSessionSyncCredential,
     saveSessionSyncToken,
 } from '@/lib/session-sync-token'
+import { exportAvatarValue } from '@/lib/avatar-export'
 
 // Suppress toasts during initial boot to prevent React "state update on unmounted component" warnings
 setTimeout(() => { syncRuntime.appReady = true }, 3000)
+
+// A wrong-key AES-GCM decrypt throws an OperationError with an empty message; the push log and toast must never show a blank reason.
+export function pushErrorMessage(error: unknown): string {
+    const err = error as Error
+    if (err.message) return err.message
+    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+        return 'The sync request was aborted before the server answered; the connection may be too slow or interrupted. Try again on a stronger network.'
+    }
+    return `${err.name || 'Unknown error'}: could not unlock saved data (an account may need signing in)`
+}
 
 // Identity profile lives outside the churnable auth object: session resets, 401 wipes and
 // expiry paths must never erase the user's chosen name or avatar. The id stamp scopes the
@@ -98,6 +120,8 @@ interface SyncState {
     lastSyncedNotesCount: number | null
     lastAppliedAccountCount: number | null
     lastSyncedAccountIds: string[] | null
+    /** The cloud ETag lastSyncedAccountIds was recorded with; cleanup trusts the ids only for this ETag. */
+    lastSyncedAccountIdsEtag: string | null
     lastAppliedAddonCount: number | null
     serverStremioCredentialedAccounts: string[] | null
     // True only when an authenticated+unlocked session has NO usable server credential
@@ -146,6 +170,7 @@ export const useSyncStore = create<SyncState>()(
             lastSyncedNotesCount: null,
             lastAppliedAccountCount: null,
             lastSyncedAccountIds: null,
+            lastSyncedAccountIdsEtag: null,
             lastAppliedAddonCount: null,
             serverStremioCredentialedAccounts: null,
             needsReauth: false,
@@ -269,13 +294,15 @@ export const useSyncStore = create<SyncState>()(
                     }
                     const syncToken = await deriveSyncToken(password)
 
+                    const registrationBody = JSON.stringify(emptyState)
                     const res = await resilientFetch(`${apiPath}/sync/${newId}`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                             'x-sync-password': syncToken
                         },
-                        body: JSON.stringify(emptyState)
+                        body: registrationBody,
+                        timeout: syncUploadTimeoutMs(registrationBody.length),
                     })
 
                     if (!res.ok) throw new Error("Failed to register account on server.")
@@ -380,6 +407,39 @@ export const useSyncStore = create<SyncState>()(
                             saveSessionSyncToken(id, syncToken, btoa(String.fromCharCode(...syncKeyRaw)))
                         } catch { /* best-effort: this session still has the password in memory */ }
                     }
+                    // Runs only on a certified pull: a full apply passes the blob's account ids, and a
+                    // trusted 304 passes the ids recorded with the unchanged ETag.
+                    const scheduleAccountServerCleanup = (blobAccountIds: string[] | null) => {
+                        setTimeout(() => {
+                            import('@/lib/account-server-cleanup').then(async m => {
+                                if (!ownership.current()) return
+                                const { auth } = get()
+                                if (!auth.isAuthenticated) return
+                                const accountsState = useAccountStore.getState()
+                                if (!accountsState.hydrated || !Array.isArray(accountsState.accounts) || !accountsState.deletedAccounts) return
+                                const syncToken = await getSyncPasswordHeader(auth)
+                                const call: Parameters<typeof m.reconcileAccountServerCleanup>[0]['call'] = (path, init) => fetch(`${apiPath}${path}`, { ...init, headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id } })
+                                await m.drainPendingAccountTombstoneLifts(call)
+                                await m.reconcileAccountServerCleanup({
+                                    call,
+                                    presentIds: accountsState.accounts.map(a => a.id),
+                                    blobAccountIds,
+                                    deletedAccounts: accountsState.deletedAccounts,
+                                    restoredAccounts: accountsState.restoredAccounts ?? {},
+                                })
+                                await m.drainPendingStremioCredentialCleanup({
+                                    call,
+                                    presentIds: accountsState.accounts.map(a => a.id),
+                                    stremioAccountIds: accountsState.accounts.filter(a => getStremioConnections(a).length > 0 || !!getStremioAuthKey(a)).map(a => a.id),
+                                })
+                                await m.drainPendingConnectionServerCleanup({
+                                    call,
+                                    presentAccountIds: () => useAccountStore.getState().accounts.map(a => a.id),
+                                    presentConnections: () => useAccountStore.getState().accounts.flatMap(a => (a.connections || []).map(c => `${a.id}:${c.id}`)),
+                                })
+                            }).catch(() => {})
+                        }, 4000)
+                    }
                     const storedEtag = get().lastSyncedCloudEtag
                     const sessionUnlocked = !!useAuthStore.getState().encryptionKey
                     // An evicted local store needs a full response despite an unchanged cloud ETag.
@@ -423,7 +483,8 @@ export const useSyncStore = create<SyncState>()(
                     }
 
                     const res = await resilientFetch(`${apiPath}/sync/${id}`, {
-                        headers: pullHeaders
+                        headers: pullHeaders,
+                        timeout: SYNC_PULL_TIMEOUT_MS,
                     })
 
                     if (res.status === 304) {
@@ -443,6 +504,9 @@ export const useSyncStore = create<SyncState>()(
                             ? hydration.status === 'ok' && hydration.id === id
                             : !!storedEtag && sessionUnlocked
                         set({ lastSyncCheckedAt: new Date().toISOString(), ...(unchangedTrusted ? { isInitialSyncCompleted: true } : {}) })
+                        // An unchanged cloud copy still carries deleted-account residue; its account ids are the ones recorded with this ETag.
+                        // Registration or an account-less pull can move the ETag without new ids; those never match.
+                        if (unchangedTrusted && storedEtag && get().lastSyncedAccountIdsEtag === storedEtag) scheduleAccountServerCleanup(get().lastSyncedAccountIds)
                         if (!unchangedTrusted && !pendingAdopted) {
                             get().addLogEntry({
                                 type: 'pull',
@@ -621,6 +685,13 @@ export const useSyncStore = create<SyncState>()(
                             deletedWatchEvents: (d.deletedWatchEvents && typeof d.deletedWatchEvents === 'object') ? d.deletedWatchEvents : {},
                             apiKeys: d.apiKeys,
                             accountStates: d.accountStates,
+                            // The credential sidecar and the deduped manifest map must survive the
+                            // login projection exactly as they survive a file import: dropping them
+                            // here leaves portable secrets and sync-blob manifests unusable at login.
+                            portableConnectionCredentials: (d.portableConnectionCredentials && typeof d.portableConnectionCredentials === 'object')
+                                ? d.portableConnectionCredentials
+                                : undefined,
+                            manifests: (d.manifests && typeof d.manifests === 'object') ? d.manifests : undefined,
                             discoverFavorites: d.discoverFavorites,
                             discoverPrefs: d.discoverPrefs,
                         }
@@ -739,6 +810,7 @@ export const useSyncStore = create<SyncState>()(
 
                     let decision = 'passive merge'
                     const postConflictPull = get().pendingConflictAccountId === id
+                    let blobAccountIds: string[] | null = null
 
                     if (syncData.accounts !== undefined) {
                         const remoteAccounts = Array.isArray(syncData.accounts) ? syncData.accounts : (syncData.accounts as Record<string, unknown> | null)?.accounts
@@ -748,7 +820,8 @@ export const useSyncStore = create<SyncState>()(
                         await useAccountStore.getState().importAccounts(syncData, true, mirror ? 'mirror' : 'merge', preUnlockEncryptionKey, ownership, 'sync')
                         ownership.assert()
                         syncRuntime.lastSyncedAccountCount = remoteAccounts.length
-                        set({ lastSyncedAccountIds: remoteAccounts.map(a => a.id as string) })
+                        blobAccountIds = remoteAccounts.map(a => a.id as string)
+                        set({ lastSyncedAccountIds: blobAccountIds, lastSyncedAccountIdsEtag: responseEtag ?? null })
                         const localIds = new Set(useAccountStore.getState().accounts.map(a => a.id))
                         if (localIds.size !== remoteAccounts.length || remoteAccounts.some(a => !localIds.has(a.id as string))) requestFollowUpPush()
                     }
@@ -774,10 +847,14 @@ export const useSyncStore = create<SyncState>()(
                         // A newer pull owns the record slot by then; never overwrite it.
                         if (syncRuntime.hydration?.seq === pullToken) syncRuntime.hydration = { seq: pullToken, id, status, kind: 'pull' }
                     }
+                    // Purge server-side residue (rules, credentials, canonical rows) of accounts this
+                    // certified pull proves are gone. Runs from completePull, so only after hydration
+                    // and the avatar check succeeded.
                     const completePull = () => {
                         if (pullCompleted || !authInstalled || !hydrationOk || avatarIncomplete
                             || !pullCurrent() || get().auth.id !== id || !get().auth.isAuthenticated) return
                         pullCompleted = true
+                        scheduleAccountServerCleanup(blobAccountIds)
                         // Publish the ETag only after every response slice has applied.
                         set({
                             isInitialSyncCompleted: true,
@@ -894,7 +971,9 @@ export const useSyncStore = create<SyncState>()(
                     fence()
 
                     if (secondary.settings) {
-                        applySyncedSettings(secondary.settings as Record<string, unknown>, !isLocalNewer)
+                        // Protect unsynced local edits: lastSyncedAt cannot see a setting changed
+                        // after a failed push, so "remote newer" must not adopt the cloud value over it.
+                        applySyncedSettings(secondary.settings as Record<string, unknown>, !isLocalNewer, { protectLocalEdits: true })
                     }
 
                     fence()
@@ -920,7 +999,7 @@ export const useSyncStore = create<SyncState>()(
 
                     fence()
                     if (Array.isArray(secondary.customThemes) && secondary.customThemes.length > 0) {
-                        applySyncedSettings({ customThemes: secondary.customThemes }, true)
+                        applySyncedSettings({ customThemes: secondary.customThemes }, true, { protectLocalEdits: true })
                     }
 
                     if (Array.isArray(secondary.discoverFavorites)) {
@@ -956,7 +1035,7 @@ export const useSyncStore = create<SyncState>()(
                             // needs to know the load is partial and syncing is paused. The
                             // push gate below stays closed until a pull fully succeeds.
                             if (!isSilent) {
-                                toast({ variant: "destructive", title: "Data Load Incomplete", description: "Some cloud data failed to load and syncing is paused. Your cloud copy is safe — sign in again or press Sync to retry." })
+                                toast({ variant: "destructive", title: "Data Load Incomplete", description: "Some cloud data failed to load and syncing is paused. Your cloud copy is safe — sign in again or press Sync to retry.", href: "/settings" })
                             }
                         })
 
@@ -998,7 +1077,7 @@ export const useSyncStore = create<SyncState>()(
                             // Same contract as a deferred slice failure: warn instead of
                             // letting the earlier login flow imply the load completed.
                             if (!isSilent) {
-                                toast({ variant: "destructive", title: "Data Load Incomplete", description: "Your avatar could not be loaded from the cloud and syncing is paused. Your cloud copy is safe — sign in again or press Sync to retry." })
+                                toast({ variant: "destructive", title: "Data Load Incomplete", description: "Your avatar could not be loaded from the cloud and syncing is paused. Your cloud copy is safe — sign in again or press Sync to retry.", href: "/settings" })
                             }
                         }
                     }
@@ -1075,6 +1154,7 @@ export const useSyncStore = create<SyncState>()(
                             .then(changed => { if (changed && ownership.current()) get().syncToRemote(true) })
                             .catch(() => {})
                     }, 2500)
+
                 } catch (e) {
                     // Superseded failures must not retry, roll back, or notify the replacement session.
                     if (!ownership.current()) throw e
@@ -1082,7 +1162,7 @@ export const useSyncStore = create<SyncState>()(
                         try {
                             const restoreRes = await resilientFetch(`${apiPath}/sync/${id}/restore`, {
                                 method: 'POST',
-                                headers: { 'x-sync-password': await deriveSyncToken(password) },
+                                headers: { 'x-sync-password': password ? await deriveSyncToken(password) : await getSyncPasswordHeader({ id, password }) },
                                 timeout: 15000,
                             })
                             ownership.assert()
@@ -1163,6 +1243,7 @@ export const useSyncStore = create<SyncState>()(
                 syncRuntime.hydration = null
                 set({ pendingConflictAccountId: null })
                 if (syncRuntime.syncDebounceTimer) { clearTimeout(syncRuntime.syncDebounceTimer); syncRuntime.syncDebounceTimer = null }
+                syncRuntime.syncDebounceFirstAt = null
                 if (syncRuntime.onlineHandler) { window.removeEventListener('online', syncRuntime.onlineHandler); syncRuntime.onlineHandler = null }
                 if (syncRuntime.syncBC) { syncRuntime.syncBC.close(); syncRuntime.syncBC = null }
                 clearSyncCredentialCaches()
@@ -1182,6 +1263,7 @@ export const useSyncStore = create<SyncState>()(
                     lastSyncedNotesCount: null,
                     lastAppliedAccountCount: null,
                     lastSyncedAccountIds: null,
+                    lastSyncedAccountIdsEtag: null,
                     lastAppliedAddonCount: null,
                     serverStremioCredentialedAccounts: null,
                     needsReauth: false
@@ -1265,13 +1347,12 @@ export const useSyncStore = create<SyncState>()(
                 }
 
                 // Server Protection: Strict Debounce check for auto-syncs
-                // Instead of dropping, we defer the sync so the *last* change always pushes
+                // Instead of dropping, we defer the sync so the *last* change always pushes.
+                // The window scales with the last measured envelope (SYNC-PERF #3) and the
+                // max-wait cap inside armSyncPushDebounce bounds the hold; explicit syncs
+                // (isAuto=false) push immediately, unchanged.
                 if (isAuto) {
-                    if (syncRuntime.syncDebounceTimer) clearTimeout(syncRuntime.syncDebounceTimer)
-                    syncRuntime.syncDebounceTimer = setTimeout(() => {
-                        syncRuntime.syncDebounceTimer = null
-                        get().syncToRemote(false, true)
-                    }, 1500)
+                    armSyncPushDebounce(syncRuntime, () => { get().syncToRemote(false, true) })
                     return false
                 }
 
@@ -1308,7 +1389,8 @@ export const useSyncStore = create<SyncState>()(
                     const salt = loadSalt()
                     const saltBase64 = salt ? btoa(String.fromCharCode(...salt)) : undefined
 
-                    const exportedAccounts = await useAccountStore.getState().exportAccountsForSync()
+                    const { exportAccountsForSyncWithLocked } = await import('@/store/account/accountImportExport')
+                    const { data: exportedAccounts, lockedAccounts } = await exportAccountsForSyncWithLocked()
                     ownership.assert()
                     const rawAddons = useAddonStore.getState().exportLibrary(true)
                     const addonCount = Object.keys(useAddonStore.getState().library).length
@@ -1367,7 +1449,11 @@ export const useSyncStore = create<SyncState>()(
                     const identityAvatarFallback = identityFallback.id === auth.id ? identityFallback.avatar : null
 
                     const watchExport = useWatchEventStore.getState().export()
-                    const avatarValue = auth.avatar ?? identityAvatarFallback ?? syncRuntime.lastPulledCloudAvatar ?? null
+                    const rawAvatarValue = auth.avatar ?? identityAvatarFallback ?? syncRuntime.lastPulledCloudAvatar ?? null
+                    // Hard ceiling: an oversized avatar data URI must not ride (or block) the push.
+                    const avatarExport = exportAvatarValue(rawAvatarValue)
+                    if (avatarExport.dropped) trace('sync', 'push.avatar-ceiling', { accountId: auth.id })
+                    const avatarValue = avatarExport.value
                     // Cloud-guard fallback: an empty local store with a known non-empty cloud
                     // set pushes the cloud set, so a wiped device can't erase the cloud notes.
                     const notesToPush = filterNotesByTrash(
@@ -1404,6 +1490,8 @@ export const useSyncStore = create<SyncState>()(
                         profiles: useProfileStore.getState().profiles,
                         settings: readSyncedSettings(),
                     }
+                    // What this push actually sends; an edit after this point must stay unsynced.
+                    const sentSettingsValues = snapshotSyncedSettingsValues(state.settings)
 
                     const { encryptSyncPayload } = await import('@/lib/crypto')
                     ownership.assert()
@@ -1421,7 +1509,9 @@ export const useSyncStore = create<SyncState>()(
                     }
 
                     forceCanonicalRepublish = consumeForceFlag()
-                    const stateHash = await computeHash(stringifiedState)
+                    // Skip hash over the normalized state: volatile observation stamps
+                    // (accountStates lastSync, rule lastCheck) must not defeat it.
+                    const stateHash = await computeHash(JSON.stringify(normalizeStateForSkipHash(state)))
                     ownership.assert()
                     if (!forceCanonicalRepublish && !forceFull && get().pendingConflictAccountId !== auth.id && syncRuntime.lastPushedHash !== null && stateHash === syncRuntime.lastPushedHash) {
                         trace('sync', 'push.skip-unchanged', { accountId: auth.id, isAuto })
@@ -1429,6 +1519,9 @@ export const useSyncStore = create<SyncState>()(
                             get().addLogEntry({ type: 'push', status: 'success', message: 'No local changes to push - checking cloud.', isAuto: false })
                             setTimeout(() => { if (pushCurrent()) get().syncFromRemote(true).catch(() => {}) }, 0)
                         }
+                        // The server already confirmed this exact state: any pending-push
+                        // marker for this workspace is delivered (Sol P1-SYNC-01).
+                        noteConfirmedPush(getActiveWorkspaceId())
                         return true
                     }
 
@@ -1484,31 +1577,36 @@ export const useSyncStore = create<SyncState>()(
 
                     const syncToken = sessionCred?.token ?? await deriveSyncToken(auth.password)
                     ownership.assert()
+                    const pushBody = JSON.stringify({
+                        data: encryptedState,
+                        isEncrypted: true,
+                        compressed: isCompressed,
+                        syncSalt: syncSaltB64,
+                        syncedAt: get().lastSyncedAt,
+                        baseContentHash: get().lastSyncedCloudEtag ?? undefined,
+                        force: forcePush,
+                        // Hash of the logical state (pre-syncedAt); lets the server skip the
+                        // archive/rewrite/apiKeys churn when the content is byte-identical
+                        // to what it already holds, since the envelope hash is IV-random.
+                        contentHint: (forceCanonicalRepublish || forceFull) ? undefined : stateHash,
+                        apiKeys: useAccountStore.getState().accounts.reduce<Record<string, string>>((map, a) => {
+                            if (a.apiKey) map[a.id] = a.apiKey
+                            return map
+                        }, {}),
+                        canonicalAddons: canonicalPayload,
+                        emptiedHubs,
+                    })
+                    // Debounce sizing input: the wire size this push actually uploads.
+                    syncRuntime.lastPushedEnvelopeBytes = pushBody.length
                     const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
                             'x-sync-password': syncToken
                         },
-                        body: JSON.stringify({
-                            data: encryptedState,
-                            isEncrypted: true,
-                            compressed: isCompressed,
-                            syncSalt: syncSaltB64,
-                            syncedAt: get().lastSyncedAt,
-                            baseContentHash: get().lastSyncedCloudEtag ?? undefined,
-                            force: forcePush,
-                            // Hash of the logical state (pre-syncedAt); lets the server skip the
-                            // archive/rewrite/apiKeys churn when the content is byte-identical
-                            // to what it already holds, since the envelope hash is IV-random.
-                            contentHint: (forceCanonicalRepublish || forceFull) ? undefined : stateHash,
-                            apiKeys: useAccountStore.getState().accounts.reduce<Record<string, string>>((map, a) => {
-                                if (a.apiKey) map[a.id] = a.apiKey
-                                return map
-                            }, {}),
-                            canonicalAddons: canonicalPayload,
-                            emptiedHubs,
-                        })
+                        body: pushBody,
+                        // Multi-MB envelopes need minutes, not the 10 s default, on a slow uplink.
+                        timeout: syncUploadTimeoutMs(pushBody.length),
                     })
                     if (!pushCurrent()) return false
 
@@ -1542,6 +1640,7 @@ export const useSyncStore = create<SyncState>()(
                         import('@/hooks/use-toast').then(({ toast }) => {
                             if (!pushCurrent()) return
                             toast({
+                                id: 'cloud-changed',
                                 variant: 'warning',
                                 title: 'Cloud changed',
                                 description: 'The cloud copy changed before this save completed. Pulling the latest state and preserving your unsaved changes.',
@@ -1560,12 +1659,17 @@ export const useSyncStore = create<SyncState>()(
                     if (!pushCurrent()) return false
                     syncRuntime.lastPushedHash = stateHash
                     syncRuntime.lastSyncedAccountCount = accountCount
+                    // The pushed settings are the cloud copy now: local edits stop counting as unsynced.
+                    markSyncedSettingsPushed(sentSettingsValues)
                     // Advance confirmed notes unless a purge changed the fallback during this push.
                     if (syncRuntime.lastPulledNotes === notesBaseline && syncRuntime.lastPulledNotesTrash === notesTrashBaseline) {
                         syncRuntime.lastPulledNotes = notesToPush
                         syncRuntime.lastPulledNotesTrash = mergedNotesTrash
                     }
-                    set({ lastSyncedAccountIds: (exportedAccounts.accounts as { id: string }[]).map(a => a.id) })
+                    set({
+                        lastSyncedAccountIds: (exportedAccounts.accounts as { id: string }[]).map(a => a.id),
+                        lastSyncedAccountIdsEtag: typeof resData.contentHash === 'string' ? resData.contentHash : null,
+                    })
                     if (typeof resData.contentHash === 'string') {
                         set({ lastSyncedCloudEtag: resData.contentHash })
                     }
@@ -1597,12 +1701,16 @@ export const useSyncStore = create<SyncState>()(
                     get().addLogEntry({
                         type: 'push',
                         status: 'success',
-                        message: 'Sync successful',
+                        message: lockedAccounts.length > 0
+                            ? `Sync successful. Sign-in needed on this device: ${lockedAccounts.map(a => a.name).join(', ')}`
+                            : 'Sync successful',
                         isAuto
                     })
                     trace('sync', 'push.success', { accountId: auth.id, isAuto, bytes: payloadBytes, compressed: isCompressed, timing: Date.now() - pushStart })
                     syncRuntime.pendingRetry = false
                     resetRepublishAttempts()
+                    // Confirmed delivery retires any pending-push marker for this workspace.
+                    noteConfirmedPush(getActiveWorkspaceId())
 
                     try {
                         const bc = new BroadcastChannel('aio-sync')
@@ -1612,7 +1720,7 @@ export const useSyncStore = create<SyncState>()(
                     return true
                 } catch (e) {
                     if (!pushCurrent()) return false
-                    const message = (e as Error).message
+                    const message = pushErrorMessage(e)
                     if (import.meta.env.DEV) console.error("Sync error:", apiPath, e)
                     if (isAuto) syncRuntime.pendingRetry = true
                     get().addLogEntry({
@@ -1688,7 +1796,8 @@ export const useSyncStore = create<SyncState>()(
 
                 try {
                     const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
-                        headers: { 'x-sync-password': sessionCred?.token ?? await deriveSyncToken(auth.password) }
+                        headers: { 'x-sync-password': sessionCred?.token ?? await deriveSyncToken(auth.password) },
+                        timeout: SYNC_PULL_TIMEOUT_MS,
                     })
 
                     // Discard a mirror response after its session ends.
@@ -1796,11 +1905,15 @@ export const useSyncStore = create<SyncState>()(
 
                     if (data.accounts !== undefined) {
                         fence()
+                        // Import can remap a cloud account onto a matching local id, so the cleanup
+                        // baseline is the blob's own ids, never the merged local list.
+                        const blobAccounts = Array.isArray(data.accounts) ? data.accounts : (data.accounts as Record<string, unknown> | null)?.accounts
+                        if (!Array.isArray(blobAccounts)) throw new Error('Cloud accounts must be an array')
+                        const ids = blobAccounts.map(a => (a as { id: string }).id)
                         await useAccountStore.getState().importAccounts(data, true, 'mirror', undefined, ownership, 'restore')
                         fence()
-                        const ids = useAccountStore.getState().accounts.map(a => a.id)
                         syncRuntime.lastSyncedAccountCount = ids.length
-                        set({ lastSyncedAccountIds: ids })
+                        set({ lastSyncedAccountIds: ids, lastSyncedAccountIdsEtag: responseEtag ?? null })
                     } else {
                         throw new Error('Cloud data is missing accounts; nothing was replaced')
                     }
@@ -1834,7 +1947,7 @@ export const useSyncStore = create<SyncState>()(
                     }
                     if (data.settings) {
                         fence()
-                        applySyncedSettings(data.settings as Record<string, unknown>, true)
+                        applySyncedSettings(data.settings as Record<string, unknown>, true, { protectLocalEdits: true })
                     }
                     if (data.notes && Array.isArray(data.notes)) {
                         fence()
@@ -1872,7 +1985,7 @@ export const useSyncStore = create<SyncState>()(
                     }
                     fence()
                     if (Array.isArray(data.customThemes) && data.customThemes.length > 0) {
-                        applySyncedSettings({ customThemes: data.customThemes }, true)
+                        applySyncedSettings({ customThemes: data.customThemes }, true, { protectLocalEdits: true })
                     }
                     if (Array.isArray(data.discoverFavorites)) {
                         try { localStorage.setItem('aio-discover-favorites', JSON.stringify(data.discoverFavorites)) } catch {}
@@ -1953,7 +2066,7 @@ export const useSyncStore = create<SyncState>()(
                 try {
                     const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
                         method: 'DELETE',
-                        headers: { 'x-sync-password': getSessionSyncCredential(auth.id)?.token ?? await deriveSyncToken(auth.password) }
+                        headers: { 'x-sync-password': await getSyncPasswordHeader(auth) }
                     })
 
                     if (!res.ok) throw new Error("Failed to delete account from server")
@@ -1985,6 +2098,7 @@ export const useSyncStore = create<SyncState>()(
                     lastSyncedNotesCount: null,
                     lastAppliedAccountCount: null,
                     lastSyncedAccountIds: null,
+                    lastSyncedAccountIdsEtag: null,
                     lastAppliedAddonCount: null,
                     serverStremioCredentialedAccounts: null,
                     needsReauth: false
@@ -2014,6 +2128,7 @@ export const useSyncStore = create<SyncState>()(
                 lastSyncedNotesCount: state.lastSyncedNotesCount,
                 lastAppliedAccountCount: state.lastAppliedAccountCount,
                 lastSyncedAccountIds: state.lastSyncedAccountIds,
+                lastSyncedAccountIdsEtag: state.lastSyncedAccountIdsEtag,
                 lastAppliedAddonCount: state.lastAppliedAddonCount,
                 serverStremioCredentialedAccounts: state.serverStremioCredentialedAccounts,
             }),
@@ -2042,6 +2157,42 @@ if (typeof window !== 'undefined') {
         }
     }
     window.addEventListener('online', syncRuntime.onlineHandler)
+
+    // A hidden/closing page must not drop a deferred change. The async push may still
+    // complete, but iOS can suspend the page before it reaches the server, so the hide
+    // path also writes a durable pending-push marker (workspace id + timestamp only) and
+    // the next valid session retries one normal push (Sol P1-SYNC-01). The local account
+    // persist flush rides the same events in accountStore.
+    const flushPendingPushForHide = () => {
+        const flushed = flushSyncPushDebounce(syncRuntime, () => { useSyncStore.getState().syncToRemote(false, true).catch(() => {}) })
+        const inFlight = useSyncStore.getState().isSyncing
+        if (flushed || inFlight) writePendingPushMarker(getActiveWorkspaceId())
+    }
+    window.addEventListener('pagehide', flushPendingPushForHide)
+    window.addEventListener('beforeunload', flushPendingPushForHide)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushPendingPushForHide()
+    })
+
+    // Boot retry: once a session is valid again (signed in, initial sync applied, no
+    // re-auth pending, nothing in flight), a due marker for this workspace runs one
+    // normal push. Marker and confirmed state are per workspace, so only the active
+    // workspace's entry is compared here. The confirmed response clears it; one
+    // attempt per marker per boot, and a different workspace's marker is never
+    // pushed from here.
+    const retryPendingPushIfDue = () => {
+        const state = useSyncStore.getState()
+        if (!state.auth.isAuthenticated || !state.isInitialSyncCompleted || state.needsReauth || state.isSyncing) return
+        const marker = readPendingPushMarker(getActiveWorkspaceId())
+        if (!marker || !pendingPushDue(marker, { workspaceId: getActiveWorkspaceId(), lastConfirmedPushAt: readLastConfirmedPushAt(getActiveWorkspaceId()) })) return
+        const attemptKey = `${marker.workspaceId}:${marker.markedAt}`
+        if (syncRuntime.pendingPushMarkerAttemptKey === attemptKey) return
+        syncRuntime.pendingPushMarkerAttemptKey = attemptKey
+        trace('sync', 'push.pending-marker-retry', { accountId: state.auth.id, workspaceId: marker.workspaceId, markedAt: marker.markedAt })
+        state.syncToRemote(false, true).catch(() => {})
+    }
+    useSyncStore.subscribe(retryPendingPushIfDue)
+    retryPendingPushIfDue()
 
     try {
         syncRuntime.syncBC = new BroadcastChannel('aio-sync')

@@ -3,12 +3,14 @@ import { getPlatformEntry } from '@/lib/platform-registry'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
+import { AlertTriangle } from 'lucide-react'
 import { useRelativeTime } from '@/hooks/use-relative-time'
 import {
     accountForAddonTargets,
     aggregateAccountPlatforms,
     aggregatePlatformSources,
     platformShortName,
+    ZERO_PLATFORM_REACH_HOVER_TEXT,
     type PlatformMediaTarget,
     type PlatformSourceAccount,
     type PlatformSyncTarget,
@@ -119,6 +121,9 @@ interface PlatformSourceChipProps {
     // Defaults to 'account'.
     scope?: 'account' | 'addon'
     addon?: Pick<AddonDescriptor, 'transportUrl' | 'destinations'>
+    // Account platform count; when larger than the addon's reach the label reads "2 of 3 platforms".
+    ofTotal?: number
+    failing?: boolean
     className?: string
 }
 
@@ -131,7 +136,7 @@ interface PlatformSourceChipProps {
 // platforms still show for either kind: pausing never removes anything. Focus/tap opens
 // an accessible "Sync targets" popover grouped into "Addon sync" and "Playback & library"
 // (account scope), with honest last synced / last verified / paused / error states.
-export function PlatformSourceChip({ account, accounts, scope = 'account', addon, className }: PlatformSourceChipProps) {
+export function PlatformSourceChip({ account, accounts, scope = 'account', addon, ofTotal, failing = false, className }: PlatformSourceChipProps) {
     const list = useMemo(
         () => (accounts ?? (account ? [account] : []))
             .filter((a): a is PlatformSourceAccount => !!a)
@@ -149,11 +154,17 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
     )
     const formatRelative = useRelativeTime()
 
-    if (platforms.length === 0) return null
+    // Zero reach: the account has platforms but this addon is excluded from all of them,
+    // so keep a muted "0 of N" pill instead of vanishing. No ofTotal (account scope,
+    // saved-addon aggregation) keeps returning null.
+    const zeroReach = platforms.length === 0 && !!ofTotal && ofTotal > 0
+    if (platforms.length === 0 && !zeroReach) return null
 
     const isAccountScope = scope === 'account'
     const names = platforms.map(chipPlatformName)
-    const hoverText = isAccountScope ? `Connected to ${names.join(', ')}` : `Syncs to ${names.join(', ')}`
+    const hoverText = zeroReach
+        ? ZERO_PLATFORM_REACH_HOVER_TEXT
+        : `${isAccountScope ? 'Connected to' : 'Syncs to'} ${names.join(', ')}${failing ? '. A sync target is failing' : ''}`
 
     // A single media-only platform may name its actual product when exactly one
     // connection makes it unambiguous; otherwise keep the plain platform name.
@@ -166,10 +177,13 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
             ? media[0].product
             : null
     const singleLabel = platforms.length === 1 ? singleMediaLabel ?? names[0] : null
+    const partial = !!ofTotal && ofTotal > platforms.length
+    const countLabel = partial ? `${platforms.length} of ${ofTotal} platforms` : `${platforms.length} platforms`
 
     const hasAddonPlatforms = targets.length > 0 || paused.length > 0
-    const intro =
-        scope === 'addon'
+    const intro = zeroReach
+        ? 'This addon is excluded from every platform on this account. Nothing receives it under its saved destination rules.'
+        : scope === 'addon'
             ? 'These platforms receive this addon under its saved destination rules. Changes apply on sync. Installation on each platform has not been verified.'
             : hasAddonPlatforms
               ? "Addon platforms receive this account's addon collection. Jellyfin-compatible platforms provide playback and library for the signed-in remote user; they do not receive addons."
@@ -219,15 +233,16 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
                         onClick={(e) => e.stopPropagation()}
                         onKeyDown={(e) => e.stopPropagation()}
                         className={cn(
-                            'inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full border border-border/40 bg-muted/30 outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/40',
-                            platforms.length === 1 ? 'pl-1 pr-1.5' : 'px-1.5',
+                            "relative inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40 max-sm:after:absolute max-sm:after:-inset-x-1 max-sm:after:-inset-y-3 max-sm:after:content-['']",
+                            failing ? 'border-destructive/35 bg-destructive/10 hover:bg-destructive/15' : 'border-border/40 bg-muted/30 hover:bg-muted/60',
+                            platforms.length === 1 && !partial ? 'pl-1 pr-1.5' : 'px-1.5',
                             className
                         )}
                     >
-                        {platforms.length === 1 ? (
+                        {platforms.length === 1 && !partial ? (
                             <>
                                 <TinyPlatformLogo platform={platforms[0]} />
-                                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{singleLabel}</span>
+                                <span className={cn('text-[10px] font-semibold uppercase tracking-wide', failing ? 'text-destructive' : 'text-muted-foreground')}>{singleLabel}</span>
                             </>
                         ) : (
                             <>
@@ -238,9 +253,10 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
                                         </span>
                                     ))}
                                 </span>
-                                <span className="text-[10px] font-semibold text-muted-foreground">{platforms.length} platforms</span>
+                                <span className={cn('text-[10px] font-semibold', failing ? 'text-destructive' : 'text-muted-foreground')}>{countLabel}</span>
                             </>
                         )}
+                        {failing && <AlertTriangle className="h-2.5 w-2.5 shrink-0 text-destructive" aria-hidden="true" />}
                     </button>
                 </PopoverTrigger>
             </Tooltip>
@@ -277,7 +293,7 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
                     <>
                         {targets.length === 0 ? (
                             <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                                No active sync targets. Every connection is paused.
+                                {zeroReach ? 'No sync targets: this addon is not sent to any platform.' : 'No active sync targets. Every connection is paused.'}
                             </p>
                         ) : (
                             <ul className="mt-2 space-y-1.5">{targets.map(renderTarget)}</ul>

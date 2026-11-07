@@ -1,5 +1,5 @@
 import { useSyncStore } from '@/store/syncStore'
-import { deriveSyncToken } from '@/lib/crypto'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { typedClient } from '@/api/typed-client'
 
 export type MetadataKeyFormat = 'v3' | 'v4' | 'unknown'
@@ -20,7 +20,7 @@ async function authHeaders(): Promise<Record<string, string>> {
     const headers: Record<string, string> = {}
     if (auth.isAuthenticated) {
         headers['x-sync-user'] = auth.id
-        headers['x-sync-password'] = await deriveSyncToken(auth.password)
+        headers['x-sync-password'] = await getSyncPasswordHeader(auth)
     }
     return headers
 }

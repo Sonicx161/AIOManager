@@ -34,6 +34,8 @@ import {
     saveSalt,
 } from '@/lib/crypto'
 import { apiFetch } from '@/lib/http-client'
+import { getSyncPasswordHeader } from '@/lib/sync-auth'
+import { hasSessionSyncCredential } from '@/lib/session-sync-token'
 import { trace } from '@/lib/trace'
 import { resolveBootReactivation, type BootReactivationOutcome } from '@/lib/device-session-boot'
 import { useAuthStore } from '@/store/authStore'
@@ -386,11 +388,11 @@ export async function getDeviceAwareAuthHeaders(): Promise<Record<string, string
             'x-sync-device': session.deviceId,
         }
     }
-    if (!auth.id || !auth.password) throw new Error('Not authenticated')
+    if (!auth.id || (!auth.password && !hasSessionSyncCredential(auth.id))) throw new Error('Not authenticated')
     return {
         'Content-Type': 'application/json',
         'x-sync-user': auth.id,
-        'x-sync-password': await deriveSyncToken(auth.password),
+        'x-sync-password': await getSyncPasswordHeader(auth),
     }
 }
 

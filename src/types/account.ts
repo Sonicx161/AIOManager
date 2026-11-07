@@ -4,6 +4,7 @@ import { Profile } from './profile'
 import { FailoverRule, WebhookConfig } from '@/store/failoverStore'
 import { AccountAddonState } from './saved-addon'
 import { Connection } from './connection'
+import type { PictureRowState } from '@/lib/connection-pictures/types'
 
 export type AccountStatus = 'active' | 'error' | 'expired'
 
@@ -36,6 +37,10 @@ export interface Account {
   activeProfileId?: string
   connections?: Connection[]
   primaryConnectionId?: string
+  /** Connection-picture row state (option C amendment 2026-11-05): followsDefault + last written marker per row id. */
+  connectionPictures?: Record<string, PictureRowState>
+  /** Schema version of connectionPictures, serialized with the account blob (CP-R2-004). */
+  connectionPicturesSchemaVersion?: number
   apiKey?: string
   createdAt?: number
   // Normalized transportUrl -> deletedAt(ms). Stops a deleted addon from being resurrected by

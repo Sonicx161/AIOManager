@@ -4,6 +4,8 @@ import { getConnectionStates } from '@/api/connection'
 import type { Connection, ConnectionStatus } from '@/types/connection'
 import { isAddonConnection } from '@/types/connection'
 import type { Account } from '@/types/account'
+import type { PictureRowState } from '@/lib/connection-pictures/types'
+import { applyConnectionPictureState } from '@/lib/connection-pictures/sync-merge'
 import { toast } from '@/hooks/use-toast'
 import { triggerSync } from '@/lib/sync-trigger'
 import { canApplyMediaReadFailure, type MediaReadSession } from '@/lib/jellyfin/connection-health'
@@ -55,12 +57,20 @@ interface ConnectionStore {
     isSyncing: string | null
 
     addConnection: (accountId: string, connection: Omit<Connection, 'id' | 'lastSync' | 'lastKnownAddonCount' | 'consecutiveFailures'>, options?: { assertCurrent?: () => void }) => Promise<void>
-    removeConnection: (accountId: string, connectionId: string) => Promise<void>
+    removeConnection: (accountId: string, connectionId: string, options?: ConnectionRemovalOptions) => Promise<void>
     updateConnection: (accountId: string, connectionId: string, updates: Partial<Connection>, mediaReadSession?: MediaReadSession) => Promise<void>
     setPrimaryConnection: (accountId: string, connectionId: string) => Promise<void>
     toggleConnection: (accountId: string, connectionId: string) => Promise<void>
     syncConnections: (accountId: string) => Promise<void>
     refreshConnectionStates: (accountId: string) => Promise<void>
+    /** Persists one connection-picture row's state (followsDefault flips, lastWritten markers, locks). */
+    setConnectionPictureState: (accountId: string, rowId: string, state: PictureRowState | null) => Promise<void>
+}
+
+// Acknowledgement that the Autopilot rules left login-less by this removal were
+// disposed server-first. Verified against the live rule store, never trusted.
+export interface ConnectionRemovalOptions {
+    autopilotRules?: 'paused' | 'deleted'
 }
 
 const safeUUID = () => {
@@ -71,6 +81,11 @@ const safeUUID = () => {
         })
     }
 }
+
+// Incarnation token of a connection (SOL-R1-BETA-04): every add of a connection id
+// starts a fresh generation. Its server rules and credentials carry it, so a delayed
+// cleanup of a removed incarnation never claims a re-added incarnation's rows.
+const newConnectionGeneration = () => safeUUID()
 
 async function updateAccount(accountId: string, updater: (account: Account) => Account, assertCurrent?: () => void) {
     const release = await acquireSyncMutex(accountId)
@@ -107,6 +122,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         }
         const connection: Connection = {
             id: safeUUID(),
+            // Incarnation token (SOL-R1-BETA-04): every add of a connection id starts a
+            // fresh generation, carried on its server rules and credentials.
+            generation: newConnectionGeneration(),
             platform: partial.platform,
             connectionType: partial.connectionType || partial.driverType || 'native',
             enabled: partial.enabled ?? true,
@@ -132,8 +150,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 authHeader: connection.driverConfig.authHeader,
                 enabled: connection.enabled,
             }
-            storeConnectionCredential(accountId, connection.id, bundle, 'hydra').catch(() => {
-                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.' })
+            storeConnectionCredential(accountId, connection.id, bundle, 'hydra', connection.generation).catch(() => {
+                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.', href: `/account/${encodeURIComponent(accountId)}` })
             })
         }
 
@@ -147,8 +165,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 baseUrl: connection.credentials?.baseUrl || null,
                 publishableKey: connection.credentials?.publishableKey || null,
             }
-            await storeConnectionCredential(accountId, connection.id, bundle, 'nuvio').catch(() => {
-                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.' })
+            await storeConnectionCredential(accountId, connection.id, bundle, 'nuvio', connection.generation).catch(() => {
+                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.', href: `/account/${encodeURIComponent(accountId)}` })
             })
         }
 
@@ -162,8 +180,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 email: connection.credentials.email || null,
                 password: connection.credentials.password || null,
             }
-            await storeConnectionCredential(accountId, connection.id, bundle, 'realstream').catch(() => {
-                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.' })
+            await storeConnectionCredential(accountId, connection.id, bundle, 'realstream', connection.generation).catch(() => {
+                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.', href: `/account/${encodeURIComponent(accountId)}` })
             })
         }
 
@@ -173,6 +191,11 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             // old history) before this login's first credential sync.
             const { convertPendingLoginsRemovedToRepoint } = await import('@/lib/stremio-repoint')
             convertPendingLoginsRemovedToRepoint(accountId)
+            // Likewise a queued last-login credential cleanup is dropped before this login registers.
+            try {
+                const { cancelPendingStremioCredentialCleanup } = await import('@/lib/account-server-cleanup')
+                await cancelPendingStremioCredentialCleanup(accountId)
+            } catch { /* the drain also skips accounts that have a Stremio login */ }
         }
 
         await updateAccount(accountId, account => {
@@ -201,22 +224,57 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
         if (connection.enabled && isAddonConnection(connection)) {
             import('./accountStore').then(({ useAccountStore }) => {
-                useAccountStore.getState().syncAccount(accountId).catch(() => {})
+                useAccountStore.getState().syncAccount(accountId, false, 'user').catch(() => {})
             })
         }
     },
 
-    removeConnection: async (accountId, connectionId) => {
+    removeConnection: async (accountId, connectionId, options) => {
         const { accounts } = useAccountStore.getState()
         const account = accounts.find(a => a.id === accountId)
         const conn = account?.connections?.find(c => c.id === connectionId)
-        // Stremio removals delete the per-connection server row too (the canonical
-        // account-level row has no connection id, so it is never caught by this delete —
-        // the next credentials sync re-points it at the surviving canonical login).
+        // Autopilot prerequisite: removing the LAST Stremio login strands the rules that
+        // run on it. The removal flow pauses or deletes them server-first and acknowledges
+        // via options; any other caller fails loudly here instead of bypassing silently.
+        // The acknowledgement is verified against the live rule store, not trusted.
+        if (conn?.platform === 'stremio' || connectionId === `${accountId}:stremio`) {
+            const { isLastStremioLoginRemoval, findDependentRules } = await import('@/lib/rule-removal')
+            if (isLastStremioLoginRemoval(account, connectionId)) {
+                const { useFailoverStore } = await import('./failoverStore')
+                const dependent = findDependentRules(useFailoverStore.getState().rules, accountId, connectionId, account)
+                if (dependent.length > 0) {
+                    const disposition = options?.autopilotRules
+                    if (!disposition) {
+                        throw new Error('Autopilot rules still use this login. Pause or delete them before removing it.')
+                    }
+                    if (disposition === 'paused' && dependent.some(r => r.isActive !== false)) {
+                        throw new Error('Autopilot rules still use this login. Pause them before removing it.')
+                    }
+                    if (disposition === 'deleted' && dependent.some(r => useFailoverStore.getState().rules.some(x => x.id === r.id))) {
+                        throw new Error('Autopilot rules still use this login. Delete them before removing it.')
+                    }
+                }
+            }
+        }
+        // Connection removal is one server-side operation: the Autopilot rules bound to
+        // this connection (stored addon_list and priority chain included), their stats
+        // and history, and its credential rows all go together, or the failure queues a
+        // retry. The canonical account-level Stremio row has no connection id: the next
+        // credentials sync re-points it at a surviving login, and the last login's
+        // removal deletes it below.
+        const removedGeneration = conn?.generation
         if (conn?.platform !== 'jellyfin' && (conn?.connectionType === 'hydra-outbound' || conn?.platform === 'nuvio' || conn?.platform === 'realstream' || conn?.platform === 'stremio')) {
-            import('@/api/hydra-providers').then(({ deleteConnectionCredential }) => {
-                deleteConnectionCredential(accountId, connectionId).catch(() => {})
-            })
+            import('@/api/hydra-providers')
+                .then(({ deleteConnectionServerState }) => {
+                    // Extra dispatch guard: a same-id re-add with a fresh incarnation
+                    // re-owns the server rows, so the cleanup only leaves while the live
+                    // connection is still the removed incarnation or already gone.
+                    const live = useAccountStore.getState().accounts.find(a => a.id === accountId)?.connections?.find(c => c.id === connectionId)
+                    if (live && live.generation !== removedGeneration) return
+                    return deleteConnectionServerState(accountId, connectionId, removedGeneration)
+                })
+                .catch(() => import('@/lib/account-server-cleanup').then(m => m.queuePendingConnectionServerCleanup(accountId, connectionId, Date.now(), removedGeneration)))
+                .catch(() => {})
         }
         const { invalidateConnectionCache } = await import('@/lib/connection-discovery')
         invalidateConnectionCache(connectionId)
@@ -262,6 +320,22 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 ? connectionId
                 : stremioConnectionsOf(account?.connections || []).find(c => c.id === account?.primaryConnectionId)?.id ?? stremioConnectionsOf(account?.connections || [])[0]?.id
             applyStremioCanonicalTransition(accountId, demotedId, promotedId, loginsRemaining, removedCanonicalId)
+        }
+        if (isStremioRemoval && loginsRemaining === 0) {
+            const removedAt = Date.now()
+            import('@/api/hydra-providers')
+                .then(({ deleteStremioCredentials }) => deleteStremioCredentials(accountId, removedAt))
+                .catch(() => import('@/lib/account-server-cleanup').then(m => m.queuePendingStremioCredentialCleanup(accountId, removedAt)))
+                .catch(() => {})
+        }
+        // Rules bound to the removed connection cannot run without it, and their server
+        // rows went with the connection-state delete above. Retire the local copies too
+        // (a rule sync would otherwise re-create the server row), unless the caller
+        // disposed of them itself through the removal dialog's disposition.
+        if (!options?.autopilotRules) {
+            import('./failoverStore').then(({ useFailoverStore }) =>
+                useFailoverStore.getState().removeConnectionRules(accountId, connectionId)
+            ).catch(() => {})
         }
         if (conn) triggerSync()
     },
@@ -323,14 +397,14 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 authType: toggled.driverConfig.authType,
                 authHeader: toggled.driverConfig.authHeader,
                 enabled: toggled.enabled,
-            }, 'hydra').catch(() => {})
+            }, 'hydra', toggled.generation).catch(() => {})
         }
         // The enabled flag is part of the encrypted envelope for every platform.
         if (toggled) triggerSync()
         if (wasEnabled === false && toggled && isAddonConnection(toggled)) {
             // Reconnecting is not an explicit reinstall of a deleted addon.
             import('./account/accountSync').then(({ scheduleSyncAccount }) => {
-                scheduleSyncAccount(accountId)
+                scheduleSyncAccount(accountId, false, 'user')
             })
             import('./account/accountAddonOps').then(({ pushToConnections }) => {
                 pushToConnections(accountId).catch(() => {})
@@ -344,10 +418,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
 
         try {
             const { useAccountStore } = await import('./accountStore')
-            await useAccountStore.getState().syncAccount(accountId, true)
+            await useAccountStore.getState().syncAccount(accountId, true, 'user')
             await get().refreshConnectionStates(accountId)
         } catch (err) {
-            toast({ title: 'Sync failed', description: err instanceof Error ? err.message : 'Unknown error', variant: 'destructive' })
+            toast({ title: 'Sync failed', description: err instanceof Error ? err.message : 'Unknown error', variant: 'destructive', href: `/account/${encodeURIComponent(accountId)}` })
         } finally {
             set({ isSyncing: null })
         }
@@ -363,5 +437,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 },
             }))
         } catch {}
+    },
+
+    setConnectionPictureState: async (accountId, rowId, state) => {
+        await updateAccount(accountId, account => {
+            // CP-R3-002: the live path funnels through the bounded pure setter,
+            // which bumps the row revision and collapses a full avatar data URI
+            // to a digest so it can never ride the synced account blob.
+            return { ...account, connectionPictures: applyConnectionPictureState(account.connectionPictures, rowId, state) }
+        })
+        // Row state is part of the account blob: ride the normal sync queue so
+        // other devices see own-picture flips and last-written markers.
+        triggerSync()
     },
 }))

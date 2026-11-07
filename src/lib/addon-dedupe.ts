@@ -90,7 +90,9 @@ function collapseInstanceDuplicates(addons: AddonDescriptor[]): AddonDescriptor[
   return result
 }
 
-export function dedupeAddonsByTransportUrl(addons: AddonDescriptor[]): AddonDescriptor[] {
+// Identical normalized URLs only. Collection writes use this (never the instance
+// fold), so copies kept apart on purpose survive every later write.
+export function dedupeAddonsByUrl(addons: AddonDescriptor[]): AddonDescriptor[] {
   const result: AddonDescriptor[] = []
   const indexByUrl = new Map<string, number>()
 
@@ -111,5 +113,25 @@ export function dedupeAddonsByTransportUrl(addons: AddonDescriptor[]): AddonDesc
     result[existingIndex] = mergeDuplicateAddon(result[existingIndex], addon)
   }
 
-  return collapseInstanceDuplicates(result)
+  return result
+}
+
+// Where a URL install lands, decided before any dedupe: the entry at the same URL, else
+// the sole pre-existing copy of its instance that no earlier install in this batch took
+// (a config-URL re-save replaces it), else -1 to append.
+export function findInstallSlot(addons: AddonDescriptor[], incoming: AddonDescriptor, preExisting: number, taken: ReadonlySet<number>): number {
+  const urlKey = getAddonUrlKey(incoming.transportUrl)
+  const exact = addons.findIndex(addon => getAddonUrlKey(addon.transportUrl) === urlKey)
+  if (exact >= 0) return exact
+  const instanceKey = getAddonInstanceKey(incoming)
+  const same: number[] = []
+  for (let i = 0; i < preExisting; i++) {
+    if (getAddonInstanceKey(addons[i]) === instanceKey) same.push(i)
+  }
+  return same.length === 1 && !taken.has(same[0]) ? same[0] : -1
+}
+
+// Read and display dedupe: URL duplicates, then same-instance copies folded into one.
+export function dedupeAddonsByTransportUrl(addons: AddonDescriptor[]): AddonDescriptor[] {
+  return collapseInstanceDuplicates(dedupeAddonsByUrl(addons))
 }

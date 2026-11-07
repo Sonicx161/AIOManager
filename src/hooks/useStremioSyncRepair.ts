@@ -97,6 +97,7 @@ export function useStremioSyncRepair(accountId: string) {
                     variant: 'warning',
                     title: 'Stremio sync repair failed',
                     description: FAILURE_COPY[result.reason],
+                    href: `/account/${encodeURIComponent(accountId)}`,
                 })
             }
         } finally {

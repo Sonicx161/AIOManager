@@ -13,7 +13,7 @@ import localforage from 'localforage'
 import type { AddonStore } from '../addonStore'
 import type { SavedAddonManifestUpdateResult } from '@/types/saved-addon'
 import { mapConcurrent } from '@/lib/concurrency'
-import { SAVED_ADDON_ACCOUNT_CONCURRENCY } from './addonDeployment'
+import { SAVED_ADDON_ACCOUNT_CONCURRENCY } from './deployment-constants'
 
 const UUID_FRAGMENT_RE = /[0-9a-f]{8}-[0-9a-f]{2,}/i
 

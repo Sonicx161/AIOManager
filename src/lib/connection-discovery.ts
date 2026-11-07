@@ -15,9 +15,23 @@ export interface DiscoveredEntry {
     connectionId: string
 }
 
+export interface ConnectionRead {
+    connectionId: string
+    platform: string
+    entries: DiscoveredEntry[]
+}
+
+export interface FailedRead {
+    message: string
+    isAuthError: boolean
+}
+
 export interface DiscoveryResult {
     discovered: DiscoveredEntry[]
     failedReadConnIds: Set<string>
+    // Every entry of each connection that was read successfully, before hub dedupe.
+    reads: ConnectionRead[]
+    failedReads: Map<string, FailedRead>
 }
 
 function normalizeRawEntry(platform: string, raw: Record<string, unknown>): { url: string; name: string; enabled: boolean } | null {
@@ -39,7 +53,8 @@ export async function discoverFromConnections(account: Account, accountId: strin
         c => c.enabled && (c.platform === 'nuvio' || c.platform === 'realstream')
     )
     const failedReadConnIds = new Set<string>()
-    if (connections.length === 0) return { discovered: [], failedReadConnIds }
+    const failedReads = new Map<string, FailedRead>()
+    if (connections.length === 0) return { discovered: [], failedReadConnIds, reads: [], failedReads }
 
     const existingUrls = new Set((account.addons || []).map(a => normalizeAddonUrl(a.transportUrl)))
 
@@ -65,7 +80,7 @@ export async function discoverFromConnections(account: Account, accountId: strin
             } else {
                 const token = await fetchConnectionToken(accountId, conn.id, 'realstream')
                 const userId = conn.credentials?.userId || ''
-                if (!userId) return { connId: conn.id, entries: connDiscovered, failed: true }
+                if (!userId) return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: { message: 'Missing RealStream user id', isAuthError: false } }
                 rawAddons = await realStreamDriverFor(conn).readAddons(token.accessToken, userId) as Record<string, unknown>[]
             }
 
@@ -80,15 +95,22 @@ export async function discoverFromConnections(account: Account, accountId: strin
                     connectionId: conn.id,
                 })
             }
-            return { connId: conn.id, entries: connDiscovered, failed: false }
+            return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: null }
         } catch (err) {
             if (import.meta.env.DEV) console.warn(`[Discovery] read failed for ${conn.platform} (${conn.id}):`, err)
-            return { connId: conn.id, entries: connDiscovered, failed: true }
+            const message = err instanceof Error && err.message ? err.message : 'Read failed'
+            return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: { message, isAuthError: (err as { isAuthError?: boolean } | null)?.isAuthError === true } }
         }
     })
 
+    const reads: ConnectionRead[] = []
     for (const result of workerResults) {
-        if (result.failed) failedReadConnIds.add(result.connId)
+        if (result.failed) {
+            failedReadConnIds.add(result.connId)
+            failedReads.set(result.connId, result.failed)
+        } else {
+            reads.push({ connectionId: result.connId, platform: result.platform, entries: result.entries })
+        }
         for (const entry of result.entries) {
             const normalizedUrl = normalizeAddonUrl(entry.transportUrl)
             if (existingUrls.has(normalizedUrl)) continue
@@ -97,12 +119,16 @@ export async function discoverFromConnections(account: Account, accountId: strin
         }
     }
 
-    return { discovered, failedReadConnIds }
+    return { discovered, failedReadConnIds, reads, failedReads }
 }
 
 export interface AbsorbResult {
     addons: AddonDescriptor[]
     failedReadConnIds: Set<string>
+    failedReads: Map<string, FailedRead>
+    reads: ConnectionRead[]
+    // Connections whose own list still holds addons the user deleted.
+    deletionConnIds: Set<string>
     changed: boolean
     // A connection served addons the user had deleted. They were filtered locally, but
     // the connection's own list still holds them - the caller must push the cleaned
@@ -111,18 +137,22 @@ export interface AbsorbResult {
 }
 
 export async function absorbConnectionAddons(account: Account, accountId: string): Promise<AbsorbResult> {
-    const { discovered: rawDiscovered, failedReadConnIds } = await discoverFromConnections(account, accountId)
+    const { discovered: rawDiscovered, failedReadConnIds, failedReads, reads } = await discoverFromConnections(account, accountId)
     trace('discovery.absorb', 'discovered', { accountId, raw: rawDiscovered.length, failedConns: failedReadConnIds.size })
     const existing = account.addons || []
     const discovered = filterResurrected(rawDiscovered, existing, account.deletedAddons)
     const tombstonedCount = rawDiscovered.length - discovered.length
+    const deletionConnIds = new Set(reads
+        .filter(r => filterResurrected(r.entries, existing, account.deletedAddons).length < r.entries.length)
+        .map(r => r.connectionId))
+    const base = { failedReadConnIds, failedReads, reads, deletionConnIds }
     trace('discovery.absorb', 'post-tombstone', { accountId, survived: discovered.length, stripped: rawDiscovered.length - discovered.length })
     if (discovered.length === 0) {
         trace('discovery.absorb', 'noop', { accountId })
         // A tombstone-only discovery still needs its deletion written back to the
         // connection, or the stale remote list resurrects the addons on every cycle.
         const outcome = evaluateAbsorbOutcome(rawDiscovered.length, 0, tombstonedCount)
-        return { addons: existing, failedReadConnIds, changed: outcome.changed, propagateDeletions: outcome.propagateDeletions }
+        return { addons: existing, ...base, changed: outcome.changed, propagateDeletions: outcome.propagateDeletions }
     }
 
     const { fetchAddonManifest } = await import('@/api/addons')
@@ -155,11 +185,12 @@ export async function absorbConnectionAddons(account: Account, accountId: string
     }))
 
     const surviving = newDescriptors
-    if (surviving.length === 0) return { addons: existing, failedReadConnIds, changed: false, propagateDeletions: tombstonedCount > 0 }
-    // Absorb is an additive union: keepMissingLocal stops the mirror-drop from removing hub addons.
+    if (surviving.length === 0) return { addons: existing, ...base, changed: false, propagateDeletions: tombstonedCount > 0 }
+    // Absorb is an additive union: keepMissingLocal stops the mirror-drop from removing hub addons,
+    // and the hub owns the enable state for matched rows (DC-R2-01).
     trace('discovery.absorb', 'absorbed', { accountId, newAddons: newDescriptors.length, existing: existing.length })
     const outcome = evaluateAbsorbOutcome(rawDiscovered.length, surviving.length, tombstonedCount)
-    return { addons: mergeAddons(existing, surviving, { keepMissingLocal: true }), failedReadConnIds, changed: outcome.changed, propagateDeletions: outcome.propagateDeletions }
+    return { addons: mergeAddons(existing, surviving, { keepMissingLocal: true, keepLocalFlags: true }), ...base, changed: outcome.changed, propagateDeletions: outcome.propagateDeletions }
 }
 
 export function invalidateConnectionCache(connectionId?: string) {

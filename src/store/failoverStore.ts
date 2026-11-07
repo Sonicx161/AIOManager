@@ -1,9 +1,15 @@
+import { passesRestoreGate, trackMissingSince, type CloudRuleSnapshot } from '@/lib/autopilot-restore-gate'
 import { triggerSync } from '@/lib/sync-trigger'
 import { mapConcurrent } from '@/lib/concurrency'
+import {
+    RESTORE_RATE_LIMIT_MESSAGE, createRestoreSession, liveAccountCheck, pickAutoRestore, readRuleBatchResponse, readRuleError, readSafeMode, readWorkerEnabledFlag, restoredToastCopy, rulesMissingOnServer, runAutoRestore,
+    type AutopilotRuleError, type AutopilotSafeMode, type AutopilotSkipReason, type RuleBatchOutcome,
+} from '@/lib/autopilot-freshness'
+import { createPollCadence, isStatePullDue } from '@/lib/autopilot-poll'
 import { didActiveTierChange, rebuildRuleFromServerState, stripUndefinedRuleFields } from '@/lib/failover-state-mapping'
 import { create } from 'zustand'
 import localforage from 'localforage'
-import { useAccountStore, getCachedAuthKey, getStremioAuthKey, hasPlatformConnection } from '@/store/accountStore'
+import { useAccountStore, getCachedAuthKey, getStremioAuthKey } from '@/store/accountStore'
 import { decrypt, encrypt, loadSessionKey } from '@/lib/crypto'
 import { normalizeAddonUrl } from '@/lib/utils'
 import { findScopedChecksAtRisk } from '@/lib/failover-scope'
@@ -11,7 +17,9 @@ import { resilientFetch } from '@/lib/api-resilience'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
 import { isSyncEligibleConnection } from '@/types/connection'
+import type { Account } from '@/types/account'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
+import { findRuleOverlaps, getRuleMissingConnection } from '@/lib/autopilot-conflicts'
 
 const STORAGE_KEY = 'aioman:failover-rules'
 
@@ -47,6 +55,14 @@ export interface FailoverRule {
     customCheckUrls?: CustomCheckEntry[] // Additional URLs to health-check alongside specific addons
     platform?: string
     connectionId?: string
+    skipReason?: AutopilotSkipReason | null
+    lastError?: AutopilotRuleError | null
+    createdAt?: number
+}
+
+export interface RestoreIssue {
+    message: string
+    retryAt: number | null
 }
 
 export interface CustomCheckEntry {
@@ -69,13 +85,25 @@ interface FailoverStore {
     isChecking: boolean // Re-entrancy guard
     lastWorkerRun?: Date // In-memory heartbeat from server
     lastCycle?: AutopilotCycleStats
+    safeMode?: AutopilotSafeMode | null
+    statePullFailed: boolean // Last server state pull could not be reached at all (network error or no response); local lastCheck is unverified
+    statePullPartial: boolean // Server answered but only some rule states arrived; claims nothing about reachability
+    pulseUnreachable: boolean // Last automatic pulse could not complete a check; independent evidence the server is unreachable
+    workerEnabled: boolean // Global pulse flag: the server operator turned Autopilot checks off (AUTOPILOT_WORKER); true until a pulse says otherwise
+    sessionGeneration: number // Bumped on reset: pulls started before it must not publish into the new session
+    lastCompletePullAt: number // Session-scoped: when the last complete states pull was published (0 = none yet)
+    restoreIssues: Record<string, RestoreIssue>
 
     initialize: () => Promise<void>
     syncServerState: () => Promise<void>
     setWebhook: (url: string, enabled: boolean) => Promise<void>
     addRule: (accountId: string, priorityChain: string[], name?: string, cooldown_ms?: number, webhookUrl?: string, notifyEnabled?: boolean, messageTemplate?: string, customCheckUrls?: CustomCheckEntry[]) => Promise<void>
     updateRule: (ruleId: string, updates: Partial<FailoverRule>) => Promise<void>
-    removeRule: (ruleId: string) => Promise<void>
+    removeRule: (ruleId: string, opts?: { strict?: boolean }) => Promise<boolean>
+    pauseRule: (ruleId: string) => Promise<void>
+    /** Retires the local rules bound to a removed connection; returns how many went. */
+    removeConnectionRules: (accountId: string, connectionId: string) => Promise<number>
+    retryRuleConflict: (ruleId: string) => Promise<void>
     reorderRules: (accountId: string, orderedRuleIds: string[]) => Promise<void>
     toggleRuleActive: (ruleId: string, isActive: boolean) => Promise<void>
     checkRules: () => Promise<void>
@@ -95,18 +123,95 @@ interface FailoverStore {
     deleteProfileRules: (accountId: string, profileId: string) => Promise<void>
     awakenProfileRules: (accountId: string, rules: FailoverRule[]) => Promise<void>
     pruneServerRulesToActive: (accountId: string, activeRuleIds: string[]) => Promise<void>
+    restoreRuleOnServer: (ruleId: string, opts?: { quiet?: boolean }) => Promise<boolean>
+    autoRestoreMissingRules: () => Promise<void>
     reset: () => Promise<void>
 }
 
 let automationInterval: number | null = null
 let _lastWorkerRun: number = 0
 let _isPulling = false
-let _adaptiveIntervalMs = 60000
-let _stableCheckCount = 0
+let _lastStatePullAt = 0
+let _lastCompletePullAt = 0
+// Server-reported rule-state version from the last pulse (null until a server sends one).
+let _lastStateVersion: string | null = null
+// Only the most recently started pulse may write reachability, so a slow pulse cannot
+// overwrite a newer one's fresher evidence. Held in an object so test extractions can share it.
+const _pulseSeq = { next: 0 }
+const _cadence = createPollCadence()
 const _pendingRuleUpdates = new Set<string>()
-const BASE_INTERVAL_MS = 60000
-const MAX_INTERVAL_MS = 600000
-const STABLE_THRESHOLD = 3
+// Local edit counter per rule: a state pull never publishes over a rule edited after it started.
+const _ruleEditSeq = new Map<string, number>()
+const markRuleEdited = (ruleId: string) => _ruleEditSeq.set(ruleId, (_ruleEditSeq.get(ruleId) ?? 0) + 1)
+// Session-scoped: one automatic restore per rule, with backoff, and a 429 stops all restores until the server's retry time.
+let _restoreSession = createRestoreSession()
+let _restoreRateLimitedUntil = 0
+// Zero-rule users still learn the global worker flag (read-only pulse), but
+// never on an interval: one read at init or UI mount, then only when focus
+// returns past this quiet window.
+const WORKER_FLAG_QUIET_MS = 300_000
+let _lastFlagReadAt = 0
+let _autoRestoreRunning = false
+const _missingSince = new Map<string, number>()
+let _cloudRules: CloudRuleSnapshot | null = null
+// The server caps this endpoint at 500 account ids per request. Public hosts
+// commonly exceed that, so state pulls must be chunked instead of failing the
+// entire refresh with a 400 and leaving every local rule stale.
+const AUTOPILOT_STATE_BATCH_SIZE = 500
+
+const readSkipReason = (serverRule: Record<string, unknown>): AutopilotSkipReason | null =>
+    serverRule.skipReason === 'no_valid_chain' || serverRule.skipReason === 'no_credentials'
+        ? serverRule.skipReason
+        : null
+
+const fetchAutopilotStates = async (
+    apiPath: string,
+    auth: { id: string; password: string },
+    accountIds: string[],
+) => {
+    const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+    const syncToken = await getSyncPasswordHeader(auth)
+    const states: Record<string, Record<string, unknown>[]> = {}
+    let lastWorkerRun: string | undefined
+    let lastCycle: Record<string, unknown> | undefined
+    let succeeded = 0
+    let failed = 0
+    let serverPartial = false
+
+    for (let offset = 0; offset < accountIds.length; offset += AUTOPILOT_STATE_BATCH_SIZE) {
+        const batch = accountIds.slice(offset, offset + AUTOPILOT_STATE_BATCH_SIZE)
+        const resp = await resilientFetch(`${apiPath}/autopilot/states`, {
+            method: 'POST',
+            retries: 1,
+            headers: {
+                'Content-Type': 'application/json',
+                'x-sync-password': syncToken,
+                'x-sync-user': auth.id,
+            },
+            body: JSON.stringify({ accountIds: batch }),
+        })
+        if (!resp.ok) {
+            failed++
+            if (import.meta.env?.DEV) console.warn(`[Failover] autopilot state batch failed: ${resp.status} ${resp.statusText}`)
+            continue
+        }
+        const data = (await resp.json()) as Record<string, unknown>
+        const batchStates = (data.states || {}) as Record<string, Record<string, unknown>[]>
+        for (const [accountId, accountRules] of Object.entries(batchStates)) {
+            states[accountId] = accountRules
+        }
+        if (typeof data.lastWorkerRun === 'string') lastWorkerRun = data.lastWorkerRun
+        if (data.lastCycle && typeof data.lastCycle === 'object') lastCycle = data.lastCycle as Record<string, unknown>
+        serverPartial = serverPartial || Boolean(data.partial)
+        succeeded++
+    }
+
+    if (succeeded === 0 && accountIds.length > 0) {
+        _cadence.reset()
+        throw new Error(`All ${failed || 1} autopilot state batches failed`)
+    }
+    return { states, lastWorkerRun, lastCycle, partial: serverPartial || failed > 0 }
+}
 
 type AddonEnabledSnapshot = {
     transportUrl: string
@@ -151,9 +256,12 @@ const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: {
 
     const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
     if (!account) return false
+    if (getRuleMissingConnection(rule, account) || rule.lastError?.code === 'contested_by_other_writer') return false
+    const overlaps = new Set(findRuleOverlaps(rule, useFailoverStore.getState().rules, account.addons).map(overlap => normalizeAddonUrl(overlap.url)))
 
     const activeUrl = rule.activeUrl || rule.priorityChain[0]
     const normActive = normalizeAddonUrl(activeUrl)
+    if (overlaps.has(normActive)) return false
     const activeProfile = account.activeProfileId
         ? account.profiles?.find(profile => profile.id === account.activeProfileId)
         : undefined
@@ -163,6 +271,7 @@ const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: {
 
     for (const url of rule.priorityChain) {
         const normUrl = normalizeAddonUrl(url)
+        if (overlaps.has(normUrl)) continue
         const shouldBeEnabled = normUrl === normActive
         const accountAddon = findAddonByNormalizedUrl(account.addons, normUrl)
         const profileMissingActive = !!activeProfile && shouldBeEnabled && !findAddonByNormalizedUrl(activeProfile.addons, normUrl)
@@ -237,31 +346,29 @@ const scheduleNextPoll = () => {
             }
         }
 
-        if (switched) {
-            _stableCheckCount = 0
-            _adaptiveIntervalMs = BASE_INTERVAL_MS
-        } else {
-            _stableCheckCount++
-            if (_stableCheckCount >= STABLE_THRESHOLD) {
-                _adaptiveIntervalMs = Math.min(_adaptiveIntervalMs * 2, MAX_INTERVAL_MS)
-                _stableCheckCount = 0
-            }
-        }
+        _cadence.recordCycle(switched)
 
         scheduleNextPoll()
-    }, _adaptiveIntervalMs)
+    }, _cadence.intervalMs())
+}
+
+// A new, edited or re-enabled rule must not wait out a backed-off poll for its first check.
+const resetPollCadence = () => {
+    _cadence.reset()
+    if (automationInterval && useFailoverStore.getState().isMonitoring) scheduleNextPoll()
 }
 
 // Tab-focus convergence: the poll loop skips hidden tabs by design, so a server-enforced
 // swap that lands while hidden would otherwise wait out the adaptive backoff (up to 10
 // min) after the tab regains focus. On visible, poke the existing loop once: pulse()
 // only pulls states when the worker heartbeat advanced, and its own guards (_isPulling,
-// vault lock, auth) prevent fighting an in-flight sync. Event edge, not a new timer.
+// vault lock, auth, and the zero-rule flag quiet window) prevent fighting an in-flight
+// sync. Event edge, not a new timer.
 let focusPulseRegistered = false
 const handleFocusPulse = () => {
     if (document.visibilityState !== 'visible') return
     const state = useFailoverStore.getState()
-    if (!state.isMonitoring || state.rules.length === 0) return
+    if (!state.isMonitoring) return
     void state.pulse()
 }
 const registerFocusPulse = () => {
@@ -275,44 +382,93 @@ const unregisterFocusPulse = () => {
     focusPulseRegistered = false
 }
 
-const syncRuleToServer = async (rule: FailoverRule) => {
+// One wire shape for both rule-save paths. notifyEnabled travels beside webhookUrl so the
+// server can store "notifications off" for this rule; webhookUrl alone cannot express it
+// ('' already means "use the global webhook"). connectionGeneration carries the bound
+// connection's incarnation token so the server stamps it on the rule row.
+function ruleSyncPayload(rule: FailoverRule, ctx: { authKey: string, connectionId?: string, connectionGeneration?: string, credentialType?: string, platform?: string, addonList: unknown[] }) {
+    return {
+        id: rule.id,
+        accountId: rule.accountId,
+        name: rule.name,
+        authKey: ctx.authKey,
+        connectionId: ctx.connectionId,
+        ...(ctx.connectionGeneration ? { connectionGeneration: ctx.connectionGeneration } : {}),
+        credentialType: ctx.credentialType,
+        platform: ctx.platform,
+        priorityChain: rule.priorityChain,
+        activeUrl: rule.activeUrl || rule.priorityChain?.[0],
+        is_active: rule.isActive ? 1 : 0,
+        is_automatic: rule.isAutomatic !== false ? 1 : 0,
+        addonList: ctx.addonList,
+        webhookUrl: rule.notifyEnabled === false ? '' : (rule.webhookUrl || ''),
+        notifyEnabled: rule.notifyEnabled !== false,
+        cooldown_ms: rule.cooldown_ms,
+        messageTemplate: rule.messageTemplate || null,
+        customCheckUrls: normalizeCustomChecks(rule.customCheckUrls),
+    }
+}
+
+// A rule keeps the target it was first saved with: a re-send never moves it to another
+// platform or connection, it skips instead.
+function resolveRuleSyncTarget(rule: FailoverRule, account: Account, hasStremioKey: boolean): { connectionId?: string, connectionGeneration?: string, credentialType?: string, platform?: string } | null {
+    if (rule.connectionId) {
+        const conn = account.connections?.find(c => c.id === rule.connectionId)
+        return { connectionId: rule.connectionId, connectionGeneration: conn?.generation, credentialType: conn?.connectionType, platform: rule.platform || conn?.platform }
+    }
+    if (rule.platform && rule.platform !== 'stremio') return null
+    if (hasStremioKey) return { platform: 'stremio' }
+    if (rule.platform === 'stremio') return null
+    const fallbackConn = account.connections?.find(c => c.enabled && isSyncEligibleConnection(c))
+    return fallbackConn ? { connectionId: fallbackConn.id, connectionGeneration: fallbackConn.generation, credentialType: fallbackConn.connectionType, platform: fallbackConn.platform } : null
+}
+
+// Server bodies are owner-scoped text (addon and rule labels). Read defensively and
+// never echo transport URLs back into the UI.
+const readAutopilotServerError = async (resp: Response): Promise<string> => {
+    let body: unknown = null
+    try { body = await resp.json() } catch { /* 499 and other empty bodies */ }
+    if (body && typeof body === 'object') {
+        const record = body as Record<string, unknown>
+        const text = typeof record.message === 'string' ? record.message.trim() : typeof record.error === 'string' ? record.error.trim() : ''
+        if (text && text.length <= 240 && !/[a-z][a-z0-9+.-]*:\/\//i.test(text)) return text
+    }
+    return `Autopilot request failed (status ${resp.status}).`
+}
+
+// strict (explicit editor saves and removal flows): failures throw with a safe message
+// instead of being logged. Background and restore paths keep the silent swallow, so
+// automatic and import restore behavior is unchanged.
+const syncRuleToServer = async (rule: FailoverRule, opts?: { strict?: boolean }): Promise<'synced' | 'local-only'> => {
+    const strict = opts?.strict === true
     try {
         const { useSyncStore } = await import('@/store/syncStore')
         const { auth, serverUrl } = useSyncStore.getState()
-        if (!auth.isAuthenticated) return
+        if (!auth.isAuthenticated) return 'local-only'
 
         const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
-        if (!account) return
+        if (!account) return 'local-only'
 
         const sessionKey = await loadSessionKey()
         if (!sessionKey) throw new Error('Encryption key not found')
 
         let authKey = ''
-        let connectionId: string | undefined
-        let credentialType: string | undefined
-        let platform: string | undefined = rule.platform
-        const stremioKey = getStremioAuthKey(account)
+        const stremioKey = rule.connectionId ? '' : getStremioAuthKey(account)
         if (stremioKey) {
             try { authKey = await getCachedAuthKey(stremioKey, sessionKey) } catch { authKey = '' }
         }
-        if (authKey) {
-            if (!platform) platform = 'stremio'
-        } else {
-            const fallbackConn = account.connections?.find(c => c.enabled && isSyncEligibleConnection(c))
-            connectionId = rule.connectionId || fallbackConn?.id
-            credentialType = fallbackConn?.connectionType
-            if (!platform || platform === 'stremio') platform = fallbackConn?.platform
-        }
-        if (!authKey && !connectionId) throw new Error('Failed to decrypt auth key')
+        const target = resolveRuleSyncTarget(rule, account, !!authKey)
+        if (!target) throw new Error(NO_SERVER_SIGN_IN)
+        const { connectionId, connectionGeneration, credentialType, platform } = target
         const baseUrl = serverUrl || ''
         const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
         const addonList = account.addons || []
-        const syncPassword = useSyncStore.getState().auth.password
-        const { deriveSyncToken } = await import('@/lib/crypto')
-        const syncToken = await deriveSyncToken(syncPassword)
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+        const syncToken = await getSyncPasswordHeader(auth)
+        if ((await accountsAwaitingRestore(apiPath, syncToken, auth.id)).has(rule.accountId)) throw new Error(RESTORE_PENDING)
 
-        await resilientFetch(`${apiPath}/autopilot/sync`, {
+        const resp = await resilientFetch(`${apiPath}/autopilot/sync`, {
             method: 'POST',
             retries: 0,
             headers: {
@@ -320,93 +476,76 @@ const syncRuleToServer = async (rule: FailoverRule) => {
                 'x-sync-password': syncToken,
                 'x-sync-user': auth.id
             },
-            body: JSON.stringify({
-                id: rule.id,
-                accountId: rule.accountId,
-                name: rule.name,
-                authKey,
-                connectionId,
-                credentialType,
-                platform,
-                priorityChain: rule.priorityChain,
-                activeUrl: rule.activeUrl || rule.priorityChain?.[0],
-                is_active: rule.isActive ? 1 : 0,
-                is_automatic: rule.isAutomatic !== false ? 1 : 0,
-                addonList,
-                webhookUrl: rule.notifyEnabled === false ? '' : (rule.webhookUrl || ''),
-                cooldown_ms: rule.cooldown_ms,
-                messageTemplate: rule.messageTemplate || null,
-                customCheckUrls: normalizeCustomChecks(rule.customCheckUrls),
-            })
+            body: JSON.stringify(ruleSyncPayload(rule, { authKey, connectionId, connectionGeneration, credentialType, platform, addonList }))
         })
+        // A 409 chain_overlap body carries the user-facing message; any other status gets
+        // the bounded generic one.
+        if (!resp.ok) throw new Error(await readAutopilotServerError(resp))
         if (import.meta.env.DEV) console.log(`[Autopilot] Rule ${rule.id} synced to server (Live Mode).`)
+        return 'synced'
     } catch (err) {
+        if (strict) {
+            // resilientFetch embeds the endpoint URL in network errors; never surface it.
+            const raw = err instanceof Error ? err.message : ''
+            throw new Error(raw.includes('Failed to fetch')
+                ? 'Could not reach the server. Check your connection and try again.'
+                : (raw || 'The rule could not be saved.'))
+        }
         if (import.meta.env.DEV) console.error('[Autopilot] Server sync failed:', err)
+        return 'local-only'
     }
 }
 
-const syncRulesToServerBatch = async (rules: FailoverRule[]) => {
-    if (rules.length === 0) return
+const NO_SERVER_SIGN_IN = 'This account has no sign-in the server can use. Reconnect it, then try again.'
+const RESTORE_PENDING = 'This account is still being restored on the server. Try again shortly.'
+
+// Rules of a restored account are refused until its server-side deletion guard is lifted,
+// so queued lifts are retried first and those accounts' rules wait.
+async function accountsAwaitingRestore(apiPath: string, syncToken: string, syncUser: string): Promise<Set<string>> {
+    const { drainPendingAccountTombstoneLifts } = await import('@/lib/account-server-cleanup')
+    return new Set(await drainPendingAccountTombstoneLifts((path, init) => fetch(`${apiPath}${path}`, { ...init, headers: { 'x-sync-password': syncToken, 'x-sync-user': syncUser } })))
+}
+
+const syncRulesToServerBatch = async (rules: FailoverRule[]): Promise<RuleBatchOutcome> => {
+    const outcome: RuleBatchOutcome = { restored: [], failed: {}, rateLimited: null }
+    if (rules.length === 0) return outcome
+    const failAll = (message: string) => ({ ...outcome, failed: Object.fromEntries(rules.map(r => [r.id, message])) })
     try {
         const { useSyncStore } = await import('@/store/syncStore')
         const { auth, serverUrl } = useSyncStore.getState()
-        if (!auth.isAuthenticated) return
+        if (!auth.isAuthenticated) return failAll('Sign in to your AIOManager cloud account, then try again.')
 
         const sessionKey = await loadSessionKey()
         if (!sessionKey) throw new Error('Encryption key not found')
 
-        const syncPassword = useSyncStore.getState().auth.password
-        const { deriveSyncToken } = await import('@/lib/crypto')
-        const syncToken = await deriveSyncToken(syncPassword)
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+        const syncToken = await getSyncPasswordHeader(auth)
 
         const baseUrl = serverUrl || ''
         const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
+        const awaitingRestore = await accountsAwaitingRestore(apiPath, syncToken, auth.id)
         const payload = []
         for (const rule of rules) {
             const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
-            if (!account) continue
+            if (!account || awaitingRestore.has(rule.accountId)) continue
             let authKey = ''
-            let connectionId: string | undefined
-            let credentialType: string | undefined
-            let platform: string | undefined = rule.platform
-            const stremioKey = getStremioAuthKey(account)
+            const stremioKey = rule.connectionId ? '' : getStremioAuthKey(account)
             if (stremioKey) {
                 try { authKey = await getCachedAuthKey(stremioKey, sessionKey) } catch { authKey = '' }
             }
-            if (authKey) {
-                if (!platform) platform = 'stremio'
-            } else {
-                const fallbackConn = account.connections?.find(c => c.enabled && isSyncEligibleConnection(c))
-                connectionId = rule.connectionId || fallbackConn?.id
-                credentialType = fallbackConn?.connectionType
-                if (!platform || platform === 'stremio') platform = fallbackConn?.platform
-            }
-            if (!authKey && !connectionId) continue
+            const target = resolveRuleSyncTarget(rule, account, !!authKey)
+            if (!target) continue
+            const { connectionId, connectionGeneration, credentialType, platform } = target
             const addonList = account.addons || []
-            payload.push({
-                id: rule.id,
-                accountId: rule.accountId,
-                name: rule.name,
-                authKey,
-                connectionId,
-                credentialType,
-                platform,
-                priorityChain: rule.priorityChain,
-                activeUrl: rule.activeUrl || rule.priorityChain?.[0],
-                is_active: rule.isActive ? 1 : 0,
-                is_automatic: rule.isAutomatic !== false ? 1 : 0,
-                addonList,
-                webhookUrl: rule.notifyEnabled === false ? '' : (rule.webhookUrl || ''),
-                cooldown_ms: rule.cooldown_ms,
-                messageTemplate: rule.messageTemplate || null,
-                customCheckUrls: normalizeCustomChecks(rule.customCheckUrls),
-            })
+            payload.push(ruleSyncPayload(rule, { authKey, connectionId, connectionGeneration, credentialType, platform, addonList }))
         }
 
-        if (payload.length === 0) return
+        const sentIds = payload.map(p => p.id)
+        const unsent = Object.fromEntries(rules.filter(r => !sentIds.includes(r.id)).map(r => [r.id, awaitingRestore.has(r.accountId) ? RESTORE_PENDING : NO_SERVER_SIGN_IN]))
+        if (payload.length === 0) return { ...outcome, failed: unsent }
 
-        await resilientFetch(`${apiPath}/autopilot/sync-batch`, {
+        const resp = await resilientFetch(`${apiPath}/autopilot/sync-batch`, {
             method: 'POST',
             retries: 0,
             headers: {
@@ -416,9 +555,13 @@ const syncRulesToServerBatch = async (rules: FailoverRule[]) => {
             },
             body: JSON.stringify(payload)
         })
-        if (import.meta.env.DEV) console.log(`[Autopilot] Batch synced ${payload.length} rules to server.`)
+        const body = await resp.json().catch(() => null)
+        const result = readRuleBatchResponse(resp.status, body, sentIds)
+        if (import.meta.env.DEV) console.log(`[Autopilot] Batch synced ${result.restored.length} of ${payload.length} rules to server.`)
+        return { ...result, failed: { ...unsent, ...result.failed } }
     } catch (err) {
         if (import.meta.env.DEV) console.error('[Autopilot] Batch server sync failed:', err)
+        return failAll(err instanceof Error && err.message ? err.message : 'The server could not be reached.')
     }
 }
 
@@ -430,9 +573,8 @@ const pushGlobalWebhookToServer = async (url: string) => {
         const { auth, serverUrl } = useSyncStore.getState()
         if (!auth.isAuthenticated) return
 
-        const syncPassword = useSyncStore.getState().auth.password
-        const { deriveSyncToken } = await import('@/lib/crypto')
-        const syncToken = await deriveSyncToken(syncPassword)
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+        const syncToken = await getSyncPasswordHeader(auth)
         const baseUrl = serverUrl || ''
         const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
@@ -571,9 +713,8 @@ const deleteRuleFromServer = async (ruleId: string) => {
         const baseUrl = serverUrl || ''
         const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
-        const syncPassword = useSyncStore.getState().auth.password
-        const { deriveSyncToken } = await import('@/lib/crypto')
-        const syncToken = await deriveSyncToken(syncPassword)
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+        const syncToken = await getSyncPasswordHeader(auth)
 
         const res = await resilientFetch(`${apiPath}/autopilot/${ruleId}`, {
             method: 'DELETE',
@@ -604,6 +745,14 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
     isChecking: false,
     lastWorkerRun: undefined,
     lastCycle: undefined,
+    safeMode: null,
+    statePullFailed: false,
+    statePullPartial: false,
+    pulseUnreachable: false,
+    workerEnabled: true,
+    sessionGeneration: 0,
+    lastCompletePullAt: 0,
+    restoreIssues: {},
 
     testRule: async (ruleId) => {
         const rule = get().rules.find(r => r.id === ruleId)
@@ -717,6 +866,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         try {
         let rules = [...get().rules]
         let needsSync = false
+        let fetched = false
+        let pullPartial = false
+        const sessionAtStart = get().sessionGeneration
 
         try {
             const { serverUrl } = (await import('@/store/syncStore')).useSyncStore.getState()
@@ -724,24 +876,16 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             const baseUrl = serverUrl || ''
             const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
 
-            const { deriveSyncToken } = await import('@/lib/crypto')
-            const syncToken = await deriveSyncToken(auth.password)
-            const resp = await resilientFetch(`${apiPath}/autopilot/states`, {
-                method: 'POST',
-                retries: 1,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-sync-password': syncToken,
-                    'x-sync-user': auth.id
-                },
-                body: JSON.stringify({ accountIds })
-            })
-            if (resp.ok) {
-                const respData = (await resp.json()) as Record<string, unknown>
-                const batchedStates = (respData?.states || {}) as Record<string, Record<string, unknown>[]>
-                const serverHeartbeat = respData?.lastWorkerRun as string | undefined
-                const lastCycle = parseAutopilotCycleStats(respData?.lastCycle as Record<string, unknown> | undefined)
-                const isPartialState = Boolean(respData?.partial)
+            const respData = await fetchAutopilotStates(apiPath, auth, accountIds)
+            fetched = true
+            pullPartial = Boolean(respData.partial)
+            _lastStatePullAt = Date.now()
+            set({ statePullFailed: false, statePullPartial: pullPartial })
+            {
+                const batchedStates = respData.states
+                const serverHeartbeat = respData.lastWorkerRun
+                const lastCycle = parseAutopilotCycleStats(respData.lastCycle)
+                const isPartialState = respData.partial
                 if (serverHeartbeat) {
                     set({ lastWorkerRun: new Date(serverHeartbeat) })
                 }
@@ -766,11 +910,11 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         let mergedRule: FailoverRule
                         if (existsIndex !== -1) {
                             preserveScopedChecksAtRisk(rules[existsIndex], processedRule.customCheckUrls)
-                            mergedRule = { ...rules[existsIndex], ...processedRule }
+                            mergedRule = { ...rules[existsIndex], ...processedRule, skipReason: readSkipReason(sr), lastError: readRuleError(sr.lastError) }
                             rules[existsIndex] = mergedRule
                         } else {
-                            rules.push(processedRule)
-                            mergedRule = processedRule
+                            mergedRule = { ...processedRule, skipReason: readSkipReason(sr), lastError: readRuleError(sr.lastError) }
+                            rules.push(mergedRule)
                         }
                         processedRules.push(mergedRule)
                     }
@@ -782,6 +926,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 }
             }
         } catch (e) {
+            if (!fetched) set({ statePullFailed: true })
             if (import.meta.env.DEV) console.warn('[Failover] Deferred server state fetch failed:', e)
             return
         }
@@ -806,14 +951,23 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
+        if (!pullPartial && get().sessionGeneration === sessionAtStart) {
+            _lastCompletePullAt = Date.now()
+            set({ lastCompletePullAt: _lastCompletePullAt })
+        }
         } finally { _isPulling = false }
     },
 
     pullServerState: async () => {
         const { rules } = get()
         if (rules.length === 0 || _isPulling) return
+        const editsAtStart = new Map(_ruleEditSeq)
+        const pendingAtStart = new Set(_pendingRuleUpdates)
 
         _isPulling = true
+        let fetched = false
+        let missingFound = false
+        const sessionAtStart = get().sessionGeneration
         try {
             if (useAuthStore.getState().isLocked) return
 
@@ -824,30 +978,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             const accountIds = [...new Set(rules.map(r => r.accountId))]
             const baseUrl = serverUrl || ''
             const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-            const syncPassword = useSyncStore.getState().auth.password
-            const { deriveSyncToken } = await import('@/lib/crypto')
-            const syncToken = await deriveSyncToken(syncPassword)
-
-            const resp = await resilientFetch(`${apiPath}/autopilot/states`, {
-                method: 'POST',
-                retries: 1,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-sync-password': syncToken,
-                    'x-sync-user': auth.id
-                },
-                body: JSON.stringify({ accountIds })
-            })
-            if (!resp.ok) {
-                if (import.meta.env?.DEV) console.warn(`[Failover] pullServerState failed: ${resp.status} ${resp.statusText}`)
-                _adaptiveIntervalMs = BASE_INTERVAL_MS
-                _stableCheckCount = 0
-                return
-            }
-            const respData = (await resp.json()) as Record<string, unknown>
-            const batchedStates = (respData?.states || {}) as Record<string, Record<string, unknown>[]>
-            const serverHeartbeat = respData?.lastWorkerRun as string | undefined
-            const lastCycle = parseAutopilotCycleStats(respData?.lastCycle as Record<string, unknown> | undefined)
+            const respData = await fetchAutopilotStates(apiPath, auth, accountIds)
+            fetched = true
+            _lastStatePullAt = Date.now()
+            set({ statePullFailed: false, statePullPartial: Boolean(respData.partial) })
+            const batchedStates = respData.states
+            const serverHeartbeat = respData.lastWorkerRun
+            const lastCycle = parseAutopilotCycleStats(respData.lastCycle)
 
             if (serverHeartbeat) {
                 set({ lastWorkerRun: new Date(serverHeartbeat) })
@@ -856,11 +993,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
             let hasUpdates = false
             const updatedRules = [...rules]
+            const seenRuleIds = new Set<string>()
 
             for (const accountId of Object.keys(batchedStates)) {
                 const serverStates = batchedStates[accountId]
                 for (const serverRuleRaw of serverStates) {
                     const serverRule = serverRuleRaw as Record<string, unknown>
+                    seenRuleIds.add(serverRule.id as string)
                     const ruleIndex = updatedRules.findIndex(r => r.id === (serverRule.id as string))
                     if (ruleIndex !== -1) {
                         const localRule = updatedRules[ruleIndex]
@@ -876,16 +1015,29 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         }
 
                         const normPrimary = normalizeAddonUrl(nextPriorityChain?.[0] || '')
+                        // The per-rule notification mode is only adopted when the server states
+                        // it (older servers omit it) and never while a local save is still in
+                        // flight: a pull racing the save must not revert the user's edit.
+                        const nextWebhookUrl = isPendingUpdate
+                            ? localRule.webhookUrl
+                            : (typeof serverRule.webhookUrl === 'string' ? serverRule.webhookUrl : localRule.webhookUrl)
+                        const nextNotifyEnabled = isPendingUpdate
+                            ? localRule.notifyEnabled
+                            : (serverRule.notifyEnabled != null ? Boolean(serverRule.notifyEnabled) : localRule.notifyEnabled)
                         updatedRules[ruleIndex] = {
                             ...localRule,
                             name: (serverRule.name as string) ?? localRule.name,
                             cooldown_ms: (serverRule.cooldownMs as number) ?? localRule.cooldown_ms,
                             priorityChain: nextPriorityChain,
                             activeUrl: nextActiveUrl,
+                            webhookUrl: nextWebhookUrl,
+                            notifyEnabled: nextNotifyEnabled,
                             isActive: serverRule.isActive !== undefined ? (serverRule.isActive as boolean) : localRule.isActive,
                             isAutomatic: serverRule.isAutomatic != null ? Boolean(serverRule.isAutomatic) : localRule.isAutomatic,
                             stabilization: (serverRule.stabilization as Record<string, number | AutopilotStabilizationEntry>) || localRule.stabilization,
                             lastCheck: serverRule.lastCheck ? new Date(serverRule.lastCheck as string | number) : localRule.lastCheck,
+                            skipReason: readSkipReason(serverRule),
+                            lastError: readRuleError(serverRule.lastError),
                             status: nextActiveUrl
                                 ? (normNextActive === normPrimary ? 'monitoring' : 'failed-over')
                                 : localRule.status
@@ -903,15 +1055,43 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 }
             }
 
+            // A partial pull cannot prove absence; a complete one can.
+            if (!respData.partial) {
+                const missing = rulesMissingOnServer(updatedRules, new Set(accountIds), seenRuleIds, Date.now(), _pendingRuleUpdates)
+                trackMissingSince(_missingSince, missing, Date.now())
+                for (let i = 0; i < updatedRules.length; i++) {
+                    if (!missing.has(updatedRules[i].id)) continue
+                    missingFound = true
+                    if (updatedRules[i].skipReason === 'not_on_server') continue
+                    updatedRules[i] = { ...updatedRules[i], skipReason: 'not_on_server' }
+                    hasUpdates = true
+                }
+            }
+
             if (hasUpdates) {
-                set({ rules: updatedRules })
-                await localforage.setItem(STORAGE_KEY, updatedRules)
+                // Publish onto the current rules: rules edited or saving since the pull began keep
+                // their local state, rules removed meanwhile stay removed, new ones stay.
+                const pulledById = new Map(updatedRules.map(r => [r.id, r]))
+                const published = get().rules.map(r => {
+                    const pulled = pulledById.get(r.id)
+                    if (!pulled || _pendingRuleUpdates.has(r.id) || pendingAtStart.has(r.id)) return r
+                    if ((_ruleEditSeq.get(r.id) ?? 0) !== (editsAtStart.get(r.id) ?? 0)) return r
+                    return pulled
+                })
+                set({ rules: published })
+                await localforage.setItem(STORAGE_KEY, published)
+            }
+            if (!respData.partial && get().sessionGeneration === sessionAtStart) {
+                _lastCompletePullAt = Date.now()
+                set({ lastCompletePullAt: _lastCompletePullAt })
             }
         } catch (e) {
+            if (!fetched) set({ statePullFailed: true })
             if (import.meta.env.DEV) console.warn('[Failover] pullServerState failed:', e)
         } finally {
             _isPulling = false
         }
+        if (missingFound) void get().autoRestoreMissingRules()
     },
 
     setWebhook: async (url, enabled) => {
@@ -942,6 +1122,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
     },
 
     addRule: async (accountId, priorityChain, name, cooldown_ms, webhookUrl, notifyEnabled, messageTemplate, customCheckUrls) => {
+        const generation = get().sessionGeneration
         const safeChain = Array.isArray(priorityChain) ? priorityChain : []
         const safeCustomChecks = normalizeCustomChecks(customCheckUrls)
         const newRule: FailoverRule = {
@@ -958,45 +1139,73 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             notifyEnabled: notifyEnabled !== false,
             messageTemplate: messageTemplate || undefined,
             customCheckUrls: safeCustomChecks,
+            createdAt: Date.now(),
         }
+
+        // Server-first validation: an authenticated save throws (409 overlap, server or
+        // network failure) before anything is published, reconciled or pushed, so an
+        // invalid overlap never lands locally. Local-only accounts skip the server and
+        // still create the rule.
+        await syncRuleToServer(newRule, { strict: true })
+        if (get().sessionGeneration !== generation) throw new Error('The session changed while saving this rule. Try again.')
 
         const rules = [...get().rules, newRule]
         set({ rules })
+        resetPollCadence()
         await localforage.setItem(STORAGE_KEY, rules)
-        const reconciled = await reconcileAccountAddonsWithActiveRule(newRule)
-        if (!reconciled) await syncRuleToServer(newRule)
+        await reconcileAccountAddonsWithActiveRule(newRule)
         triggerSync()
     },
 
-    removeRule: async (ruleId) => {
+    removeRule: async (ruleId, opts) => {
+        const generation = get().sessionGeneration
+        const strict = opts?.strict === true
+        const ruleAccountId = get().rules.find(r => r.id === ruleId)?.accountId
         await trackDeletedRule(ruleId)
         const deletedOnServer = await deleteRuleFromServer(ruleId)
+        if (get().sessionGeneration !== generation) throw new Error('The session changed while removing this rule. Try again.')
         if (!deletedOnServer) {
             await clearDeletedRuleId(ruleId)
+            if (strict) {
+                // Removal flows must verify the server deletion before unlinking a login.
+                throw new Error('The rule could not be deleted on the server, so the login was not removed. Try again.')
+            }
             toast({
                 title: 'Unable to delete Autopilot rule',
                 description: 'Server deletion failed. The local rule was kept so it does not reappear on sync.',
-                variant: 'destructive'
+                variant: 'destructive',
+                href: ruleAccountId ? `/account/${encodeURIComponent(ruleAccountId)}` : undefined,
             })
-            return
+            return false
         }
         const rules = get().rules.filter(r => r.id !== ruleId)
         set({ rules })
         await localforage.setItem(STORAGE_KEY, rules)
+        if (strict && get().rules.some(r => r.id === ruleId)) {
+            throw new Error('The rule is still present after deletion, so the login was not removed.')
+        }
         triggerSync()
+        return true
     },
 
     updateRule: async (ruleId, updates) => {
+        const generation = get().sessionGeneration
+        const before = get().rules.find(r => r.id === ruleId)
+        if (!before) return
+        // Server-first validation before this edit publishes anywhere (see addRule).
+        await syncRuleToServer({ ...before, ...updates }, { strict: true })
+        if (get().sessionGeneration !== generation) throw new Error('The session changed while saving this rule. Try again.')
+        markRuleEdited(ruleId)
         _pendingRuleUpdates.add(ruleId)
         const timeoutId = setTimeout(() => _pendingRuleUpdates.delete(ruleId), 10000)
         try {
             const rules = get().rules.map(r => r.id === ruleId ? { ...r, ...updates } : r)
             set({ rules })
+            resetPollCadence()
             await localforage.setItem(STORAGE_KEY, rules)
             const rule = rules.find(r => r.id === ruleId)
             if (rule) {
-                const reconciled = await reconcileAccountAddonsWithActiveRule(rule)
-                if (!reconciled) await syncRuleToServer(rule)
+                await reconcileAccountAddonsWithActiveRule(rule)
             }
         } finally {
             clearTimeout(timeoutId)
@@ -1021,10 +1230,12 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
     },
 
     toggleRuleActive: async (ruleId, isActive) => {
+        markRuleEdited(ruleId)
         const rules = get().rules.map(r =>
             r.id === ruleId ? { ...r, isActive } : r
         )
         set({ rules })
+        if (isActive) resetPollCadence()
         await localforage.setItem(STORAGE_KEY, rules)
         const rule = rules.find(r => r.id === ruleId)
         if (rule) {
@@ -1032,6 +1243,81 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             if (!reconciled) await syncRuleToServer(rule)
         }
         triggerSync()
+    },
+
+    // A removed connection's rules are dead weight: their server rows were deleted with
+    // the connection's server state, so retire the local copies and track the deletions
+    // (a states pull or a stale tab must not resurrect them).
+    removeConnectionRules: async (accountId, connectionId) => {
+        const bound = get().rules.filter(r => r.accountId === accountId && r.connectionId === connectionId)
+        if (bound.length === 0) return 0
+        for (const rule of bound) await trackDeletedRule(rule.id)
+        const remaining = get().rules.filter(r => r.accountId !== accountId || r.connectionId !== connectionId)
+        set({ rules: remaining })
+        resetPollCadence()
+        await localforage.setItem(STORAGE_KEY, remaining)
+        triggerSync()
+        return bound.length
+    },
+
+    // Removal-flow pause: server-first and idempotent, it touches only is_active (no
+    // platform, connection or blob writes). A rule absent on the server has nothing to
+    // pause, so its 404 counts as paused. Local state flips only after the server
+    // confirms, behind a session fence so a reset cannot race the flip.
+    pauseRule: async (ruleId) => {
+        const rule = get().rules.find(r => r.id === ruleId)
+        if (!rule) throw new Error('Rule not found')
+        const generation = get().sessionGeneration
+        const { useSyncStore } = await import('@/store/syncStore')
+        const { auth, serverUrl } = useSyncStore.getState()
+        if (auth.isAuthenticated) {
+            const baseUrl = serverUrl || ''
+            const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+            const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+            let resp: Awaited<ReturnType<typeof resilientFetch>>
+            try {
+                const syncToken = await getSyncPasswordHeader(auth)
+                resp = await resilientFetch(`${apiPath}/autopilot/${encodeURIComponent(ruleId)}/pause`, {
+                    method: 'POST',
+                    retries: 0,
+                    headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id },
+                })
+            } catch {
+                throw new Error('Could not reach the server, so the rule is still active. Try again.')
+            }
+            if (!resp.ok && resp.status !== 404) throw new Error(await readAutopilotServerError(resp))
+        }
+        if (get().sessionGeneration !== generation) throw new Error('The session changed during the pause. Try again.')
+        markRuleEdited(ruleId)
+        const rules = get().rules.map(r => r.id === ruleId ? { ...r, isActive: false } : r)
+        set({ rules })
+        await localforage.setItem(STORAGE_KEY, rules)
+    },
+
+    // Conflict retry: asks the engine to re-audit a contested rule now. It never resumes
+    // a disabled rule and pushes nothing; the fresh state pull decides what is enforced.
+    retryRuleConflict: async (ruleId) => {
+        const rule = get().rules.find(r => r.id === ruleId)
+        if (!rule) throw new Error('Rule not found')
+        const { useSyncStore } = await import('@/store/syncStore')
+        const { auth, serverUrl } = useSyncStore.getState()
+        if (!auth.isAuthenticated) return
+        const baseUrl = serverUrl || ''
+        const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
+        const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+        let resp: Awaited<ReturnType<typeof resilientFetch>>
+        try {
+            const syncToken = await getSyncPasswordHeader(auth)
+            resp = await resilientFetch(`${apiPath}/autopilot/${encodeURIComponent(ruleId)}/retry-conflict`, {
+                method: 'POST',
+                retries: 0,
+                headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id },
+            })
+        } catch {
+            throw new Error('Could not reach the server, so the retry did not run. Try again.')
+        }
+        if (!resp.ok) throw new Error(await readAutopilotServerError(resp))
+        await get().pullServerState()
     },
 
     checkRules: async () => {
@@ -1053,7 +1339,15 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
     pulse: async () => {
         const { rules } = get()
-        if (rules.length === 0 || _isPulling) return
+        if (_isPulling) return
+        // Zero rules skip rule-state work (activeRuleCount 0 never pulls), but the
+        // global worker flag is still read once per quiet window so Header and the
+        // rule card can announce a turned-off server.
+        const flagProbe = rules.length === 0
+        if (flagProbe && Date.now() - _lastFlagReadAt < WORKER_FLAG_QUIET_MS) return
+        const sessionAtStart = get().sessionGeneration
+        const pulseSeq = ++_pulseSeq.next
+        const pulseIsCurrent = () => get().sessionGeneration === sessionAtStart && pulseSeq === _pulseSeq.next
 
         try {
             if (useAuthStore.getState().isLocked) return
@@ -1063,27 +1357,49 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
             const baseUrl = serverUrl || ''
             const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-            const syncPassword = useSyncStore.getState().auth.password
-            const { deriveSyncToken } = await import('@/lib/crypto')
-            const syncToken = await deriveSyncToken(syncPassword)
+            const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+            const syncToken = await getSyncPasswordHeader(auth)
+            if (flagProbe) _lastFlagReadAt = Date.now()
 
-            const resp = await resilientFetch(`${apiPath}/autopilot/pulse`, {
-                headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
-            })
+            let resp: Awaited<ReturnType<typeof resilientFetch>>
+            try {
+                resp = await resilientFetch(`${apiPath}/autopilot/pulse`, {
+                    headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
+                })
+            } catch {
+                // Only a transport failure marks the server unreachable; processing errors never do.
+                if (pulseIsCurrent()) set({ pulseUnreachable: true })
+                return
+            }
+            // Any HTTP response proves the server is reachable.
+            if (pulseIsCurrent()) set({ pulseUnreachable: false })
             if (!resp.ok) return
             const data = await resp.json()
             const serverLastRun = data?.lastWorkerRun
             const lastCycle = parseAutopilotCycleStats(data?.lastCycle)
 
             if (lastCycle) set({ lastCycle })
+            set({ safeMode: readSafeMode(data?.safeMode), workerEnabled: readWorkerEnabledFlag(data?.workerEnabled) })
 
-            if (serverLastRun && serverLastRun !== _lastWorkerRun) {
+            const heartbeatAdvanced = Boolean(serverLastRun) && serverLastRun !== _lastWorkerRun
+            if (heartbeatAdvanced) {
                 _lastWorkerRun = serverLastRun
                 set({ lastWorkerRun: new Date(serverLastRun) })
-                if (data?.activeRuleCount > 0) {
-                    await get().pullServerState()
-                }
             }
+            // Servers that report stateVersion let us skip the pull when nothing changed;
+            // older servers keep the heartbeat-based pull.
+            const stateVersion = typeof data?.stateVersion === 'string' ? data.stateVersion : null
+            const versionChanged = stateVersion !== null && stateVersion !== _lastStateVersion
+            const shouldPullStates = stateVersion !== null
+                ? versionChanged || isStatePullDue(_lastStatePullAt, Date.now())
+                : heartbeatAdvanced || isStatePullDue(_lastStatePullAt, Date.now())
+            const willPull = data?.activeRuleCount > 0 && shouldPullStates
+            const completeBefore = _lastCompletePullAt
+            if (willPull) {
+                await get().pullServerState()
+            }
+            // Acknowledge a version only once a complete pull applied it, so a failed pull retries.
+            if (stateVersion !== null && (!willPull || _lastCompletePullAt !== completeBefore)) _lastStateVersion = stateVersion
         } catch (e) {
             if (import.meta.env.DEV) console.warn('[Failover] pulse failed:', e)
         }
@@ -1093,8 +1409,9 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         if (automationInterval) return
         const state = get()
         _lastWorkerRun = 0
-        _adaptiveIntervalMs = BASE_INTERVAL_MS
-        _stableCheckCount = 0
+        _cadence.reset()
+        _lastStatePullAt = 0
+        _lastStateVersion = null
         registerFocusPulse()
         state.pulse()
         set({ isMonitoring: true })
@@ -1159,6 +1476,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         }
         const rulesToImport = scavengedRules
         const currentRules = [...get().rules]
+        _cloudRules = { ids: new Set(rulesToImport.map(r => String(r?.id ?? ''))), at: Date.now() }
 
         if (strategy === 'mirror') {
             // Anti-Wipe Guard: If remote has 0 rules but we have local rules, preserve local state.
@@ -1190,9 +1508,12 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                 const existing = currentRules.find(r => r.id === migratedRule.id)
                 if (existing) {
                     preserveScopedChecksAtRisk(existing, migratedRule.customCheckUrls)
+                    // A cloud pull landing while a rule save is in flight must not revert it.
+                    const keepLocalNotify = _pendingRuleUpdates.has(migratedRule.id)
                     finalRules.push({
                         ...existing,
                         ...migratedRule,
+                        ...(keepLocalNotify ? { webhookUrl: existing.webhookUrl, notifyEnabled: existing.notifyEnabled } : {}),
                         lastCheck: newRule.lastCheck ? new Date(newRule.lastCheck) : existing.lastCheck,
                         lastFailover: newRule.lastFailover ? new Date(newRule.lastFailover) : existing.lastFailover
                     })
@@ -1234,9 +1555,12 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             const index = currentRules.findIndex(r => r.id === migratedRule.id)
             if (index !== -1) {
                 preserveScopedChecksAtRisk(currentRules[index], migratedRule.customCheckUrls)
+                // A cloud pull landing while a rule save is in flight must not revert it.
+                const keepLocalNotify = _pendingRuleUpdates.has(migratedRule.id)
                 currentRules[index] = {
                     ...currentRules[index],
                     ...migratedRule,
+                    ...(keepLocalNotify ? { webhookUrl: currentRules[index].webhookUrl, notifyEnabled: currentRules[index].notifyEnabled } : {}),
                     lastCheck: newRule.lastCheck ? new Date(newRule.lastCheck) : currentRules[index].lastCheck,
                     lastFailover: newRule.lastFailover ? new Date(newRule.lastFailover) : currentRules[index].lastFailover
                 }
@@ -1418,6 +1742,52 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         }
     },
 
+    restoreRuleOnServer: async (ruleId, opts) => {
+        const rule = get().rules.find(r => r.id === ruleId)
+        if (!rule) return false
+        const now = Date.now()
+        if (now < _restoreRateLimitedUntil) {
+            await applyRestoreOutcome({ restored: [], failed: { [ruleId]: RESTORE_RATE_LIMIT_MESSAGE }, rateLimited: null }, _restoreRateLimitedUntil)
+            return false
+        }
+        _restoreSession.attempted.add(ruleId)
+        const outcome = await syncRulesToServerBatch([rule])
+        if (outcome.rateLimited) _restoreRateLimitedUntil = now + outcome.rateLimited.retryAfterMs
+        await applyRestoreOutcome(outcome, outcome.rateLimited ? _restoreRateLimitedUntil : null)
+        if (!outcome.restored.includes(ruleId)) return false
+        await get().pullServerState()
+        if (!opts?.quiet) toast({ ...restoredToastCopy([rule.name]), accountId: rule.accountId })
+        return get().rules.find(r => r.id === ruleId)?.skipReason !== 'not_on_server'
+    },
+
+    autoRestoreMissingRules: async () => {
+        if (_autoRestoreRunning || useAuthStore.getState().isLocked) return
+        const accountState = useAccountStore.getState()
+        if (!accountState.hydrated) return
+        const now = Date.now()
+        if (now < _restoreRateLimitedUntil) return
+        const accountExists = liveAccountCheck(accountState.accounts.map(a => a.id), accountState.deletedAccounts, accountState.restoredAccounts)
+        const deleted = new Set(await getDeletedRuleIds())
+        const ids = pickAutoRestore(get().rules, accountExists, deleted, _restoreSession, now)
+            .filter(id => passesRestoreGate(id, _missingSince, _cloudRules, now))
+        if (ids.length === 0) return
+        _autoRestoreRunning = true
+        try {
+            const byId = new Map(get().rules.map(r => [r.id, r]))
+            const outcome = await runAutoRestore(ids, _restoreSession, now, chunk =>
+                syncRulesToServerBatch(chunk.map(id => byId.get(id)).filter((r): r is FailoverRule => r !== undefined)))
+            if (outcome.rateLimited) _restoreRateLimitedUntil = now + outcome.rateLimited.retryAfterMs
+            await applyRestoreOutcome(outcome, outcome.rateLimited ? _restoreRateLimitedUntil : null)
+            if (outcome.restored.length > 0) {
+                const restored = outcome.restored.map(id => byId.get(id))
+                const accountIds = new Set(restored.map(r => r?.accountId))
+                toast({ ...restoredToastCopy(restored.map(r => r?.name)), accountId: accountIds.size === 1 ? restored[0]?.accountId : undefined })
+            }
+        } finally {
+            _autoRestoreRunning = false
+        }
+    },
+
     toggleAllRulesForAccount: async (accountId, isActive) => {
         const prevRules = get().rules
         const rules = prevRules.map(r =>
@@ -1479,7 +1849,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         for (const targetId of targetAccountIds) {
             if (targetId === sourceAccountId) continue
             const targetAccount = accounts.find(a => a.id === targetId)
-            if (!targetAccount || !hasPlatformConnection(targetAccount)) { skipped += sourceRules.length; continue }
+            // Mirroring is Stremio-only: a destination without a Stremio login could never run these rules.
+            if (!targetAccount || !getStremioAuthKey(targetAccount)) { skipped += sourceRules.length; continue }
 
             const existingKeys = new Set(
                 get().rules.filter(r => r.accountId === targetId).map(r => chainKey(r.priorityChain))
@@ -1511,9 +1882,10 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const next = [...get().rules, ...created]
         set({ rules: next })
         await localforage.setItem(STORAGE_KEY, next)
-        await syncRulesToServerBatch(created)
+        const outcome = await syncRulesToServerBatch(created)
         triggerSync()
-        return { mirrored: created.length, skipped }
+        const refused = Object.keys(outcome.failed).length
+        return { mirrored: created.length - refused, skipped: skipped + refused }
     },
 
     deleteProfileRules: async (accountId: string, _profileId: string) => {
@@ -1566,8 +1938,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             if (!auth.isAuthenticated) return
             const baseUrl = serverUrl || ''
             const apiPath = baseUrl.startsWith('http') ? `${baseUrl.replace(/\/$/, '')}/api` : '/api'
-            const { deriveSyncToken } = await import('@/lib/crypto')
-            const syncToken = await deriveSyncToken(auth.password)
+            const { getSyncPasswordHeader } = await import('@/lib/sync-auth')
+            const syncToken = await getSyncPasswordHeader(auth)
             await resilientFetch(`${apiPath}/autopilot/active-rules`, {
                 method: 'POST',
                 retries: 0,
@@ -1581,7 +1953,11 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
 
     reset: async () => {
         get().stopAutomation()
-        set({ rules: [], webhook: { url: '', enabled: false, updatedAt: 0 }, isMonitoring: false, lastWorkerRun: undefined, lastCycle: undefined })
+        set({ rules: [], webhook: { url: '', enabled: false, updatedAt: 0 }, isMonitoring: false, lastWorkerRun: undefined, lastCycle: undefined, safeMode: null, statePullFailed: false, statePullPartial: false, pulseUnreachable: false, workerEnabled: true, lastCompletePullAt: 0, sessionGeneration: get().sessionGeneration + 1, restoreIssues: {} })
+        _restoreSession = createRestoreSession()
+        _restoreRateLimitedUntil = 0
+        _missingSince.clear()
+        _cloudRules = null
         // Defensive: timer is a setTimeout handle, so clearTimeout (not clearInterval).
         if (automationInterval) {
             clearTimeout(automationInterval)
@@ -1593,3 +1969,16 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         ])
     },
 }))
+
+async function applyRestoreOutcome(outcome: RuleBatchOutcome, retryAt: number | null) {
+    const { rules, restoreIssues } = useFailoverStore.getState()
+    const restored = new Set(outcome.restored)
+    const issues = { ...restoreIssues }
+    for (const id of restored) delete issues[id]
+    for (const [id, message] of Object.entries(outcome.failed)) issues[id] = { message, retryAt }
+    const next = restored.size > 0
+        ? rules.map(r => restored.has(r.id) && r.skipReason === 'not_on_server' ? { ...r, skipReason: null } : r)
+        : rules
+    useFailoverStore.setState({ rules: next, restoreIssues: issues })
+    if (next !== rules) await localforage.setItem(STORAGE_KEY, next)
+}
