@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Theme, ThemeOption, THEME_OPTIONS, useTheme, CustomThemeData, ThemePalette } from '@/contexts/ThemeContext'
-import { Check, Plus, Pencil, Copy, Upload, Download, Import, Layers, Search, X } from 'lucide-react'
+import { Theme, ThemeOption, useTheme, CustomThemeData, ThemePalette } from '@/contexts/ThemeContext'
+import { THEME_OPTIONS } from '@/data/themes'
+import { Check, Plus, Pencil, Copy, Upload, Download, Import, Layers, Palette, Search, X } from 'lucide-react'
 import { useToast } from '@/hooks/use-toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
@@ -181,7 +182,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                 <div className="mt-auto flex flex-col items-stretch gap-2 pt-3 min-[420px]:flex-row min-[420px]:items-center min-[420px]:justify-between">
                     {selected ? (
                         <span
-                            className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] font-bold"
+                            className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs font-bold"
                             style={{ background: preview.accent, color: isLightAccent ? '#000' : '#fff' }}
                         >
                             <Check className="w-3 h-3" />
@@ -189,7 +190,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                         </span>
                     ) : (
                         <span
-                            className="inline-flex h-7 items-center rounded-lg border px-2 text-[11px] font-bold"
+                            className="inline-flex h-7 items-center rounded-lg border px-2 text-xs font-bold"
                             style={actionStyle}
                         >
                             {isCustom ? 'Custom' : isSpecialTheme(option) ? 'Special' : 'Preset'}
@@ -202,7 +203,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                                 aria-label={`Clone ${option.label} as custom theme`}
                                 onClick={e => { e.stopPropagation(); onClone() }}
                                 onKeyDown={e => e.stopPropagation()}
-                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                                 style={actionStyle}
                             >
                                 <Layers className="w-3 h-3" />
@@ -215,7 +216,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                                 aria-label={`Edit ${option.label} theme`}
                                 onClick={e => { e.stopPropagation(); onEdit() }}
                                 onKeyDown={e => e.stopPropagation()}
-                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                                 style={actionStyle}
                             >
                                 <Pencil className="w-3 h-3" />
@@ -228,7 +229,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                                 aria-label={`Copy ${option.label} theme JSON`}
                                 onClick={e => { e.stopPropagation(); onCopy() }}
                                 onKeyDown={e => e.stopPropagation()}
-                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                                 style={actionStyle}
                             >
                                 <Copy className="w-3 h-3" />
@@ -241,7 +242,7 @@ function ThemeCard({ option, selected, onSelect, onEdit, onClone, onCopy, onDown
                                 aria-label={`Download ${option.label} theme JSON`}
                                 onClick={e => { e.stopPropagation(); onDownload() }}
                                 onKeyDown={e => e.stopPropagation()}
-                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                                className="inline-flex h-7 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-bold transition-colors hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                                 style={actionStyle}
                             >
                                 <Download className="w-3 h-3" />
@@ -427,9 +428,17 @@ export function ThemeSection({ theme, setTheme }: ThemeSectionProps) {
 
     return (
         <div data-theme-part="panel" className="p-5 rounded-2xl border border-border/40 bg-card shadow-sm space-y-6">
+            {/* Selected theme shown as the group's value row (owner pick 2026-11-05); the grid below stays. */}
+            <div className="flex min-h-[36px] items-center gap-3 border-b border-border/30 pb-4">
+                <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted/35 text-muted-foreground">
+                    <Palette className="h-[15px] w-[15px]" aria-hidden />
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">Theme</span>
+                <span className="max-w-[40%] truncate text-xs text-muted-foreground">{currentOption?.label ?? theme}</span>
+            </div>
 
             <div className="space-y-1">
-                <h3 className="text-xs font-medium text-foreground/60 uppercase">Appearance</h3>
+                <h3 className="text-xs font-medium text-foreground/60">Appearance</h3>
                 {currentOption && (
                     <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                         <span className="text-xs text-muted-foreground">Current theme</span>
@@ -511,7 +520,7 @@ export function ThemeSection({ theme, setTheme }: ThemeSectionProps) {
 
             <div className="space-y-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <h3 className="text-xs font-medium text-foreground/60 uppercase">Custom Themes</h3>
+                    <h3 className="text-xs font-medium text-foreground/60">Custom themes</h3>
                     <div className="grid w-full grid-cols-3 gap-2 sm:w-auto sm:flex sm:items-center">
 
                         <Tooltip content="Paste theme JSON from clipboard" side="top">
@@ -588,7 +597,7 @@ export function ThemeSection({ theme, setTheme }: ThemeSectionProps) {
                 .map(section => (
                     <div key={section.key} className="space-y-4">
                         <div className="flex items-center gap-3">
-                            <span className="text-xs font-medium text-foreground/60 uppercase">{section.heading}</span>
+                            <span className="text-xs font-medium text-foreground/60">{section.heading}</span>
                             <div className="flex-1 h-px bg-border/50" />
                             <span className="text-xs text-muted-foreground/60">
                                 {section.visible.length < section.total ? `${section.visible.length} of ${section.total}` : section.total} themes

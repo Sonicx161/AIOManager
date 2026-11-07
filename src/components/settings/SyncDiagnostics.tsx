@@ -40,7 +40,7 @@ function DiagnosticStat({
             tone === 'destructive' && "border-destructive/25 bg-destructive/5",
             tone === 'muted' && "border-border/35"
         )}>
-            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
                 <span className={cn(
                     "inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/35 bg-muted/25",
                     tone === 'success' && "border-success/20 bg-success/10 text-success",
@@ -192,7 +192,7 @@ export function SyncDiagnostics() {
 
 
                     <div className="space-y-2">
-                        <h4 className="text-xs font-medium uppercase text-foreground/60 flex items-center gap-2">
+                        <h4 className="text-xs font-medium text-foreground/60 flex items-center gap-2">
                             Sync Event Log (Latest 50)
                             <Badge variant="outline" className="text-xs py-0 px-1.5 h-4 font-normal">Session Only</Badge>
                         </h4>

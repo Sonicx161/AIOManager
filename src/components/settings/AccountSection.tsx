@@ -5,15 +5,23 @@ import { Button } from '@/components/ui/button'
 import { Check, User, Clock, RefreshCw, Upload, Download } from 'lucide-react'
 import { ImageUploadButton } from '@/components/ui/image-upload-button'
 import { useSyncStore } from '@/store/syncStore'
-import { getTimeAgo } from '@/lib/utils'
+import { useUIStore } from '@/store/uiStore'
+import { getTimeAgo, maskedInitial } from '@/lib/utils'
 import { CopyButton } from '@/components/ui/copy-button'
+import { useNow } from '@/hooks/use-relative-time'
+import { maskSyncId } from './settings-model'
 
 export function AccountSection() {
     const auth = useSyncStore(s => s.auth)
+    const privacyLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
     const syncToRemote = useSyncStore(s => s.syncToRemote)
     const syncFromRemote = useSyncStore(s => s.syncFromRemote)
     const isSyncing = useSyncStore(s => s.isSyncing)
     const lastSyncedAt = useSyncStore(s => s.lastSyncedAt)
+    const lastSyncCheckedAt = useSyncStore(s => s.lastSyncCheckedAt)
+    useNow()
+    // Same clock as the header chip: the newest of a confirmed check and a real push or pull.
+    const latestSyncAt = [lastSyncCheckedAt, lastSyncedAt].filter(Boolean).map(t => new Date(t as string).getTime()).reduce((a, b) => Math.max(a, b), 0)
     const setDisplayName = useSyncStore(s => s.setDisplayName)
     const setAvatar = useSyncStore(s => s.setAvatar)
     const urlRef = useRef<HTMLInputElement>(null)
@@ -33,11 +41,11 @@ export function AccountSection() {
 
     return (
         <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-            <div data-theme-part="panel" className="rounded-[1.75rem] border border-border/45 bg-card/80 p-5 shadow-sm">
+            <div data-theme-part="panel" className="rounded-[1.75rem] border border-border/45 bg-card/80 p-5 lg:p-6 shadow-sm">
                 <div className="mb-5 flex items-start justify-between gap-4">
                     <div>
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cloud account</p>
-                        <h3 className="mt-1 text-xl font-semibold tracking-tight">Sync Identity</h3>
+                        <p className="text-xs font-semibold text-muted-foreground">Cloud account</p>
+                        <h3 className="mt-1 text-xl font-semibold tracking-tight">Sync identity</h3>
                     </div>
                     <span data-theme-part="badge" className="inline-flex items-center gap-1.5 rounded-full border border-success/20 bg-success/10 px-2.5 py-1 text-xs font-semibold text-success">
                         <Check className="h-3.5 w-3.5" />
@@ -47,13 +55,13 @@ export function AccountSection() {
 
                 <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
-                        <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Display Name</Label>
+                        <Label className="text-xs font-semibold text-muted-foreground">Display name</Label>
                         <div className="flex items-center gap-3">
                             <div data-theme-part="avatar" className="h-16 w-16 shrink-0 overflow-hidden rounded-full border border-primary/25 bg-primary/10 flex items-center justify-center">
                                 {auth.avatar ? (
                                     <img src={auth.avatar} alt="" className="h-full w-full object-cover" />
                                 ) : (
-                                    <span className="text-xl font-bold text-primary">{(auth.name || auth.id).charAt(0).toUpperCase()}</span>
+                                    <span className="text-xl font-bold text-primary">{maskedInitial(auth.name || auth.id, privacyLevel)}</span>
                                 )}
                             </div>
                             <div className="min-w-0 flex-1 space-y-1.5">
@@ -94,10 +102,12 @@ export function AccountSection() {
                     </div>
 
                     <div className="space-y-2">
-                        <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">UUID</Label>
+                        <Label className="text-xs font-semibold text-muted-foreground">Sync ID</Label>
                         <div className="flex gap-2">
-                            <Input value={auth.id} readOnly className="h-10 bg-background/60 font-mono text-xs" />
-                            <CopyButton value={auth.id} variant="outline" className="h-10 w-10" iconSize={16} />
+                            <div data-theme-part="field" className="flex h-10 min-w-0 flex-1 items-center rounded-md border border-border/50 bg-background/60 px-3">
+                                <span className="truncate font-mono text-xs text-muted-foreground select-none">{maskSyncId(auth.id)}</span>
+                            </div>
+                            <CopyButton value={auth.id} variant="outline" className="h-10 w-10" iconSize={16} aria-label="Copy sync ID" />
                         </div>
                     </div>
                 </div>
@@ -107,16 +117,19 @@ export function AccountSection() {
                 </p>
             </div>
 
-            <div data-theme-part="panel" className="rounded-[1.75rem] border border-primary/20 bg-primary/10 p-5 shadow-sm">
+            <div data-theme-part="panel" className="rounded-[1.75rem] border border-primary/20 bg-primary/10 p-5 lg:p-6 shadow-sm">
                 <div className="flex h-full flex-col justify-between gap-5">
                     <div>
                         <div className="mb-3 inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-primary/25 bg-background/70 text-primary">
                             <Clock className="h-4 w-4" />
                         </div>
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Last Sync</p>
+                        <p className="text-xs font-semibold text-muted-foreground">Last sync</p>
                         <p className="mt-1 text-2xl font-semibold tracking-tight">
-                            {lastSyncedAt ? getTimeAgo(new Date(lastSyncedAt)) : 'Never'}
+                            {latestSyncAt ? getTimeAgo(new Date(latestSyncAt)) : 'Never'}
                         </p>
+                        {lastSyncedAt && new Date(lastSyncedAt).getTime() < latestSyncAt && (
+                            <p className="mt-1 text-xs text-muted-foreground">Last change {getTimeAgo(new Date(lastSyncedAt))}</p>
+                        )}
                     </div>
 
                     <div className="grid gap-2">

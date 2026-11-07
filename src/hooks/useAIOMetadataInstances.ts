@@ -5,7 +5,6 @@ import { isAIOMetadataAddon, parseAIOMetadataUrl, getStoredAIOMetadataPassword }
 
 export interface AIOMetadataInstanceAccount {
     accountId: string
-    accountName: string
 }
 
 export interface AIOMetadataInstance {
@@ -44,7 +43,6 @@ export function useAIOMetadataInstances() {
                 const existing = instanceMap.get(key)
                 const accountEntry: AIOMetadataInstanceAccount = {
                     accountId: account.id,
-                    accountName: account.name || account.id,
                 }
 
                 if (existing) {

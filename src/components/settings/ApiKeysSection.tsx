@@ -69,7 +69,7 @@ const ApiKeyRow = memo(function ApiKeyRow({ account, isSplitBrain }: ApiKeyRowPr
                 <div className="min-w-0 flex-1">
                     <p className="truncate text-xs font-bold leading-tight">{displayName}</p>
                     {secondaryEmail && (
-                        <p className="truncate text-[10px] leading-tight text-muted-foreground/75">{secondaryEmail}</p>
+                        <p className="truncate text-xs leading-tight text-muted-foreground/75">{secondaryEmail}</p>
                     )}
                 </div>
             </div>
@@ -105,7 +105,7 @@ const ApiKeyRow = memo(function ApiKeyRow({ account, isSplitBrain }: ApiKeyRowPr
                             </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-56 max-w-[calc(100vw-2rem)] z-50">
-                            <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">API Key</div>
+                            <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">API Key</div>
                             <DropdownMenuItem destructive className="gap-2" onClick={() => setConfirmRegenerate(true)}>
                                 <RefreshCw className="h-4 w-4 shrink-0" />
                                 Regenerate API key
@@ -169,7 +169,7 @@ export function ApiKeysSection() {
 
     return (
         <section className="space-y-4">
-            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 shadow-sm">
+            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 lg:p-6 shadow-sm">
                 <div className="flex items-start gap-3">
                     <div className="relative mt-0.5 flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
                         <SquircleOverlay />
@@ -193,14 +193,14 @@ export function ApiKeysSection() {
                         <>
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Accounts</p>
+                                    <p className="text-xs font-semibold text-muted-foreground">Accounts</p>
                                     {activeKeyCount > 0 && (
-                                        <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-tighter text-primary">
+                                        <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-xs font-bold text-primary">
                                             {activeKeyCount} active
                                         </span>
                                     )}
                                     {normalizedQuery && visibleAccounts.length !== accounts.length && (
-                                        <span className="text-[10px] font-medium text-muted-foreground/80">
+                                        <span className="text-xs font-medium text-muted-foreground/80">
                                             {visibleAccounts.length} of {accounts.length} accounts
                                         </span>
                                     )}

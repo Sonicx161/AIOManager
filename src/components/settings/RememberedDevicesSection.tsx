@@ -42,11 +42,11 @@ const DeviceRow = memo(function DeviceRow({ row, isThisDevice, busy, onRevoke, o
                         : <Laptop className="h-3.5 w-3.5 text-muted-foreground" />}
                 </div>
                 <span className="min-w-0 flex-1 truncate text-xs font-bold">{row.label || 'Remembered device'}</span>
-                <span data-theme-part="badge" className="rounded-full bg-muted/50 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-tighter text-muted-foreground">
+                <span data-theme-part="badge" className="rounded-full bg-muted/50 px-1.5 py-0.5 text-xs font-bold text-muted-foreground">
                     {row.tier === 'prf' ? 'Passkey' : 'Device key'}
                 </span>
                 {isThisDevice && (
-                    <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-tighter text-primary">
+                    <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-xs font-bold text-primary">
                         This device
                     </span>
                 )}
@@ -70,7 +70,7 @@ const DeviceRow = memo(function DeviceRow({ row, isThisDevice, busy, onRevoke, o
                     Revoke
                 </Button>
             </div>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground/80">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground/80">
                 <span>Signed in {formatDate(row.createdAt)}</span>
                 <span>Last used {formatDate(row.lastUsedAt)}</span>
                 <span>Expires {formatDate(row.expiresAt)}</span>
@@ -174,7 +174,7 @@ export function RememberedDevicesSection() {
 
     return (
         <section className="space-y-4">
-            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 shadow-sm">
+            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 lg:p-6 shadow-sm">
                 <div className="flex items-start gap-3">
                     <div className="relative mt-0.5 flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
                         <SquircleOverlay />
@@ -241,7 +241,7 @@ export function RememberedDevicesSection() {
                 </div>
 
                 <div className="flex flex-col gap-2 border-t border-border/35 pt-3 sm:flex-row sm:items-center sm:justify-between">
-                    <p className="text-[10px] text-muted-foreground/70">
+                    <p className="text-xs text-muted-foreground/70">
                         Sign out everywhere ends every saved sign-in, including devices you cannot reach.
                     </p>
                     <Button

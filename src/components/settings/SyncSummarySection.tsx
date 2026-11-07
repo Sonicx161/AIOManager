@@ -21,7 +21,7 @@ export function SyncSummarySection() {
 
     return (
         <section className="space-y-4">
-            <div data-theme-part="panel" className="space-y-4 rounded-[1.75rem] border border-border/45 bg-card/80 p-5 shadow-sm">
+            <div data-theme-part="panel" className="space-y-4 rounded-[1.75rem] border border-border/45 bg-card/80 p-5 lg:p-6 shadow-sm">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-center gap-3">
                         <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
@@ -31,7 +31,7 @@ export function SyncSummarySection() {
                         <div>
                             <div className="flex items-center gap-2">
                                 <h3 className="text-base font-semibold">Active Sync Connections</h3>
-                                <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-xs font-bold uppercase tracking-tighter text-primary">
+                                <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-xs font-bold text-primary">
                                     {syncedAddons.length}
                                 </span>
                             </div>

@@ -42,6 +42,8 @@ import {
     testMetadataKey,
 } from '@/lib/metadata-keys'
 import { useAIOMetadataInstances } from '@/hooks/useAIOMetadataInstances'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
+import { useAccountStore } from '@/store/accountStore'
 
 type ProviderOption = {
     id: string
@@ -100,6 +102,8 @@ export function IntegrationsSection() {
     const [inlineEditValue, setInlineEditValue] = useState('')
 
     const { instances: detectedInstances } = useAIOMetadataInstances()
+    const accounts = useAccountStore(s => s.accounts)
+    const maskedLabel = useMaskedAccountLabel()
 
     const refreshProviders = useCallback(async () => {
         setLoading(true)
@@ -246,7 +250,7 @@ export function IntegrationsSection() {
 
     return (
         <section className="space-y-4">
-            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 shadow-sm">
+            <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 lg:p-6 shadow-sm">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="flex items-start gap-3">
                         <div className="relative mt-0.5 flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
@@ -256,7 +260,7 @@ export function IntegrationsSection() {
                         <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="text-sm sm:text-base font-semibold">Metadata Integrations</h3>
-                                <div data-theme-part="badge" className="inline-flex items-center gap-1.5 rounded-full border border-border/35 bg-background/40 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                <div data-theme-part="badge" className="inline-flex items-center gap-1.5 rounded-full border border-border/35 bg-background/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
                                     <span className="text-muted-foreground/60">Powered by</span>
                                     {[
                                         ...providers.flatMap(p => {
@@ -286,9 +290,9 @@ export function IntegrationsSection() {
 
                 <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Configured keys</p>
+                        <p className="text-xs font-semibold text-muted-foreground">Configured keys</p>
                         {providers.length > 0 && (
-                            <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-tighter text-primary">
+                            <span data-theme-part="badge" className="rounded-full bg-primary/12 px-1.5 py-0.5 text-xs font-bold text-primary">
                                 {providers.length}
                             </span>
                         )}
@@ -326,12 +330,12 @@ export function IntegrationsSection() {
                                             {option?.logo ? (
                                                 <img src={option.logo} alt={label} className="relative z-10 h-full w-full object-cover" />
                                             ) : (
-                                                <span className="relative z-10 font-black text-[10px] text-muted-foreground">{option?.abbr || label.slice(0, 2)}</span>
+                                                <span className="relative z-10 font-black text-xs text-muted-foreground">{option?.abbr || label.slice(0, 2)}</span>
                                             )}
                                         </div>
                                             <div className="min-w-0 flex flex-col gap-0.5 flex-1">
                                                 <span className="truncate text-xs font-bold">{label}</span>
-                                                <p className="text-[10px] text-muted-foreground">
+                                                <p className="text-xs text-muted-foreground">
                                                     {provider.updatedAt ? `Saved ${getTimeAgo(new Date(provider.updatedAt))}` : 'Saved'}
                                                 </p>
                                             </div>
@@ -465,7 +469,7 @@ export function IntegrationsSection() {
                                             )}
                                         </div>
                                         {testResult && (
-                                            <p className={`text-[10px] font-medium ${testResult.success ? 'text-success' : 'text-destructive'}`}>
+                                            <p className={`text-xs font-medium ${testResult.success ? 'text-success' : 'text-destructive'}`}>
                                                 {testResult.message}
                                             </p>
                                         )}
@@ -479,7 +483,7 @@ export function IntegrationsSection() {
                 <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/30 bg-background/30 p-2.5 sm:p-3 md:p-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
                         <div className="space-y-1.5">
-                            <Label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Provider</Label>
+                            <Label className="text-xs font-semibold text-muted-foreground">Provider</Label>
                             <div className="flex flex-wrap gap-1.5">
                                 {PROVIDER_OPTIONS.map((opt) => {
                                     const isSelected = selectedProvider === opt.id
@@ -508,7 +512,7 @@ export function IntegrationsSection() {
                                                     <span className="text-[7px] font-bold text-muted-foreground">{opt.abbr}</span>
                                                 )}
                                             </span>
-                                            {!opt.available && <span className="text-[9px] uppercase opacity-60">soon</span>}
+                                            {!opt.available && <span className="text-xs opacity-60">soon</span>}
                                             {opt.label}
                                         </button>
                                     )
@@ -526,7 +530,7 @@ export function IntegrationsSection() {
 
                     <div className="space-y-1.5">
                         <div className="flex items-center justify-between">
-                            <Label htmlFor="tmdb-key-input" className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            <Label htmlFor="tmdb-key-input" className="text-xs font-semibold text-muted-foreground">
                                 {selectedProviderOption?.label || 'Provider'} key
                             </Label>
                             {selectedProviderOption?.keyUrl && (
@@ -534,7 +538,7 @@ export function IntegrationsSection() {
                                     href={selectedProviderOption.keyUrl}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-primary hover:underline"
+                                    className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
                                 >
                                     Get key
                                     <ExternalLink className="h-3 w-3" />
@@ -569,11 +573,11 @@ export function IntegrationsSection() {
 
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div className="flex items-center gap-2 min-w-0">
-                            <p className="text-[11px] text-muted-foreground/70 hidden sm:block">
+                            <p className="text-xs text-muted-foreground/70 hidden sm:block">
                                 Keys are encrypted at rest on the server.
                             </p>
                             {testResult && (
-                                <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${testResult.success ? 'text-green-500' : 'text-destructive'}`}>
+                                <span className={`inline-flex items-center gap-1 text-xs font-medium ${testResult.success ? 'text-green-500' : 'text-destructive'}`}>
                                     {testResult.success ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
                                     <span className="truncate">{testResult.message}</span>
                                 </span>
@@ -632,12 +636,12 @@ export function IntegrationsSection() {
 
                     <div className="space-y-4 px-6 pb-3">
                         <div className="space-y-2">
-                            <Label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                            <Label className="text-xs font-semibold text-muted-foreground">
                                 AIOMetadata Instance
                             </Label>
                             <div className="grid gap-2">
                                 {detectedInstances.length === 0 && (
-                                    <p data-theme-part="panel" className="rounded-xl border border-dashed border-border/40 bg-muted/10 px-3 py-2 text-[11px] text-muted-foreground/60">
+                                    <p data-theme-part="panel" className="rounded-xl border border-dashed border-border/40 bg-muted/10 px-3 py-2 text-xs text-muted-foreground/60">
                                         No AIOMetadata instances detected from your accounts. Add one manually below.
                                     </p>
                                 )}
@@ -676,14 +680,14 @@ export function IntegrationsSection() {
                                                 <div className="flex items-center gap-1.5">
                                                     <span className="text-xs font-semibold text-foreground">{inst.addonName}</span>
                                                     {inst.hasPassword && (
-                                                        <span data-theme-part="badge" className="inline-flex items-center gap-0.5 rounded-full bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-success">
+                                                        <span data-theme-part="badge" className="inline-flex items-center gap-0.5 rounded-full bg-success/15 px-1.5 py-0.5 text-xs font-semibold text-success">
                                                             <CheckCircle2 className="h-2.5 w-2.5" /> Key saved
                                                         </span>
                                                     )}
                                                 </div>
-                                                <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/50">{inst.baseUrl}</p>
-                                                <p className="mt-0.5 truncate text-[10px] text-muted-foreground/40">
-                                                    {inst.accounts.map(a => a.accountName).join(', ')}
+                                                <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground/50">{inst.baseUrl}</p>
+                                                <p className="mt-0.5 truncate text-xs text-muted-foreground/40">
+                                                    {inst.accounts.map(a => maskedLabel(accounts.find(acc => acc.id === a.accountId))).join(', ')}
                                                 </p>
                                             </div>
                                         </button>
@@ -713,7 +717,7 @@ export function IntegrationsSection() {
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         <span className="text-xs font-semibold text-foreground">Custom Instance</span>
-                                        <p className="mt-0.5 text-[11px] leading-tight text-muted-foreground/70">Enter URL and credentials manually.</p>
+                                        <p className="mt-0.5 text-xs leading-tight text-muted-foreground/70">Enter URL and credentials manually.</p>
                                     </div>
                                 </button>
                             </div>
@@ -733,7 +737,7 @@ export function IntegrationsSection() {
 
                         <div className="grid gap-3 sm:grid-cols-2">
                             <div className="space-y-1.5">
-                                <Label htmlFor="aiometadata-uuid" className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                <Label htmlFor="aiometadata-uuid" className="text-xs font-semibold text-muted-foreground">
                                     UUID
                                 </Label>
                                 <Input
@@ -748,7 +752,7 @@ export function IntegrationsSection() {
                                 />
                             </div>
                             <div className="space-y-1.5">
-                                <Label htmlFor="aiometadata-password" className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                <Label htmlFor="aiometadata-password" className="text-xs font-semibold text-muted-foreground">
                                     Password
                                 </Label>
                                 <Input
@@ -791,7 +795,7 @@ export function IntegrationsSection() {
                                                 onChange={(e) => setImportForm(prev => ({ ...prev, addonPassword: e.target.value }))}
                                                 className="h-9"
                                             />
-                                            <p className="mt-1.5 text-[11px] text-muted-foreground/70">
+                                            <p className="mt-1.5 text-xs text-muted-foreground/70">
                                                 Only needed if your AIOMetadata instance is protected with an addon-level password.
                                             </p>
                                         </div>
@@ -800,7 +804,7 @@ export function IntegrationsSection() {
                             </AnimatePresence>
                         </div>
 
-                        <div data-theme-tone="status" data-theme-part="panel" className="flex items-start gap-2 rounded-xl border border-info/25 bg-info/8 p-2 sm:p-2.5 text-[11px] text-muted-foreground">
+                        <div data-theme-tone="status" data-theme-part="panel" className="flex items-start gap-2 rounded-xl border border-info/25 bg-info/8 p-2 sm:p-2.5 text-xs text-muted-foreground">
                             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
                             <span>Your AIOMetadata password is used once to fetch your keys, then discarded. It is never stored on the AIOManager server.</span>
                         </div>
@@ -811,7 +815,7 @@ export function IntegrationsSection() {
                                     initial={{ opacity: 0, height: 0 }}
                                     animate={{ opacity: 1, height: 'auto' }}
                                     exit={{ opacity: 0, height: 0 }}
-                                    className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-2 sm:p-2.5 text-[11px] text-destructive"
+                                    className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-2 sm:p-2.5 text-xs text-destructive"
                                     data-theme-part="panel"
                                 >
                                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

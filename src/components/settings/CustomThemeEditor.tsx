@@ -190,7 +190,7 @@ const TokenColorRow = memo(function TokenColorRow({ label, hexValue, onChange }:
                     <div className="w-6 h-6 rounded-lg ring-1 ring-black/5 shadow-sm shrink-0 group-hover:scale-110 transition-transform" style={{ background: hexValue }} />
                     <div className="flex-1 min-w-0">
                         <div className="text-xs font-semibold text-foreground leading-tight">{label}</div>
-                        <div className="text-[11px] font-mono text-muted-foreground/60">{hexValue}</div>
+                        <div className="text-xs font-mono text-muted-foreground/60">{hexValue}</div>
                     </div>
                 </button>
             </PopoverTrigger>
@@ -828,18 +828,18 @@ export function CustomThemeEditor({ editingTheme, onClose }: CustomThemeEditorPr
                                 </p>
                             </div>
                             <div className="flex flex-wrap items-end gap-2 rounded-xl border border-border/30 bg-muted/10 p-3">
-                                <p className="w-full text-[11px] font-medium text-muted-foreground">
+                                <p className="w-full text-xs font-medium text-muted-foreground">
                                     FX knobs — retune themes that expose <code>--fx-duration</code> (motion speed), <code>--fx-density</code> (texture density) and <code>--fx-depth</code> (glow/shadow depth). Writes a <code>:root</code> block into the CSS below.
                                 </p>
-                                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+                                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                                     <span>Duration (s)</span>
                                     <Input aria-label="FX duration in seconds" className="h-7 w-20 font-mono text-xs" value={fxDuration} onChange={e => setFxDuration(e.target.value)} />
                                 </label>
-                                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+                                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                                     <span>Density (px)</span>
                                     <Input aria-label="FX density in pixels" className="h-7 w-20 font-mono text-xs" value={fxDensity} onChange={e => setFxDensity(e.target.value)} />
                                 </label>
-                                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
+                                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
                                     <span>Depth (px)</span>
                                     <Input aria-label="FX depth in pixels" className="h-7 w-20 font-mono text-xs" value={fxDepth} onChange={e => setFxDepth(e.target.value)} />
                                 </label>
@@ -897,7 +897,7 @@ export function CustomThemeEditor({ editingTheme, onClose }: CustomThemeEditorPr
                     <div className="px-5 py-4 border-b border-border/30">
                         <div className="flex items-center gap-2">
                             <h2 className="text-sm font-semibold">Live preview</h2>
-                            <span data-theme-part="badge" className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">Sample</span>
+                            <span data-theme-part="badge" className="text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">Sample</span>
                         </div>
                         <p className="mt-1 text-xs text-muted-foreground">Your palette and CSS on a sample of the app.</p>
                     </div>
@@ -907,7 +907,7 @@ export function CustomThemeEditor({ editingTheme, onClose }: CustomThemeEditorPr
                     <div className="px-5 py-4 border-t border-border/30 space-y-2.5">
                         <div className="flex items-baseline justify-between gap-2 flex-wrap">
                             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Contrast checks</p>
-                            <p className="text-[10px] text-muted-foreground">7:1 and up is Great, 4.5:1 and up is OK</p>
+                            <p className="text-xs text-muted-foreground">7:1 and up is Great, 4.5:1 and up is OK</p>
                         </div>
                         {contrastPairs.map(p => (
                             <div key={p.label} className="flex items-center gap-3">
@@ -926,7 +926,7 @@ export function CustomThemeEditor({ editingTheme, onClose }: CustomThemeEditorPr
                             </div>
                         ))}
                         {editorState.customCss?.trim() && (
-                            <p className="text-[11px] text-muted-foreground pt-2 border-t border-border/20">
+                            <p className="text-xs text-muted-foreground pt-2 border-t border-border/20">
                                 Contrast checks measure palette colors. CSS effects can change the final appearance.
                             </p>
                         )}

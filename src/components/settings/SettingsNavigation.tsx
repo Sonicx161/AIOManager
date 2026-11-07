@@ -4,14 +4,17 @@ import { Input } from '@/components/ui/input'
 import { HighlightText } from '@/components/ui/highlight-text'
 import { cn } from '@/lib/utils'
 import { canInstall, subscribeInstall } from '@/lib/pwa'
+import { SETTING_PAGE_LABELS, type SettingsPageId } from './settings-model'
 
-export type SettingTabId = 'general' | 'appearance' | 'data' | 'advanced'
+export type { SettingsPageId }
+
+export { SETTING_PAGE_LABELS }
 
 export interface SettingSearchEntry {
     /** Unique id for React keys. */
     id: string
-    /** Tab that contains this section. */
-    tab: SettingTabId
+    /** Detail page that contains this section. */
+    page: SettingsPageId
     /** Section title as shown in the settings UI. */
     title: string
     /** Short summary of the controls living in this section. */
@@ -31,140 +34,140 @@ export interface SettingSearchMatch {
     matchedKeywords: string[]
 }
 
-export const SETTING_TAB_LABELS: Record<SettingTabId, string> = {
-    general: 'General',
-    appearance: 'Appearance',
-    data: 'Data & Sync',
-    advanced: 'Advanced',
-}
-
 /**
  * Static index over the EXISTING settings sections. This only describes what
  * is already rendered on the page. it never renders settings itself, so
  * there is no duplication of controls, dialogs, or import/export flows.
  */
 const SETTINGS_INDEX: SettingSearchEntry[] = [
-    // General
+    // Account and sync, then Appearance and privacy
     {
         id: 'sync-identity',
-        tab: 'general',
+        page: 'account-sync',
         title: 'Sync Identity',
         description: 'Cloud account profile: display name, avatar, UUID, push to cloud and pull from cloud.',
         keywords: ['account', 'cloud', 'login', 'name', 'avatar', 'uuid', 'identity', 'push', 'pull', 'profile'],
     },
     {
         id: 'about',
-        tab: 'general',
+        page: 'account-sync',
         title: 'About',
         description: 'Version and build information for this installation.',
         keywords: ['version', 'build', 'release', 'commit', 'about', 'changelog'],
     },
     {
         id: 'install-app',
-        tab: 'general',
+        page: 'appearance-privacy',
         title: 'Install App',
         description: 'Add AIOManager to your device for an app-like window.',
         keywords: ['install', 'app', 'pwa', 'desktop', 'standalone', 'progressive web app', 'installable'],
     },
     {
         id: 'privacy-mode',
-        tab: 'general',
+        page: 'appearance-privacy',
         title: 'Privacy Mode',
         description: 'Control how sensitive data appears, with granular masking for account names, addon URLs, profile names and email.',
         keywords: ['privacy', 'mask', 'hide', 'redact', 'sensitive', 'blur', 'obfuscate', 'names', 'urls', 'email', 'incognito'],
     },
-    // Appearance
+    // Appearance and privacy
     {
         id: 'themes',
-        tab: 'appearance',
+        page: 'appearance-privacy',
         title: 'Appearance & Themes',
         description: 'Pick a light, dark or OLED theme, each with its own accent colors.',
         keywords: ['theme', 'dark mode', 'light mode', 'oled', 'appearance', 'accent', 'color', 'background', 'look'],
     },
     {
         id: 'custom-themes',
-        tab: 'appearance',
+        page: 'appearance-privacy',
         title: 'Custom Themes',
         description: 'Create, paste, import, edit, clone, copy and download your own themes.',
         keywords: ['custom theme', 'create theme', 'paste theme', 'import theme', 'share theme', 'theme json', 'editor', 'design'],
         anchor: 'themes',
         heading: 'Custom Themes',
     },
-    // Data & Sync
+    // Account and sync, keys, updates and activity
     {
         id: 'backup-restore',
-        tab: 'data',
+        page: 'account-sync',
         title: 'Backup & Restore',
         description: 'Export your entire configuration (accounts, profiles, addons, rules) to a portable JSON file, or import a backup.',
         keywords: ['backup', 'export', 'import', 'restore', 'json', 'download', 'upload', 'transfer', 'migrate', 'syncio'],
     },
     {
         id: 'metadata-integrations',
-        tab: 'data',
+        page: 'keys',
         title: 'Metadata Integrations',
         description: 'Provider API keys for TMDB, PMDB, MDBList and TVDB metadata enrichment.',
         keywords: ['metadata', 'integration', 'provider', 'tmdb', 'pmdb', 'mdblist', 'tvdb', 'trailers', 'recommendations', 'ratings'],
     },
     {
         id: 'api-keys',
-        tab: 'data',
+        page: 'keys',
         title: 'API Keys',
         description: 'Manage per-account API keys and credentials.',
         keywords: ['api', 'key', 'keys', 'credentials', 'token', 'auth', 'secret'],
     },
     {
+        id: 'auto-update',
+        page: 'updates-activity',
+        title: 'Auto-update',
+        description: 'Install newer addon versions automatically: interval, platforms and per-account exclusions.',
+        keywords: ['auto update', 'auto-update', 'autoupdate', 'update', 'upgrade', 'version', 'outdated', 'interval', 'reinstall', 'addons'],
+    },
+    {
         id: 'sync-connections',
-        tab: 'data',
+        page: 'account-sync',
         title: 'Active Sync Connections',
         description: 'Saved addons that mirror into installed account addons.',
         keywords: ['sync', 'connections', 'mirror', 'mirroring', 'active sync', 'addon sync'],
     },
     {
         id: 'history-cache',
-        tab: 'data',
+        page: 'updates-activity',
         title: 'Clear History Cache',
         description: 'Wipe locally cached activity view data and watch event history.',
         keywords: ['clear', 'cache', 'history', 'activity', 'watch', 'wipe', 're-pull', 'events'],
     },
     {
         id: 'live-activity',
-        tab: 'data',
+        page: 'updates-activity',
         title: 'Live Activity Refresh',
         description: 'Auto-refresh Activity page progress every 60 seconds.',
         keywords: ['live', 'activity', 'refresh', 'auto', 'interval', 'auto-refresh', 'rate limit'],
     },
-    // Advanced
+    // Updates and activity, devices and maintenance pages
     {
         id: 'monitoring-alerts',
-        tab: 'advanced',
+        page: 'updates-activity',
         title: 'Monitoring & Alerts',
-        description: 'Autopilot webhook alerts and auto-update addon notifications.',
-        keywords: ['notifications', 'alerts', 'monitoring', 'webhook', 'webhooks', 'autopilot', 'auto update', 'auto-update', 'notify'],
+        description: 'Autopilot webhook alerts.',
+        keywords: ['notifications', 'alerts', 'monitoring', 'webhook', 'webhooks', 'autopilot', 'notify'],
     },
     {
         id: 'repair-recovery',
-        tab: 'advanced',
+        page: 'devices-maintenance',
         title: 'Repair & Recovery',
         description: 'Repair all accounts, re-authenticate expired accounts, re-check connections and copy diagnostics.',
         keywords: ['repair', 'recovery', 'fix', 're-authenticate', 'reauth', 'expired', 're-check', 'diagnostics', 'troubleshoot', 'broken', 'unknown addon'],
     },
     {
         id: 'remembered-devices',
-        tab: 'advanced',
+        page: 'devices-maintenance',
         title: 'Remembered Devices',
         description: 'Devices remembered for cloud sync authentication.',
         keywords: ['remembered', 'devices', 'device', 'trusted', 'login devices', 'sessions'],
     },
     {
         id: 'sync-diagnostics',
-        tab: 'advanced',
+        page: 'devices-maintenance',
         title: 'Cloud Sync Diagnostics',
         description: 'Sync history logs plus manual push and pull overrides.',
         keywords: ['sync diagnostics', 'sync events', 'logs', 'force push', 'force pull', 'override', 'cloud sync', 'history logs'],
     },
     {
         id: 'danger-zone',
-        tab: 'advanced',
+        page: 'danger-zone',
         title: 'Danger Zone',
         description: 'Irreversible actions that permanently delete data. Requires unlocking first.',
         keywords: ['danger', 'delete', 'reset', 'wipe', 'destructive', 'unsafe', 'irreversible', 'erase', 'delete all'],
@@ -236,14 +239,20 @@ export function resolveSectionElement(anchor: string, heading?: string): HTMLEle
 
 interface SettingsSearchProps {
     onNavigate: (entry: SettingSearchEntry) => void
+    /** Mirrors the raw query so the home list can filter its rows live. */
+    onQueryChange?: (query: string) => void
     className?: string
+    /** Extra classes for the results popover: desktop anchors right and grows left over the tab strip. */
+    popoverClassName?: string
+    /** Compact toolbar style (h32, r10, text-xs, bg-muted/30) used inside the section bar. */
+    compact?: boolean
 }
 
 /**
  * Small "Find a setting" search that jumps to an EXISTING settings section
- * and its containing tab. It never renders settings itself.
+ * and its containing page. It never renders settings itself.
  */
-export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
+export function SettingsSearch({ onNavigate, onQueryChange, className, popoverClassName, compact }: SettingsSearchProps) {
     const [installable, setInstallable] = useState(canInstall())
     const [query, setQuery] = useState('')
     const [open, setOpen] = useState(false)
@@ -270,6 +279,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
     const select = (match: SettingSearchMatch) => {
         onNavigate(match.entry)
         setQuery('')
+        onQueryChange?.('')
         setOpen(false)
         inputRef.current?.blur()
     }
@@ -294,6 +304,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
             e.preventDefault()
             if (query) {
                 setQuery('')
+                onQueryChange?.('')
             } else {
                 inputRef.current?.blur()
             }
@@ -301,14 +312,15 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
     }
 
     return (
-        <div className={cn('relative min-w-0', className)}>
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/70" />
+        <div className={cn('relative min-w-0', compact && 'text-xs', className)}>
+            <Search className={cn('pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/70', compact && 'h-3.5 w-3.5')} />
             <Input
                 ref={inputRef}
                 type="text"
                 value={query}
                 onChange={e => {
                     setQuery(e.target.value)
+                    onQueryChange?.(e.target.value)
                     setOpen(true)
                 }}
                 onFocus={() => setOpen(true)}
@@ -321,7 +333,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                 aria-controls="settings-search-listbox"
                 aria-autocomplete="list"
                 aria-activedescendant={showResults && results[activeIndex] ? `settings-search-option-${results[activeIndex].entry.id}` : undefined}
-                className="h-10 rounded-2xl border-border/45 bg-card pl-9 pr-9 text-sm shadow-sm"
+                className={compact ? 'h-8 rounded-lg border-border/40 bg-muted/30 pl-9 pr-8 text-xs' : 'h-9 rounded-2xl border-border/45 bg-card pl-9 pr-9 text-sm shadow-sm'}
             />
             {query && (
                 <button
@@ -331,6 +343,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                     onMouseDown={e => e.preventDefault()}
                     onClick={() => {
                         setQuery('')
+                        onQueryChange?.('')
                         inputRef.current?.focus()
                     }}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-md p-0.5 text-muted-foreground/70 transition-colors hover:text-foreground"
@@ -339,7 +352,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                 </button>
             )}
             {showResults && (
-                <div data-theme-part="popover" className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-2xl border border-border/50 bg-card shadow-lg">
+                <div data-theme-part="popover" className={cn('absolute top-[calc(100%+0.5rem)] z-50 left-0 right-0 overflow-hidden rounded-2xl border border-border/50 bg-card shadow-lg', popoverClassName)}>
                     {results.length === 0 ? (
                         <p className="px-4 py-3 text-xs text-muted-foreground">
                             No settings match <span className="font-medium text-foreground">"{query.trim()}"</span>
@@ -374,8 +387,8 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                                             <span className="min-w-0 truncate text-sm font-medium text-foreground">
                                                 <HighlightText text={match.entry.title} highlight={query} />
                                             </span>
-                                            <span data-theme-part="badge" className="shrink-0 rounded-full border border-border/40 bg-muted/30 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                                {SETTING_TAB_LABELS[match.entry.tab]}
+                                            <span data-theme-part="badge" className="shrink-0 rounded-full border border-border/40 bg-muted/30 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                                                {SETTING_PAGE_LABELS[match.entry.page]}
                                             </span>
                                         </div>
                                         <span className="line-clamp-2 text-xs leading-snug text-muted-foreground">
@@ -387,7 +400,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                                                     <span
                                                         key={keyword}
                                                         data-theme-part="badge"
-                                                        className="rounded-md bg-muted/50 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                                                        className="rounded-md bg-muted/50 px-1.5 py-0.5 text-xs text-muted-foreground"
                                                     >
                                                         {keyword}
                                                     </span>
@@ -399,7 +412,7 @@ export function SettingsSearch({ onNavigate, className }: SettingsSearchProps) {
                             })}
                         </ul>
                     )}
-                    <p className="border-t border-border/30 px-3.5 py-1.5 text-[10px] text-muted-foreground/60">
+                    <p className="border-t border-border/30 px-3.5 py-1.5 text-xs text-muted-foreground/60">
                         ↑↓ browse · Enter jumps to the section · Esc clears
                     </p>
                 </div>
