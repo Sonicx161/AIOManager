@@ -10,6 +10,8 @@ const STORAGE_KEY = 'aioman:key-vault'
 const TOMBSTONE_KEY = `${STORAGE_KEY}:tombstones`
 
 let _vaultQueue: Promise<void> = Promise.resolve()
+// Generation of the initialize call that owns the store's loading flag.
+let _initSeq = 0
 
 export interface VaultTombstone {
     id: string
@@ -76,15 +78,17 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         }
 
         own.assert()
+        const initSeq = ++_initSeq
         set({ loading: true, error: null })
+        // Publish only while ownership-current and still the latest initialize.
+        const mine = () => own.current() && _initSeq === initSeq
         try {
             const tombstones = normalizeTombstones(await localforage.getItem<VaultTombstone[]>(TOMBSTONE_KEY))
             own.assert()
             const encryptedData = await localforage.getItem<string>(STORAGE_KEY)
             own.assert()
             if (!encryptedData) {
-
-                set({ keys: [], tombstones, isLocked: false, loading: false })
+                if (mine()) set({ keys: [], tombstones, isLocked: false, loading: false })
                 return
             }
 
@@ -92,16 +96,25 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             const keys = JSON.parse(decryptedData) as VaultKey[]
             // Recheck ownership before publishing hydrated state.
             own.assert()
-            set({ keys, tombstones, isLocked: false, loading: false })
+            if (mine()) set({ keys, tombstones, isLocked: false, loading: false })
         } catch (error) {
             if (import.meta.env.DEV) console.error('Failed to initialize vault:', error)
 
-            if (own.current()) set({ error: 'Failed to decrypt vault. Your keys might be corrupted or the password changed.', loading: false })
+            if (mine()) set({ error: 'Failed to decrypt vault. Your keys might be corrupted or the password changed.' })
+        } finally {
+            // The latest initialize owns the store: clear loading, or on ownership
+            // loss clear keys too; keeping isLocked true makes the next push
+            // re-initialize instead of exporting an empty vault.
+            if (_initSeq === initSeq) {
+                if (own.current()) set({ loading: false })
+                else set({ keys: [], isLocked: true, error: null, loading: false })
+            }
         }
     },
 
     addKey: (newKey) => {
-        _vaultQueue = _vaultQueue.then(async () => {
+        // The queue survives a failed op, but the caller still gets the real outcome.
+        const op = _vaultQueue.then(async () => {
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -122,10 +135,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
             set({ keys: updatedKeys, tombstones: get().tombstones.filter(t => t.id !== key.id), saveFailed: false })
             triggerSync()
-        }).catch(() => {
+        })
+        _vaultQueue = op.catch(() => {
             set({ saveFailed: true })
         })
-        return _vaultQueue
+        return op
     },
 
     removeKey: (id) => {
@@ -153,7 +167,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     },
 
     updateKey: (id, updates) => {
-        _vaultQueue = _vaultQueue.then(async () => {
+        const op = _vaultQueue.then(async () => {
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -170,10 +184,11 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
             set({ keys: updatedKeys, saveFailed: false })
             triggerSync()
-        }).catch(() => {
+        })
+        _vaultQueue = op.catch(() => {
             set({ saveFailed: true })
         })
-        return _vaultQueue
+        return op
     },
 
     moveKey: (id, direction) => {

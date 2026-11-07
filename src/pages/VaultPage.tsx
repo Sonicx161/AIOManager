@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useVaultStore } from '@/store/vaultStore'
 import { useAuthStore } from '@/store/authStore'
 import { useProviderStore } from '@/store/providerStore'
@@ -22,6 +23,7 @@ import { VAULT_GROUPS, getKeyAbbr, PROVIDERS, resolveVaultGroup } from '@/lib/co
 import { cn, getTimeAgo } from '@/lib/utils'
 import { toast } from '@/hooks/use-toast'
 import { useDocumentTitle } from '@/hooks/use-document-title'
+import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
 import { VaultKey } from '@/types/vault'
 
 import { ProviderHealth } from '@/types/provider'
@@ -37,19 +39,6 @@ const GROUP_ICONS: Record<string, typeof Cloud> = {
     'AI Services': Sparkles,
     'VPN': ShieldCheck,
     'Custom': Wrench,
-}
-
-const GROUP_COLORS: Record<string, { text: string; bg: string }> = {
-    'Debrid Services': { text: 'text-primary', bg: 'bg-primary/12' },
-    'AIOStreams': { text: 'text-info', bg: 'bg-info/10' },
-    'Usenet Providers': { text: 'text-info', bg: 'bg-info/10' },
-    'Usenet Indexers': { text: 'text-success', bg: 'bg-success/10' },
-    'Torrent Indexers': { text: 'text-success', bg: 'bg-success/10' },
-    'Subtitles': { text: 'text-warning', bg: 'bg-warning/10' },
-    'Metadata & Trackers': { text: 'text-warning', bg: 'bg-warning/10' },
-    'AI Services': { text: 'text-info', bg: 'bg-info/10' },
-    'VPN': { text: 'text-primary', bg: 'bg-primary/12' },
-    'Custom': { text: 'text-muted-foreground', bg: 'bg-muted/30' },
 }
 
 type SmartFilter = 'all' | 'recent' | 'expiring'
@@ -388,6 +377,26 @@ export function VaultPage() {
     const [mobileFilterOpen, setMobileFilterOpen] = useState(true)
     const [categorySort, setCategorySort] = useState<CategorySort>(loadCategorySort)
     const [entrySort, setEntrySort] = useState<EntrySort>(loadEntrySort)
+    const [searchParams, setSearchParams] = useSearchParams()
+    const linkedKeyId = searchParams.get('key')
+
+    // Re-initialize when the workspace changes mid-init.
+    const workspaceId = useSyncExternalStore(subscribeWorkspaceChanges, getActiveWorkspaceId, () => '')
+    const initializedWorkspaceRef = useRef(workspaceId)
+    useEffect(() => {
+        if (initializedWorkspaceRef.current === workspaceId) return
+        initializedWorkspaceRef.current = workspaceId
+        if (encryptionKey) useVaultStore.getState().initialize().catch(() => {})
+    }, [workspaceId, encryptionKey])
+
+    useEffect(() => {
+        if (!linkedKeyId || !keys.some(k => k.id === linkedKeyId)) return
+        setActiveFilter({ type: 'smart', id: 'all' })
+        setSearch('')
+        setSelectedId(linkedKeyId)
+        if (window.matchMedia('(max-width: 767px)').matches) setMobileDetailId(linkedKeyId)
+        setSearchParams(prev => { const next = new URLSearchParams(prev); next.delete('key'); return next }, { replace: true })
+    }, [linkedKeyId, keys, setSearchParams])
 
     useEffect(() => {
         localStorage.setItem(CATEGORY_SORT_KEY, categorySort)
@@ -437,6 +446,7 @@ export function VaultPage() {
             variant: 'warning',
             title: `${n} key${n !== 1 ? 's' : ''} expiring soon`,
             description: `Renew before they expire to avoid stream interruptions. Filter by "Expiring Soon" to see them.`,
+            href: '/vault',
         })
     }, [expiringKeys.length])
 
@@ -552,7 +562,6 @@ export function VaultPage() {
         label: string,
         icon: typeof Cloud,
         count?: number,
-        color?: { text: string; bg: string },
         filterType: 'smart' | 'group' = 'smart',
     ) => {
         const isActive = activeFilter.type === filterType && (
@@ -577,12 +586,12 @@ export function VaultPage() {
                         : 'text-foreground/85 border-transparent hover:bg-muted/50'
                 }`}
             >
-                <span className={`w-6 h-6 rounded-lg flex items-center justify-center shrink-0 ${isActive ? 'bg-muted/45 text-foreground' : `${color?.bg || 'bg-muted/35'} ${color?.text || 'text-muted-foreground'}`}`}>
-                    <Icon className="w-3 h-3" />
+                <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-lg', isActive ? 'bg-muted/50 text-foreground' : 'bg-muted/35 text-muted-foreground')}>
+                    <Icon className="h-3.5 w-3.5" />
                 </span>
-                <span className="flex-1 text-left truncate">{label}</span>
+                <span className="min-w-0 flex-1 truncate text-left font-semibold">{label}</span>
                 {count !== undefined && (
-                    <span className="text-xs text-muted-foreground tabular-nums">{count}</span>
+                    <span className="text-xs font-bold tabular-nums text-muted-foreground">{count}</span>
                 )}
             </button>
         )
@@ -683,9 +692,9 @@ export function VaultPage() {
                                             <div className="px-1 pb-1 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground cursor-help">Smart</div>
                                         </Tooltip>
                                         <div className="space-y-0.5">
-                                            {sidebarItem('all', 'All', List, keys.length, { text: 'text-primary', bg: 'bg-primary/12' })}
-                                            {sidebarItem('recent', 'Recent', Clock, Math.min(keys.length, 10), { text: 'text-info', bg: 'bg-info/10' })}
-                                            {sidebarItem('expiring', 'Expiring Soon', AlertTriangle, expiringKeys.length, { text: 'text-warning', bg: 'bg-warning/10' })}
+                                            {sidebarItem('all', 'All', List, keys.length)}
+                                            {sidebarItem('recent', 'Recent', Clock, Math.min(keys.length, 10))}
+                                            {sidebarItem('expiring', 'Expiring Soon', AlertTriangle, expiringKeys.length)}
                                         </div>
                                     </div>
 
@@ -708,7 +717,7 @@ export function VaultPage() {
                                         <div className="space-y-0.5">
                                             {sortedGroups.map(g => {
                                                 const Icon = GROUP_ICONS[g] || Wrench
-                                                return sidebarItem(g, g, Icon, groupedCounts[g] || 0, GROUP_COLORS[g], 'group')
+                                                return sidebarItem(g, g, Icon, groupedCounts[g] || 0, 'group')
                                             })}
                                         </div>
                                     </div>
