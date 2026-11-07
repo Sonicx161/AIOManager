@@ -43,7 +43,9 @@ const child = spawn(process.execPath, ['index.js'], {
         ...process.env,
         PORT: String(port),
         DATA_DIR: dataDir,
-        READ_ONLY_REPLICA: '1',
+        // Workers off instead of READ_ONLY_REPLICA: env validation rejects a SQLite replica.
+        AUTOPILOT_WORKER: 'off',
+        ACTIVITY_ENGINE_ENABLED: 'false',
         LOG_PRETTY_PRINT: 'false',
         LOG_LEVEL: 'warn',
         CUSTOM_HTML: ''

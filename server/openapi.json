@@ -316,6 +316,15 @@
         }
       }
     },
+    "/api/account/notices": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/meta-proxy": {
       "get": {
         "parameters": [
