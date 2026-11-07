@@ -104,6 +104,8 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
     }, [open, releases.length, fetchReleases])
 
     useEffect(() => {
+        // The operator console is not the app; release notes wait for the next app visit.
+        if (window.location.pathname.startsWith('/dashboard')) return
         if (lastSeenVersion !== currentVersion) {
             // Small delay so the app finishes mounting first
             const timer = setTimeout(() => {
@@ -205,7 +207,7 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
 
     return (
         <Dialog open={open} onOpenChange={handleOpenChange}>
-            <DialogContent className="flex max-h-[88vh] min-h-0 w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+            <DialogContent className="flex max-h-[88vh] min-h-0 sm:w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
 
                 <DialogHeader className="flex-shrink-0 border-b border-border/30 bg-card px-6 pb-4 pt-6">
                     <div className="flex items-start gap-3 pr-10">

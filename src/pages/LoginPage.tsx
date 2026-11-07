@@ -12,6 +12,7 @@ import { toast } from '@/hooks/use-toast'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { useTheme } from '@/contexts/ThemeContext'
 import { BrandLogo } from '@/components/common/BrandLogo'
+import { DashboardEntry } from '@/components/common/DashboardEntry'
 import { useAuthStore } from '@/store/authStore'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
@@ -571,25 +572,26 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                     )}
                                 </div>
 
-                                <div className="space-y-1.5 pt-1">
-                                    <div className="flex items-start gap-2">
-                                        <Checkbox
-                                            id="remember-device"
-                                            className="mt-0.5"
-                                            checked={knownDeviceLogin || remember}
-                                            disabled={knownDeviceLogin}
-                                            onCheckedChange={(checked) => setRemember(checked === true)}
-                                        />
-                                        <Label htmlFor="remember-device" className={`text-sm font-normal leading-snug ${knownDeviceLogin ? 'cursor-default' : 'cursor-pointer'}`}>
-                                            Remember this device
-                                        </Label>
+                                {knownDeviceLogin ? (
+                                    <p className="pt-1 text-xs text-muted-foreground">This device is remembered</p>
+                                ) : (
+                                    <div className="space-y-1.5 pt-1">
+                                        <div className="flex items-start gap-2">
+                                            <Checkbox
+                                                id="remember-device"
+                                                className="mt-0.5"
+                                                checked={remember}
+                                                onCheckedChange={(checked) => setRemember(checked === true)}
+                                            />
+                                            <Label htmlFor="remember-device" className="text-sm font-normal leading-snug cursor-pointer">
+                                                Remember this device
+                                            </Label>
+                                        </div>
+                                        <p className="pl-6 text-xs text-muted-foreground">
+                                            Stay signed in on this device until you sign out or this browser clears its data.
+                                        </p>
                                     </div>
-                                    <p className="pl-6 text-xs text-muted-foreground">
-                                        {knownDeviceLogin
-                                            ? 'This device is already remembered.'
-                                            : 'Stay signed in on this device until you sign out or this browser clears its data.'}
-                                    </p>
-                                </div>
+                                )}
                                 </form>
 
                                 {isLocked && auth.isAuthenticated && unlockFailures >= 2 && (
@@ -694,8 +696,8 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                     }}
                 />
 
-                <Dialog open={showRegSuccess} onOpenChange={(open) => { if (!open) setShowRegSuccess(false) }}>
-                    <DialogContent className="sm:max-w-md">
+                <Dialog open={showRegSuccess} onOpenChange={(open) => { if (!open && !hasCopied) return; setShowRegSuccess(open) }}>
+                    <DialogContent className="sm:max-w-md" hideClose>
                         <DialogHeader>
                             <div className="flex justify-center mb-4">
                                 <div className="h-12 w-12 rounded-full bg-success/10 flex items-center justify-center">
@@ -713,7 +715,10 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                 <Label className="text-xs font-medium text-muted-foreground uppercase">Account UUID</Label>
                                 <div className="relative group">
                                     <div data-theme-part="field" className="p-4 bg-success/10 rounded-lg border border-success/20 flex items-center justify-between gap-3 group-hover:border-success/40 transition-colors">
-                                        <code className="text-sm font-mono font-bold break-all text-success">
+                                        <code
+                                            className="text-sm font-mono font-bold break-all text-success"
+                                            onCopy={() => setHasCopied(true)}
+                                        >
                                             {registeredId}
                                         </code>
                                         <CopyButton
@@ -724,6 +729,9 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                         />
                                     </div>
                                 </div>
+                                {!hasCopied && (
+                                    <p className="text-xs text-muted-foreground">Copy your UUID above before continuing. Select it and press Ctrl+C if the button does not work.</p>
+                                )}
                             </div>
 
                             <div data-theme-tone="status" data-theme-part="panel" className="bg-warning/10 border border-warning/20 rounded-lg p-3 space-y-2">
@@ -746,14 +754,12 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                             >
                                 Enter dashboard
                             </Button>
-                            {!hasCopied && (
-                                <p className="text-xs text-muted-foreground text-center">Copy your UUID above before continuing.</p>
-                            )}
                         </DialogFooter>
                     </DialogContent>
                 </Dialog>
 
-                <div className="text-center mt-4">
+                <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+                    <DashboardEntry />
                     <Link
                         to="/kronorium"
                         className="text-xs text-muted-foreground hover:text-primary transition-colors"

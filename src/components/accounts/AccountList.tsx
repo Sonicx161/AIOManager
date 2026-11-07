@@ -34,11 +34,12 @@ import { useAddonStore } from '@/store/addonStore'
 import { getLatestAddonVersion, isNewerVersion } from '@/lib/utils'
 import { mapConcurrent } from '@/lib/concurrency'
 import { getPlatformEntry } from '@/lib/platform-registry'
-import { useAccountStore, getStremioAuthKey, getAccountEmail, hasPlatformConnection } from '@/store/accountStore'
+import { useAccountStore, getStremioAuthKey, hasPlatformConnection } from '@/store/accountStore'
 import { accountMatchesQuery } from '@/lib/account-compat'
 import { useScrollRestoration } from '@/hooks/use-scroll-restoration'
 import { useAuthStore } from '@/store/authStore'
 import { useLibraryCache } from '@/store/libraryCache'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { AccountListRow } from './AccountListRow'
@@ -225,15 +226,23 @@ export function AccountList() {
     open: boolean;
     accountIds: string[];
   }>({ open: false, accountIds: [] })
+  const [deleting, setDeleting] = useState(false)
+  const maskedAccountLabel = useMaskedAccountLabel()
+  const autopilotRules = useFailoverStore(state => state.rules)
 
   const deleteConfirmationDetails = useMemo(() => {
     return deleteConfirmation.accountIds.map(id => {
       const account = accounts.find(a => a.id === id)
-      return account ? { name: account.name || getAccountEmail(account) || 'Unknown', addonCount: account.addons.length } : null
+      return account ? { account, name: maskedAccountLabel(account), ruleCount: autopilotRules.filter(rule => rule.accountId === account.id).length, connectionCount: (account.connections || []).length } : null
     }).filter(Boolean)
-  }, [deleteConfirmation.accountIds, accounts])
+  }, [deleteConfirmation.accountIds, accounts, maskedAccountLabel, autopilotRules])
 
-  const totalAddonsInDeletion = deleteConfirmationDetails.reduce((sum, d) => sum + (d?.addonCount || 0), 0)
+  const deletingMultiple = deleteConfirmation.accountIds.length > 1
+  const deleteSubject = deletingMultiple
+    ? `${deleteConfirmation.accountIds.length} accounts`
+    : deleteConfirmationDetails[0]?.name || 'this account'
+  const totalRulesInDeletion = deleteConfirmationDetails.reduce((sum, d) => sum + (d?.ruleCount || 0), 0)
+  const totalConnectionsInDeletion = deleteConfirmationDetails.reduce((sum, d) => sum + (d?.connectionCount || 0), 0)
 
   const [isSelectionMode, setIsSelectionMode] = useState(false)
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
@@ -300,9 +309,16 @@ export function AccountList() {
 
   const confirmDelete = async () => {
     const ids = deleteConfirmation.accountIds
-    await Promise.all(ids.map(id => removeAccount(id)))
-    setDeleteConfirmation({ open: false, accountIds: [] })
-    clearSelection()
+    setDeleting(true)
+    try {
+      await Promise.all(ids.map(id => removeAccount(id)))
+      setDeleteConfirmation({ open: false, accountIds: [] })
+      clearSelection()
+    } catch {
+      toast({ variant: 'destructive', title: 'Could not delete', description: `Could not delete ${deleteSubject}. Check the account list and try again.` })
+    } finally {
+      setDeleting(false)
+    }
   }
 
 
@@ -356,7 +372,7 @@ export function AccountList() {
     try {
       await mapConcurrent(accounts, 5, async (account) => {
         try {
-          await syncAccount(account.id, true)
+          await syncAccount(account.id, true, 'user')
           succeeded += 1
         } catch {
           failed += 1
@@ -526,7 +542,7 @@ export function AccountList() {
                   <DropdownMenuItem
                     onClick={handleSyncAllAccounts}
                     disabled={syncingAll || loading}
-                    onSelect={(e) => e.preventDefault()}
+                    keepOpen
                     className="py-2.5 px-3 rounded-lg gap-2 text-sm font-medium"
                   >
                     {syncingAll
@@ -538,7 +554,7 @@ export function AccountList() {
                   <DropdownMenuItem
                     onClick={handleCheckAllAddonUpdates}
                     disabled={checkingUpdates}
-                    onSelect={(e) => e.preventDefault()}
+                    keepOpen
                     className="py-2.5 px-3 rounded-lg gap-2 text-sm font-medium"
                   >
                     {checkingUpdates
@@ -734,9 +750,9 @@ export function AccountList() {
 
 
       <Dialog open={showBulkActions} onOpenChange={setShowBulkActions}>
-        <DialogContent className="max-h-[92vh] max-w-5xl flex flex-col overflow-hidden p-0 gap-0">
+        <DialogContent className="max-h-[92vh] sm:max-w-3xl lg:max-w-5xl flex flex-col overflow-hidden p-0 gap-0">
           <DialogHeader className="px-6 pb-2 pt-6 pr-16 sm:pr-6">
-            <DialogTitle className="text-2xl tracking-tight">Bulk Actions</DialogTitle>
+            <DialogTitle>Bulk Actions</DialogTitle>
             <DialogDescription>
               Apply installs, syncs, removals, and protection changes across selected accounts.
             </DialogDescription>
@@ -758,14 +774,17 @@ export function AccountList() {
 
       <ConfirmationDialog
         open={deleteConfirmation.open}
-        onOpenChange={(open) => setDeleteConfirmation(prev => ({ ...prev, open }))}
-        title={`Delete ${deleteConfirmation.accountIds.length > 1 ? `${deleteConfirmation.accountIds.length} Accounts` : 'Account'}`}
-        description={`Are you sure you want to delete ${deleteConfirmation.accountIds.length > 1 ? 'these accounts' : 'this account'}?${totalAddonsInDeletion > 0 ? ` This will also remove ${totalAddonsInDeletion} addon${totalAddonsInDeletion !== 1 ? 's' : ''}.` : ''} This action cannot be undone.`}
+        onOpenChange={(open) => { if (!deleting) setDeleteConfirmation(prev => ({ ...prev, open })) }}
+        title={`Delete ${deletingMultiple ? `${deleteConfirmation.accountIds.length} Accounts` : 'Account'}`}
+        description={`Removes ${deleteSubject} from AIOManager, including ${deletingMultiple ? 'their' : 'its'} Autopilot rules and watch history here. Addons on Stremio and your other apps stay as they are. This cannot be undone.`}
         confirmText="Delete"
         isDestructive={true}
-        isLoading={loading}
+        isLoading={deleting}
         onConfirm={confirmDelete}
-        impactItems={deleteConfirmationDetails.map((d) => d ? `${d.name} (${d.addonCount} addon${d.addonCount !== 1 ? 's' : ''})` : '')}
+        impactItems={[
+          ...(totalRulesInDeletion > 0 ? [`${totalRulesInDeletion} Autopilot rule${totalRulesInDeletion !== 1 ? 's' : ''}`] : []),
+          ...(totalConnectionsInDeletion > 0 ? [`${totalConnectionsInDeletion} connection${totalConnectionsInDeletion !== 1 ? 's' : ''} signed out`] : []),
+        ]}
       />
     </div>
   )

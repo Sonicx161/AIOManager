@@ -11,6 +11,35 @@ interface CopyButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> 
   variant?: 'ghost' | 'outline' | 'inline' | 'subtle'
 }
 
+// navigator.clipboard is absent or rejects on insecure contexts (http LAN), so fall back to a hidden textarea.
+const copyToClipboard = async (value: string): Promise<boolean> => {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(textarea)
+  return ok
+}
+export { copyToClipboard as copyTextToClipboard }
+
 const CopyButton = React.forwardRef<HTMLButtonElement, CopyButtonProps>(
   ({ value, onCopied, iconSize = 14, variant = 'ghost', className, children, onClick, ...props }, ref) => {
     const [copied, setCopied] = React.useState(false)
@@ -22,10 +51,14 @@ const CopyButton = React.forwardRef<HTMLButtonElement, CopyButtonProps>(
       if (e.defaultPrevented) return
 
       try {
-        await navigator.clipboard.writeText(value)
-        setCopied(true)
-        onCopied?.()
-        setTimeout(() => setCopied(false), 2000)
+        const ok = await copyToClipboard(value)
+        if (ok) {
+          setCopied(true)
+          onCopied?.()
+          setTimeout(() => setCopied(false), 2000)
+        } else if (import.meta.env.DEV) {
+          console.error('[CopyButton] Failed to copy to clipboard: no clipboard mechanism succeeded')
+        }
       } catch (copyError) {
         if (import.meta.env.DEV) console.error('[CopyButton] Failed to copy to clipboard:', copyError)
       }

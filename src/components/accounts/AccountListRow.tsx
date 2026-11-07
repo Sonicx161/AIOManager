@@ -3,11 +3,15 @@ import { useNavigate } from 'react-router-dom'
 import { prefetchAccountDetail } from '@/lib/account-prefetch'
 import { Account } from '@/types/account'
 import { Tooltip } from '@/components/ui/tooltip'
-import { AccountAvatar } from './AccountAvatar'
+import { AccountAvatar, AccountMenuHeader } from './AccountAvatar'
+import { usePhoneViewport } from '@/hooks/usePhoneViewport'
 import { AccountMediaPlayback } from './AccountMedia'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
-import { PlatformLogo } from '@/components/providers/ConnectionPrimitives'
+import { PlatformSourceChip } from '@/components/addons/PlatformSourceChip'
+import { accountPlatformSources } from '@/components/addons/platform-source'
+import { AccountStatChips } from './AccountStatChips'
+import { addonCountLabel, addonCountTooltip, isSyncStale } from './account-stat-chips'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -16,10 +20,8 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { cn, getLatestAddonVersion, maskEmailLevel, maskNameLevel, getTimeAgo, isNewerVersion } from '@/lib/utils'
-import { AlertTriangle, ShieldCheck, ArrowUpCircle, Pencil, RefreshCw, ChevronRight, StickyNote, AlertCircle, MoreVertical, RotateCw, Trash, Activity, ArrowRightLeft, CheckCircle2, Puzzle, Play } from 'lucide-react'
-import { useAddonStore } from '@/store/addonStore'
-import { useFailoverStore } from '@/store/failoverStore'
+import { cn, maskEmailLevel, maskNameLevel, getTimeAgo } from '@/lib/utils'
+import { AlertTriangle, Pencil, RefreshCw, ChevronRight, StickyNote, AlertCircle, MoreVertical, RotateCw, Trash, Play } from 'lucide-react'
 import { useLibraryCache } from '@/store/libraryCache'
 import { activityForAccount } from '@/lib/account-activity-index'
 import { useAccountStore, getAccountEmail, getStremioAuthKey, hasPlatformConnection } from '@/store/accountStore'
@@ -35,6 +37,9 @@ interface AccountListRowProps {
     onToggleSelect?: (accountId: string) => void
     onDelete?: (accountId: string) => void
 }
+
+/** Rows only show the latest-watched entry and live playback, so they read the head and skip archive walks. */
+const CARD_MEDIA_OPTIONS = { archive: false } as const
 
 export const AccountListRow = memo(function AccountListRow({
     account,
@@ -52,6 +57,7 @@ export const AccountListRow = memo(function AccountListRow({
     const openAddAccountDialog = useUIStore((state) => state.openAddAccountDialog)
     const privacyLevelNames = useUIStore((state) => state.privacyLevelNames)
     const [isMenuOpen, setIsMenuOpen] = useState(false)
+    const phone = usePhoneViewport()
 
     const accountEmail = getAccountEmail(account)
     const isNameCustomized = account.name !== accountEmail && account.name !== 'Account' && account.name !== 'Stremio Account'
@@ -62,34 +68,12 @@ export const AccountListRow = memo(function AccountListRow({
             ? maskEmailLevel(account.name, privacyLevel)
             : maskNameLevel(account.name || accountEmail || 'Unnamed Account', privacyLevel)
 
-    const updateCount = useAddonStore(
-        useShallow((state) =>
-            account.addons.filter(addon => {
-                const latest = getLatestAddonVersion(state.latestVersions, addon)
-                return latest && isNewerVersion(addon.manifest.version, latest)
-            }).length
-        )
-    )
-
-    const recentChanges = useAccountStore(
-        useShallow((state) => state.changelog.filter(
-            e => e.accountId === account.id &&
-                Date.now() - new Date(e.timestamp).getTime() < 24 * 60 * 60 * 1000
-        ).length)
-    )
-
-    const failoverRules = useFailoverStore(
-        useShallow((state) => state.rules.filter(r => r.accountId === account.id))
-    )
-    const activeRules = useMemo(() => failoverRules.filter(r => r.isActive), [failoverRules])
-    const failedOverRules = useMemo(() => activeRules.filter(r => r.activeUrl !== r.priorityChain?.[0]), [activeRules])
-
     const protectedCount = useMemo(
         () => account.addons.filter(a => a.flags?.protected).length,
         [account.addons]
     )
 
-    const media = useJellyfinActivity(account.id)
+    const media = useJellyfinActivity(account.id, true, CARD_MEDIA_OPTIONS)
     const cachedAccountItems = useLibraryCache(
         useShallow((state) => activityForAccount(state.items, account.id))
     )
@@ -100,8 +84,8 @@ export const AccountListRow = memo(function AccountListRow({
     }, [accountItems])
     const mediaPlayback = accountMediaPlayback(media.playback, lastWatched)
 
-    const timeStr = getTimeAgo(new Date(account.lastSync))
-    const isStale = (Date.now() - new Date(account.lastSync).getTime()) > 24 * 60 * 60 * 1000
+    const isStale = isSyncStale(account.lastSync, Date.now())
+    const hasPlatformSources = accountPlatformSources(account).length > 0
     const hasAccentColor = account.accentColor && account.accentColor !== 'none'
     const accentColor = hasAccentColor ? account.accentColor! : null
 
@@ -149,14 +133,7 @@ export const AccountListRow = memo(function AccountListRow({
 
 
             <div className="relative shrink-0">
-                <AccountAvatar account={account} size="md" />
-                {accentColor && (
-                    <span
-                        className="pointer-events-none absolute inset-0 rounded-xl"
-                        style={{ boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accentColor} 65%, transparent)` }}
-                        aria-hidden="true"
-                    />
-                )}
+                <AccountAvatar account={account} size="md" accentColor={accentColor} />
             </div>
 
 
@@ -182,93 +159,42 @@ export const AccountListRow = memo(function AccountListRow({
 
 
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                    {(hasPlatformConnection(account) || (account.connections || []).filter(c => c.platform !== 'stremio').length > 0) && (
-                        <div className="flex items-center gap-0.5">
-                            {getStremioAuthKey(account) && (
-                                <PlatformLogo platform="stremio" className="h-4 w-4" />
-                            )}
-                            {(account.connections || []).filter(c => c.platform !== 'stremio').map(conn => (
-                                <PlatformLogo key={conn.id} platform={conn.platform} className={cn("h-4 w-4", conn.enabled === false && "opacity-40 grayscale")} />
-                            ))}
-                        </div>
+                    {!account.hidePlatformLogos && hasPlatformSources && (
+                        <span className="inline-flex shrink-0 items-center border-r border-border/50 pr-2">
+                            <PlatformSourceChip account={account} />
+                        </span>
                     )}
+                    {!hasPlatformSources && (
+                        <span className="shrink-0 border-r border-border/50 pr-2 text-[11px]">Local</span>
+                    )}
+                    <Tooltip content={addonCountTooltip(account.addons.length, protectedCount)} side="top">
+                        <span className="shrink-0 whitespace-nowrap">{addonCountLabel(account.addons.length)}</span>
+                    </Tooltip>
                     {!account.hideLastWatched && mediaPlayback && <AccountMediaPlayback playback={mediaPlayback} compact />}
                     {!account.hideLastWatched && !mediaPlayback && lastWatched && (
                         <>
-                            <span className="hidden sm:inline shrink-0">·</span>
-                            <span className="hidden truncate text-muted-foreground sm:inline">
-                                <Play className="inline h-3 w-3 text-muted-foreground/60 mr-1" /><span className="font-medium text-foreground/80">{lastWatched.name}</span>
+                            <span className="hidden shrink-0 sm:inline">·</span>
+                            <span className="min-w-0 truncate">
+                                <Play className="mr-1 inline h-3 w-3 text-muted-foreground/60" /><span className="font-medium text-foreground/80">{lastWatched.name}</span>
+                                <span className="ml-1 text-[11px]">{getTimeAgo(new Date(lastWatched.timestamp))}</span>
                             </span>
                         </>
                     )}
-                    {!account.hideLastWatched && lastWatched && (
-                        <span className="hidden min-[380px]:inline shrink-0">·</span>
+                    {isStale && (
+                        <>
+                            <span className="shrink-0">·</span>
+                            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-warning">
+                                <AlertTriangle className="h-3 w-3" />
+                                Last synced {getTimeAgo(new Date(account.lastSync))}
+                            </span>
+                        </>
                     )}
-                    <span className="hidden min-[380px]:flex shrink-0 items-center gap-1">
-                        {isStale && <AlertTriangle className="w-2.5 h-2.5 text-warning" />}
-                        Synced {timeStr}
-                    </span>
                 </div>
             </div>
 
 
-            <div className="hidden items-center gap-2 shrink-0 sm:flex">
-                <Tooltip content={`${account.addons.length} addon${account.addons.length !== 1 ? 's' : ''}${protectedCount > 0 ? `, ${protectedCount} protected` : ''}`} side="top">
-                    <span className="inline-flex h-6 items-center gap-1.5 text-xs text-muted-foreground">
-                        <Puzzle className="h-3.5 w-3.5 text-muted-foreground" /><span className="font-semibold text-foreground">{account.addons.length}</span>
-                        {protectedCount > 0 && (
-                            <>
-                                <span className="text-border">/</span>
-                                <ShieldCheck className="h-3 w-3 shrink-0 text-success/80" />
-                                <span className="font-semibold text-foreground">{protectedCount}</span>
-                            </>
-                        )}
-                    </span>
-                </Tooltip>
-                {updateCount > 0 && (
-                    <Tooltip content={`${updateCount} update${updateCount !== 1 ? 's' : ''} available`} side="top">
-                        <span data-theme-part="badge" aria-label={`${updateCount} update${updateCount !== 1 ? 's' : ''} available`} className="relative inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
-                            <ArrowUpCircle className="h-3 w-3" />
-                            <span className="absolute -top-1 -right-1 h-3 min-w-3 px-0.5 flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[9px] font-bold leading-none">{updateCount}</span>
-                        </span>
-                    </Tooltip>
-                )}
-
-                {recentChanges > 0 && updateCount === 0 && (
-                    <Tooltip content={`${recentChanges} change${recentChanges !== 1 ? 's' : ''} today · Click to dismiss`} side="top">
-                        <button
-                            data-theme-part="button"
-                            onClick={(e) => {
-                                e.stopPropagation()
-                                useAccountStore.getState().clearChangelog(account.id)
-                            }}
-                            aria-label={`${recentChanges} change${recentChanges !== 1 ? 's' : ''} today`}
-                            className="relative inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary cursor-pointer hover:bg-primary/20 transition-colors"
-                        >
-                            <Activity className="h-3 w-3" />
-                            <span className="absolute -top-1 -right-1 h-3 min-w-3 px-0.5 flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[9px] font-bold leading-none">{recentChanges}</span>
-                        </button>
-                    </Tooltip>
-                )}
-
-                {activeRules.length > 0 && (
-                    failedOverRules.length > 0 ? (
-                        <Tooltip content={`${failedOverRules.length} rule${failedOverRules.length !== 1 ? 's' : ''} failed over`} side="top">
-                            <span data-theme-part="badge" aria-label={`${failedOverRules.length} rule${failedOverRules.length !== 1 ? 's' : ''} failed over`} className="relative inline-flex items-center justify-center rounded-full border p-1 border-warning/20 bg-warning/10 text-warning">
-                                <ArrowRightLeft className="h-3 w-3" />
-                                <span className="absolute -top-1 -right-1 h-3 min-w-3 px-0.5 flex items-center justify-center rounded-full bg-warning text-warning-foreground text-[9px] font-bold leading-none">{failedOverRules.length}</span>
-                            </span>
-                        </Tooltip>
-                    ) : (
-                        <Tooltip content={`${activeRules.length} Autopilot rule${activeRules.length !== 1 ? 's' : ''} healthy`} side="top">
-                            <span data-theme-part="badge" aria-label={`${activeRules.length} Autopilot rule${activeRules.length !== 1 ? 's' : ''} healthy`} className="relative inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
-                                <CheckCircle2 className="h-3 w-3" />
-                                <span className="absolute -top-1 -right-1 h-3 min-w-3 px-0.5 flex items-center justify-center rounded-full bg-success text-success-foreground text-[9px] font-bold leading-none">{activeRules.length}</span>
-                            </span>
-                        </Tooltip>
-                    )
-                )}
-
+            <div className="hidden items-center gap-2.5 shrink-0 text-xs sm:flex">
+                <AccountStatChips account={account} />
                 {account.note && (
                     <Tooltip content={`Note: ${account.note.slice(0, 60)}${account.note.length > 60 ? '…' : ''}`} side="top">
                         <StickyNote className="w-3.5 h-3.5 text-primary" />
@@ -287,10 +213,10 @@ export const AccountListRow = memo(function AccountListRow({
                             e.stopPropagation()
                             try {
                                 toast({ title: 'Syncing...', description: `Refreshing ${displayName}` })
-                                await syncAccount(account.id, true)
-                                toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}` })
+                                await syncAccount(account.id, true, 'user')
+                                toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}`, accountId: account.id })
                             } catch (err) {
-                                toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}` })
+                                toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}`, accountId: account.id })
                             }
                         }}
                         disabled={loading}
@@ -315,12 +241,12 @@ export const AccountListRow = memo(function AccountListRow({
                     setIsMenuOpen(open)
                 }}>
                     <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-muted-foreground hover:bg-muted/45 hover:text-foreground" onClick={(e) => e.stopPropagation()}>
+                        <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-muted-foreground hover:bg-muted/45 hover:text-foreground max-sm:-mr-2 max-sm:h-11 max-sm:w-11" onClick={(e) => e.stopPropagation()}>
                             <MoreVertical className="h-3.5 w-3.5" />
                         </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-52 max-w-[calc(100vw-2rem)] z-50">
-                        <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">Manage Account</div>
+                    <DropdownMenuContent align="end" className="w-52 max-w-[calc(100vw-2rem)] z-50" sheetHeader={<AccountMenuHeader account={account} name={displayName} />}>
+                        {!phone && <div className="px-2 py-1.5 text-xs font-medium uppercase text-muted-foreground">Manage Account</div>}
                         {account.status === 'expired' && (
                             <DropdownMenuItem className="gap-2 text-warning focus:text-warning" onClick={(e) => { e.stopPropagation(); openAddAccountDialog(account); setIsMenuOpen(false) }}>
                                 <AlertCircle className="h-4 w-4 shrink-0" /> Fix Session
@@ -333,10 +259,10 @@ export const AccountListRow = memo(function AccountListRow({
                             e.stopPropagation()
                             try {
                                 toast({ title: 'Syncing...', description: `Refreshing ${displayName}` })
-                                await syncAccount(account.id, true)
-                                toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}` })
+                                await syncAccount(account.id, true, 'user')
+                                toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}`, accountId: account.id })
                             } catch (err) {
-                                toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}` })
+                                toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}`, accountId: account.id })
                             }
                         }} disabled={loading}>
                             <RefreshCw className={`h-4 w-4 shrink-0 ${loading ? 'animate-spin' : ''}`} /> Sync
