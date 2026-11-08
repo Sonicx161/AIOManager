@@ -2,7 +2,7 @@
 //
 // Interface for runtime integration (the parent owns factories/session wrappers):
 //   createStremioWatchDestination(options) -> WatchStateDestination
-//   options: { connectionId, label, subject, scope, open(signal), seriesVideos?(id) } — exactly
+//   options: { connectionId, label, subject, scope, open(signal), seriesVideos?(id) } - exactly
 //   what stremioWatchSession(account, connection, key, signal, assertCurrent) returns, so the
 //   parent can pass it straight through. options.open(signal) resolves AFTER re-verifying the
 //   remote user and returns a request(body, signal) transport whose Put calls the parent's
@@ -23,6 +23,7 @@
 //     the row immediately before the Put, and verifies the saved row with an exact readback.
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { canonicalWatchIdentity, hasSavedWatchState, sourceTime, watchFingerprint } from './records.ts'
+import { skippedNoIdRowsNote } from './source-stremio.ts'
 import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
 import { isLiveLibraryRow } from '../stremio-liveness.ts'
 import { migrationStage, WatchMigrationError } from './failures.ts'
@@ -106,10 +107,11 @@ interface DestinationRow {
     state: Record<string, unknown>
 }
 
-function parseDestinationRow(entry: unknown): DestinationRow {
-    if (!isRecord(entry)) throw new Error('Stremio returned a malformed library item; refusing to guess.')
+/** Null means the row has no usable id (junk other tools can leave behind): it can never be matched or written, so callers skip it. */
+function parseDestinationRow(entry: unknown): DestinationRow | null {
+    if (!isRecord(entry)) return null
     const id = entry._id
-    if (typeof id !== 'string' || !id) throw new Error('Stremio returned a malformed library item; refusing to guess.')
+    if (typeof id !== 'string' || !id) return null
     return {
         raw: entry,
         id,
@@ -153,8 +155,8 @@ function seasonEpisodeKey(season: number, episode: number): string {
 
 /**
  * Normalizes a raw video list into the write index space. Anything that makes the ordering
- * ambiguous fails closed: duplicate video ids, two videos sharing (season, episode) — the
- * (season, episode, released) sort could then depend on data we do not have — or entries
+ * ambiguous fails closed: duplicate video ids, two videos sharing (season, episode) - the
+ * (season, episode, released) sort could then depend on data we do not have - or entries
  * without integer season/episode numbers, whose index position stremio-core never defines.
  */
 function normalizeSeriesVideos(list: unknown): StremioSeriesIndex | null {
@@ -369,11 +371,20 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
                     throw new Error(`The destination library exceeded ${MAX_LIBRARY_ITEMS.toLocaleString()} items, so matches cannot be verified safely.`)
                 }
                 const rows = new Map<string, DestinationRow>()
+                let skippedNoId = 0
                 for (const entry of entries) {
-                    if (entry === null || entry === undefined) continue
                     const row = parseDestinationRow(entry)
+                    if (row === null) {
+                        skippedNoId++
+                        continue
+                    }
                     if (rows.has(row.id)) throw new Error('Stremio returned duplicate library rows; refusing to guess.')
                     rows.set(row.id, row)
+                }
+                // Surfaced through the plan notes: the destination capabilities array is
+                // read only after the resolves that build this inventory.
+                if (skippedNoId > 0 && !capabilities.notes.includes(skippedNoIdRowsNote(skippedNoId))) {
+                    capabilities.notes.push(skippedNoIdRowsNote(skippedNoId))
                 }
                 return rows
             })()
@@ -391,6 +402,9 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         for (const entry of libraryEntries(result)) {
             if (entry === null || entry === undefined) continue
             const row = parseDestinationRow(entry)
+            // An exact read must never treat a malformed answer as absence: that would turn
+            // the full-row write into a replacement of an existing row.
+            if (row === null) throw new Error('Stremio returned a malformed library item; refusing to guess.')
             if (row.id === rowId) rows.push(row)
         }
         if (rows.length > 1) throw new Error('Stremio returned duplicate rows for this title; refusing to guess.')

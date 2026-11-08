@@ -348,7 +348,16 @@ async function fetchLibrary(authKey, deadline = 0, log = null) {
             if (log) log.warn({ category: 'Activity' }, `Library fetch returned no items for ${accountIdHint} (result keys: ${result ? Object.keys(result).join(',') : 'null'})`)
             return null
         }
-        return items.map(normalizeItem)
+        // Rows with no usable id (null, non-object, empty _id) can never be attributed; skip them.
+        // A read that contained any is not trusted as complete, so it never deletes snapshots.
+        const usable = items.filter(raw => raw && typeof raw === 'object' && typeof (raw._id || raw.id) === 'string' && (raw._id || raw.id))
+        if (usable.length === 0 && items.length > 0) {
+            if (log) log.warn({ category: 'Activity' }, `Library fetch for ${accountIdHint} returned only entries without an id`)
+            return null
+        }
+        const library = usable.map(normalizeItem)
+        if (usable.length < items.length) library.skippedRows = items.length - usable.length
+        return library
     } catch (e) {
         if (log) log.warn({ category: 'Activity' }, `Library fetch exception for ${accountIdHint}: ${e.message}`)
         return null
@@ -643,7 +652,7 @@ async function scanAccount(syncUser, accountId, accountName, authKey, limits, lo
     const libraryHash = computeLibraryHash(library)
     if (getCachedLibraryHash(hashKey) === libraryHash) {
         trace('activity', 'scanAccount.complete', { accountId, connectionId, libraryItems: library.length, skipped: true, reason: 'hash-match', timing: Date.now() - scanStart })
-        return { eventsWritten: 0, snapshotWrites: 0, snapshotDeletes: 0, skippedByHash: true, complete: true }
+        return { eventsWritten: 0, snapshotWrites: 0, snapshotDeletes: 0, skippedByHash: true, complete: !library.skippedRows }
     }
 
     const existingSnapshots = await getSnapshot(syncUser, scopeAccountId)
@@ -652,7 +661,7 @@ async function scanAccount(syncUser, accountId, accountName, authKey, limits, lo
     const snapshots = []
     const snapshotsToDelete = []
     const seenItemIds = new Set()
-    let complete = true
+    let complete = !library.skippedRows
 
     const enqueueEvent = (event) => {
         if (events.length >= limits.maxEvents) {

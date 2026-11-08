@@ -65,10 +65,15 @@ interface LibraryItem {
     state: Record<string, unknown>
 }
 
-function parseLibraryItem(entry: unknown): LibraryItem {
-    if (!isRecord(entry)) throw new Error('Stremio returned a malformed library item; refusing to guess.')
+export function skippedNoIdRowsNote(count: number): string {
+    return count === 1 ? '1 library entry without an id was skipped.' : `${count} library entries without an id were skipped.`
+}
+
+/** Null means the row has no usable id (junk other tools can leave behind): it can never be matched or imported, so callers skip it. */
+function parseLibraryItem(entry: unknown): LibraryItem | null {
+    if (!isRecord(entry)) return null
     const id = entry._id
-    if (typeof id !== 'string' || !id) throw new Error('Stremio returned a malformed library item; refusing to guess.')
+    if (typeof id !== 'string' || !id) return null
     return {
         raw: entry,
         id,
@@ -316,8 +321,13 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
         const entries = libraryEntries(result)
         const capped = entries.length > MAX_LIBRARY_ITEMS
         const items: LibraryItem[] = []
+        let skippedNoId = 0
         for (const entry of capped ? entries.slice(0, MAX_LIBRARY_ITEMS) : entries) {
             const item = parseLibraryItem(entry)
+            if (item === null) {
+                skippedNoId++
+                continue
+            }
             if (options.isDeletedItem?.(item.id, epochMs(item.raw._mtime) ?? 0)) continue
             if (item.kind !== null || hasAnyState(item.state)) items.push(item)
         }
@@ -350,6 +360,7 @@ export function createStremioWatchSource(options: StremioWatchSourceOptions): Wa
         records.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         const snapshotNotes = [...notes]
         if (capped) snapshotNotes.push(`The Stremio library exceeded ${MAX_LIBRARY_ITEMS.toLocaleString()} items, so this read is partial; only the first ${MAX_LIBRARY_ITEMS.toLocaleString()} items are listed.`)
+        if (skippedNoId > 0) snapshotNotes.push(skippedNoIdRowsNote(skippedNoId))
         return { connectionId, label, subject, scope, records, complete: !capped, notes: snapshotNotes }
     }
 

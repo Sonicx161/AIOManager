@@ -1019,7 +1019,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     const lib = Array.isArray(data?.result) ? data.result : (data?.result?.library && Array.isArray(data.result.library) ? data.result.library : null)
                     if (lib) {
                         const sanitize = items => items.map(item => {
-                            if (item.removed) {
+                            if (item && item.removed) {
                                 return { ...item, _ctime: item._ctime || '0001-01-01T00:00:00Z', _mtime: item._mtime || '0001-01-01T00:00:00Z' }
                             }
                             return item
