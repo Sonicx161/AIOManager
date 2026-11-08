@@ -19,6 +19,7 @@ import {
 } from './jellyfin-records.ts'
 import type { ParsedWatchIdentity } from './jellyfin-records.ts'
 import { createWatchStateRequestGate } from './request-gate.ts'
+import { assertFreshChecks } from './prewrite-fresh.ts'
 
 const SERIES_READ_WORKERS = 4
 const EPISODE_CHILDREN_PAGE = 500
@@ -220,6 +221,21 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         writeUserData: (accessToken: string, userId: string, itemId: string, update: Parameters<JellyfinWatchClient['writeUserData']>[3], requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.writeUserData(accessToken, userId, itemId, update, requestSignal)),
     }
     const gatedBinding: JellyfinBinding = { ...binding, client }
+    // The write's freshness must hold after any facade gate wait, so the check runs inside
+    // the gated operation, immediately before the request is sent. The transport may answer
+    // 404/405 and dispatch a PlayedItems fallback after another round trip, so the same
+    // guard travels with the write and re-runs before each mutation request.
+    const writeUserDataFresh = async (checkedAt: number, itemId: string, update: JellyfinUserDataUpdate, requestSignal: AbortSignal): Promise<{ via: 'userdata' | 'played-items' } | void> => {
+        const beforeDispatch = () => assertFreshChecks(checkedAt)
+        if (facadeGate === null) {
+            assertFreshChecks(checkedAt)
+            return binding.client.writeUserData(binding.secret.accessToken, binding.secret.userId, itemId, update, requestSignal, beforeDispatch)
+        }
+        return facadeGate.run(requestSignal, () => {
+            assertFreshChecks(checkedAt)
+            return binding.client.writeUserData(binding.secret.accessToken, binding.secret.userId, itemId, update, requestSignal, beforeDispatch)
+        })
+    }
     let indexPromise: Promise<JellyfinLibraryIndex> | null = null
     const ensureIndex = (indexSignal: AbortSignal): Promise<JellyfinLibraryIndex> => {
         if (indexPromise === null) {
@@ -423,6 +439,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         if (sessions.some(session => session.NowPlayingItem?.Id === expected.id)) {
             return { status: 'conflict', message: 'This title is playing on the destination right now. Import it after playback stops.', record: freshRecord }
         }
+        const checkedAt = Date.now()
         const body: JellyfinUserDataUpdate = {}
         if (patch.watched === true) body.Played = true
         if (patch.positionMs !== undefined && patch.positionMs > 0) {
@@ -456,7 +473,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         }
         assertCurrent()
         applySignal.throwIfAborted()
-        const written = await gatedBinding.client.writeUserData(gatedBinding.secret.accessToken, gatedBinding.secret.userId, expected.id, body, applySignal)
+        const written = await writeUserDataFresh(checkedAt, expected.id, body, applySignal)
         const check = await gatedBinding.client.readWatchItem(gatedBinding.secret.accessToken, gatedBinding.secret.userId, expected.id, applySignal)
         if (!isWatchableLeaf(check)) throw new Error(READBACK_FAILED)
         const checkKey = seriesKeyOf(check)

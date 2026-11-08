@@ -4,6 +4,7 @@
 // Continue Watching hydration is verified; native playback may start from the beginning.
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { sourceTime, watchFingerprint } from './records.ts'
+import { assertFreshChecks } from './prewrite-fresh.ts'
 import type { RealStreamProgressPage } from './source-realstream.ts'
 
 export interface RealStreamWatchDestinationTransport {
@@ -260,6 +261,7 @@ export function createRealStreamWatchDestination(options: RealStreamWatchDestina
         signal.throwIfAborted()
         const read = await readAll(transport, signal)
         if (!read.complete) throw new Error('The RealStream progress list could not be read completely, so this import cannot be verified safely. Preview again.')
+        const checkedAt = Date.now()
 
         const entryMatches: RealStreamEntryHit[] = []
         for (const container of read.containers) {
@@ -298,6 +300,7 @@ export function createRealStreamWatchDestination(options: RealStreamWatchDestina
         const container = read.containers[0] ?? null
         const sentData = container ? [...container.data, entry] : [entry]
         signal.throwIfAborted()
+        assertFreshChecks(checkedAt)
         await transport.writeRecord(container ? container.id : null, sentData, signal)
 
         // Exact readback: the saved entry, every pre-existing entry, and every other record.

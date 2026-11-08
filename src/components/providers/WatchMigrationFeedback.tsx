@@ -3,6 +3,7 @@ import { ArrowRight, CheckCircle2, CircleAlert, Download, Info, Loader2 } from '
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatWatchPosition, watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
+import { isStaleKeptResult, migrationResultCounts, resultExplanation } from '@/lib/watch-state/result-counts'
 import type { MigrationResult, WatchMigrationPlan, WatchStateRecord } from '@/lib/watch-state/types'
 import { MigrationArtwork } from './MigrationArtwork'
 
@@ -36,6 +37,9 @@ export function MigrationProgressPanel({ mode, message, progress }: {
 }
 
 const resultLabels = { applied: 'Imported', unchanged: 'Already saved', conflict: 'Kept', failed: 'Unconfirmed' } as const
+// A stale-kept row was never written; it reads as not attempted, never as kept.
+const staleResultLabel = 'Not attempted'
+const resultLabel = (result: MigrationResult) => isStaleKeptResult(result) ? staleResultLabel : resultLabels[result.status]
 
 export function MigrationImportLog({ plan, results }: { plan: WatchMigrationPlan; results: MigrationResult[] }) {
     const rows = useMemo(() => new Map(plan.rows.map(row => [row.id, row])), [plan])
@@ -56,25 +60,11 @@ export function MigrationImportLog({ plan, results }: { plan: WatchMigrationPlan
                         <p className="text-sm font-medium [overflow-wrap:anywhere]">{row ? watchRecordTitle(row.source) : 'Title'}</p>
                         {row && <p className="mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">{watchRecordSubtitle(row.source)}</p>}
                     </div>
-                    <span className="max-w-[40%] text-right text-xs leading-5 text-muted-foreground">{result.status === 'applied' ? 'Saved and confirmed' : resultLabels[result.status]}</span>
+                    <span className="max-w-[40%] text-right text-xs leading-5 text-muted-foreground">{result.status === 'applied' ? 'Saved and confirmed' : resultLabel(result)}</span>
                 </li>
             })}
         </ol>
     </section>
-}
-
-const resultDescriptions = {
-    applied: 'Saved and confirmed on this connection.',
-    unchanged: 'Already saved here. No extra copy was needed.',
-    conflict: 'Changed or existing watch information was kept.',
-    failed: 'We couldn’t confirm this save. The title may already be saved; check a fresh preview before trying again.',
-} as const
-
-function resultExplanation(result: MigrationResult): string {
-    if (result.status === 'failed' && result.failure) return result.message
-    if (result.status === 'conflict' && result.message.includes('source record changed')) return 'The source changed after the preview. This title wasn’t copied; preview again to check its new state.'
-    if (result.status === 'conflict' && result.message.includes('playing on the destination')) return 'This title is playing now, so it wasn’t copied. Try again after playback stops.'
-    return resultDescriptions[result.status]
 }
 
 export function MigrationResultsPanel({ plan, results, outcome, connections, notice, unattempted = 0, onExport }: {
@@ -87,9 +77,9 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
     const [page, setPage] = useState(0)
     const rows = useMemo(() => new Map(plan.rows.map(row => [row.id, row])), [plan])
     const byResult = useMemo(() => new Map(results.map(result => [result.rowId, result])), [results])
-    const imported = results.filter(result => result.status === 'applied').length
-    const kept = results.filter(result => result.status === 'unchanged' || result.status === 'conflict').length
-    const review = results.filter(result => result.status === 'failed').length
+    const { imported, kept, unconfirmed: review, stale } = useMemo(() => migrationResultCounts(results), [results])
+    // A stale-kept row was never written, so it joins the rows the run never reached.
+    const notAttempted = unattempted + stale
     const readyWithoutResult = plan.rows.filter(row => row.status === 'ready' && !byResult.has(row.id)).length
     const otherReady = Math.max(0, readyWithoutResult - unattempted)
     const alreadySaved = plan.rows.filter(row => row.status === 'unchanged').length
@@ -97,7 +87,7 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
     const unmatched = plan.rows.filter(row => row.status === 'skipped' || row.status === 'unsupported').length
     const undated = results.filter(result => result.status === 'applied' && rows.get(result.rowId)?.undated === true).length
     const datesNotCopied = results.some(result => result.status === 'applied' && rows.get(result.rowId)?.notes.includes('Original watch dates cannot be preserved by this destination.'))
-    const visible = results.filter(result => filter === 'all' || (filter === 'attention' ? result.status === 'failed' : filter === 'kept' ? result.status === 'unchanged' || result.status === 'conflict' : result.status === 'applied'))
+    const visible = results.filter(result => filter === 'all' || (filter === 'attention' ? result.status === 'failed' : filter === 'kept' ? (result.status === 'unchanged' || result.status === 'conflict') && !isStaleKeptResult(result) : result.status === 'applied'))
     const pageCount = Math.max(1, Math.ceil(visible.length / 50))
     const shownPage = Math.min(page, pageCount - 1)
     // Filters only earn their space once the list is long enough to need them and more than
@@ -126,11 +116,11 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
                 <div className="inline-flex min-w-0 items-center gap-1.5 [overflow-wrap:anywhere]">{connections.destination.logo}<span className="min-w-0">{connections.destination.name} · {connections.destination.user}</span></div>
             </div>
             <p className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm leading-relaxed"><span className="sr-only">Outcome counts: </span>
-                {(imported > 0 || review > 0 || unattempted > 0 || kept === 0) && <span><span className="font-semibold tabular-nums text-success">{imported.toLocaleString()}</span> <span className="text-muted-foreground">{imported > 0 ? 'imported and confirmed' : 'imported'}</span></span>}
+                {(imported > 0 || review > 0 || notAttempted > 0 || kept === 0) && <span><span className="font-semibold tabular-nums text-success">{imported.toLocaleString()}</span> <span className="text-muted-foreground">{imported > 0 ? 'imported and confirmed' : 'imported'}</span></span>}
                 {kept > 0 && <span><span className="font-semibold tabular-nums">{kept.toLocaleString()}</span> <span className="text-muted-foreground">kept as is</span></span>}
                 {review > 0 && <span><span className="font-semibold tabular-nums text-warning">{review.toLocaleString()}</span> <span className="text-muted-foreground">unconfirmed</span></span>}
-                {unattempted > 0 && <span><span className="font-semibold tabular-nums">{unattempted.toLocaleString()}</span> <span className="text-muted-foreground">not attempted</span></span>}
-                {imported === 0 && kept === 0 && review === 0 && unattempted === 0 && <span className="text-muted-foreground">Nothing was confirmed in this run.</span>}
+                {notAttempted > 0 && <span><span className="font-semibold tabular-nums">{notAttempted.toLocaleString()}</span> <span className="text-muted-foreground">not attempted</span></span>}
+                {imported === 0 && kept === 0 && review === 0 && notAttempted === 0 && <span className="text-muted-foreground">Nothing was confirmed in this run.</span>}
             </p>
             {notice && <p className="flex items-start gap-2 text-xs leading-relaxed text-warning"><CircleAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 [overflow-wrap:anywhere]">{notice}</span></p>}
         </div>
@@ -143,7 +133,7 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
                 return <li key={result.rowId} className="flex items-start gap-3 py-3">
                     {row && <MigrationArtwork record={row.source} />}
                     <div className="min-w-0 flex-1 space-y-1.5">
-                        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1"><div className="min-w-0 flex-1"><p className="break-words text-sm font-semibold">{row ? watchRecordTitle(row.source) : 'Title'}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{row ? watchRecordSubtitle(row.source) : 'Title'}</p></div><span className={cn('inline-flex shrink-0 items-center gap-1.5 text-xs', result.status === 'failed' ? 'text-warning' : 'text-muted-foreground')}>{result.status === 'applied' && <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5" />}{resultLabels[result.status]}</span></div>
+                        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1"><div className="min-w-0 flex-1"><p className="break-words text-sm font-semibold">{row ? watchRecordTitle(row.source) : 'Title'}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{row ? watchRecordSubtitle(row.source) : 'Title'}</p></div><span className={cn('inline-flex shrink-0 items-center gap-1.5 text-xs', result.status === 'failed' ? 'text-warning' : 'text-muted-foreground')}>{result.status === 'applied' && <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5" />}{resultLabel(result)}</span></div>
                         {result.verified && (result.status === 'applied' || result.status === 'unchanged') && <p className="text-xs leading-relaxed text-muted-foreground"><span className="font-medium text-foreground/80">Saved here:</span> {migrationStateLabel(result.verified)}</p>}
                         <p className="text-xs leading-relaxed text-muted-foreground">{resultExplanation(result)}</p>
                     </div>

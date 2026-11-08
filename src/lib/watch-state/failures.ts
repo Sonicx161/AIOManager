@@ -1,4 +1,5 @@
 import type { MigrationFailure } from './types.ts'
+import { StaleChecksError } from './prewrite-fresh.ts'
 
 // Only these structured fields leave the importer. Never export exception text,
 // transport bodies, URLs, auth keys or provider-specific error messages.
@@ -20,6 +21,9 @@ export function migrationFailure(error: unknown, stage: MigrationFailure['stage'
 export async function migrationStage<T>(stage: MigrationFailure['stage'], operation: () => Promise<T>): Promise<T> {
     try { return await operation() }
     catch (error) {
+        // A stale-checks abort restarts the row in the engine; it is control flow,
+        // not a transport failure, so it must survive this classification.
+        if (error instanceof StaleChecksError) throw error
         // Unknown errors retain their original message inside this module for local
         // debugging. The engine/UI/report use only migrationFailureMessage below.
         throw new WatchMigrationError({ ...migrationFailure(error, stage), stage }, error instanceof Error ? error.message : undefined)

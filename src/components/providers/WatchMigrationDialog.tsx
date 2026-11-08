@@ -20,6 +20,7 @@ import { createWatchMigrationSource, migrationSourceLabel, watchMigrationSources
 import { watchConnectionLabel } from './watch-migration-labels'
 import { executeWatchMigration, migrationReport, planWatchMigration } from '@/lib/watch-state/migration'
 import { migrationFailureMessage, WatchMigrationError } from '@/lib/watch-state/failures'
+import { isStaleKeptResult } from '@/lib/watch-state/result-counts'
 import { undatedRowCount, watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
 import type { MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateSource } from '@/lib/watch-state/types'
 import { refreshJellyfinMedia } from './useJellyfinMedia'
@@ -196,12 +197,10 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                 setError('The workspace, vault, source or destination changed. Unlock and preview again.')
             }
         }
-        const stopHidden = () => { if (document.hidden) request.current?.abort() }
         const stop = () => { request.current?.abort() }
         const accountsUnsubscribe = useAccountStore.subscribe(check)
         const authUnsubscribe = useAuthStore.subscribe(check)
         const workspaceUnsubscribe = subscribeWorkspaceChanges(check)
-        document.addEventListener('visibilitychange', stopHidden)
         window.addEventListener('pagehide', stop)
         return () => {
             stop()
@@ -209,7 +208,6 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
             accountsUnsubscribe()
             authUnsubscribe()
             workspaceUnsubscribe()
-            document.removeEventListener('visibilitychange', stopHidden)
             window.removeEventListener('pagehide', stop)
         }
     }, [open, accountId, connection.id])
@@ -374,6 +372,8 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
     // "Remaining" mixes rows that failed verification with rows the run never reached; the
     // result state reports them separately so retry copy never claims the wrong population.
     const unattemptedCount = remaining.filter(row => !byResult.has(row.id)).length
+    // A stale-kept row was never written, so it needs a fresh preview like an unattempted one.
+    const staleKeptCount = results.filter(result => isStaleKeptResult(result)).length
     const undatedCount = plan ? undatedRowCount(plan.rows) : 0
     const alreadySavedCount = plan?.rows.filter(row => row.status === 'unchanged' || byResult.get(row.id)?.status === 'unchanged').length || 0
     const skippedBreakdown = useMemo(() => {
@@ -525,14 +525,14 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                             </li>
                         })}</ul> : <EmptyState title="No matching records" description="Choose another filter or source to review more saved state." />}
                         {pageCount > 1 && <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground"><Button size="sm" variant="outline" disabled={shownPage === 0} onClick={() => setPage(shownPage - 1)}>Previous</Button><span>Page {shownPage + 1} of {pageCount}</span><Button size="sm" variant="outline" disabled={shownPage + 1 === pageCount} onClick={() => setPage(shownPage + 1)}>Next</Button></div>}
-                        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">We check each title before copying and confirm it was saved afterward. This connection may also update its linked tracking services. Closing this window, locking the vault or leaving the tab stops the import. You can preview again later; saved titles won’t be copied twice.</p>
+                        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">We check each title before copying and confirm it was saved afterward. This connection may also update its linked tracking services. Closing this window or locking the vault stops the import; switching tabs does not. You can preview again later; saved titles won’t be copied twice.</p>
                     </div>}
                     <div aria-live="polite" className="text-sm text-muted-foreground">{!busy && !showingResults && progress}</div>
                     {error && !showingResults && <p role="alert" className="text-sm text-destructive">{error}</p>}
                 </div>
                 <DialogFooter className={showingResults ? 'flex flex-wrap items-center justify-end gap-2 border-t border-border/30 pt-4' : 'flex-wrap gap-2'}>
                     {busy ? <Button ref={stopButton} variant="outline" onClick={() => request.current?.abort()}><Square className="h-4 w-4" />Stop</Button> : showingResults ? <>
-                        {(failedCount > 0 || unattemptedCount > 0) && <Button variant="outline" onClick={reviewAndPreviewAgain}>Review &amp; preview again</Button>}
+                        {(failedCount > 0 || unattemptedCount > 0 || staleKeptCount > 0) && <Button variant="outline" onClick={reviewAndPreviewAgain}>Review &amp; preview again</Button>}
                         <Button onClick={() => { reset(); onOpenChange(false) }}>Done</Button>
                     </> : <>
                         <Button variant="ghost" onClick={() => { reset(); onOpenChange(false) }}>Close</Button>

@@ -26,13 +26,14 @@
 //     carry them.
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { canonicalWatchIdentity, hasSavedWatchState, sameWatchTitle, sourceTime, watchFingerprint } from './records.ts'
+import { assertFreshChecks, StaleChecksError } from './prewrite-fresh.ts'
 
 export type NuvioWatchRpcName = 'sync_pull_watched_items' | 'sync_pull_watch_progress' | 'sync_push_watched_items' | 'sync_push_watch_progress'
 
 export interface NuvioWatchDestinationTransport {
     /** Every RPC in this transport stays pinned to one Nuvio profile index. */
     profileIndex: number
-    rpc(fn: NuvioWatchRpcName, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
+    rpc(fn: NuvioWatchRpcName, body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void): Promise<unknown>
 }
 
 export interface NuvioWatchDestinationOptions {
@@ -376,6 +377,8 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
         recentPull = null
         const reusable = options.reuseRecentPull === true && candidate !== null && candidate.profileIndex === transport.profileIndex && now() - candidate.at <= reuseWindowMs
         const pull = reusable ? candidate.pull : await pullAll(transport.profileIndex, transport.rpc, signal)
+        // A reused pull ran no new check just now, so its own finish time dates the checks.
+        const checkedAt = reusable ? candidate.at : now()
         if (options.reuseRecentPull === true) recentPull = { pull, profileIndex: transport.profileIndex, at: reusable ? candidate.at : now() }
         const historyRow = pull.history.get(target.identity)?.row ?? null
         const progressRow = pull.progress.get(target.identity)?.row ?? null
@@ -464,6 +467,7 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
         // Push the resume first: a completion dated at or after the resume makes the server
         // ignore the resume push, so the completion must land after the position.
         if (doProgress) {
+            assertFreshChecks(checkedAt, now())
             const entry = {
                 content_id: target.contentId,
                 content_type: contentType,
@@ -474,9 +478,14 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
                 duration: durationMs,
                 last_watched: resumeTime,
             }
-            checkPushResult(await transport.rpc('sync_push_watch_progress', { p_profile_id: transport.profileIndex, p_entries: [entry] }, signal), 'sync_push_watch_progress')
+            checkPushResult(await transport.rpc('sync_push_watch_progress', { p_profile_id: transport.profileIndex, p_entries: [entry] }, signal, () => assertFreshChecks(checkedAt, now())), 'sync_push_watch_progress')
         }
         if (doWatched) {
+            try {
+                assertFreshChecks(checkedAt, now())
+            } catch (error) {
+                throw error instanceof StaleChecksError && doProgress ? new StaleChecksError(true) : error
+            }
             const item: Record<string, unknown> = {
                 content_id: target.contentId,
                 content_type: contentType,
@@ -487,7 +496,14 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
                 item.season = target.season
                 item.episode = target.episode
             }
-            checkPushResult(await transport.rpc('sync_push_watched_items', { p_profile_id: transport.profileIndex, p_items: [item] }, signal), 'sync_push_watched_items')
+            const watchedFresh = () => {
+                try {
+                    assertFreshChecks(checkedAt, now())
+                } catch (error) {
+                    throw error instanceof StaleChecksError && doProgress ? new StaleChecksError(true) : error
+                }
+            }
+            checkPushResult(await transport.rpc('sync_push_watched_items', { p_profile_id: transport.profileIndex, p_items: [item] }, signal, watchedFresh), 'sync_push_watched_items')
         }
 
         const check = await pullAll(transport.profileIndex, transport.rpc, signal)

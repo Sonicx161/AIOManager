@@ -277,8 +277,9 @@ export interface JellyfinWatchClient extends JellyfinClient {
      * Writes UserData. Servers without /Items/{id}/UserData (Jellyfin 10.8) answer 404/405; a
      * played-only update then falls back to PlayedItems?datePlayed= and the result reports the
      * route used. The capability is learned from the response and remembered for this client.
+     * beforeDispatch runs immediately before each mutation request, including the fallback.
      */
-    writeUserData(accessToken: string, userId: string, itemId: string, update: JellyfinUserDataUpdate, signal?: AbortSignal): Promise<{ via: 'userdata' | 'played-items' } | void>
+    writeUserData(accessToken: string, userId: string, itemId: string, update: JellyfinUserDataUpdate, signal?: AbortSignal, beforeDispatch?: () => void): Promise<{ via: 'userdata' | 'played-items' } | void>
     /**
      * Sets the user's Primary profile picture. The body must be the base64
      * TEXT of the image bytes (Jellyfin base64-decodes it), never raw bytes.
@@ -1309,7 +1310,8 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         userId: string,
         itemId: string,
         update: JellyfinUserDataUpdate,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        beforeDispatch?: () => void
     ): Promise<{ via: 'userdata' | 'played-items' }> {
         if (typeof userId !== 'string' || userId === '') {
             throw new JellyfinError('invalid-response', 'writeUserData requires a non-empty userId')
@@ -1330,6 +1332,9 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                 throw cause instanceof JellyfinError ? cause : new JellyfinError('unsupported', 'This server cannot store this watch state without the UserData endpoint')
             }
             const datePlayed = update.LastPlayedDate !== undefined ? `?datePlayed=${encodeURIComponent(update.LastPlayedDate)}` : ''
+            // The fallback is a second mutation dispatched after the first round trip,
+            // so the caller's freshness guard runs again right before it leaves.
+            beforeDispatch?.()
             await request({
                 label: 'Users/{userId}/PlayedItems/{itemId}',
                 path: `/Users/${encodeURIComponent(userId)}/PlayedItems/${encodeURIComponent(itemId)}${datePlayed}`,
@@ -1341,6 +1346,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         }
         if (userDataRoute === 'played-items') return viaPlayedItems()
         try {
+            beforeDispatch?.()
             await request({
                 label: 'Users/{userId}/Items/{itemId}/UserData',
                 path: `/Users/${encodeURIComponent(userId)}/Items/${encodeURIComponent(itemId)}/UserData`,

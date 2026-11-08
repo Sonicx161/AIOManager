@@ -26,6 +26,7 @@ import { canonicalWatchIdentity, hasSavedWatchState, sourceTime, watchFingerprin
 import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
 import { isLiveLibraryRow } from '../stremio-liveness.ts'
 import { migrationStage, WatchMigrationError } from './failures.ts'
+import { assertFreshChecks } from './prewrite-fresh.ts'
 
 export interface StremioDestinationVideo {
     id: string
@@ -40,12 +41,12 @@ export interface StremioWatchDestinationOptions {
     subject: string
     scope: string
     /** Returns a transport pinned to the remote user verified at session creation; the runtime wrapper owns auth and identity re-checks. */
-    open(signal: AbortSignal): Promise<{ request(body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> }>
+    open(signal: AbortSignal): Promise<{ request(body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void): Promise<unknown> }>
     /** Ordered-video provider (Cinemeta via the runtime wrapper); absent or ambiguous lists fail closed for episode writes. */
     seriesVideos?(id: string): Promise<StremioDestinationVideo[] | null>
 }
 
-type DestinationRequest = (body: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>
+type DestinationRequest = (body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void) => Promise<unknown>
 
 const PROVIDER_ITEM_ID = /^(?:tt\d{5,}|tmdb:\d+)$/
 const MAX_LIBRARY_ITEMS = 10_000
@@ -396,9 +397,12 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         return rows.length === 1 ? rows[0] : null
     })
 
-    const putRow = async (request: DestinationRequest, row: Record<string, unknown>, signal: AbortSignal): Promise<void> => {
+    const putRow = async (request: DestinationRequest, checkedAt: number, row: Record<string, unknown>, signal: AbortSignal): Promise<void> => {
+        assertFreshChecks(checkedAt)
         signal.throwIfAborted()
-        const result = await migrationStage('write', () => request({ type: 'DatastorePut', collection: 'libraryItem', changes: [row] }, signal))
+        // The transport awaits headers and a pacer reservation before the fetch; the
+        // guard re-runs through beforeDispatch immediately before the write leaves.
+        const result = await migrationStage('write', () => request({ type: 'DatastorePut', collection: 'libraryItem', changes: [row] }, signal, () => assertFreshChecks(checkedAt)))
         // The official API returns { success: true }; some compatible transports return
         // a bare true. An acknowledgement only permits the mandatory readback below.
         if (result !== true && !(isRecord(result) && result.success === true)) throw new WatchMigrationError({ stage: 'write', reason: 'acknowledgement' }, 'Stremio did not confirm the library update.')
@@ -636,7 +640,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         return episodeView(readback, check.index, check.season, check.episode)
     }
 
-    const createMovieRow = async (request: DestinationRequest, rowId: string, expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult> => {
+    const createMovieRow = async (request: DestinationRequest, checkedAt: number, rowId: string, expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult> => {
         if (!PROVIDER_ITEM_ID.test(rowId)) throw new Error(BAD_TARGET)
         const now = new Date().toISOString()
         const state: Record<string, unknown> = {}
@@ -648,7 +652,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(undefined, patch, 'movie')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row: Record<string, unknown> = { _id: rowId, name: expected.title || rowId, type: 'movie', poster: '', removed: false, temp: false, _ctime: now, _mtime: createdMtime(state, now), state }
-        await putRow(request, row, signal)
+        await putRow(request, checkedAt, row, signal)
         await trackOwnWrite(rowId, row, null, patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
@@ -662,11 +666,12 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         signal.throwIfAborted()
         const fresh = await readRow(request, rowId, signal)
         signal.throwIfAborted()
+        const checkedAt = Date.now()
         const keptRecord = fresh === null ? undefined : await movieView(fresh)
         if (patch.watched !== undefined && patch.positionMs !== undefined) return { status: 'conflict', message: CANNOT_COMBINE, record: keptRecord }
         if (patch.watched === undefined && patch.positionMs === undefined) return { status: 'unchanged', message: NOTHING_SELECTED, record: keptRecord }
         if (patch.positionMs !== undefined && (!Number.isSafeInteger(patch.positionMs) || patch.positionMs <= 0)) return { status: 'conflict', message: BAD_RESUME, record: keptRecord }
-        if (fresh === null) return createMovieRow(request, rowId, expected, patch, signal)
+        if (fresh === null) return createMovieRow(request, checkedAt, rowId, expected, patch, signal)
         if (fresh.removed) return { status: 'conflict', message: REMOVED_ROW, record: keptRecord }
         if (fresh.kind !== 'movie') return { status: 'conflict', message: CHANGED_MESSAGE, record: keptRecord }
         const desired = (patch.watched === true && keptRecord !== undefined && keptRecord.watched === true)
@@ -689,7 +694,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'movie')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row = stampedRow(fresh.raw, state)
-        await putRow(request, row, signal)
+        await putRow(request, checkedAt, row, signal)
         await trackOwnWrite(rowId, row, null, patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
@@ -700,6 +705,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
 
     const createEpisodeRow = async (
         request: DestinationRequest,
+        checkedAt: number,
         rowId: string,
         season: number,
         episode: number,
@@ -725,7 +731,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(undefined, patch, 'series')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row: Record<string, unknown> = { _id: rowId, name: expected.seriesTitle || expected.title || rowId, type: 'series', poster: '', removed: false, temp: false, _ctime: now, _mtime: createdMtime(state, now), state }
-        await putRow(request, row, signal)
+        await putRow(request, checkedAt, row, signal)
         await trackOwnWrite(rowId, row, seasonEpisodeKey(season, episode), patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
@@ -752,6 +758,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         signal.throwIfAborted()
         const fresh = await readRow(request, rowId, signal)
         signal.throwIfAborted()
+        const checkedAt = Date.now()
         const unready = async (message: string): Promise<MigrationWriteResult> => ({
             status: 'conflict',
             message,
@@ -763,7 +770,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         if (positionMs !== undefined && (!Number.isSafeInteger(positionMs) || positionMs <= 0)) return unready(BAD_RESUME)
         const targetIndex = index.bySeasonEpisode.get(episodeKey)
         if (targetIndex === undefined) return unready(EPISODE_NOT_LISTED)
-        if (fresh === null) return createEpisodeRow(request, rowId, season, episode, targetIndex, index, expected, patch, signal)
+        if (fresh === null) return createEpisodeRow(request, checkedAt, rowId, season, episode, targetIndex, index, expected, patch, signal)
         if (fresh.removed) return unready(REMOVED_ROW)
         if (fresh.kind !== 'series') return unready(CHANGED_MESSAGE)
         const bits = await readSeriesBits(fresh.state, index)
@@ -787,7 +794,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
             if (lastWatched !== null) state.lastWatched = lastWatched
             const row = stampedRow(fresh.raw, state)
-            await putRow(request, row, signal)
+            await putRow(request, checkedAt, row, signal)
             await trackOwnWrite(rowId, row, episodeKey, { watched: true })
             signal.throwIfAborted()
             const readback = await readRow(request, rowId, signal, 'readback')
@@ -821,7 +828,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row = stampedRow(fresh.raw, state)
-        await putRow(request, row, signal)
+        await putRow(request, checkedAt, row, signal)
         await trackOwnWrite(rowId, row, episodeKey, { positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')

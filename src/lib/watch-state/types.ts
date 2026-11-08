@@ -57,6 +57,8 @@ export interface MigrationWriteResult {
     status: 'applied' | 'unchanged' | 'conflict'
     message: string
     record?: WatchStateRecord
+    /** The pre-write checks went stale, so nothing was written; the row needs a fresh preview. */
+    stale?: true
 }
 
 export interface WatchStateDestination extends WatchStateEndpoint {
@@ -107,4 +109,6 @@ export interface MigrationResult {
     completedAt: number
     failure?: MigrationFailure
     verified?: Pick<WatchStateRecord, 'watched' | 'positionMs' | 'playedAt' | 'playCount'>
+    /** The row was kept only because its checks went stale; it was never written and counts as not attempted. */
+    stale?: true
 }

@@ -125,7 +125,7 @@ export function createStremioWatchRequest(options: RequestOptions) {
     const sleepFn = options.sleep ?? sleep
     const now = options.now ?? Date.now
     const pacer = options.pacer ?? stremioWatchRequestPacer(`account:${options.accountId}`)
-    return async (type: StremioOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> => {
+    return async (type: StremioOperation, body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void): Promise<unknown> => {
         const stage: MigrationFailure['stage'] = type === 'GetUser' ? 'identity' : type === 'DatastorePut' ? 'write' : 'prewrite'
         // Reads may retry a transient transport failure. Never replay a library
         // replacement here: an interrupted write may have reached Stremio already.
@@ -140,6 +140,10 @@ export function createStremioWatchRequest(options: RequestOptions) {
             // here so no request leaves with auth captured before the wait.
             options.assertCurrent()
             signal.throwIfAborted()
+            // Writes re-assert their pre-write freshness here: header and pacing waits
+            // can outlast the freshness bound, so the guard runs on every attempt,
+            // immediately before the request leaves.
+            beforeDispatch?.()
             let response: Response
             try {
                 response = await (options.fetch ?? fetch)('/api/stremio-proxy', {

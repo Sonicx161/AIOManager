@@ -1,6 +1,7 @@
 import { hasSavedWatchState, matchesWatchPatch, sameWatchTitle, undatedRowCount } from './records.ts'
 import { migrationFailure, migrationFailureMessage, WatchMigrationError } from './failures.ts'
-import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
+import { StaleChecksError } from './prewrite-fresh.ts'
+import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, MigrationWriteResult, WatchMigrationPlan, WatchStateDestination, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
 
 function isTransientMatchFailure(error: unknown): boolean {
     if (!error || typeof error !== 'object') return false
@@ -8,6 +9,11 @@ function isTransientMatchFailure(error: unknown): boolean {
     return candidate.kind === 'server' || candidate.kind === 'network' || candidate.kind === 'timeout'
         || candidate.status === 429 || candidate.status === 503
 }
+
+// A row whose checks went stale was never written, so it restarts instead of failing.
+const STALE_APPLY_RETRIES = 2
+const STALE_CHECKS_MESSAGE = 'Paused too long to write safely. Preview again to import this title.'
+const STALE_PARTIAL_MESSAGE = 'Paused too long to finish this title; only part of it was saved. Preview again to complete it.'
 
 export async function planWatchMigration(source: WatchStateSnapshot, destination: WatchStateDestination, options: MigrationOptions, signal: AbortSignal, progress?: MigrationProgress): Promise<WatchMigrationPlan> {
     if (source.scope === destination.scope) throw new Error('Choose a different remote user or server for the destination.')
@@ -162,9 +168,29 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
             result = { rowId: row.id, status: 'conflict', message: 'The source record changed or could not be verified. Preview again.', completedAt: Date.now() }
         } else {
             try {
-                const written = await destination.apply(row.target!, row.patch!, signal)
-                result = { rowId: row.id, status: written.status, message: written.message, completedAt: Date.now() }
-                if (written.record && written.status !== 'conflict') {
+                // A suspended tab can leave a row's checks older than the pre-write freshness
+                // guard allows. Nothing was written, so the row restarts from a fresh read;
+                // after the last retry it is kept as a conflict instead of failing.
+                let written: MigrationWriteResult | null = null
+                let partial = false
+                for (let attempt = 0; ; attempt++) {
+                    try {
+                        written = await destination.apply(row.target!, row.patch!, signal)
+                        break
+                    } catch (error) {
+                        if (!(error instanceof StaleChecksError)) throw error
+                        partial ||= error.partial
+                        if (attempt >= STALE_APPLY_RETRIES) {
+                            // Part of the row may have landed, so it must read as needing review, not as never attempted.
+                            if (!partial) written = { status: 'conflict', message: STALE_CHECKS_MESSAGE, stale: true }
+                            break
+                        }
+                    }
+                }
+                result = written
+                    ? { rowId: row.id, status: written.status, message: written.message, completedAt: Date.now(), ...(written.stale === true ? { stale: true } : {}) }
+                    : { rowId: row.id, status: 'failed', message: STALE_PARTIAL_MESSAGE, failure: { stage: 'write', reason: 'unknown' }, completedAt: Date.now() }
+                if (written?.record && written.status !== 'conflict') {
                     const { watched, positionMs, playedAt, playCount } = written.record
                     result.verified = { watched, positionMs, playedAt, playCount }
                 }

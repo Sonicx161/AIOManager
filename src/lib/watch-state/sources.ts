@@ -99,14 +99,14 @@ export async function stremioWatchSession(account: Account, connection: Connecti
         open: async openSignal => {
             const fresh = await readUser(openSignal)
             if (fresh.id !== user.id) throw new Error('The Stremio account changed. Preview again from the start.')
-            return { request: (body, requestSignal) => request(body.type === 'DatastorePut' ? 'DatastorePut' : 'DatastoreGet', body, requestSignal) }
+            return { request: (body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void) => request(body.type === 'DatastorePut' ? 'DatastorePut' : 'DatastoreGet', body, requestSignal, beforeDispatch) }
         },
         seriesVideos: fetchSeriesVideos,
     }
 }
 
 export interface NuvioWatchSession extends Omit<NuvioWatchSourceOptions, 'open'> {
-    open(signal: AbortSignal): Promise<{ rpc: (fn: string, body: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>; profileIndex: number }>
+    open(signal: AbortSignal): Promise<{ rpc: (fn: string, body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void) => Promise<unknown>; profileIndex: number }>
     /** Forces a fresh token and identity verification; reuse sessions call it once at the start of an import run. */
     beginRun(signal: AbortSignal): Promise<void>
 }
@@ -206,12 +206,12 @@ export async function nuvioWatchSession(account: Account, connection: Connection
     const sameIdentity = (candidate: NuvioLive) => candidate.subjectId === initial.subjectId && candidate.profileId === initial.profileId && candidate.profileIndex === initial.profileIndex
     const identityChanged = () => new Error('The Nuvio user or profile changed. Preview again from the start.')
     const profileChanged = () => new Error('The selected Nuvio profile changed. Preview again before importing.')
-    const bound = (profileIndex: number, send: (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal) => Promise<unknown>) => ({
+    const bound = (profileIndex: number, send: (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void) => Promise<unknown>) => ({
         profileIndex,
-        rpc: async (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal): Promise<unknown> => {
+        rpc: async (fn: string, body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void): Promise<unknown> => {
             guard(fn)
             if (fn !== 'sync_pull_profiles' && body.p_profile_id !== profileIndex) throw profileChanged()
-            return send(fn, body, requestSignal)
+            return send(fn, body, requestSignal, beforeDispatch)
         },
     })
 
@@ -232,11 +232,15 @@ export async function nuvioWatchSession(account: Account, connection: Connection
         return renewing
     }
     const usable = () => Number.isFinite(live.expiresAt) && Date.now() < live.expiresAt - NUVIO_TOKEN_MARGIN_MS
-    const shared = bound(initial.profileIndex, async (fn, body, requestSignal) => {
+    const shared = bound(initial.profileIndex, async (fn, body, requestSignal, beforeDispatch) => {
         const used = live.accessToken
+        beforeDispatch?.()
         let response = await post(used, fn, body, requestSignal)
         if (response.status === 401) {
             await renew(requestSignal, used)
+            // Renewal re-fetches the token and profile; a write's freshness guard must
+            // re-run after that wait, immediately before the replay leaves.
+            beforeDispatch?.()
             response = await post(live.accessToken, fn, body, requestSignal)
         }
         return readBody(response)
@@ -255,7 +259,10 @@ export async function nuvioWatchSession(account: Account, connection: Connection
             }
             const fresh = await authenticate(openSignal)
             if (!sameIdentity(fresh)) throw identityChanged()
-            return bound(fresh.profileIndex, async (fn, body, requestSignal) => readBody(await post(fresh.accessToken, fn, body, requestSignal)))
+            return bound(fresh.profileIndex, async (fn, body, requestSignal, beforeDispatch) => {
+                beforeDispatch?.()
+                return readBody(await post(fresh.accessToken, fn, body, requestSignal))
+            })
         },
         beginRun: async runSignal => {
             if (reuse) await renew(runSignal, null)
