@@ -12,8 +12,9 @@ import { Account } from '@/types/account'
 import type { Connection } from '@/types/connection'
 import { exportJellyfinCredentials, importJellyfinCredentials, openJellyfinSecret, sealJellyfinSecret, recoverJellyfinConnection } from '@/lib/jellyfin/connection-data'
 import { mergeConnections, resolvePrimaryConnectionId } from '@/lib/connection-merge'
+import { importConnectionRemovalState, restoredConnectionIds, pruneConnectionRemovalState, readConnectionRemovals, readConnectionRestores } from '@/lib/connection-removals'
 import { legacyConnectionGeneration } from '@/lib/connection-generation'
-import { resolvePrimaryStremio, stremioConnectionsOf } from '@/lib/connection-identity'
+import { markerRemovedStremioLoginIds, resolvePrimaryStremio, stremioAuthKeyAfterMarkerRemovals, stremioConnectionsOf } from '@/lib/connection-identity'
 import { SAVED_LOGIN_LOCKED, isSavedCredentialFailure } from './accountSync'
 import { isAIOStreamsAddon, parseAIOStreamsUrl } from '@/lib/aiostreams-utils'
 import { isAIOMetadataAddon, parseAIOMetadataUrl } from '@/lib/aiometadata-utils'
@@ -391,6 +392,9 @@ async function buildExportData(
             activeProfileId: acc.activeProfileId,
             deletedAddons: acc.deletedAddons,
             restoredAddons: acc.restoredAddons,
+            // Both marker maps ride the blob, pruned so the envelope stays bounded;
+            // the fields are additive, older readers ignore them.
+            ...pruneConnectionRemovalState(acc),
             // CP-R3-002: the export re-applies the bounds, so a marker that
             // somehow bypassed the setter can never ride the blob.
             connectionPictures: migrateConnectionPictures(acc.connectionPictures),
@@ -808,6 +812,8 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                 activeProfileId: acc.activeProfileId as string | undefined,
                 deletedAddons: acc.deletedAddons as Record<string, number> | undefined,
                 restoredAddons: acc.restoredAddons as Record<string, number> | undefined,
+                deletedConnections: readConnectionRemovals(acc.deletedConnections),
+                restoredConnections: readConnectionRestores(acc.restoredConnections),
                 // CP-R2-004: normalize, bound and prune the imported picture
                 // state (stale rows for connections/instances the incoming
                 // account no longer has never enter the merged blob), and
@@ -998,12 +1004,13 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                     keepLocalCiphertext,
                 )
                 const passwordUnchanged = !!matchedSecrets && (keepLocalCiphertext && (ra.password === undefined || ra.password === matchedSecrets.password))
+                const mergedAuthKeyValue = mergedAuthKey
+                    ? (secretUnchanged ? matchedAccount.authKey : await encrypt(mergedAuthKey, getWriteEncryptionKey()))
+                    : matchedAccount.authKey
                 const updated: Account = {
                     ...matchedAccount,
                     name: ra.name || matchedAccount.name,
-                    authKey: mergedAuthKey
-                        ? (secretUnchanged ? matchedAccount.authKey : await encrypt(mergedAuthKey, getWriteEncryptionKey()))
-                        : matchedAccount.authKey,
+                    authKey: mergedAuthKeyValue,
                     password: mergedPassword
                         ? (passwordUnchanged ? matchedAccount.password : await encrypt(mergedPassword, getWriteEncryptionKey()))
                         : matchedAccount.password,
@@ -1066,15 +1073,48 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                     })(),
                     ...(await (async () => {
                         // Re-point primaries that referred to media or removed connections.
-                        const mergedConnections = mergeConnections(matchedAccount.connections, ra.connections, mode) ?? matchedAccount.connections
-                        const incomingIds = new Set((ra.connections || []).map(c => c?.id).filter(Boolean) as string[])
-                        // A read/merge never queues server credential cleanup: rows of a
-                        // live connection are deleted only by an explicit AIOManager
-                        // removal (connectionStore) or a deletion record, never because
-                        // a merge chose not to keep the connection locally.
+                        // Removal markers by flow (lib/connection-removals.ts): a sync
+                        // pull merges both devices' maps newest-wins so an explicit
+                        // removal survives a stale copy; a backup restore acknowledges
+                        // the markers of every connection it brings back; a merge-mode
+                        // file import adopts no file markers, so an old backup cannot
+                        // delete a live connection. A read/merge never queues server
+                        // credential cleanup: rows of a live connection are deleted only
+                        // by an explicit AIOManager removal (connectionStore) or a
+                        // deletion record, never because a merge chose not to keep the
+                        // connection locally.
+                        const incomingConnectionIds = new Set((ra.connections || []).map(c => c?.id).filter(Boolean) as string[])
+                        const restoredIds = restoredConnectionIds(incomingConnectionIds, !!ra.rawKey, [matchedAccount.id, ra.id])
+                        const removalState = importConnectionRemovalState(accountList, matchedAccount, ra, restoredIds)
+                        const mergedConnections = mergeConnections(matchedAccount.connections, ra.connections, mode, removalState) ?? matchedAccount.connections
+                        const primaryConnectionId = resolvePrimaryConnectionId(mergedConnections, ra.primaryConnectionId ?? matchedAccount.primaryConnectionId)
+                        // A Stremio login dropped by a marker must not live on through
+                        // the legacy flat key: reconcile account.authKey exactly the way
+                        // an explicit removal does (clear when none survive, re-point at
+                        // the surviving canonical otherwise), so the duplicate guards
+                        // never see the removed login either. The candidates include the
+                        // legacy synthesized ids (`${id}:stremio`, both records: a
+                        // key/email match can pair different account ids) because a
+                        // pre-multi-login account has no stored row to enumerate.
+                        const markerRemovedStremioIds = markerRemovedStremioLoginIds({
+                            localConnections: matchedAccount.connections,
+                            incomingConnections: ra.connections,
+                            accountIds: [matchedAccount.id, ra.id],
+                            removals: removalState,
+                        })
+                        const authKeyAfterMarkerRemovals = markerRemovedStremioIds.length > 0
+                            ? stremioAuthKeyAfterMarkerRemovals({
+                                connections: mergedConnections,
+                                primaryConnectionId,
+                                previousAuthKey: mergedAuthKeyValue,
+                                removedConnectionIds: markerRemovedStremioIds,
+                            })
+                            : undefined
                         return {
-                            connections: reuseUnchanged(matchedAccount.connections, await settleImportedConnectionGenerations(matchedAccount.id, mergedConnections, incomingIds, accountList)),
-                            primaryConnectionId: resolvePrimaryConnectionId(mergedConnections, ra.primaryConnectionId ?? matchedAccount.primaryConnectionId),
+                            connections: reuseUnchanged(matchedAccount.connections, await settleImportedConnectionGenerations(matchedAccount.id, mergedConnections, incomingConnectionIds, accountList)),
+                            primaryConnectionId,
+                            ...removalState,
+                            ...(authKeyAfterMarkerRemovals !== undefined ? { authKey: authKeyAfterMarkerRemovals } : {}),
                         }
                     })()),
                     lastSync: ra.lastSync || new Date(),
@@ -1086,15 +1126,37 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                 const deletionState = mergeAddonDeletionState(undefined, ra.deletedAddons, undefined, ra.restoredAddons)
                 const importedAddons = filterResurrected(ra.addons, [], deletionState.deletedAddons)
                 const incomingIds = new Set((ra.connections || []).map(c => c?.id).filter(Boolean) as string[])
-                const importedConnections = await settleImportedConnectionGenerations(ra.id, mergeConnections(undefined, ra.connections, mode), incomingIds, accountList)
+                // Same marker policy as the matched-account branch (lib/connection-removals.ts).
+                const restoredIds = restoredConnectionIds(incomingIds, !!ra.rawKey, [ra.id])
+                const removalState = importConnectionRemovalState(accountList, undefined, ra, restoredIds)
+                const importedConnections = await settleImportedConnectionGenerations(ra.id, mergeConnections(undefined, ra.connections, mode, removalState), incomingIds, accountList)
+                const primaryConnectionId = resolvePrimaryConnectionId(importedConnections, ra.primaryConnectionId)
+                // The flat key follows the surviving Stremio logins here too, so a
+                // marker-removed login (the legacy synthesized `${ra.id}:stremio` id
+                // included) cannot be synthesized back from account.authKey.
+                const sealedFlatKey = ra.rawKey ? await encrypt(ra.rawKey, getWriteEncryptionKey()) : ''
+                const markerRemovedStremioIds = markerRemovedStremioLoginIds({
+                    localConnections: undefined,
+                    incomingConnections: ra.connections,
+                    accountIds: [ra.id],
+                    removals: removalState,
+                })
                 const importedAccount = {
                     ...ra,
                     addons: importedAddons,
                     ...deletionState,
-                    authKey: ra.rawKey ? await encrypt(ra.rawKey, getWriteEncryptionKey()) : '',
+                    ...removalState,
+                    authKey: markerRemovedStremioIds.length > 0
+                        ? stremioAuthKeyAfterMarkerRemovals({
+                            connections: importedConnections,
+                            primaryConnectionId,
+                            previousAuthKey: sealedFlatKey,
+                            removedConnectionIds: markerRemovedStremioIds,
+                        })
+                        : sealedFlatKey,
                     password: ra.password ? await encrypt(ra.password, getWriteEncryptionKey()) : undefined,
                     connections: importedConnections,
-                    primaryConnectionId: resolvePrimaryConnectionId(importedConnections, ra.primaryConnectionId),
+                    primaryConnectionId,
                     apiKey: ra.apiKey ?? safeUUID(),
                 } as Account
                 reconciledAccounts.push(importedAccount)

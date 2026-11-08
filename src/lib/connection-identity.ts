@@ -1,5 +1,6 @@
 import type { Account } from '@/types/account'
 import type { Connection } from '@/types/connection'
+import { isRemovedConnection, type PartialConnectionRemovalState } from './connection-removals.ts'
 
 // Pure identity rules for accounts that hold SEVERAL connections on one platform.
 // Kept free of store, vault and network dependencies so the multiplicity invariants
@@ -148,6 +149,55 @@ export function stremioAuthKeyMirrorAfterRemoval(args: {
     // Both ciphertexts are sealed with the same vault key, so mirroring the sealed
     // value keeps the mirror decryptable without a round trip.
     return resolvePrimaryStremio(remaining, primaryConnectionId)?.credentials?.authKey ?? ''
+}
+
+/**
+ * The value account.authKey should hold after removal markers drop Stremio logins
+ * during an import/sync merge: the explicit-removal rule applied for every
+ * marker-removed id, so a removed login cannot live on through the legacy flat key
+ * (getStremioConnection would synthesize a connection from it, and the duplicate
+ * guards compare it). `connections` is the post-merge survivor list; an empty result
+ * with no surviving login clears the mirror entirely.
+ */
+export function stremioAuthKeyAfterMarkerRemovals(args: {
+    connections: Connection[] | undefined
+    primaryConnectionId: string | undefined
+    previousAuthKey: string
+    removedConnectionIds: string[]
+}): string {
+    let value = args.previousAuthKey
+    for (const removedConnectionId of args.removedConnectionIds) {
+        value = stremioAuthKeyMirrorAfterRemoval({
+            connections: args.connections,
+            removedConnectionId,
+            primaryConnectionId: args.primaryConnectionId,
+            previousAuthKey: value,
+        })
+    }
+    return value
+}
+
+/**
+ * Stremio login ids whose removal markers must reconcile the legacy flat key during
+ * an import/sync merge: every stored native login on either side, plus the legacy
+ * synthesized ids (`${accountId}:stremio`) of both records. A pre-multi-login
+ * account has no stored row (its only identity is the synthesized one), and a
+ * key/email match can pair records whose account ids differ, so both ids count.
+ * Without the synthesized ids a marker could never clear account.authKey and
+ * getStremioConnection would re-synthesize the removed login.
+ */
+export function markerRemovedStremioLoginIds(args: {
+    localConnections: Connection[] | undefined
+    incomingConnections: Partial<Connection>[] | undefined
+    accountIds: string[]
+    removals: PartialConnectionRemovalState | undefined
+}): string[] {
+    const candidates = new Set<string>([
+        ...stremioConnectionsOf(args.localConnections).map(c => c.id),
+        ...stremioConnectionsOf((args.incomingConnections || []) as Connection[]).map(c => c.id),
+        ...args.accountIds.map(id => `${id}:stremio`),
+    ])
+    return Array.from(candidates).filter(id => isRemovedConnection(id, args.removals))
 }
 
 export function normalizedLoginEmail(value: string | undefined | null): string {

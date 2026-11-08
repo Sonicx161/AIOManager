@@ -2,6 +2,7 @@ import type { Connection, MediaServerIdentity } from '../types/connection.ts'
 import { isAddonConnection } from '../types/connection.ts'
 import { MEDIA_SIGN_IN_REQUIRED } from './jellyfin/connection-data.ts'
 import { normalizedBackendUrl, normalizedLoginEmail } from './connection-identity.ts'
+import { isRemovedConnection, type PartialConnectionRemovalState } from './connection-removals.ts'
 
 // Sync incoming connections carry metadata only (credentials live server-side), so local
 // credentials must be preserved. Backup imports carry credentials, which take precedence.
@@ -11,11 +12,13 @@ export function mergeConnections(
     local: Connection[] | undefined,
     incoming: Partial<Connection>[] | undefined,
     mode: 'merge' | 'mirror',
+    removals?: PartialConnectionRemovalState,
 ): Connection[] | undefined {
     if (!incoming) return local
-    const localById = new Map((local || []).map(c => [c.id, c]))
+    const keptLocal = (local || []).filter(c => !isRemovedConnection(c.id, removals))
+    const localById = new Map(keptLocal.map(c => [c.id, c]))
     const merged: Connection[] = incoming
-        .filter(inc => inc.id && inc.platform)
+        .filter(inc => inc.id && inc.platform && !isRemovedConnection(inc.id as string, removals))
         .map(inc => {
             const existing = localById.get(inc.id as string)
             const credentials = mergeConnectionCredentials(existing, inc)
@@ -34,7 +37,7 @@ export function mergeConnections(
         const incomingIds = new Set(merged.map(c => c.id))
         const mergedByPlatform = new Map<string, Connection[]>()
         for (const c of merged) mergedByPlatform.set(c.platform, [...(mergedByPlatform.get(c.platform) || []), c])
-        for (const c of local || []) {
+        for (const c of keptLocal) {
             if (incomingIds.has(c.id)) continue
             // Only the same platform AND login survives as one connection; media
             // connections are independent per server/user and always survive a merge.

@@ -48,6 +48,11 @@ export interface Account {
   deletedAddons?: Record<string, number>
   /** Deletion versions explicitly overridden by a user reinstall. */
   restoredAddons?: Record<string, number>
+  // Connection id -> removal version(ms). Stops a removed connection from being
+  // resurrected by a stale copy merging in. See lib/connection-removals.ts.
+  deletedConnections?: Record<string, number>
+  /** Removal versions explicitly overridden by a re-add or a backup restore. */
+  restoredConnections?: Record<string, number>
 }
 
 export interface AddonChangelogEntry {

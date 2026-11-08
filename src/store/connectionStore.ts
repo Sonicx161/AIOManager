@@ -10,6 +10,7 @@ import { toast } from '@/hooks/use-toast'
 import { triggerSync } from '@/lib/sync-trigger'
 import { canApplyMediaReadFailure, type MediaReadSession } from '@/lib/jellyfin/connection-health'
 import { stremioAuthKeyMirrorAfterRemoval, stremioConnectionsOf } from '@/lib/connection-identity'
+import { acknowledgeConnectionRestores, addConnectionRemovals } from '@/lib/connection-removals'
 import { noteStremioCanonicalRepoint, noteStremioLoginsRemoved } from '@/lib/stremio-repoint'
 
 /**
@@ -206,6 +207,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             return {
                 ...account,
                 connections: [...(account.connections || []), connection],
+                // A deliberate re-add acknowledges any removal marker for this id (an
+                // acknowledgement, not a local erase: it must survive the next sync).
+                ...acknowledgeConnectionRestores(account, [connection.id]),
                 primaryConnectionId: account.primaryConnectionId || (isAddonConnection(connection) ? connection.id : undefined),
             }
         }, options?.assertCurrent)
@@ -301,6 +305,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 ...account,
                 connections,
                 primaryConnectionId,
+                // Removal marker: the version outranks any earlier acknowledgement and
+                // survives sync merges, so a stale copy cannot merge this connection
+                // back (issue #89).
+                ...addConnectionRemovals(account, [connectionId]),
                 // account.authKey is the legacy mirror of the CANONICAL Stremio login:
                 // unlinking a secondary login must not clear it, and unlinking the
                 // canonical one re-points it at the surviving canonical login instead
