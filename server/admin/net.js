@@ -107,10 +107,11 @@ export const adminClientIp = (request) => forwardedInfo(request).ip
 
 // Fastify's trustProxy, so request.ip (rate limits, logs) follows the same hops as the Dashboard.
 // Fastify ignores a bare hop count, so the count is applied here behind a trusted socket peer.
+// Auto counts a trusted peer as one proxy, as forwardedInfo does.
 export function fastifyTrustProxy() {
     const raw = String(process.env.TRUST_PROXY ?? '').trim().toLowerCase()
     if (raw === 'true' || raw === '1') return true
-    const hops = trustProxyHops()
+    const hops = proxyHopsAuto() ? 1 : trustProxyHops()
     if (!hops) return false
     return (addr, i) => i < hops && (i > 0 || isTrustedProxy(normalize(addr)))
 }
