@@ -32,12 +32,6 @@ export const trustProxyHops = () => {
     const n = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10)
     return Number.isFinite(n) && n > 0 ? Math.min(n, 10) : 0
 }
-// Fastify's trustProxy, so request.ip (rate limits, logs) matches the Dashboard's client address.
-export const fastifyTrustProxy = () => {
-    const raw = String(process.env.TRUST_PROXY ?? '').trim().toLowerCase()
-    if (raw === 'true' || raw === '1') return true
-    return trustProxyHops() || false
-}
 export const adminReadOnly = () => isReadOnlyReplica()
 
 export const ADMIN_LIMITS = {

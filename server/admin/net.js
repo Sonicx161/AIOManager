@@ -105,6 +105,16 @@ export function forwardedInfo(request) {
 
 export const adminClientIp = (request) => forwardedInfo(request).ip
 
+// Fastify's trustProxy, so request.ip (rate limits, logs) follows the same hops as the Dashboard.
+// Fastify ignores a bare hop count, so the count is applied here behind a trusted socket peer.
+export function fastifyTrustProxy() {
+    const raw = String(process.env.TRUST_PROXY ?? '').trim().toLowerCase()
+    if (raw === 'true' || raw === '1') return true
+    const hops = trustProxyHops()
+    if (!hops) return false
+    return (addr, i) => i < hops && (i > 0 || isTrustedProxy(normalize(addr)))
+}
+
 // Loopback privileges (plain HTTP, lockout exemption) only for a loopback socket peer whose
 // request carries no forwarded headers; a forwarded candidate is never trusted as loopback.
 export function isDirectLoopback(request) {
