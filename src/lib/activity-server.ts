@@ -338,9 +338,11 @@ export async function deleteServerActivityEvents(eventIds: string[]): Promise<nu
     let deleted = 0
     for (const eventId of eventIds) {
         try {
+            // No body, so no JSON content type: Fastify answers 400 to an empty JSON body.
+            const { 'Content-Type': _contentType, ...headers } = authHeaders
             const res = await fetchWithTimeout(`${apiPath}/activity/events/${encodeURIComponent(eventId)}`, {
                 method: 'DELETE',
-                headers: authHeaders,
+                headers,
             })
             if (res.ok) deleted++
         } catch { /* fire-and-forget: a missed row re-merges on the next pull and stays tombstoned locally */ }

@@ -9,10 +9,12 @@ export interface CanonicalEntry {
     updatedAt: number
 }
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
+// jsonBody: false omits Content-Type: a bodyless request with that header makes
+// Fastify parse an empty JSON body and answer 400 (FST_ERR_CTP_EMPTY_JSON_BODY).
+async function getAuthHeaders(options?: { jsonBody?: boolean }): Promise<Record<string, string>> {
     const { auth } = useSyncStore.getState()
     return {
-        'Content-Type': 'application/json',
+        ...(options?.jsonBody === false ? {} : { 'Content-Type': 'application/json' }),
         'x-sync-user': auth.id,
         'x-sync-password': await getSyncPasswordHeader(auth),
     }
@@ -212,7 +214,7 @@ export async function deleteConnectionCredential(
     const base = getSyncApiPath(useSyncStore.getState().serverUrl)
     const res = await resilientFetch(`${base}/providers/connections/${connectionId}/credentials`, {
         method: 'DELETE',
-        headers: await getAuthHeaders(),
+        headers: await getAuthHeaders({ jsonBody: false }),
         timeout: 10000,
     })
     if (!res.ok) {
@@ -233,7 +235,7 @@ export async function deleteConnectionServerState(accountId: string, connectionI
     const res = await resilientFetch(`${base}/accounts/${encodeURIComponent(accountId)}/server-state/connection/${encodeURIComponent(connectionId)}${query}`, {
         method: 'DELETE',
         retries: 0,
-        headers: await getAuthHeaders(),
+        headers: await getAuthHeaders({ jsonBody: false }),
         timeout: 10000,
     })
     if (!res.ok) throw new Error(`Failed to delete connection server state (${res.status})`)
@@ -248,7 +250,7 @@ export async function deleteStremioCredentials(accountId: string, removedAt: num
     const res = await resilientFetch(`${base}/accounts/${encodeURIComponent(accountId)}/server-state/stremio-credentials?removedAt=${removedAt}&sentAt=${Date.now()}`, {
         method: 'DELETE',
         retries: 0,
-        headers: await getAuthHeaders(),
+        headers: await getAuthHeaders({ jsonBody: false }),
         timeout: 10000,
     })
     if (!res.ok) throw new Error(`Failed to delete Stremio credentials (${res.status})`)

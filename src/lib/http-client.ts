@@ -31,7 +31,9 @@ export async function apiFetch<T>(
     if (signal) signal.addEventListener('abort', onAbort, { once: true })
 
     const headers: Record<string, string> = { ...(authHeaders ?? await getSyncAuthHeaders()) }
+    // A bodyless request must not claim JSON: Fastify answers 400 to an empty JSON body.
     if (opts.body !== undefined) headers['Content-Type'] = contentType
+    else delete headers['Content-Type']
     const base = opts.baseUrl ? `${opts.baseUrl.replace(/\/$/, '')}/api` : '/api'
     const fetchPromise = fetch(`${base}${path.startsWith('/') ? path : '/' + path}`, {
         method,
