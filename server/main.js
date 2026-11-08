@@ -31,7 +31,7 @@ import { registerWatchlistRoutes } from './routes/watchlist.js'
 import { registerDeviceCredentialRoutes } from './routes/device-credentials.js'
 import { deviceAuthHook } from './auth.js'
 import { registerAdminRoutes } from './routes/admin.js'
-import { isAdminEnabled } from './admin/config.js'
+import { fastifyTrustProxy, isAdminEnabled } from './admin/config.js'
 import { isDashboardSpaPath } from './admin/paths.js'
 import { corsDelegator } from './lib/cors-policy.js'
 import { publicConfig } from './lib/public-config.js'
@@ -45,7 +45,7 @@ const fastify = Fastify({
     logger: { ...loggerConfig, formatters: logFormatters },
     disableRequestLogging: true,
     bodyLimit: parseInt(process.env.MAX_SYNC_PAYLOAD_SIZE || '104857600'),
-    trustProxy: process.env.TRUST_PROXY === 'true' || process.env.TRUST_PROXY === '1'
+    trustProxy: fastifyTrustProxy()
 })
 
 ensureDataDirectory(fastify)
