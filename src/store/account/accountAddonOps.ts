@@ -5,6 +5,7 @@ import {
 } from '@/api/addons'
 import { getAddonVersionKey, normalizeAddonUrl, mergeAddons } from '@/lib/utils'
 import { addTombstones, restoreAddonDeletions, filterResurrected } from '@/lib/addon-tombstones'
+import { queueAddonActionDeletes, addonDeleteAcks, InstallAbortedError, makeInstallGuard, liftBlockedByInstance, acquireInstallMutex } from './addonActions'
 import { effectiveAddonsFor, normalizeDestinations, stripDestinationsForWire } from '@/lib/addon-destinations'
 import { AddonDescriptor } from '@/types/addon'
 import { dedupeAddonsByUrl, findInstallSlot } from '@/lib/addon-dedupe'
@@ -35,7 +36,7 @@ import {
 import type { AccountStore, ReplaceTransportUrlResult } from '../accountStore'
 import type { Account, AccountProfile } from '@/types/account'
 import { type Connection, isSyncEligibleConnection } from '@/types/connection'
-import type { SyncOwnership } from '../sync-store-helpers'
+import { captureSyncOwnership, SyncOwnershipLostError, type SyncOwnership } from '../sync-store-helpers'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 
 type StoreRef = { getState: () => AccountStore; setState: (partial: Partial<AccountStore> | ((state: AccountStore) => Partial<AccountStore>)) => void }
@@ -43,6 +44,13 @@ type StoreRef = { getState: () => AccountStore; setState: (partial: Partial<Acco
 async function getStore(): Promise<StoreRef> {
     const { useAccountStore } = await import('../accountStore')
     return useAccountStore
+}
+
+export { InstallAbortedError }
+
+export interface InstallAddonOptions {
+    guard?: () => void
+    skipIfBusy?: boolean
 }
 
 // A queued edit belongs to the workspace and vault in which it was requested.
@@ -381,16 +389,21 @@ function updateActiveProfile(account: Account, updatedAddons: AddonDescriptor[])
     }
 }
 
-export async function installAddonToAccount(accountId: string, addonUrl: string, savedMetadata?: AddonDescriptor['metadata']) {
+export async function installAddonToAccount(accountId: string, addonUrl: string, savedMetadata?: AddonDescriptor['metadata'], options?: InstallAddonOptions) {
     const store = await getStore()
+    const ownership = captureSyncOwnership()
+    const guarded = makeInstallGuard(options, ownership)
     store.setState({ error: null })
     setAccountLoading(accountId)
-    const releaseMutex = await acquireSyncMutex(accountId)
+    let releaseMutex: (() => void) | null = null
     try {
+        releaseMutex = await acquireInstallMutex(accountId, options)
+        guarded()
         const account = getAccountById(store.getState().accounts, accountId)
         if (!account) throw new Error('Account not found')
 
         const fetchedAddon = await apiFetchAddonManifest(addonUrl, account.id)
+        guarded()
         if (!fetchedAddon) throw new Error('Failed to fetch addon manifest')
 
         const normalizedAddon: AddonDescriptor = {
@@ -405,6 +418,11 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
         }
 
         const baseAddons = await reconcileInstallBase(account)
+        guarded()
+        // A sweep lift never replaces a newer config the hub already holds.
+        if (options?.guard && liftBlockedByInstance(baseAddons, normalizedAddon)) {
+            throw new InstallAbortedError(new Error('the hub already holds this instance under another url'))
+        }
         const mergedAddons = mergeAddons(baseAddons, [normalizedAddon], { keepMissingLocal: true, instanceMatch: 'adopt-remote-url' })
         const finalAddons = dedupeAddonsByUrl(mergedAddons).map(addon => ({
             ...addon,
@@ -414,6 +432,7 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
         const deletionState = restoreAddonDeletions(account.deletedAddons, account.restoredAddons, [{ transportUrl: addonUrl }])
         let updatedAccount: Account = { ...account, addons: finalAddons, ...deletionState, lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, finalAddons)
+        guarded()
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
         persistAccounts(accounts)
@@ -436,11 +455,13 @@ export async function installAddonToAccount(accountId: string, addonUrl: string,
             })
         }
     } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to install addon'
-        store.setState({ error: message })
+        if (!(error instanceof InstallAbortedError || error instanceof SyncOwnershipLostError)) {
+            const message = error instanceof Error ? error.message : 'Failed to install addon'
+            store.setState({ error: message })
+        }
         throw error
     } finally {
-        releaseMutex()
+        releaseMutex?.()
         clearAccountLoading(accountId)
     }
 }
@@ -575,6 +596,7 @@ export async function removeAddonFromAccount(accountId: string, transportUrl: st
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
         persistAccounts(accounts)
+        queueAddonActionDeletes(accountId, addonDeleteAcks(updatedAccount.deletedAddons, [transportUrl]), captureSyncOwnership())
 
         backgroundSync(accountId, account, updatedAddons, { allowCollectionShrink: true }, 'remove')
 
@@ -637,6 +659,7 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
         persistAccounts(accounts)
+        queueAddonActionDeletes(accountId, addonDeleteAcks(updatedAccount.deletedAddons, [transportUrl]), captureSyncOwnership())
 
         await store.getState().addChangelogEntry({
             accountId,
@@ -716,6 +739,7 @@ export async function reorderAddons(accountId: string, newOrder: AddonDescriptor
                 .filter(addon => !keptUrls.has(normalizeAddonUrl(addon.transportUrl)))
                 .map(addon => addon.transportUrl)
             deletionState.deletedAddons = addTombstones(deletionState.deletedAddons, removedUrls, Date.now(), deletionState.restoredAddons)
+            queueAddonActionDeletes(accountId, addonDeleteAcks(deletionState.deletedAddons, removedUrls), captureSyncOwnership())
         }
         let updatedAccount: Account = { ...account, addons: finalOrder, ...deletionState, lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, finalOrder)
@@ -751,6 +775,7 @@ export async function bulkDeleteAddons(accountId: string, keptAddons: AddonDescr
         const accounts = store.getState().accounts.map((acc) => (acc.id === accountId ? updatedAccount : acc))
         store.setState({ accounts })
         persistAccounts(accounts)
+        queueAddonActionDeletes(accountId, addonDeleteAcks(updatedAccount.deletedAddons, removedUrls), captureSyncOwnership())
 
         try {
             const { useFailoverStore } = await import('@/store/failoverStore')
@@ -1281,6 +1306,7 @@ export async function removeLocalAddons(accountId: string, idsOrUrls: string[]) 
         )
         store.setState({ accounts })
         persistAccounts(accounts)
+        queueAddonActionDeletes(accountId, addonDeleteAcks(updatedAccount.deletedAddons, removedUrls), captureSyncOwnership())
 
         try {
             const { useFailoverStore } = await import('@/store/failoverStore')

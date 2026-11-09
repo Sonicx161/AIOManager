@@ -13,6 +13,7 @@ import { normalizeHydraAddonInput } from '../utils/addon-shape.js'
 import { isExcludedFromDestinations } from '../utils/addon-destinations.js'
 import { getLatestStremioCredential, resolveStremioConnectionIdentity } from '../lib/stremio-credentials.js'
 import { invalidateCanonicalAddons, readCanonicalCached, rememberCanonicalAuthKey } from '../hydra/canonical-cache.js'
+import { addonActionUrlKey, recordAddonActions, withHydraAccountLock, withHydraFanoutLock } from '../lib/addon-actions.js'
 import { isReadOnlyReplica } from '../config.js'
 import { assertAccountActive, assertWritablePrimary, ownerCanWriteOrFail, AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
 
@@ -209,6 +210,22 @@ function graftStoredDestinations(addons, policyByUrl) {
 
 const addonUrlKey = (a) => normalizeAddonUrl(a?.transportUrl || a?.url || '').toLowerCase()
 
+// A proven alias is the same addon under url normalization (scheme, manifest.json suffix, trailing
+// slash, case); a manifest-id match alone never qualifies, so it cannot lift a different config's tombstone.
+const isProvenUrlAlias = (a, b) => {
+    const aliasKey = (u) => addonActionUrlKey(u).replace(/^https?:\/\//, '')
+    return aliasKey(a) !== '' && aliasKey(a) === aliasKey(b) && addonActionUrlKey(a) !== addonActionUrlKey(b)
+}
+
+function installEntries(postedUrl, matchedRow) {
+    const entries = [{ url: postedUrl, action: 'install' }]
+    const matchedUrl = matchedRow?.transportUrl || matchedRow?.url
+    if (matchedUrl && isProvenUrlAlias(matchedUrl, postedUrl)) {
+        entries.push({ url: matchedUrl, action: 'install' })
+    }
+    return entries
+}
+
 function nonEmptyFields(obj) {
     const out = {}
     for (const [k, v] of Object.entries(obj || {})) {
@@ -251,7 +268,8 @@ function propagationFields(mode) {
         : { propagatedTo: [], warning: CANONICAL_ONLY_WARNING }
 }
 
-async function writeCanonicalAddons(account, addons) {
+// addonActions: [{ url, action }] rows riding the canonical write's transaction.
+async function writeCanonicalAddons(account, addons, addonActions = []) {
     const accountId = account.account_id
     const syncUser = account.sync_user || ''
     // Write boundary gates: entry, immediately before the Stremio platform write and
@@ -320,7 +338,12 @@ async function writeCanonicalAddons(account, addons) {
             stremioWriteThrough = true
         }
     }
-    if (stremioWriteThrough) return 'stremio'
+    if (stremioWriteThrough) {
+        if (addonActions.length > 0) {
+            await db.tx(tx => recordAddonActions(tx, { syncUser, accountId, entries: addonActions }))
+        }
+        return 'stremio'
+    }
 
     // Non-Stremio Hub (Nuvio-only / local-only): the inbound write lands in the
     // server-readable canonical store. The client folds it into the Hub on its next
@@ -330,15 +353,15 @@ async function writeCanonicalAddons(account, addons) {
     // account the client has synced at least once always lands.
     await assertAccountActive(syncUser)
     const now = Date.now()
-    await db.run(
-        db.type === 'postgres'
-            ? 'INSERT INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ($1, $2, $3) ON CONFLICT (account_id) DO NOTHING'
-            : 'INSERT OR IGNORE INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ($1, $2, $3)',
-        [accountId, syncUser, now]
-    )
     // WHERE scoped to sync_user: if the row is owned by another user (the account_id PK already
     // exists), this update matches nothing rather than overwriting their canonical list.
     await db.tx(async (tx) => {
+        await tx.run(
+            db.type === 'postgres'
+                ? 'INSERT INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ($1, $2, $3) ON CONFLICT (account_id) DO NOTHING'
+                : 'INSERT OR IGNORE INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ($1, $2, $3)',
+            [accountId, syncUser, now]
+        )
         await writeEncryptedIfChanged(
             'account_canonical_addons',
             { sql: 'account_id = $1 AND sync_user = $2', params: [accountId, syncUser] },
@@ -346,6 +369,9 @@ async function writeCanonicalAddons(account, addons) {
             JSON.stringify(addons),
             { alsoSet: { sync_user: syncUser, updated_at: now }, runner: tx }
         )
+        if (addonActions.length > 0) {
+            await recordAddonActions(tx, { syncUser, accountId, entries: addonActions })
+        }
     })
     invalidateCanonicalAddons(accountId, syncUser)
     return 'canonical'
@@ -475,27 +501,37 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid or missing addon URL' }
         }
 
-        const current = await readFreshCanonical(account, reply)
-        if (!current) return UNAVAILABLE
-
         try {
-            const norm = normalizeAddonUrl(url)
-            if (current.some(a => normalizeAddonUrl(a.transportUrl || a.url || '') === norm)) {
-                const addons = current.map(toHydraAddon).filter(Boolean)
-                return { addons, ...propagationFields(await stremioCredentialMode(account.account_id, account.sync_user || '')) }
-            }
-
+            // The manifest fetch is the slow part: validate before taking the account lock.
             const { valid, manifest } = await validateManifest(url)
             if (!valid) {
                 reply.code(400)
                 return { error: 'bad_request', message: 'Failed to fetch valid manifest from URL' }
             }
 
-            const newAddon = { transportUrl: url, manifest }
-            const updated = [...current, newAddon]
-            const mode = await writeCanonicalAddons(account, updated)
+            return await withHydraAccountLock(account, async () => {
+                const current = await readFreshCanonical(account, reply)
+                if (!current) return UNAVAILABLE
 
-            return { addons: updated.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+                const norm = normalizeAddonUrl(url)
+                const present = current.find(a => normalizeAddonUrl(a.transportUrl || a.url || '') === norm)
+                if (present) {
+                    // An explicit install of an already-present url still lifts an older delete.
+                    await db.tx(tx => recordAddonActions(tx, {
+                        syncUser: account.sync_user || '',
+                        accountId: account.account_id,
+                        entries: installEntries(url, present)
+                    }))
+                    const addons = current.map(toHydraAddon).filter(Boolean)
+                    return { addons, ...propagationFields(await stremioCredentialMode(account.account_id, account.sync_user || '')) }
+                }
+
+                const newAddon = { transportUrl: url, manifest }
+                const updated = [...current, newAddon]
+                const mode = await writeCanonicalAddons(account, updated, [{ url, action: 'install' }])
+
+                return { addons: updated.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+            })
         } catch (err) {
             if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
@@ -516,20 +552,23 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid or missing addon URL' }
         }
 
-        const current = await readFreshCanonical(account, reply)
-        if (!current) return UNAVAILABLE
-
         try {
-            const norm = normalizeAddonUrl(url)
-            const filtered = current.filter(a => normalizeAddonUrl(a.transportUrl || a.url || '') !== norm)
+            return await withHydraAccountLock(account, async () => {
+                const current = await readFreshCanonical(account, reply)
+                if (!current) return UNAVAILABLE
 
-            if (filtered.length === current.length) {
-                reply.code(404)
-                return { error: 'not_found', message: 'Addon not installed' }
-            }
+                const norm = normalizeAddonUrl(url)
+                const filtered = current.filter(a => normalizeAddonUrl(a.transportUrl || a.url || '') !== norm)
 
-            const mode = await writeCanonicalAddons(account, filtered)
-            return { addons: filtered.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+                if (filtered.length === current.length) {
+                    // Not installed: record nothing, an explicit delete needs a prior install.
+                    reply.code(404)
+                    return { error: 'not_found', message: 'Addon not installed' }
+                }
+
+                const mode = await writeCanonicalAddons(account, filtered, [{ url, action: 'delete' }])
+                return { addons: filtered.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+            })
         } catch (err) {
             if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
@@ -563,32 +602,34 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             }
         }
 
-        const current = await readFreshCanonical(account, reply)
-        if (!current) return UNAVAILABLE
-
         try {
-            // Tolerant of both wire shapes: spec-flat ({transportUrl, name, ...}) and the
-            // AIOManager descriptor shape ({transportUrl, manifest: {...}, flags: {...}}).
-            // Rows are rebuilt on the current row so a flat payload keeps catalogs,
-            // behaviorHints and config. Request destinations are ignored (no policy
-            // injection via the API); the STORED policy is grafted back so an external
-            // payload that omits it cannot erase it (R8).
-            const storedPolicyByUrl = await loadCanonicalDestinations(account.account_id, account.sync_user)
-            const normalized = graftStoredDestinations(mergePutRows(addons, current), storedPolicyByUrl)
+            return await withHydraAccountLock(account, async () => {
+                const current = await readFreshCanonical(account, reply)
+                if (!current) return UNAVAILABLE
 
-            // Catastrophic-shrink guard (belt-and-suspenders; the client merge's
-            // "inbound deletes don't shrink" policy is the real protection and self-heals
-            // a bad replace on the next sync). Reject only the obvious wipe: clearing a
-            // non-trivial collection to empty (or to only disabled rows, which Stremio
-            // drops), never a legitimate few-addon removal.
-            const enabledCount = normalized.filter(a => a.flags?.enabled !== false).length
-            if (enabledCount === 0 && current.length >= 3) {
-                reply.code(409)
-                return { error: 'conflict', message: 'Refusing to clear a non-empty addon collection. Remove addons individually.' }
-            }
+                // Tolerant of both wire shapes: spec-flat ({transportUrl, name, ...}) and the
+                // AIOManager descriptor shape ({transportUrl, manifest: {...}, flags: {...}}).
+                // Rows are rebuilt on the current row so a flat payload keeps catalogs,
+                // behaviorHints and config. Request destinations are ignored (no policy
+                // injection via the API); the STORED policy is grafted back so an external
+                // payload that omits it cannot erase it (R8).
+                const storedPolicyByUrl = await loadCanonicalDestinations(account.account_id, account.sync_user)
+                const normalized = graftStoredDestinations(mergePutRows(addons, current), storedPolicyByUrl)
 
-            const mode = await writeCanonicalAddons(account, normalized)
-            return { addons: normalized.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+                // Catastrophic-shrink guard (belt-and-suspenders; the client merge's
+                // "inbound deletes don't shrink" policy is the real protection and self-heals
+                // a bad replace on the next sync). Reject only the obvious wipe: clearing a
+                // non-trivial collection to empty (or to only disabled rows, which Stremio
+                // drops), never a legitimate few-addon removal.
+                const enabledCount = normalized.filter(a => a.flags?.enabled !== false).length
+                if (enabledCount === 0 && current.length >= 3) {
+                    reply.code(409)
+                    return { error: 'conflict', message: 'Refusing to clear a non-empty addon collection. Remove addons individually.' }
+                }
+
+                const mode = await writeCanonicalAddons(account, normalized)
+                return { addons: normalized.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+            })
         } catch (err) {
             if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)
@@ -643,13 +684,14 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             return { error: 'bad_request', message: 'Invalid addon URL' }
         }
 
-        const current = await readFreshCanonical(account, reply)
-        if (!current) return UNAVAILABLE
-
         try {
+            // Resolve the url and fetch its manifest before taking the account lock; the
+            // fetch is the slow part and must not block other writers on the account.
             let fetchUrl = addonUrl
             if (!fetchUrl) {
-                const existing = current.find(a => (a.manifest?.id || a.id) === addonId)
+                const preRead = await readFreshCanonical(account, reply)
+                if (!preRead) return UNAVAILABLE
+                const existing = preRead.find(a => (a.manifest?.id || a.id) === addonId)
                 if (!existing) {
                     reply.code(404)
                     return { error: 'not_found', message: 'Addon not installed; provide addonUrl to install it' }
@@ -663,39 +705,49 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                 return { error: 'bad_request', message: 'Failed to fetch valid manifest from URL' }
             }
 
-            const target = normalizeAddonUrl(fetchUrl)
-            let matchIdx = current.findIndex(a => normalizeAddonUrl(a.transportUrl || a.url || '') === target)
-            if (matchIdx < 0 && manifest?.id) {
-                matchIdx = current.findIndex(a => (a.manifest?.id || a.id) === manifest.id)
-            }
+            const result = await withHydraAccountLock(account, async () => {
+                const current = await readFreshCanonical(account, reply)
+                if (!current) return UNAVAILABLE
 
-            let updated
-            if (matchIdx >= 0) {
-                updated = current.slice()
-                updated[matchIdx] = {
-                    ...current[matchIdx],
-                    transportUrl: fetchUrl,
-                    manifest,
-                    metadata: { ...current[matchIdx].metadata, lastUpdated: Date.now() }
+                const target = normalizeAddonUrl(fetchUrl)
+                let matchIdx = current.findIndex(a => normalizeAddonUrl(a.transportUrl || a.url || '') === target)
+                if (matchIdx < 0 && manifest?.id) {
+                    matchIdx = current.findIndex(a => (a.manifest?.id || a.id) === manifest.id)
                 }
-            } else {
-                updated = [...current, { transportUrl: fetchUrl, manifest }]
-            }
 
-            const mode = await writeCanonicalAddons(account, updated)
+                let updated
+                let actions
+                if (matchIdx >= 0) {
+                    updated = current.slice()
+                    updated[matchIdx] = {
+                        ...current[matchIdx],
+                        transportUrl: fetchUrl,
+                        manifest,
+                        metadata: { ...current[matchIdx].metadata, lastUpdated: Date.now() }
+                    }
+                    actions = installEntries(fetchUrl, current[matchIdx])
+                } else {
+                    updated = [...current, { transportUrl: fetchUrl, manifest }]
+                    actions = [{ url: fetchUrl, action: 'install' }]
+                }
 
+                const mode = await writeCanonicalAddons(account, updated, actions)
+                return { updated, mode }
+            })
+            if (result === UNAVAILABLE) return UNAVAILABLE
+
+            // Fan-outs run one at a time per account and each enforces the canonical state read inside its own turn.
             if (reconciler) {
                 try {
-                    const connections = await reconciler.resolveConnections(account.account_id, account.sync_user)
-                    const targets = connections.filter(c => c.enabled)
-                    if (targets.length > 0) {
-                        // `updated` derives from getCanonicalAddons — for Stremio-
-                        // credentialed accounts that is a LIVE platform read carrying no
-                        // destinations. Graft the stored policy so the per-connection
-                        // projection in enforceAccount sees it (R8: no bypass on fan-out).
-                        const enforced = graftStoredDestinations(updated, await loadCanonicalDestinations(account.account_id, account.sync_user))
-                        await reconciler.enforceAccount(account.account_id, targets, enforced, { canWrite: () => ownerCanWriteOrFail(account.sync_user) })
-                    }
+                    await withHydraFanoutLock(account, async () => {
+                        const connections = await reconciler.resolveConnections(account.account_id, account.sync_user)
+                        const targets = connections.filter(c => c.enabled)
+                        if (targets.length > 0) {
+                            const live = await getCanonicalAddons(account.account_id, account.sync_user)
+                            const enforced = graftStoredDestinations(live, await loadCanonicalDestinations(account.account_id, account.sync_user))
+                            await reconciler.enforceAccount(account.account_id, targets, enforced, { canWrite: () => ownerCanWriteOrFail(account.sync_user) })
+                        }
+                    })
                 } catch (e) {
                     // Typed account-state refusals must reach the route's error mapping,
                     // not collapse into a propagation warning.
@@ -704,7 +756,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                 }
             }
 
-            return { addons: updated.map(toHydraAddon).filter(Boolean), ...propagationFields(mode) }
+            return { addons: result.updated.map(toHydraAddon).filter(Boolean), ...propagationFields(result.mode) }
         } catch (err) {
             if (err instanceof AuthStateError || err instanceof StateUnavailableError || err instanceof ReadOnlyReplicaError) throw err
             reply.code(500)

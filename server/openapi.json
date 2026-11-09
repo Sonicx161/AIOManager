@@ -2601,6 +2601,295 @@
         }
       }
     },
+    "/api/addon-actions/query": {
+      "post": {
+        "summary": "Every install and acknowledged delete for the requested addon url keys",
+        "tags": [
+          "addon-actions"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "accountId",
+                  "urlKeys"
+                ],
+                "properties": {
+                  "accountId": {
+                    "type": "string",
+                    "description": "Account id the actions belong to"
+                  },
+                  "urlKeys": {
+                    "type": "array",
+                    "maxItems": 200,
+                    "description": "Normalized addon URL keys (tombstone key space), up to 200 per request; over-long keys are skipped",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "actions"
+                  ],
+                  "properties": {
+                    "actions": {
+                      "type": "array",
+                      "description": "Every row for the requested keys, newest activity first, no cap",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "urlKey",
+                          "transportUrl",
+                          "lastInstallAt",
+                          "lastDeleteAt",
+                          "installSeq",
+                          "deleteSeq",
+                          "deleteToken"
+                        ],
+                        "properties": {
+                          "urlKey": {
+                            "type": "string",
+                            "description": "The requested normalized addon URL key (tombstone key space)"
+                          },
+                          "transportUrl": {
+                            "type": "string",
+                            "description": "Transport URL of the latest install"
+                          },
+                          "lastInstallAt": {
+                            "type": [
+                              "null",
+                              "number"
+                            ],
+                            "description": "Server Unix epoch (ms) of the latest install"
+                          },
+                          "lastDeleteAt": {
+                            "type": [
+                              "null",
+                              "number"
+                            ],
+                            "description": "Server Unix epoch (ms) of the latest delete"
+                          },
+                          "installSeq": {
+                            "type": "number",
+                            "description": "Row sequence of the latest install; compared against deleteSeq for eligibility"
+                          },
+                          "deleteSeq": {
+                            "type": "number",
+                            "description": "Row sequence of the latest delete; compared against installSeq for eligibility"
+                          },
+                          "deleteToken": {
+                            "type": [
+                              "null",
+                              "string"
+                            ],
+                            "description": "Client deletion identity the delete acknowledged"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/addon-actions/delete": {
+      "post": {
+        "summary": "Acknowledge client addon deletions on the server",
+        "tags": [
+          "addon-actions"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "accountId",
+                  "deletes"
+                ],
+                "properties": {
+                  "accountId": {
+                    "type": "string"
+                  },
+                  "deletes": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "url",
+                        "token"
+                      ],
+                      "properties": {
+                        "url": {
+                          "type": "string",
+                          "maxLength": 2048
+                        },
+                        "token": {
+                          "type": "string",
+                          "maxLength": 64
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "recorded"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "recorded": {
+                      "type": "number",
+                      "description": "Delete rows written"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/commands": {
       "post": {
         "summary": "Enqueue a bulk account command (protect-all, unprotect-all)",

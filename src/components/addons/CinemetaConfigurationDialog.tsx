@@ -16,6 +16,8 @@ import { useAuthStore } from '@/store/authStore'
 import { mergeRemoteIntoHub } from '@/store/account/accountSync'
 import { pushHubToStremio, updateActiveProfile } from '@/store/addon/addonDeployment'
 import { addTombstones, restoreAddonDeletions } from '@/lib/addon-tombstones'
+import { queueAddonActionDeletes, addonDeleteAcks } from '@/store/account/addonActions'
+import { captureSyncOwnership } from '@/store/sync-store-helpers'
 import { normalizeAddonUrl } from '@/lib/utils'
 import { decrypt } from '@/lib/crypto'
 import { stremioClient } from '@/api/stremio-client'
@@ -258,6 +260,10 @@ export function CinemetaConfigurationDialog({
           return { accounts: prev.accounts.map(a => a.id !== accountId ? a : updatedAccount) }
         })
         persistAccounts(useAccountStore.getState().accounts)
+        if (retireUrl) {
+          const tombstones = useAccountStore.getState().accounts.find(a => a.id === accountId)?.deletedAddons
+          queueAddonActionDeletes(accountId, addonDeleteAcks(tombstones, [retireUrl]), captureSyncOwnership())
+        }
       } finally {
         release()
       }

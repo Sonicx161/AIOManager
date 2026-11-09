@@ -26,6 +26,7 @@ import { registerProviderRoutes } from './routes/providers.js'
 import { autopilotWorkerEnabled } from './lib/autopilot-worker.js'
 import { registerMetadataKeysRoutes } from './routes/metadata-keys.js'
 import { registerMetadataProxyRoutes } from './routes/metadata-proxy.js'
+import { registerAddonActionRoutes } from './routes/addon-actions.js'
 import { registerCommandsRoutes } from './routes/commands.js'
 import { registerWatchlistRoutes } from './routes/watchlist.js'
 import { registerDeviceCredentialRoutes } from './routes/device-credentials.js'
@@ -362,6 +363,7 @@ const start = async () => {
         registerProviderRoutes(fastify, reconciler)
         registerMetadataKeysRoutes(fastify)
         registerMetadataProxyRoutes(fastify)
+        registerAddonActionRoutes(fastify)
         registerCommandsRoutes(fastify)
 
         await fastify.listen({ port: PORT, host: '0.0.0.0' })

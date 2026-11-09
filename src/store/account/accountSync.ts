@@ -38,7 +38,8 @@ import {
     needsDisabledAddonIdentityRepair,
     getAccountById,
     persistAccounts,
-    syncMutexes,
+    acquireSyncMutex,
+    tryAcquireSyncMutex,
     getStremioAuthKey,
     getStremioConnection,
     setAccountLoading,
@@ -672,11 +673,11 @@ export async function syncAccount(id: string, forceRefresh = false, intent?: Syn
     const store = await getStore()
     if (!useAuthStore.getState().encryptionKey) return
 
-    while (syncMutexes.has(id)) {
-        await syncMutexes.get(id)
-    }
-    let resolveMutex!: () => void
-    syncMutexes.set(id, new Promise<void>((r) => { resolveMutex = r }))
+    // Server addon-action lift runs before the sync mutex: installs take that mutex themselves.
+    const { reconcileServerAddonActions } = await import('./addonActions')
+    await reconcileServerAddonActions(id).catch(() => {})
+
+    const releaseMutex = await acquireSyncMutex(id)
     store.setState({ error: null })
     setAccountLoading(id)
     let coreOk = false
@@ -695,8 +696,7 @@ export async function syncAccount(id: string, forceRefresh = false, intent?: Syn
         throw error
     } finally {
         clearAccountLoading(id)
-        resolveMutex()
-        syncMutexes.delete(id)
+        releaseMutex()
     }
     if (coreOk) {
         deferCanonicalFold()
@@ -733,21 +733,29 @@ export async function syncAllAccounts(silent = false): Promise<boolean> {
 
         const BATCH_SIZE = 5
         const syncOne = async (account: typeof accounts[0]) => {
-            if (syncMutexes.has(account.id)) return
-            const hasAnyEnabledConnection = account.connections?.some(c => c.enabled)
-            const hasRootAuthKey = !!getStremioAuthKey(account)
-            if (!hasAnyEnabledConnection && !hasRootAuthKey) return
+            // Busy accounts are skipped without waiting, and the sweep runs before the
+            // eligibility skips so connectionless (local-only) accounts lift too. The
+            // sweep releases its probe before running, so the mutex comes back with its
+            // return value: null means the account went busy and is skipped here too.
+            const { preSyncSweep, reconcileServerAddonActions } = await import('./addonActions')
+            const releaseMutex = await preSyncSweep({
+                tryAcquire: () => tryAcquireSyncMutex(account.id),
+                sweep: () => reconcileServerAddonActions(account.id),
+            })
+            if (!releaseMutex) return
 
-            const nonStremioConnections = account.connections?.filter(c => isSyncEligibleConnection(c) && c.enabled) || []
-            const allNonStremioExpired = nonStremioConnections.length > 0 && nonStremioConnections.every(c => c.status === 'expired')
-            if (allNonStremioExpired) {
-                if (import.meta.env.DEV) console.log(`[Account] syncAllAccounts skipping ${account.id}: all non-Stremio connections expired`)
-                return
-            }
-
-            let resolveMutex!: () => void
-            syncMutexes.set(account.id, new Promise<void>((r) => { resolveMutex = r }))
             try {
+                const hasAnyEnabledConnection = account.connections?.some(c => c.enabled)
+                const hasRootAuthKey = !!getStremioAuthKey(account)
+                if (!hasAnyEnabledConnection && !hasRootAuthKey) return
+
+                const nonStremioConnections = account.connections?.filter(c => isSyncEligibleConnection(c) && c.enabled) || []
+                const allNonStremioExpired = nonStremioConnections.length > 0 && nonStremioConnections.every(c => c.status === 'expired')
+                if (allNonStremioExpired) {
+                    if (import.meta.env.DEV) console.log(`[Account] syncAllAccounts skipping ${account.id}: all non-Stremio connections expired`)
+                    return
+                }
+
                 const result = await syncAccountCore(account.id, false, 'passive')
                 if (result.changed) hasAnyChange = true
             } catch (error: unknown) {
@@ -761,8 +769,7 @@ export async function syncAllAccounts(silent = false): Promise<boolean> {
                 }))
                 hasAnyChange = true
             } finally {
-                resolveMutex()
-                syncMutexes.delete(account.id)
+                releaseMutex()
                 clearAccountLoading(account.id)
             }
         }

@@ -9,7 +9,7 @@ import {
     getAccountById,
     getStremioAuthKey,
     persistAccounts,
-    syncMutexes,
+    acquireSyncMutex,
 } from '../accountStore'
 import type { AccountStore } from '../accountStore'
 import type { AddonDescriptor } from '@/types/addon'
@@ -60,16 +60,11 @@ export async function reconcileInboundCanonical(ownership: SyncOwnership = captu
         if (serverHasStremioCredential(account.id, serverCredentialed, !!getStremioAuthKey(account))) continue
         const remoteAddons = (remote[account.id]?.addons || []) as unknown as CanonicalAddon[]
 
-        while (syncMutexes.has(account.id)) {
-            await syncMutexes.get(account.id)
-            ownership.assert()
-        }
-        ownership.assert()
-        let release!: () => void
-        syncMutexes.set(account.id, new Promise<void>(r => { release = r }))
+        const releaseMutex = await acquireSyncMutex(account.id)
         let didChange = false
         let mergedCount = -1
         try {
+            ownership.assert()
             const current = getAccountById(store.getState().accounts, account.id)
             if (!current) continue
             const base = getCanonicalBase(account.id) as unknown as CanonicalAddon[] | null
@@ -99,8 +94,7 @@ export async function reconcileInboundCanonical(ownership: SyncOwnership = captu
             anyChanged = true
             didChange = true
         } finally {
-            release()
-            syncMutexes.delete(account.id)
+            releaseMutex()
         }
         console.info(`[Fold] ${account.id}: remote=${remoteAddons.length} local→merged=${mergedCount} changed=${didChange}`)
 

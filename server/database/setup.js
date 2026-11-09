@@ -999,6 +999,28 @@ export async function initializeDatabase(fastify) {
         deleted_at: `ALTER TABLE account_server_tombstones ADD COLUMN deleted_at BIGINT NOT NULL DEFAULT 0`,
     }, ['sync_user', 'account_id'])
 
+    // Per-account addon action identity (latest install and acknowledged delete per url); keep DDL in sync with migrations/007_account_addon_actions.sql.
+    await ensureTable('account_addon_actions', `CREATE TABLE IF NOT EXISTS account_addon_actions (
+            sync_user TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            url_key TEXT NOT NULL,
+            install_transport_url TEXT NOT NULL DEFAULT '',
+            last_install_at BIGINT,
+            last_delete_at BIGINT,
+            install_seq INTEGER NOT NULL DEFAULT 0,
+            delete_seq INTEGER NOT NULL DEFAULT 0,
+            delete_token TEXT,
+            PRIMARY KEY (sync_user, account_id, url_key)
+        );`, [], ['sync_user', 'account_id', 'url_key', 'install_transport_url', 'last_install_at', 'last_delete_at', 'install_seq', 'delete_seq', 'delete_token'], {
+        url_key: `ALTER TABLE account_addon_actions ADD COLUMN url_key TEXT NOT NULL DEFAULT ''`,
+        install_transport_url: `ALTER TABLE account_addon_actions ADD COLUMN install_transport_url TEXT NOT NULL DEFAULT ''`,
+        last_install_at: `ALTER TABLE account_addon_actions ADD COLUMN last_install_at BIGINT`,
+        last_delete_at: `ALTER TABLE account_addon_actions ADD COLUMN last_delete_at BIGINT`,
+        install_seq: `ALTER TABLE account_addon_actions ADD COLUMN install_seq INTEGER NOT NULL DEFAULT 0`,
+        delete_seq: `ALTER TABLE account_addon_actions ADD COLUMN delete_seq INTEGER NOT NULL DEFAULT 0`,
+        delete_token: `ALTER TABLE account_addon_actions ADD COLUMN delete_token TEXT`,
+    }, ['sync_user', 'account_id', 'url_key'])
+
     // Remembered-device credentials; keep DDL in sync with migrations/003_device_credentials.sql.
     const deviceCredentialsDdl = db.type === 'postgres'
         ? `CREATE TABLE IF NOT EXISTS device_credentials (

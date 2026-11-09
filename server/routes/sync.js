@@ -806,6 +806,7 @@ export function registerSyncRoutes(fastify) {
             // still authenticate to /hydra/* for the now-deleted user.
             await tx.run('DELETE FROM account_api_keys WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM hydra_subscribers WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM account_addon_actions WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM autopilot_rule_stats WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
             await tx.run('DELETE FROM failover_history WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
             await tx.run('DELETE FROM autopilot_rules WHERE owner_sync_user = $1', [id])

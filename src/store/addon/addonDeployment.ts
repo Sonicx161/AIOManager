@@ -88,6 +88,8 @@ export async function pushHubToStremio(accountId: string, authKey: string, addon
     await updateAddons(authKey, projection.list, accountId, { authorizedRemovals: projection.authorizedRemovals })
 }
 import { addTombstones, restoreAddonDeletions } from '@/lib/addon-tombstones'
+import { queueAddonActionDeletes, addonDeleteAcks } from '../account/addonActions'
+import { captureSyncOwnership } from '../sync-store-helpers'
 import { trace } from '@/lib/trace'
 import { cloneAddonsWithMode } from '@/lib/clone-mode'
 import type { CloneMode } from '@/lib/clone-mode'
@@ -566,6 +568,10 @@ export async function bulkApplySavedAddons(
             })
             persistAccounts(useAccountStore.getState().accounts)
           }
+          if (replacedOld.length > 0) {
+            const tombstones = useAccountStore.getState().accounts.find(a => a.id === accountId)?.deletedAddons
+            queueAddonActionDeletes(accountId, addonDeleteAcks(tombstones, replacedOld.map(r => r.oldUrl)), captureSyncOwnership())
+          }
           if (isConnectedNonStremio) {
             const { pushToConnections } = await import('../account/accountAddonOps')
             pushToConnections(accountId, { signal: options.batch?.signal }).catch(err => { if (import.meta.env.DEV) console.error('Failed to push to connections:', err) })
@@ -606,6 +612,10 @@ export async function bulkApplySavedAddons(
             return { accounts: prev.accounts.map(a => a.id === accountId ? updatedAccount : a) }
           })
           persistAccounts(useAccountStore.getState().accounts)
+          if (replacedOld.length > 0) {
+            const tombstones = useAccountStore.getState().accounts.find(a => a.id === accountId)?.deletedAddons
+            queueAddonActionDeletes(accountId, addonDeleteAcks(tombstones, replacedOld.map(r => r.oldUrl)), captureSyncOwnership())
+          }
           const { pushToConnections } = await import('../account/accountAddonOps')
           pushToConnections(accountId, { addons: finalAddons, signal: options.batch?.signal }).catch(() => { toast({ variant: 'destructive', title: 'Cross-platform sync failed', description: 'Addon changes saved locally but not pushed to connected platforms.', href: `/account/${encodeURIComponent(accountId)}` }) })
           // Debounced additive refresh keeps manifests and bookkeeping current.

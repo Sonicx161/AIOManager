@@ -119,20 +119,8 @@ if (typeof window !== 'undefined') {
     })
 }
 
-export const syncMutexes = new Map<string, Promise<void>>()
-
-export const acquireSyncMutex = async (accountId: string): Promise<() => void> => {
-    while (syncMutexes.has(accountId)) {
-        await syncMutexes.get(accountId)
-    }
-    let resolveMutex!: () => void
-    syncMutexes.set(accountId, new Promise<void>((r) => { resolveMutex = r }))
-    return () => {
-        resolveMutex()
-        syncMutexes.delete(accountId)
-    }
-}
-
+import { syncMutexes, acquireSyncMutex, tryAcquireSyncMutex } from './syncMutex'
+export { syncMutexes, acquireSyncMutex, tryAcquireSyncMutex }
 export const getAccountById = (accounts: Account[], id: string): Account | undefined =>
   accounts.find(a => a.id === id)
 

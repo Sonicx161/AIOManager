@@ -3974,6 +3974,185 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/addon-actions/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Every install and acknowledged delete for the requested addon url keys */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Account id the actions belong to */
+                        accountId: string;
+                        /** @description Normalized addon URL keys (tombstone key space), up to 200 per request; over-long keys are skipped */
+                        urlKeys: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description Every row for the requested keys, newest activity first, no cap */
+                            actions: {
+                                /** @description The requested normalized addon URL key (tombstone key space) */
+                                urlKey: string;
+                                /** @description Transport URL of the latest install */
+                                transportUrl: string;
+                                /** @description Server Unix epoch (ms) of the latest install */
+                                lastInstallAt: null | number;
+                                /** @description Server Unix epoch (ms) of the latest delete */
+                                lastDeleteAt: null | number;
+                                /** @description Row sequence of the latest install; compared against deleteSeq for eligibility */
+                                installSeq: number;
+                                /** @description Row sequence of the latest delete; compared against installSeq for eligibility */
+                                deleteSeq: number;
+                                /** @description Client deletion identity the delete acknowledged */
+                                deleteToken: null | string;
+                            }[];
+                        };
+                    };
+                };
+                /** @description Default Response */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/addon-actions/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge client addon deletions on the server */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        accountId: string;
+                        deletes: {
+                            url: string;
+                            token: string;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Default Response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok: boolean;
+                            /** @description Delete rows written */
+                            recorded: number;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+                /** @description Default Response */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/commands": {
         parameters: {
             query?: never;

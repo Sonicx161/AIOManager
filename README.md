@@ -211,7 +211,7 @@ The server includes a dedicated health endpoint for orchestrators:
 - **Behavior**: Returns `200 OK` (ok) or `503 Service Unavailable` (degraded) if the database connection is lost. Use this for your K8s Liveness and Readiness probes.
 
 ### Stateless Scaling
-With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `server_secret.key`), the API instances are stateless and can be scaled horizontally behind a load balancer.
+With PostgreSQL enabled and `DATA_DIR` mapped to a persistent volume (for `server_secret.key`), the API instances are stateless and can be scaled horizontally behind a load balancer. Concurrent Hydra API installs for the same account are serialized within an instance, so route a user's API traffic to one instance (sticky routing) if you need strict ordering across instances.
 
 ---
 
