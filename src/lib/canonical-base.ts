@@ -51,3 +51,28 @@ export function setCanonicalBases(entries: BaseMap): void {
 export function clearCanonicalBases(): void {
     try { localStorage.removeItem(KEY) } catch {}
 }
+
+/**
+ * Restrict a push's canonical payload to the entries the server confirmed it
+ * holds ('applied' writes and 'unchanged' no-ops). A 'rejected' hub (shrink
+ * guard, other workspace) must keep its old base: the server never stored that
+ * snapshot, and a wrong base makes the next three-way merge treat stored
+ * content as remote adds/removals. A receipt-less response is an older server
+ * that cannot report per-hub outcomes; keep confirming everything so bases on
+ * older self-hosted servers do not stall.
+ */
+export function confirmedCanonicalEntries(entries: BaseMap, receipts: unknown): BaseMap {
+    if (!receipts || typeof receipts !== 'object') return entries
+    const confirmed: BaseMap = {}
+    for (const [id, addons] of Object.entries(entries)) {
+        const status = (receipts as Record<string, unknown>)[id]
+        if (status === 'applied' || status === 'unchanged') confirmed[id] = addons
+    }
+    return confirmed
+}
+
+/** Hubs the server reported 'rejected' for this push (empty without receipts). */
+export function rejectedCanonicalEntries(entries: BaseMap, receipts: unknown): string[] {
+    if (!receipts || typeof receipts !== 'object') return []
+    return Object.keys(entries).filter(id => (receipts as Record<string, unknown>)[id] === 'rejected')
+}

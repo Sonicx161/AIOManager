@@ -1693,7 +1693,18 @@ export const useSyncStore = create<SyncState>()(
                     // server confirmed it received," never "what we hoped to send." If the
                     // push had failed, leaving the base stale would make the next merge
                     // mistake a just-deleted addon for an inbound add and resurrect it.
-                    canonicalBase?.setCanonicalBases(canonicalPayload)
+                    // Receipts make that per hub: a rejected canonical (shrink guard,
+                    // other workspace) keeps its old base, and the rejected snapshot is
+                    // not retried; it rides later pushes unchanged and the server
+                    // re-evaluates its guards with no extra writes. Receipt-less replies
+                    // (older servers) keep confirming every entry.
+                    const canonicalReceipts = resData.canonical
+                    let rejectedHubs: string[] = []
+                    if (canonicalBase) {
+                        canonicalBase.setCanonicalBases(canonicalBase.confirmedCanonicalEntries(canonicalPayload, canonicalReceipts))
+                        rejectedHubs = canonicalBase.rejectedCanonicalEntries(canonicalPayload, canonicalReceipts)
+                    }
+                    if (rejectedHubs.length > 0) trace('sync', 'push.canonical-rejected', { accountId: auth.id, hubs: rejectedHubs.join(',') })
 
                     if (get().pendingConflictAccountId === auth.id) set({ pendingConflictAccountId: null })
                     set({ lastSyncedAt: readServerSyncTimestamp(resData.syncedAt) ?? get().lastSyncedAt, needsReauth: false, lastAppliedAccountCount: accountCount, lastAppliedAddonCount: addonCount, lastSyncedNotesCount: notesToPush.length })
@@ -1701,9 +1712,14 @@ export const useSyncStore = create<SyncState>()(
                     get().addLogEntry({
                         type: 'push',
                         status: 'success',
-                        message: lockedAccounts.length > 0
-                            ? `Sync successful. Sign-in needed on this device: ${lockedAccounts.map(a => a.name).join(', ')}`
-                            : 'Sync successful',
+                        // Rejected hubs ride the same success entry the locked-account
+                        // note uses; no separate surface exists for per-hub outcomes.
+                        message: [
+                            lockedAccounts.length > 0
+                                ? `Sync successful. Sign-in needed on this device: ${lockedAccounts.map(a => a.name).join(', ')}`
+                                : 'Sync successful',
+                            rejectedHubs.length > 0 ? `Cloud addon list not saved for: ${rejectedHubs.join(', ')}.` : '',
+                        ].filter(Boolean).join(' '),
                         isAuto
                     })
                     trace('sync', 'push.success', { accountId: auth.id, isAuto, bytes: payloadBytes, compressed: isCompressed, timing: Date.now() - pushStart })

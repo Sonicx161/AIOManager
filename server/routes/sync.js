@@ -92,6 +92,93 @@ async function archiveCurrentKV(tx, key, authUser) {
     }
 }
 
+/**
+ * Structural JSON equality for the skip path: object key order is ignored (a
+ * stored list written by another writer may serialize the same content with
+ * different key order or spacing), array order is significant, and primitive
+ * values must match exactly. Operates on parsed JSON only.
+ */
+function jsonStructurallyEqual(a, b) {
+    if (a === b) return true
+    if (Array.isArray(a) || Array.isArray(b)) {
+        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+        return a.every((item, i) => jsonStructurallyEqual(item, b[i]))
+    }
+    if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+        const keys = Object.keys(a)
+        if (keys.length !== Object.keys(b).length) return false
+        return keys.every(k => Object.prototype.hasOwnProperty.call(b, k) && jsonStructurallyEqual(a[k], b[k]))
+    }
+    return false
+}
+
+// A hub whose stored list differs from a re-pushed snapshot is rejected on every
+// byte-identical skip, and a stuck client re-pushes the same envelope forever:
+// warn on the first mismatch per hub per process, then drop to debug. The trace
+// event stays on every occurrence.
+const skipMismatchWarned = new Set()
+const SKIP_MISMATCH_WARNED_MAX = 5000
+
+/**
+ * Receipts for a byte-identical re-push (the skip path). The first attempt may
+ * have committed on the server while its response was lost, so an empty receipt
+ * map would strand the caller's merge base for entries that DID land. Verify
+ * each submitted entry against the workspace-scoped store: 'unchanged' only for
+ * structurally equal parsed JSON (object key order ignored, array order and
+ * primitives exact), 'rejected' otherwise. Never claims or writes rows, and
+ * never rewrites a stored row whose bytes merely differ in serialization.
+ */
+async function skipPathCanonicalReceipts(tx, id, canonicalAddons, log) {
+    const receipts = {}
+    const reasons = {}
+    if (!canonicalAddons || typeof canonicalAddons !== 'object') return { receipts, reasons }
+    const submitted = Object.entries(canonicalAddons).filter(([accountId, addons]) => accountId && Array.isArray(addons))
+    const stored = new Map()
+    const CHUNK = 100
+    for (let i = 0; i < submitted.length; i += CHUNK) {
+        const ids = submitted.slice(i, i + CHUNK).map(([accountId]) => accountId)
+        const inList = ids.map((_, j) => `$${j + 2}`).join(', ')
+        const rows = await tx.query(
+            `SELECT account_id, addon_list FROM account_canonical_addons WHERE sync_user = $1 AND account_id IN (${inList})`,
+            [id, ...ids],
+        )
+        for (const r of rows) stored.set(r.account_id, r.addon_list)
+    }
+    for (const [accountId, addons] of submitted) {
+        const encrypted = stored.get(accountId)
+        let verified = false
+        if (encrypted) {
+            // Compare parsed JSON structurally, not bytes: another writer may have
+            // stored the same list with a different object-key order or spacing, and
+            // a byte check would reject that hub on every skip forever while the
+            // skip path keeps being chosen. The stored row itself is never rewritten.
+            try {
+                verified = jsonStructurallyEqual(JSON.parse(decrypt(encrypted, FALLBACK_KEYS)), addons)
+            } catch {}
+        }
+        if (verified) {
+            receipts[accountId] = 'unchanged'
+        } else {
+            // Rejected rather than omitted: the push's snapshot is not what the
+            // server holds, and an omitted entry is indistinguishable from a
+            // receipt-less older server once mixed with confirmed ones.
+            receipts[accountId] = 'rejected'
+            reasons[accountId] = 'not-applied'
+            const firstMismatch = !skipMismatchWarned.has(accountId)
+            if (firstMismatch) {
+                if (skipMismatchWarned.size >= SKIP_MISMATCH_WARNED_MAX) skipMismatchWarned.delete(skipMismatchWarned.values().next().value)
+                skipMismatchWarned.add(accountId)
+            }
+            const fields = { category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'skip-mismatch' }
+            const text = `Canonical skip check: stored list for ${maskContext(accountId)} differs from the resubmitted snapshot.`
+            if (firstMismatch) log.warn(fields, text)
+            else log.debug({ ...fields, repeat: true }, text)
+            trace('syncRoute', 'canonical.skip_mismatch', { accountId: id, hub: maskContext(accountId) })
+        }
+    }
+    return { receipts, reasons }
+}
+
 export function registerSyncRoutes(fastify) {
     fastify.get('/api/sync/:id', {
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
@@ -298,7 +385,7 @@ export function registerSyncRoutes(fastify) {
         const rowMayExist = request.deviceAuth || !!(await db.get('SELECT 1 AS ok FROM kv_store WHERE key = $1', [id]))
         const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
 
-        const pushOutcome = await db.tx(async (tx) => {
+        const runPushTx = () => db.tx(async (tx) => {
             const row = await tx.get(
                 db.type === 'postgres'
                     ? 'SELECT password, content_hash, content_hint, updated_at FROM kv_store WHERE key = $1 FOR UPDATE'
@@ -353,7 +440,19 @@ export function registerSyncRoutes(fastify) {
                     if (keysChanged && data.apiKeys && typeof data.apiKeys === 'object') {
                         await registerApiKeys(tx, id, data.apiKeys, Array.isArray(data.accounts) ? data.accounts : null)
                     }
-                    return { success: true, syncedAt: currentSyncedAt, skipped: true, contentHash: row.content_hash, serverStremioCredentialedAccounts }
+                    // Receipts still describe what the server holds: a lost response
+                    // before this retry may have committed the canonical writes, and
+                    // empty receipts here would strand the caller's merge base.
+                    const skipCanonical = await skipPathCanonicalReceipts(tx, id, data.canonicalAddons, fastify.log)
+                    return {
+                        success: true,
+                        syncedAt: currentSyncedAt,
+                        skipped: true,
+                        contentHash: row.content_hash,
+                        serverStremioCredentialedAccounts,
+                        canonical: skipCanonical.receipts,
+                        ...(Object.keys(skipCanonical.reasons).length > 0 ? { canonicalReasons: skipCanonical.reasons } : {}),
+                    }
                 }
 
                 await archiveCurrentKV(tx, id, id)
@@ -402,6 +501,12 @@ export function registerSyncRoutes(fastify) {
             // no-ops when an account's addon list is unchanged, so re-syncs don't churn the row.
             const canonicalAddons = data.canonicalAddons
             const canonicalWrites = []
+            // Per-hub receipts: the client advances its canonical merge base only
+            // for hubs the server confirmed it holds. Old clients ignore these.
+            // Rejection reasons in the response are deliberately generic; the
+            // specific cause stays in server logs and traces only.
+            const canonicalReceipts = {}
+            const canonicalReasons = {}
             if (canonicalAddons && typeof canonicalAddons === 'object') {
                 const now = Date.now()
                 const emptyCanonicalIds = new Set()
@@ -437,6 +542,8 @@ export function registerSyncRoutes(fastify) {
                                     if (Array.isArray(parsed) && parsed.length > 0) {
                                         const idx = canonicalWrites.findIndex(([aid]) => aid === accountId)
                                         if (idx >= 0) canonicalWrites.splice(idx, 1)
+                                        canonicalReceipts[accountId] = 'rejected'
+                                        canonicalReasons[accountId] = 'not-applied'
                                         fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'empty-push' }, `Canonical shrink guard: kept ${parsed.length} stored addon(s) for account ${accountId} (push carried an empty list — likely unfolded external write).`)
                                     }
                                 } catch {}
@@ -455,6 +562,35 @@ export function registerSyncRoutes(fastify) {
                         : `INSERT OR IGNORE INTO account_canonical_addons (account_id, sync_user, updated_at) VALUES ${placeholders}`
                     await tx.run(sql, params)
                 }
+                // Claim unowned legacy rows (sync_user '') for this push's hubs before
+                // the ownership check and write. One conditional statement resolves the
+                // legacy race on both databases: concurrent pushes serialize on the row,
+                // the loser's claim matches zero rows and the check below rejects the
+                // hub. Claiming also covers the identical-plaintext case, which the
+                // write helper would otherwise skip without taking ownership. Sorted ids
+                // keep concurrent claims locking rows in one order; steady state matches
+                // nothing and writes nothing.
+                const claimIds = canonicalRows.map(r => r[0]).sort()
+                // Sorted IN-list parameters do not make Postgres lock rows in that
+                // order, and chunk boundaries from a JS sort need not match the
+                // database collation. Lock every blank-owner row of this push in one
+                // database-ordered statement first; the chunked UPDATEs then only
+                // re-take locks this transaction already holds. SQLite has no FOR
+                // UPDATE and its single-writer tx queue already serializes claims.
+                if (db.type === 'postgres' && claimIds.length > 0) {
+                    await tx.query(
+                        `SELECT account_id FROM account_canonical_addons WHERE sync_user = '' AND account_id = ANY($1::text[]) ORDER BY account_id FOR UPDATE`,
+                        [claimIds],
+                    )
+                }
+                for (let i = 0; i < claimIds.length; i += CANONICAL_CHUNK) {
+                    const ids = claimIds.slice(i, i + CANONICAL_CHUNK)
+                    const inList = ids.map((_, j) => `$${j + 2}`).join(', ')
+                    await tx.run(
+                        `UPDATE account_canonical_addons SET sync_user = $1 WHERE sync_user = '' AND account_id IN (${inList})`,
+                        [id, ...ids],
+                    )
+                }
                 const foreignIds = new Set()
                 for (let i = 0; i < canonicalRows.length; i += CANONICAL_CHUNK) {
                     const ids = canonicalRows.slice(i, i + CANONICAL_CHUNK).map(r => r[0])
@@ -467,17 +603,29 @@ export function registerSyncRoutes(fastify) {
                 }
                 for (let i = canonicalWrites.length - 1; i >= 0; i--) {
                     if (!foreignIds.has(canonicalWrites[i][0])) continue
+                    canonicalReceipts[canonicalWrites[i][0]] = 'rejected'
+                    canonicalReasons[canonicalWrites[i][0]] = 'not-applied'
                     fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: canonicalWrites[i][0], reason: 'other-workspace' }, `Canonical write skipped: account ${maskContext(canonicalWrites[i][0])} belongs to another workspace.`)
                     canonicalWrites.splice(i, 1)
                 }
                 for (const [accountId, addons] of canonicalWrites) {
-                    await writeEncryptedIfChanged(
+                    const { outcome } = await writeEncryptedIfChanged(
                         'account_canonical_addons',
-                        { sql: "account_id = $1 AND sync_user IN ($2, '')", params: [accountId, id] },
+                        { sql: 'account_id = $1 AND sync_user = $2', params: [accountId, id] },
                         'addon_list',
                         JSON.stringify(addons),
                         { alsoSet: { sync_user: id, updated_at: now }, runner: tx },
                     )
+                    if (outcome === 'written') canonicalReceipts[accountId] = 'applied'
+                    else if (outcome === 'unchanged') canonicalReceipts[accountId] = 'unchanged'
+                    else {
+                        // Zero-row write: the selector stopped matching between the
+                        // claim above and this statement. Never acknowledge it; the
+                        // server does not hold this workspace's snapshot.
+                        canonicalReceipts[accountId] = 'rejected'
+                        canonicalReasons[accountId] = 'not-applied'
+                        fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'not-matched' }, `Canonical write matched no row for ${maskContext(accountId)}; the hub changed ownership during this push.`)
+                    }
                 }
             }
 
@@ -490,8 +638,30 @@ export function registerSyncRoutes(fastify) {
                 invalidateCanonicalAddons(accountId, id)
             }
             trace('syncRoute', 'push.success', { accountId: id, bytes: storedStr.length, timing: Date.now() - postStart })
-            return { success: true, syncedAt: serverTime, contentHash, serverStremioCredentialedAccounts }
+            return {
+                success: true,
+                syncedAt: serverTime,
+                contentHash,
+                serverStremioCredentialedAccounts,
+                canonical: canonicalReceipts,
+                ...(Object.keys(canonicalReasons).length > 0 ? { canonicalReasons } : {}),
+            }
         })
+        // The ordered legacy-row pre-lock removes the known lock-order inversion, but
+        // Postgres can still deadlock the push tx on another statement pair. db.tx
+        // rolls the whole transaction back on deadlock, so one bounded re-run of the
+        // identical envelope is safe (auth caches and reply status are idempotent).
+        // Deadlock SQLSTATE only: at the default READ COMMITTED there is no
+        // serialization-failure path, and SQLite cannot deadlock (single-writer queue).
+        let pushOutcome
+        try {
+            pushOutcome = await runPushTx()
+        } catch (err) {
+            if (db.type !== 'postgres' || err?.code !== '40P01') throw err
+            fastify.log.warn({ category: 'Sync', fmt: 'sync.push_deadlock', acct: id, retry: '2/2' }, `[${maskContext(id)}] Push transaction deadlocked on PostgreSQL; retrying once.`)
+            trace('syncRoute', 'push.deadlock_retry', { accountId: id })
+            pushOutcome = await runPushTx()
+        }
         // Bounded WAL checkpoint after a real write only (skip/conflict return inside the
         // tx): an archive plus rewrite moves roughly twice the envelope into the WAL.
         if (db.type === 'sqlite' && pushOutcome?.success && !pushOutcome.skipped && !pushOutcome.conflict) {

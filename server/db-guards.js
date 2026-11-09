@@ -29,8 +29,13 @@ const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/
  * @param {Record<string, any>} [opts.alsoSet]  Extra columns to set on a real change,
  *                          e.g. `{ updated_at: Date.now() }`.
  * @param {{ get: Function, run: Function }} [opts.runner]  Optional tx runner from `db.tx`. Defaults to `db`.
- * @returns {Promise<{ written: boolean }>}  `written: false` means the value was
- *                          unchanged and no write was issued (the Midnight-safe path).
+ * @returns {Promise<{ written: boolean, outcome: 'written'|'unchanged'|'not-matched' }>}
+ *                          `outcome` separates the three results: 'unchanged' = the
+ *                          stored plaintext already equals the new one (no write issued);
+ *                          'written' = the guarded UPDATE matched a row and wrote;
+ *                          'not-matched' = the UPDATE matched zero rows (row absent, or
+ *                          its ownership changed under the selector). `written` keeps
+ *                          its original meaning for existing callers.
  */
 export async function writeEncryptedIfChanged(table, where, column, plaintext, opts = {}) {
     if (!IDENT.test(table)) throw new Error(`writeEncryptedIfChanged: unsafe table name "${table}"`)
@@ -46,7 +51,7 @@ export async function writeEncryptedIfChanged(table, where, column, plaintext, o
         try {
             const currentPlaintext = decrypt(current.val, FALLBACK_KEYS)
             if (currentPlaintext === plaintext) {
-                return { written: false }
+                return { written: false, outcome: 'unchanged' }
             }
         } catch {
         }
@@ -75,5 +80,6 @@ export async function writeEncryptedIfChanged(table, where, column, plaintext, o
         `UPDATE ${table} SET ${sets.join(', ')} WHERE ${whereSql}`,
         params,
     )
-    return { written: (res?.changes || 0) > 0 }
+    const matched = (res?.changes || 0) > 0
+    return { written: matched, outcome: matched ? 'written' : 'not-matched' }
 }
