@@ -79,5 +79,5 @@ export const useInboxStore = create<InboxState>((set, get) => {
 })
 
 subscribeToToasts((t) => {
-  useInboxStore.getState().record({ id: t.id, title: t.title, description: t.description, variant: t.variant, href: t.href, accountId: t.accountId, history: t.history })
+  useInboxStore.getState().record({ id: t.id, title: t.title, description: t.description, variant: t.variant, href: t.href, accountId: t.accountId, history: t.history, actionHint: t.actionHint, actionTarget: t.actionTarget })
 })

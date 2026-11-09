@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { Link } from 'react-router-dom'
-import { AlertCircle, AlertTriangle, ArrowUpRight, Bell, CheckCircle, X } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { AlertCircle, AlertTriangle, ArrowUpRight, Bell, CheckCircle, KeyRound, X } from 'lucide-react'
 import { useInboxStore } from '@/store/notificationInbox'
 import { useAccountStore } from '@/store/accountStore'
+import { useUIStore } from '@/store/uiStore'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
-import { groupByDay, unreadCount, type InboxEntry, type InboxVariant } from '@/lib/notification-history'
+import { platformName } from '@/components/addons/PlatformSourceChip'
+import { groupByDay, resolveInboxSignInAction, unreadCount, type InboxEntry, type InboxVariant } from '@/lib/notification-history'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -29,19 +31,43 @@ const ICON: Record<InboxVariant, { Icon: typeof CheckCircle; tile: string }> = {
 }
 
 function EntryRow({ entry, onOpen }: { entry: InboxEntry; onOpen: () => void }) {
+  const navigate = useNavigate()
   const { Icon, tile } = ICON[entry.variant]
   const account = useAccountStore(s => (entry.accountId ? s.accounts.find(a => a.id === entry.accountId) : undefined))
+  // Sign-in fix notices keep their action after the toast is gone. An explicit
+  // target opens its own connection's sign-in or, if that connection no longer
+  // exists, the profile itself; it never falls through to another connection.
+  const signInAction = resolveInboxSignInAction(entry, account)
+  const signInTarget = signInAction?.kind === 'signin'
+    ? account?.connections?.find(c => c.id === signInAction.connectionId)
+    : undefined
+  const signInPlatform = entry.actionTarget?.platform ?? signInTarget?.platform
+  const signInLabel = signInAction?.kind === 'open-profile'
+    ? 'Open profile'
+    : signInPlatform
+      ? `Sign in to ${platformName(signInPlatform)}`
+      : 'Sign in again'
+  const openSignIn = () => {
+    useInboxStore.getState().markRead(entry.id)
+    onOpen()
+    if (!account) return
+    if (signInAction?.kind === 'open-profile') {
+      navigate(`/account/${encodeURIComponent(account.id)}`)
+      return
+    }
+    useUIStore.getState().openAddAccountDialog(account, signInAction?.kind === 'signin' ? { focusConnectionId: signInAction.connectionId } : undefined)
+  }
   return (
     <li
       className={cn('relative flex gap-3 px-4 py-3 transition-colors hover:bg-muted/20', !entry.read && 'bg-muted/10')}
       onClick={() => useInboxStore.getState().markRead(entry.id)}
     >
       <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border', tile)}>
-        <Icon className="h-4 w-4" />
+        {entry.actionHint === 'signin' ? <KeyRound className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-start gap-2">
-          <p className={cn('flex-1 text-[13px] font-semibold leading-snug [overflow-wrap:anywhere]', entry.variant === 'destructive' && 'text-destructive')}>
+          <p className={cn('flex-1 text-[13px] font-semibold leading-snug [overflow-wrap:anywhere]', entry.variant === 'destructive' && 'text-destructive', entry.actionHint === 'signin' && 'text-warning')}>
             {entry.title}
             {entry.count > 1 && <span className="ml-1.5 text-xs font-medium tabular-nums text-muted-foreground">x{entry.count}</span>}
           </p>
@@ -53,7 +79,15 @@ function EntryRow({ entry, onOpen }: { entry: InboxEntry; onOpen: () => void }) 
         <div className="mt-1.5 flex items-center gap-3 text-[11px] text-muted-foreground">
           {account && <AccountAvatar account={account} size="xs" showStatus={false} className="h-4 w-4" />}
           <span className="tabular-nums">{relTime(entry.at)}</span>
-          {entry.href && (
+          {entry.actionHint === 'signin' && account ? (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openSignIn() }}
+              className="inline-flex min-h-8 items-center rounded-full bg-warning px-3.5 py-1.5 text-xs font-semibold text-warning-foreground transition-colors hover:bg-warning/90"
+            >
+              {signInLabel}
+            </button>
+          ) : entry.href && (
             <Link
               to={entry.href}
               onClick={() => { useInboxStore.getState().markRead(entry.id); onOpen() }}

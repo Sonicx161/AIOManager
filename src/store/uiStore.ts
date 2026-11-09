@@ -18,7 +18,7 @@ interface UIStore {
   addonListView: 'grid' | 'list'
   notesSidebarCollapsed: boolean
 
-  openAddAccountDialog: (account?: Account) => void
+  openAddAccountDialog: (account?: Account, options?: { focusConnectionId?: string }) => void
   closeAddAccountDialog: () => void
   openAddAddonDialog: (accountId: string) => void
   closeAddAddonDialog: () => void
@@ -33,6 +33,8 @@ interface UIStore {
   setNotesSidebarCollapsed: (collapsed: boolean) => void
   initialize: () => void
   editingAccount: Account | null
+  /** Connection whose sign-in sheet should open with the edit dialog (sync failure fix button). */
+  addAccountFocusConnectionId: string | null
   selectedAccountId: string | null
 }
 
@@ -107,11 +109,12 @@ export const useUIStore = create<UIStore>((set, get) => ({
   })(),
 
   editingAccount: null,
+  addAccountFocusConnectionId: null,
   selectedAccountId: null,
 
-  openAddAccountDialog: (account?: Account) =>
-    set({ isAddAccountDialogOpen: true, editingAccount: account || null }),
-  closeAddAccountDialog: () => set({ isAddAccountDialogOpen: false, editingAccount: null }),
+  openAddAccountDialog: (account?: Account, options?: { focusConnectionId?: string }) =>
+    set({ isAddAccountDialogOpen: true, editingAccount: account || null, addAccountFocusConnectionId: options?.focusConnectionId ?? null }),
+  closeAddAccountDialog: () => set({ isAddAccountDialogOpen: false, editingAccount: null, addAccountFocusConnectionId: null }),
   openAddAddonDialog: (accountId: string) =>
     set({ isAddAddonDialogOpen: true, selectedAccountId: accountId }),
   closeAddAddonDialog: () => set({ isAddAddonDialogOpen: false, selectedAccountId: null }),

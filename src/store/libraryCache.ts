@@ -12,6 +12,8 @@ import { mapConcurrent } from '@/lib/concurrency'
 import { trace } from '@/lib/trace'
 import { metaIsUnchanged } from '@/lib/stremio-meta-diff'
 import { reuseActivityItems, reuseDeletedItemIds } from '@/lib/activity-structural-sharing'
+import { historyNoticeCopy } from '@/lib/sync-error-copy'
+import { platformName } from '@/components/addons/PlatformSourceChip'
 
 // v4: v3-era blobs persist transformed ActivityItems from before imported-saved-state
 // tagging; the fresh-TTL restore and identical-meta skip would keep serving that old
@@ -73,6 +75,57 @@ let cacheGeneration = 0
 let removeItemsLock: Promise<void> = Promise.resolve()
 const toastedNuvioFailures = new Set<string>()
 const toastedRealStreamFailures = new Set<string>()
+
+// Watch-history fetch failures get cause-specific copy: a lost or expired
+// sign-in points at the fix (amber toast plus an inbox action that opens that
+// connection's own sign-in), an outage says nothing needs fixing, and anything
+// unrecognised keeps the generic notice from before.
+function notifyHistoryFetchFailed(err: unknown, target: { accountId: string; profileName: string; platformId: string; connectionId: string }) {
+    const rawMessage = err instanceof Error ? err.message : String(err)
+    const platform = platformName(target.platformId)
+    // Driver errors carry a structured status/isAuthError (src/lib/drivers/*); trust it over string matching.
+    const driverErr = err as { status?: number; isAuthError?: boolean } | null
+    const notice = historyNoticeCopy(rawMessage, platform, target.profileName, {
+        status: driverErr?.status,
+        isAuthError: driverErr?.isAuthError,
+    })
+    if (!notice) {
+        toast({
+            title: `${platform} history unavailable`,
+            description: `Could not fetch watch history for ${target.profileName}. Using last cached data.`,
+            variant: 'destructive',
+            href: `/account/${encodeURIComponent(target.accountId)}`,
+        })
+        return
+    }
+    toast({
+        title: notice.title,
+        description: notice.body,
+        variant: notice.variant,
+        href: `/account/${encodeURIComponent(target.accountId)}`,
+        accountId: target.accountId,
+        ...(notice.action === 'signin'
+            ? {
+                actionHint: 'signin' as const,
+                actionTarget: { connectionId: target.connectionId, platform: target.platformId },
+                action: {
+                    label: notice.actionLabel,
+                    onClick: () => {
+                        void (async () => {
+                            const [{ useAccountStore }, { useUIStore }] = await Promise.all([
+                                import('@/store/accountStore'),
+                                import('@/store/uiStore'),
+                            ])
+                            const live = useAccountStore.getState().accounts.find(a => a.id === target.accountId)
+                            if (!live) return
+                            useUIStore.getState().openAddAccountDialog(live, { focusConnectionId: target.connectionId })
+                        })()
+                    },
+                },
+            }
+            : {}),
+    })
+}
 
 // Per-origin stickiness: once an account has EVER had more than one native login on a
 // platform, every fetch of that platform stays per-connection attributed — disabling or
@@ -951,7 +1004,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     trace('libraryCache', 'nuvio.fetch.error', { accountId: account.id, connectionId: multiNuvio ? conn.id : undefined, error: (err as Error)?.message })
                                     if (!toastedNuvioFailures.has(conn.id)) {
                                         toastedNuvioFailures.add(conn.id)
-                                        toast({ title: 'Nuvio history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive', href: `/account/${encodeURIComponent(account.id)}` })
+                                        notifyHistoryFetchFailed(err, { accountId: account.id, profileName: account.name || 'account', platformId: conn.platform, connectionId: conn.id })
                                         setTimeout(() => toastedNuvioFailures.delete(conn.id), 3600000)
                                     }
                                     // A failed login preserves ITS OWN last-known items; sibling
@@ -1034,7 +1087,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                     trace('libraryCache', 'realstream.fetch.error', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, error: (err as Error)?.message })
                                     if (!toastedRealStreamFailures.has(conn.id)) {
                                         toastedRealStreamFailures.add(conn.id)
-                                        toast({ title: 'RealStream history unavailable', description: `Could not fetch watch history for ${account.name || 'account'}. Using last cached data.`, variant: 'destructive', href: `/account/${encodeURIComponent(account.id)}` })
+                                        notifyHistoryFetchFailed(err, { accountId: account.id, profileName: account.name || 'account', platformId: conn.platform, connectionId: conn.id })
                                         setTimeout(() => toastedRealStreamFailures.delete(conn.id), 3600000)
                                     }
                                     // Per-login fallback: only THIS connection's items are preserved.

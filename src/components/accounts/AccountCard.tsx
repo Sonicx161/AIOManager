@@ -9,6 +9,7 @@ import { usePhoneViewport } from '@/hooks/usePhoneViewport'
 import { AccountMediaPlayback } from './AccountMedia'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
+import { syncErrorPanelCopy, classifySyncError, attributeAccountError } from '@/lib/sync-error-copy'
 import { PlatformSourceChip, platformName } from '@/components/addons/PlatformSourceChip'
 import { accountPlatformSources } from '@/components/addons/platform-source'
 import { CopyButton } from '@/components/ui/copy-button'
@@ -25,7 +26,7 @@ import { useLibraryCache } from '@/store/libraryCache'
 import { activityForAccount } from '@/lib/account-activity-index'
 import { Account } from '@/types/account'
 import type { ActivityItem } from '@/types/activity'
-import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ArrowUpRight, RotateCw, StickyNote, Undo2, Redo2, Bold, Italic, List, ListOrdered, Link2, Check, Trash2, Play } from 'lucide-react'
+import { AlertCircle, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ArrowUpRight, RotateCw, StickyNote, Undo2, Redo2, Bold, Italic, List, ListOrdered, Link2, Check, Trash2, Play, KeyRound, CloudOff, LogIn } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { cn, maskEmailLevel, maskNameLevel, getTimeAgo } from '@/lib/utils'
 import { STICKY_NOTE_MAX_LENGTH } from '@/lib/constants'
@@ -242,6 +243,48 @@ export const AccountCard = memo(function AccountCard({
   const hasPlatformSources = accountPlatformSources(account).length > 0
   const expiredConnection = account.connections?.find(connection => connection.enabled !== false && connection.status === 'expired')
 
+  // The panel's cause, platform and sign-in target must describe the SAME
+  // failure: attribute the account error to the connection whose own lastError
+  // matches it, and stay platform-neutral when that attribution is uncertain.
+  const errorAttribution = account.status === 'error'
+    ? attributeAccountError(account.lastError, account.connections, { rootStremioAuthKey: !!getStremioAuthKey(account) })
+    : {}
+  const errorKind = account.status === 'error' ? classifySyncError(account.lastError) : null
+  const firstEnabledConnection = account.connections?.find(connection => connection.enabled !== false)
+  const unattributedSignIn = (errorKind === 'signin-lost' || errorKind === 'signin-expired') && !errorAttribution.platformId
+  const syncErrorPlatformName = errorAttribution.platformId
+    ? platformName(errorAttribution.platformId)
+    : unattributedSignIn
+      ? null
+      : firstEnabledConnection
+        ? platformName(firstEnabledConnection.platform)
+        : 'Stremio'
+  const errorPanelCopy = account.status === 'error' ? syncErrorPanelCopy(account.lastError, syncErrorPlatformName) : null
+
+  const handleOpenSignIn = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    openAddAccountDialog(account, errorAttribution.connectionId ? { focusConnectionId: errorAttribution.connectionId } : undefined)
+  }
+
+  const runSyncWithToast = async () => {
+    toast({ title: 'Syncing...', description: `Refreshing ${displayName}` })
+    try {
+      await syncAccount(account.id, true)
+      // syncAccount can resolve with the account still in error: announce the
+      // result from the store, not from the promise settling.
+      const result = useAccountStore.getState().accounts.find(a => a.id === account.id)
+      if (result?.status === 'error') throw new Error(result.lastError || 'sync failed')
+      toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}`, accountId: account.id })
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}`, accountId: account.id })
+    }
+  }
+
+  const handleRetrySync = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    await runSyncWithToast()
+  }
+
   const { isLongPressTriggered, ...longPressProps } = useLongPress(() => {
     if (!isSelectionMode && onLongPress) {
       onLongPress(account.id)
@@ -371,13 +414,7 @@ export const AccountCard = memo(function AccountCard({
                     <DropdownMenuItem
                       onClick={async (e) => {
                         e.stopPropagation();
-                        try {
-                          toast({ title: 'Syncing...', description: `Refreshing ${displayName}` });
-                          await syncAccount(account.id, true);
-                          toast({ title: 'Sync Complete', description: `Successfully synced ${displayName}`, accountId: account.id });
-                        } catch (err) {
-                          toast({ variant: 'destructive', title: 'Sync Failed', description: `Could not sync ${displayName}: ${err instanceof Error ? err.message : 'unknown error'}`, accountId: account.id });
-                        }
+                        await runSyncWithToast();
                       }}
                       disabled={loading}
                       className="gap-2"
@@ -452,33 +489,70 @@ export const AccountCard = memo(function AccountCard({
             {account.addons.length === 0 && (
               <p className="py-1 text-xs text-muted-foreground">No addons yet</p>
             )}
-            {account.status === 'error' && isStabilized && (
-              <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-md p-3 mt-3">
+            {account.status === 'error' && isStabilized && errorPanelCopy && (
+              <div data-theme-tone="status" data-theme-part="panel" className={cn('rounded-xl p-3 mt-3', errorPanelCopy.tone === 'warning' ? 'border border-warning/25 bg-warning/10' : 'border border-destructive/50 bg-destructive/10')}>
                 <div className="flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
+                  {errorPanelCopy.kind === 'unreachable'
+                    ? <CloudOff className={cn('h-4 w-4 flex-shrink-0 mt-0.5', errorPanelCopy.tone === 'warning' ? 'text-warning' : 'text-destructive')} aria-hidden="true" />
+                    : errorPanelCopy.kind === 'unknown'
+                      ? <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" aria-hidden="true" />
+                      : <KeyRound className="h-4 w-4 text-warning flex-shrink-0 mt-0.5" aria-hidden="true" />}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-destructive">Sync Failed</p>
-                    <p className="text-xs text-destructive/80 mt-0.5">
-                      {account.lastError || 'Could not reach the server. Try a re-sync; if it keeps failing, update the account credentials.'}
-                    </p>
+                    <p className={cn('text-sm font-medium', errorPanelCopy.tone === 'warning' ? 'text-warning' : 'text-destructive')}>{errorPanelCopy.title}</p>
+                    <p className={cn('text-xs mt-0.5', errorPanelCopy.tone === 'warning' ? 'text-warning/80' : 'text-destructive/80')}>{errorPanelCopy.body}</p>
                   </div>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={async (e) => {
-                      e.stopPropagation()
-                      try {
-                          await syncAccount(account.id, true)
-                      } catch {
-                          handleEdit()
-                      }
-                  }}
-                  className="w-full mt-2 border-destructive/30 text-destructive hover:bg-destructive/20 gap-2 max-sm:h-10"
+                {errorPanelCopy.action === 'signin' && (
+                  <Button
+                    onClick={handleOpenSignIn}
+                    className="w-full mt-2.5 gap-1.5 rounded-[10px] bg-warning text-warning-foreground hover:bg-warning/90 max-sm:h-10"
+                  >
+                    <LogIn className="h-3.5 w-3.5" />
+                    {errorPanelCopy.actionLabel}
+                  </Button>
+                )}
+                {errorPanelCopy.action === 'retry' && (
+                  <Button
+                    variant="outline"
+                    onClick={handleRetrySync}
+                    className="w-full mt-2.5 gap-2 rounded-[10px] border-destructive/30 text-destructive hover:bg-destructive/20 max-sm:h-10"
+                  >
+                    <RotateCw className="h-3.5 w-3.5" />
+                    {errorPanelCopy.actionLabel}
+                  </Button>
+                )}
+                {errorPanelCopy.action === 'retry-or-edit' && (
+                  <div className="mt-2.5 flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={handleRetrySync}
+                      className="w-full gap-2 rounded-[10px] border-destructive/30 text-destructive hover:bg-destructive/20 max-sm:h-10"
+                    >
+                      <RotateCw className="h-3.5 w-3.5" />
+                      {errorPanelCopy.actionLabel}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={(e) => { e.stopPropagation(); handleEdit() }}
+                      className="w-full gap-1.5 rounded-[10px] max-sm:h-10"
+                    >
+                      <Pencil className="h-3 w-3" />
+                      {errorPanelCopy.secondaryActionLabel}
+                    </Button>
+                  </div>
+                )}
+                {/* Clicks and keys on the disclosure must toggle it, not navigate the card. */}
+                <details
+                  className="mt-2 text-xs"
+                  open={errorPanelCopy.kind === 'unknown'}
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <Pencil className="h-3 w-3" />
-                  Try Sync / Update
-                </Button>
+                  <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">Details</summary>
+                  <code className="mt-1 block rounded-lg border border-border/60 bg-background/80 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground break-words">
+                    {account.lastError || 'No error details recorded'}
+                  </code>
+                </details>
               </div>
             )}
             {account.status === 'expired' && isStabilized && (

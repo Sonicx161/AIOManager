@@ -12,6 +12,9 @@ export interface InboxEntry {
   count: number
   href?: string
   accountId?: string
+  /** Set by sign-in fix notices: the inbox offers a "Sign in to X" action for these entries. */
+  actionHint?: 'signin'
+  actionTarget?: { connectionId: string; platform: string }
 }
 
 export interface InboxCandidate {
@@ -22,9 +25,24 @@ export interface InboxCandidate {
   href?: string
   accountId?: string
   history?: boolean
+  actionHint?: 'signin'
+  actionTarget?: { connectionId: string; platform: string }
 }
 
 export const INBOX_CAP = 50
+
+// A sign-in action target must name a real connection id and a supported
+// platform id; anything else (a token-bearing URL, free text) is dropped so it
+// can never be stored or replayed as a connection reference.
+const SAFE_CONNECTION_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+const SIGNIN_PLATFORM_IDS = new Set(['stremio', 'nuvio', 'realstream', 'jellyfin', 'hydra-outbound'])
+
+export function sanitizeActionTarget(v: unknown): { connectionId: string; platform: string } | undefined {
+  const t = v as { connectionId?: unknown; platform?: unknown } | null
+  if (!t || typeof t.connectionId !== 'string' || typeof t.platform !== 'string') return undefined
+  if (!SAFE_CONNECTION_ID.test(t.connectionId) || !SIGNIN_PLATFORM_IDS.has(t.platform)) return undefined
+  return { connectionId: t.connectionId, platform: t.platform }
+}
 
 const ROUTINE_TITLE = /^(welcome back|signed in|login successful|logged out|signed out|sign in to continue)$|copied|\.\.\.\s*$/i
 const MEANINGFUL = /sync|autopilot|failover|rule|deploy|install|delet|remov|clear|wip|purg|restor|backup|import|export|mirror|migrat|revoked|pushed|session refreshed/i
@@ -130,10 +148,16 @@ export function recordEntry(entries: InboxEntry[], rawToast: InboxCandidate, now
   const variant = toast.variant ?? 'default'
   const accountId = typeof rawToast.accountId === 'string' && rawToast.accountId ? rawToast.accountId : undefined
   const description = sanitizeInboxText(describeText(rawToast.description))
-  const match = entries.find(e => e.id === toast.id || (e.title === toast.title && e.variant === variant && e.accountId === accountId))
+  const actionTarget = sanitizeActionTarget(rawToast.actionTarget)
+  // Two logins on one account fail independently: a sign-in notice's identity
+  // includes the connection it points at, so each keeps its own entry and target.
+  const signinTargetId = toast.actionHint === 'signin' ? actionTarget?.connectionId : undefined
+  const match = entries.find(e => e.id === toast.id
+    || (e.title === toast.title && e.variant === variant && e.accountId === accountId
+      && (toast.actionHint !== 'signin' || e.actionTarget?.connectionId === signinTargetId)))
   const entry: InboxEntry = match
-    ? { ...match, description, variant, href: toast.href ?? match.href, accountId, at: now, read: false, count: match.count + 1 }
-    : { id: toast.id, title: toast.title, description, variant, href: toast.href, accountId, at: now, read: false, count: 1 }
+    ? { ...match, description, variant, href: toast.href ?? match.href, accountId, actionHint: toast.actionHint ?? match.actionHint, actionTarget: actionTarget ?? match.actionTarget, at: now, read: false, count: match.count + 1 }
+    : { id: toast.id, title: toast.title, description, variant, href: toast.href, accountId, ...(toast.actionHint ? { actionHint: toast.actionHint } : {}), ...(actionTarget ? { actionTarget } : {}), at: now, read: false, count: 1 }
   return [entry, ...entries.filter(e => e !== match)].slice(0, INBOX_CAP)
 }
 
@@ -169,6 +193,7 @@ export function parseStoredEntries(raw: unknown): InboxEntry[] {
     if (!item || typeof item !== 'object') continue
     const e = item as Partial<InboxEntry>
     if (typeof e.id !== 'string' || typeof e.title !== 'string' || typeof e.at !== 'number') continue
+    const actionTarget = sanitizeActionTarget(e.actionTarget)
     out.push({
       id: e.id,
       title: sanitizeInboxText(e.title),
@@ -179,7 +204,40 @@ export function parseStoredEntries(raw: unknown): InboxEntry[] {
       count: typeof e.count === 'number' && e.count > 0 ? e.count : 1,
       href: sanitizeInboxHref(e.href),
       ...(typeof e.accountId === 'string' && e.accountId ? { accountId: e.accountId } : {}),
+      ...(e.actionHint === 'signin' ? { actionHint: 'signin' as const } : {}),
+      ...(actionTarget ? { actionTarget } : {}),
     })
   }
   return out.sort((a, b) => b.at - a.at).slice(0, INBOX_CAP)
+}
+
+export interface SignInActionConnection {
+  id: string
+  enabled?: boolean
+  status?: string
+}
+
+export type InboxSignInAction =
+  | { kind: 'signin'; connectionId: string }
+  | { kind: 'signin-generic' }
+  | { kind: 'open-profile' }
+
+/**
+ * Resolves what a stored sign-in notice's button should do. An explicit action
+ * target only ever opens its own connection: when that connection no longer
+ * exists the button opens the profile instead of falling through to another
+ * failing connection. Targetless notices keep the best-guess fallback.
+ */
+export function resolveInboxSignInAction(
+  entry: Pick<InboxEntry, 'actionHint' | 'actionTarget'>,
+  account: { connections?: SignInActionConnection[] } | null | undefined,
+): InboxSignInAction | null {
+  if (entry.actionHint !== 'signin' || !account) return null
+  const connections = account.connections ?? []
+  if (entry.actionTarget) {
+    const target = connections.find(c => c.id === entry.actionTarget?.connectionId)
+    return target ? { kind: 'signin', connectionId: target.id } : { kind: 'open-profile' }
+  }
+  const fallback = connections.find(c => c.enabled !== false && (c.status === 'error' || c.status === 'expired'))
+  return fallback ? { kind: 'signin', connectionId: fallback.id } : { kind: 'signin-generic' }
 }

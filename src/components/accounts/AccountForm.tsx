@@ -97,6 +97,7 @@ export function AccountForm() {
   const isOpen = useUIStore((state) => state.isAddAccountDialogOpen)
   const closeDialog = useUIStore((state) => state.closeAddAccountDialog)
   const editingAccount = useUIStore((state) => state.editingAccount)
+  const focusConnectionId = useUIStore((state) => state.addAccountFocusConnectionId)
   const liveAccount = useAccountStore((s) => editingAccount ? s.accounts.find(a => a.id === editingAccount.id) ?? editingAccount : null)
   const encryptionKey = useAuthStore((state) => state.encryptionKey)
   const { addAccountByAuthKey, addAccountByCredentials, addLocalAccount, removeAccount, updateAccount, loading } = useAccounts()
@@ -185,13 +186,15 @@ export function AccountForm() {
     setCreatedAccountId(null)
     setConnectedPlatforms(new Set())
     // An expired account opens on Connections with Profile below it, so Back and
-    // Escape still work; everything else starts on Profile.
-    resetEditPage(editingAccount?.status === 'expired' ? ['profile', 'connections'] : 'profile')
+    // Escape still work; everything else starts on Profile. A requested sign-in
+    // (sync failure fix button) also lands on Connections, focused on that
+    // connection's own sign-in sheet.
+    resetEditPage(editingAccount?.status === 'expired' || (editingAccount && focusConnectionId) ? ['profile', 'connections'] : 'profile')
     setColorOpen(false)
     setCardOpen(false)
     setEmojiOpen(false)
     setShowAvatarUrl(false)
-    setSignInAgainTarget(null)
+    setSignInAgainTarget(editingAccount && focusConnectionId ? { id: focusConnectionId, nonce: Date.now() } : null)
     setSubmitting(false)
 
     if (editingAccount) {
@@ -234,7 +237,7 @@ export function AccountForm() {
       setAvatar('')
       setHideLastWatched(false)
     }
-  }, [editingAccount, isOpen, resetEditPage])
+  }, [editingAccount, isOpen, focusConnectionId, resetEditPage])
 
   const handleClose = () => {
     setCreatedAccountId(null)

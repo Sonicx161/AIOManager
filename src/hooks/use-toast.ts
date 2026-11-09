@@ -14,6 +14,10 @@ export interface Toast {
   variant?: 'default' | 'destructive' | 'warning'
   className?: string
   action?: ToastAction
+  /** 'signin' marks this toast as a sign-in fix so the notification inbox can offer that action after the toast is gone. */
+  actionHint?: 'signin'
+  /** The connection a sign-in fix notice points at. */
+  actionTarget?: { connectionId: string; platform: string }
   duration?: number
   href?: string
   accountId?: string
@@ -49,9 +53,9 @@ function removeToast(id: string) {
 }
 
 // Standalone toast function that can be used outside of React components
-export function toast({ id: givenId, title, description, variant = 'default', className, action, duration, href, accountId, history }: ToastInput) {
+export function toast({ id: givenId, title, description, variant = 'default', className, action, actionHint, actionTarget, duration, href, accountId, history }: ToastInput) {
   const id = givenId ?? crypto.randomUUID()
-  const newToast: Toast = { id, title, description, variant, className, action, duration, href, accountId, history, createdAt: Date.now() }
+  const newToast: Toast = { id, title, description, variant, className, action, actionHint, actionTarget, duration, href, accountId, history, createdAt: Date.now() }
 
   const existingTimer = toastTimers.get(id)
   if (existingTimer) clearTimeout(existingTimer)
