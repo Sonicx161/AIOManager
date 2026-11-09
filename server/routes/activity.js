@@ -6,7 +6,7 @@ import { getCachedAuth, setCachedAuth, hashAuthPassword } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
 import { verifySyncPassword, upgradeLegacyPasswordHash } from '../lib/sync-password.js'
-import { tombstonedAccountIds, withAccountWriteLock } from '../lib/account-tombstones.js'
+import { deleteAccountActivity, tombstonedAccountIds, withAccountWriteLock } from '../lib/account-tombstones.js'
 import { assertAccountActive, assertWritablePrimary } from '../admin/account-state.js'
 
 async function validateSyncAuth(request, reply) {
@@ -466,6 +466,15 @@ export function registerActivityRoutes(fastify, activityEngine) {
                         ...capped.filter(a => a.accountId).map(a => a.accountId),
                         ...cappedConnections.filter(c => c.accountId).map(c => c.accountId),
                     ])
+                // Account-gone deletion is tombstone-gated: allAccountIds only witnesses
+                // what the POSTING device holds at this instant (a short list after a
+                // restore-mode import, or a browser that has not pulled yet), so absence
+                // alone must never delete another device's rows. The tombstone recorded
+                // by the explicit account server-state delete is the deletion signal.
+                const absentAccountIds = [...existingByAccount.keys()].filter(id => !knownIds.has(id))
+                const absentTombstoned = absentAccountIds.length > 0
+                    ? await tombstonedAccountIds(syncUser, absentAccountIds, tx)
+                    : new Set()
                 // Prune live-set: EXISTENCE-based when the client reports it (a paused or
                 // vault-unreadable login still exists and must keep its rows/history); older
                 // clients fall back to the registerable set.
@@ -492,28 +501,15 @@ export function registerActivityRoutes(fastify, activityEngine) {
 
                 for (const [accountId, rows] of existingByAccount.entries()) {
                     if (!knownIds.has(accountId)) {
-                        // Account gone entirely: prune every row and every history scope it owns
-                        // (bare + `accountId::connectionId`), exactly like the legacy contract.
+                        // A deleted account (tombstoned): prune every row and every history
+                        // scope it owns (bare + `accountId::connectionId`), exactly like the
+                        // legacy contract. Absent-but-live accounts keep everything.
+                        if (!absentTombstoned.has(accountId)) continue
                         for (const row of rows) {
                             await tx.run('DELETE FROM server_credentials WHERE id = $1 AND sync_user = $2', [row.id, syncUser])
                             pruned++
                         }
-                        await tx.run(
-                            'DELETE FROM activity_events WHERE sync_user = $1 AND account_id = $2',
-                            [syncUser, accountId]
-                        )
-                        await tx.run(
-                            'DELETE FROM activity_events WHERE sync_user = $1 AND account_id LIKE ($2 || \'::%\')',
-                            [syncUser, `${accountId}::`]
-                        )
-                        await tx.run(
-                            'DELETE FROM activity_snapshots WHERE sync_user = $1 AND account_id = $2',
-                            [syncUser, accountId]
-                        )
-                        await tx.run(
-                            'DELETE FROM activity_snapshots WHERE sync_user = $1 AND account_id LIKE ($2 || \'::%\')',
-                            [syncUser, `${accountId}::`]
-                        )
+                        await deleteAccountActivity(tx, syncUser, accountId, knownIds)
                         continue
                     }
                     // Deliberate last-login removal: the account-level row AND the bare-scope

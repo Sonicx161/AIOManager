@@ -13,7 +13,7 @@ import { applyOneActiveFlags } from '../autopilot/one-active.js'
 import { resolveRuleSkipReason } from '../autopilot/engine.js'
 import { getGlobalWebhook, setGlobalWebhook, maskWebhookUrl } from '../autopilot/global-webhook.js'
 import { autopilotDb, autopilotTripwire, autopilotOwnerBudget, ownerSaveDb, runAsOwner } from '../autopilot/write-tripwire.js'
-import { ACCOUNT_DELETED_ERROR, isAccountTombstoned, liftAccountTombstone, recordAccountTombstone, withAccountWriteLock } from '../lib/account-tombstones.js'
+import { ACCOUNT_DELETED_ERROR, deleteAccountActivity, isAccountTombstoned, liftAccountTombstone, recordAccountTombstone, withAccountWriteLock } from '../lib/account-tombstones.js'
 import { findNewRuleOverlap, RULE_OVERLAP_MESSAGE } from '../lib/rule-overlap.js'
 import { normalizeAddonUrl } from '../utils/addon-url.js'
 import { autopilotWorkerEnabled } from '../lib/autopilot-worker.js'
@@ -1116,6 +1116,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             const rules = await tx.run('DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [accountId, authUser])
             const credentials = await tx.run('DELETE FROM server_credentials WHERE account_id = $1 AND sync_user = $2', [accountId, authUser])
             const canonical = await tx.run('DELETE FROM account_canonical_addons WHERE account_id = $1 AND sync_user = $2', [accountId, authUser])
+            await deleteAccountActivity(tx, authUser, accountId)
             await recordAccountTombstone(tx, authUser, accountId)
             return { rules: rules?.changes || 0, credentials: credentials?.changes || 0, canonical: canonical?.changes || 0 }
         }))

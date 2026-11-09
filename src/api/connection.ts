@@ -122,7 +122,10 @@ async function reRegisterCredentialAndRefetchToken(
         const bundle = connection ? connectionCredentialBundle(connection) : null
         if (!connection || !bundle) return null
         const { storeConnectionCredential } = await import('@/api/hydra-providers')
-        await storeConnectionCredential(accountId, connectionId, bundle, connection.platform, connection.generation)
+        // createOnly: the heal exists to restore a MISSING row; if one appeared since
+        // the 404 (a re-sign on another device, an in-flight write), it outranks this
+        // sign-in-era copy and must not be overwritten.
+        await storeConnectionCredential(accountId, connectionId, bundle, connection.platform, connection.generation, { createOnly: true })
         const base = getSyncApiPath(useSyncStore.getState().serverUrl)
         const res = await resilientFetch(`${base}/providers/connections/${connectionId}/token`, {
             method: 'POST',

@@ -156,8 +156,36 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             })
         }
 
-        if (connection.platform === 'nuvio' && connection.credentials?.accessToken) {
+        // Server-custody platforms: every later token fetch for these goes through the
+        // server, so a sign-in whose credential never reached it 404s on each sync. The
+        // save is retried once; a second failure is surfaced honestly and the connection
+        // is left in the sign-in-required state ('expired' + lastError) the app renders
+        // for expired sessions.
+        let serverCredentialSaveFailed = false
+        const storeServerCredentialWithRetry = async (bundle: Record<string, unknown>, credentialType: 'nuvio' | 'realstream') => {
+            const label = credentialType === 'nuvio' ? 'Nuvio' : 'RealStream'
             const { storeConnectionCredential } = await import('@/api/hydra-providers')
+            try {
+                await storeConnectionCredential(accountId, connection.id, bundle, credentialType, connection.generation)
+            } catch {
+                try {
+                    await storeConnectionCredential(accountId, connection.id, bundle, credentialType, connection.generation)
+                } catch (retryErr) {
+                    serverCredentialSaveFailed = true
+                    connection.status = 'expired'
+                    connection.lastError = `${label} sign-in was not stored on the server. Sign in again to sync this connection.`
+                    connection.lastErrorAt = Date.now()
+                    toast({
+                        variant: 'destructive',
+                        title: `${label} sign-in was not saved on the server`,
+                        description: `${retryErr instanceof Error ? retryErr.message : 'Unknown error'} Sign in again from this connection so it can sync.`,
+                        href: `/account/${encodeURIComponent(accountId)}`,
+                    })
+                }
+            }
+        }
+
+        if (connection.platform === 'nuvio' && connection.credentials?.accessToken) {
             const bundle = {
                 accessToken: connection.credentials.accessToken,
                 refreshToken: connection.credentials.refreshToken,
@@ -166,13 +194,10 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 baseUrl: connection.credentials?.baseUrl || null,
                 publishableKey: connection.credentials?.publishableKey || null,
             }
-            await storeConnectionCredential(accountId, connection.id, bundle, 'nuvio', connection.generation).catch(() => {
-                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.', href: `/account/${encodeURIComponent(accountId)}` })
-            })
+            await storeServerCredentialWithRetry(bundle, 'nuvio')
         }
 
         if (connection.platform === 'realstream' && connection.credentials?.accessToken) {
-            const { storeConnectionCredential } = await import('@/api/hydra-providers')
             const bundle = {
                 accessToken: connection.credentials.accessToken,
                 userId: connection.credentials.userId || null,
@@ -181,9 +206,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 email: connection.credentials.email || null,
                 password: connection.credentials.password || null,
             }
-            await storeConnectionCredential(accountId, connection.id, bundle, 'realstream', connection.generation).catch(() => {
-                toast({ variant: 'destructive', title: 'Connection credential save failed', description: 'The connection will work until page reload.', href: `/account/${encodeURIComponent(accountId)}` })
-            })
+            await storeServerCredentialWithRetry(bundle, 'realstream')
         }
 
         if (connection.platform === 'stremio' && connection.credentials?.authKey) {
@@ -220,7 +243,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             throw new Error('This account no longer exists. Reload and add the media connection again.')
         }
 
-        toast({ title: `${connection.platform} connection added` })
+        if (!serverCredentialSaveFailed) toast({ title: `${connection.platform} connection added` })
 
         // Structural connection changes belong in the encrypted sync envelope. Media
         // connections never enter the addon reconciliation below (isAddonConnection).

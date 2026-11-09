@@ -271,7 +271,7 @@ export function registerProviderRoutes(fastify, reconciler) {
         assertWritablePrimary()
 
         const { connectionId } = request.params
-        const { accountId, credential, credentialType, connectionGeneration } = request.body || {}
+        const { accountId, credential, credentialType, connectionGeneration, createOnly } = request.body || {}
         if (!accountId || !credential) { reply.code(400); return { error: 'Missing accountId or credential' } }
         // Incarnation token of the connection (SOL-R1-BETA-04): stamps the row so a
         // delayed cleanup of a previous same-id incarnation cannot claim it.
@@ -307,7 +307,27 @@ export function registerProviderRoutes(fastify, reconciler) {
                 reply.code(403); return { error: 'Forbidden' }
             }
 
-            if (db.type === 'postgres') {
+            // The server is the single owner of the rotating session (nuvio: refresh
+            // token, realstream: access token); a device copy is written once at sign-in
+            // and never updated, so after any rotation it is revoked at the provider. The
+            // self-heal (createOnly) restores a MISSING row, which is what its 404 means:
+            // it never touches an existing one. Sign-ins and re-signs overwrite as before.
+            const insertOnly = createOnly === true && (type === 'nuvio' || type === 'realstream')
+            if (insertOnly) {
+                const existingRow = await conn.get(
+                    'SELECT 1 AS ok FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND sync_user = $3 AND account_id = $4 LIMIT 1',
+                    [connectionId, type, authUser, accountId]
+                )
+                if (existingRow) return { ok: true }
+            }
+
+            if (insertOnly) {
+                await conn.run(`
+                    INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (id) DO NOTHING
+                `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
+            } else if (db.type === 'postgres') {
                 await conn.run(`
                     INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

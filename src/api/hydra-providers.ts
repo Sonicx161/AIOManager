@@ -46,12 +46,13 @@ export async function storeConnectionCredential(
     credential: string | Record<string, unknown>,
     credentialType?: string,
     generation?: string,
+    options?: { createOnly?: boolean },
 ): Promise<void> {
     const base = getSyncApiPath(useSyncStore.getState().serverUrl)
     const res = await resilientFetch(`${base}/providers/connections/${connectionId}/credentials`, {
         method: 'POST',
         headers: await getAuthHeaders(),
-        body: JSON.stringify({ accountId, credential, credentialType, ...(generation ? { connectionGeneration: generation } : {}) }),
+        body: JSON.stringify({ accountId, credential, credentialType, ...(generation ? { connectionGeneration: generation } : {}), ...(options?.createOnly ? { createOnly: true } : {}) }),
         timeout: 10000,
     })
     if (!res.ok) {

@@ -74,6 +74,42 @@ export async function recordAccountTombstone(tx, owner, accountId, now = Date.no
     )
 }
 
+// A deleted account's watch history: the bare scope and every `accountId::connectionId`
+// scope. The prefix is compared literally and case-sensitively (LIKE would treat _ and %
+// inside an imported id as wildcards, and is case-insensitive on SQLite). An imported id
+// may itself contain '::', so scopes that belong to another known account of the same
+// owner (`acct::other` and its own scopes) are left alone.
+export async function deleteAccountActivity(tx, owner, accountId, liveAccountIds = []) {
+    const scoped = `${accountId}::`
+    const known = new Set([...liveAccountIds].map(String).filter(id => id !== accountId && id.startsWith(scoped)))
+    const sources = [
+        ['server_credentials', 'sync_user'],
+        ['account_canonical_addons', 'sync_user'],
+        ['autopilot_rules', 'owner_sync_user'],
+        ['account_server_tombstones', 'sync_user'],
+    ]
+    for (const [table, ownerColumn] of sources) {
+        const rows = await tx.query(
+            `SELECT DISTINCT account_id FROM ${table} WHERE ${ownerColumn} = $1 AND substr(account_id, 1, length(CAST($2 AS TEXT))) = CAST($3 AS TEXT)`,
+            [owner, scoped, scoped]
+        )
+        for (const r of rows) known.add(String(r.account_id))
+    }
+    const ownedByOther = (id) => [...known].some(other => id === other || id.startsWith(`${other}::`))
+    for (const table of ['activity_events', 'activity_snapshots']) {
+        await tx.run(`DELETE FROM ${table} WHERE sync_user = $1 AND account_id = $2`, [owner, accountId])
+        const scopes = await tx.query(
+            `SELECT DISTINCT account_id FROM ${table} WHERE sync_user = $1 AND substr(account_id, 1, length(CAST($2 AS TEXT))) = CAST($3 AS TEXT)`,
+            [owner, scoped, scoped]
+        )
+        for (const r of scopes) {
+            const id = String(r.account_id)
+            if (ownedByOther(id)) continue
+            await tx.run(`DELETE FROM ${table} WHERE sync_user = $1 AND account_id = $2`, [owner, id])
+        }
+    }
+}
+
 export async function liftAccountTombstone(owner, accountId) {
     const result = await db.run('DELETE FROM account_server_tombstones WHERE sync_user = $1 AND account_id = $2', [owner, accountId])
     return result?.changes || 0
