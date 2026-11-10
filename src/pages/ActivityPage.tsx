@@ -166,9 +166,12 @@ async function deleteNuvioWatchItems(account: Account, items: ActivityItem[]): P
 async function deleteRealStreamWatchItems(account: Account, items: ActivityItem[]): Promise<{ ok: boolean; keptItems: ActivityItem[] }> {
     const rsConns = (account.connections || []).filter(c => c.enabled && c.platform === 'realstream')
     if (rsConns.length === 0) return { ok: false, keptItems: items }
-    const [{ fetchConnectionToken }, { realStreamDriverFor }] = await Promise.all([
+    const [{ fetchConnectionToken, hashRejectedToken }, { realStreamDriverFor }, { getOrFetchRealStreamToken, refreshRealStreamToken, invalidateRealStreamToken }, { realStreamTokenOwner }, { isAuthError }] = await Promise.all([
         import('@/api/connection'),
         import('@/lib/drivers/factory'),
+        import('@/lib/realstream-token-cache'),
+        import('@/lib/realstream-token-owner'),
+        import('@/store/accountStore'),
     ])
 
     // Same exact-origin rule as Nuvio: one login's delete never touches a sibling's copy.
@@ -199,13 +202,24 @@ async function deleteRealStreamWatchItems(account: Account, items: ActivityItem[
             episode: i.episode ?? null,
         }))
         try {
-            const userId = group.conn.credentials?.userId || ''
+            const conn = group.conn
+            const userId = conn.credentials?.userId || ''
             if (!userId) throw new Error('RealStream user ID missing; re-authenticate this connection')
-            const token = await fetchConnectionToken(account.id, group.conn.id, 'realstream')
-            const driver = realStreamDriverFor(group.conn)
-            await driver.deleteWatchProgress(token.accessToken, userId, entries)
-            trace('activityDelete', 'realstream.connection.ok', { accountId: account.id, connectionId: group.conn.id, entries: entries.length })
+            const tokenOwner = realStreamTokenOwner(account.id, conn)
+            const token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(account.id, conn.id, 'realstream'))
+            const driver = realStreamDriverFor(conn)
+            try {
+                await driver.deleteWatchProgress(token.accessToken, userId, entries)
+            } catch (err) {
+                // A cached token the server has since rejected heals once, like the push path.
+                if (!isAuthError(err)) throw err
+                const rejectedTokenHash = await hashRejectedToken(token.accessToken)
+                const fresh = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash }))
+                await driver.deleteWatchProgress(fresh.accessToken, userId, entries)
+            }
+            trace('activityDelete', 'realstream.connection.ok', { accountId: account.id, connectionId: conn.id, entries: entries.length })
         } catch (e) {
+            if (group.conn) invalidateRealStreamToken(group.conn.id)
             if (import.meta.env.DEV) console.error('[Activity] RealStream delete failed:', e)
             trace('activityDelete', 'realstream.connection.error', { accountId: account.id, connectionId: group.conn.id, error: (e as Error)?.message })
             ok = false

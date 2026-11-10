@@ -4,10 +4,33 @@ import { decrypt, encrypt } from '../crypto.js'
 import { FALLBACK_KEYS, PRIMARY_KEY } from '../keys.js'
 import { trace } from '../utils/trace.js'
 import { assertAccountActive, gateCode } from '../admin/account-state.js'
+import { credentialBundleGeneration, getCachedCredentialBundle, setCachedCredentialBundle } from './credential-bundle-cache.js'
 
 export const REFRESH_BUFFER_MS = 5 * 60 * 1000
 export const FORCE_COOLDOWN_MS = 60 * 1000
 const FORCE_COOLDOWN_MAX_ENTRIES = 5000
+
+// Both refresh paths read the same credential shape; the bundle cache removes the
+// repeated read+decrypt when nothing was rotated. Only successful decrypts are cached.
+async function loadCredentialBundle(credentialType, connectionId, accountId, syncUser) {
+    const cached = getCachedCredentialBundle(credentialType, connectionId, accountId, syncUser)
+    if (cached) return { bundle: cached, reason: null }
+    const readGeneration = credentialBundleGeneration()
+    const cred = await db.get(
+        'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
+        [connectionId, credentialType, accountId, syncUser]
+    )
+    if (!cred?.auth_key) return { bundle: null, reason: 'no-credential' }
+    let bundle
+    try {
+        bundle = JSON.parse(decrypt(cred.auth_key, FALLBACK_KEYS))
+    } catch {
+        return { bundle: null, reason: 'decrypt-failed' }
+    }
+    if (!bundle || typeof bundle !== 'object') return { bundle: null, reason: 'unreadable-bundle' }
+    setCachedCredentialBundle(credentialType, connectionId, accountId, syncUser, bundle, readGeneration)
+    return { bundle, reason: null }
+}
 
 const refreshInFlight = new Map()
 function singleFlight(key, fn) {
@@ -144,26 +167,12 @@ async function refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, k
         }
         throw stateErr
     }
-    const cred = await db.get(
-        "SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = 'nuvio' AND sync_user = $2 AND account_id = $3 ORDER BY updated_at DESC LIMIT 1",
-        [connectionId, syncUser, accountId]
-    )
-    if (!cred?.auth_key) {
-        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'no-credential' })
+    const loaded = await loadCredentialBundle('nuvio', connectionId, accountId, syncUser)
+    if (loaded.reason) {
+        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: loaded.reason })
         return null
     }
-
-    let bundle
-    try {
-        bundle = JSON.parse(decrypt(cred.auth_key, FALLBACK_KEYS))
-    } catch {
-        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'decrypt-failed' })
-        return null
-    }
-    if (!bundle || typeof bundle !== 'object') {
-        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'unreadable-bundle' })
-        return null
-    }
+    let bundle = loaded.bundle
 
     // A bundle without baseUrl pushes to the public api.nuvio.tv; persist the heal before
     // refreshing so the refresh itself targets the client's real backend. The owner is
@@ -254,26 +263,12 @@ async function refreshRealStreamTokenInner(connectionId, accountId, syncUser, ke
         }
         throw stateErr
     }
-    const cred = await db.get(
-        "SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = 'realstream' AND sync_user = $2 AND account_id = $3 ORDER BY updated_at DESC LIMIT 1",
-        [connectionId, syncUser, accountId]
-    )
-    if (!cred?.auth_key) {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: 'no-credential' })
+    const loaded = await loadCredentialBundle('realstream', connectionId, accountId, syncUser)
+    if (loaded.reason) {
+        trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: loaded.reason })
         return null
     }
-
-    let bundle
-    try {
-        bundle = JSON.parse(decrypt(cred.auth_key, FALLBACK_KEYS))
-    } catch {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, reason: 'decrypt-failed' })
-        return null
-    }
-    if (!bundle || typeof bundle !== 'object') {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: 'unreadable-bundle' })
-        return null
-    }
+    const bundle = loaded.bundle
 
     if (!bundle.accessToken) {
         trace('tokenRefresh', 'realstream.skip', { connectionId, reason: 'no-access-token' })

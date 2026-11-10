@@ -59,6 +59,8 @@ export async function discoverFromConnections(account: Account, accountId: strin
     const existingUrls = new Set((account.addons || []).map(a => normalizeAddonUrl(a.transportUrl)))
 
     const { fetchConnectionToken } = await import('@/api/connection')
+    const { getOrFetchRealStreamToken, invalidateRealStreamToken } = await import('@/lib/realstream-token-cache')
+    const { realStreamTokenOwner } = await import('@/lib/realstream-token-owner')
     const { nuvioDriverFor, realStreamDriverFor } = await import('@/lib/drivers/factory')
 
     const discovered: DiscoveredEntry[] = []
@@ -78,9 +80,12 @@ export async function discoverFromConnections(account: Account, accountId: strin
                 const profileId = conn.credentials?.profileIndex || conn.credentials?.profileId
                 rawAddons = await nuvioDriverFor(conn).readAddons(token.accessToken, profileId) as Record<string, unknown>[]
             } else {
-                const token = await fetchConnectionToken(accountId, conn.id, 'realstream')
+                const token = await getOrFetchRealStreamToken(realStreamTokenOwner(accountId, conn), () => fetchConnectionToken(accountId, conn.id, 'realstream'))
                 const userId = conn.credentials?.userId || ''
-                if (!userId) return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: { message: 'Missing RealStream user id', isAuthError: false } }
+                if (!userId) {
+                    invalidateRealStreamToken(conn.id)
+                    return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: { message: 'Missing RealStream user id', isAuthError: false } }
+                }
                 rawAddons = await realStreamDriverFor(conn).readAddons(token.accessToken, userId) as Record<string, unknown>[]
             }
 

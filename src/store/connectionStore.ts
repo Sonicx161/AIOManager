@@ -12,6 +12,7 @@ import { canApplyMediaReadFailure, type MediaReadSession } from '@/lib/jellyfin/
 import { stremioAuthKeyMirrorAfterRemoval, stremioConnectionsOf } from '@/lib/connection-identity'
 import { acknowledgeConnectionRestores, addConnectionRemovals } from '@/lib/connection-removals'
 import { noteStremioCanonicalRepoint, noteStremioLoginsRemoved } from '@/lib/stremio-repoint'
+import { invalidateRealStreamToken } from '@/lib/realstream-token-cache'
 
 /**
  * Canonical Stremio identity transitions: returns the demoted canonical connection id
@@ -260,6 +261,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         const { accounts } = useAccountStore.getState()
         const account = accounts.find(a => a.id === accountId)
         const conn = account?.connections?.find(c => c.id === connectionId)
+        if (conn?.platform === 'realstream') invalidateRealStreamToken(connectionId)
         // Autopilot prerequisite: removing the LAST Stremio login strands the rules that
         // run on it. The removal flow pauses or deletes them server-first and acknowledges
         // via options; any other caller fails loudly here instead of bypassing silently.
@@ -382,6 +384,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 return { ...c, ...updates }
             }),
         }))
+        if (matched && updates.credentials) invalidateRealStreamToken(connectionId)
         if (!matched && (updates.mediaServer || updates.credentials?.jellyfin)) {
             throw new Error('This media connection no longer exists. Add a new connection instead.')
         }

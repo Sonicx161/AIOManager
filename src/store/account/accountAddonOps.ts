@@ -136,8 +136,13 @@ async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId:
 
 async function pushRealStream(conn: Connection, addons: AddonDescriptor[], accountId: string, ownership?: SyncOwnership, signal?: AbortSignal) {
     const { fetchConnectionToken, hashRejectedToken } = await import('@/api/connection')
+    const [{ getOrFetchRealStreamToken, refreshRealStreamToken }, { realStreamTokenOwner }] = await Promise.all([
+        import('@/lib/realstream-token-cache'),
+        import('@/lib/realstream-token-owner'),
+    ])
     assertLive(ownership, signal)
-    let token = await fetchConnectionToken(accountId, conn.id, 'realstream')
+    const tokenOwner = realStreamTokenOwner(accountId, conn)
+    let token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(accountId, conn.id, 'realstream'))
     assertLive(ownership, signal)
 
     const { realStreamDriverFor } = await import('@/lib/drivers/factory')
@@ -154,7 +159,8 @@ async function pushRealStream(conn: Connection, addons: AddonDescriptor[], accou
     } catch (err) {
         if (!isAuthError(err)) throw err
         assertLive(ownership, signal)
-        token = await fetchConnectionToken(accountId, conn.id, 'realstream', undefined, { rejectedTokenHash: await hashRejectedToken(token.accessToken) })
+        const rejectedTokenHash = await hashRejectedToken(token.accessToken)
+        token = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(accountId, conn.id, 'realstream', undefined, { rejectedTokenHash }))
         assertLive(ownership, signal)
         return await write()
     }

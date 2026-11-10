@@ -527,12 +527,16 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     { nuvioDriverFor, realStreamDriverFor },
                     { getCachedNuvioToken, setCachedNuvioToken, invalidateNuvioToken },
                     { invalidateNuvioProfileCache },
+                    { getOrFetchRealStreamToken, refreshRealStreamToken, invalidateRealStreamToken },
+                    { realStreamTokenOwner },
                 ] = await Promise.all([
                     import('@/store/watchEventStore'),
                     import('@/api/connection'),
                     import('@/lib/drivers/factory'),
                     import('@/lib/nuvio-token-cache'),
                     import('@/lib/nuvio-profile-cache'),
+                    import('@/lib/realstream-token-cache'),
+                    import('@/lib/realstream-token-owner'),
                 ])
                 await useWatchEventStore.getState().load()
                 // Registers the mappings already on hand; when that changes what is known,
@@ -1026,12 +1030,17 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                 try {
                                     const userId = conn.credentials?.userId || ''
                                     if (!userId) throw new Error('RealStream user ID missing; re-authenticate this connection')
-                                    const token = await fetchConnectionToken(account.id, conn.id, 'realstream')
+                                    const tokenOwner = realStreamTokenOwner(account.id, conn)
+                                    const token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(account.id, conn.id, 'realstream'))
                                     const driver = realStreamDriverFor(conn)
                                     const progress = await readRealStreamProgressWithHeal({
                                         connId: conn.id,
                                         accessToken: token.accessToken,
-                                        forcedToken: async () => (await fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash: await hashRejectedToken(token.accessToken) })).accessToken,
+                                        forcedToken: async () => {
+                                            const rejectedTokenHash = await hashRejectedToken(token.accessToken)
+                                            const fresh = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash }))
+                                            return fresh.accessToken
+                                        },
                                         read: accessToken => driver.readWatchProgress(accessToken, userId),
                                     })
                                     if (import.meta.env.DEV) console.info(`[LibraryCache] RealStream fetched ${progress.length} progress for ${account.name || account.id}`)
@@ -1083,6 +1092,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         })), multiRS ? { sourceConnectionId: conn.id } : undefined)
                                     }
                                 } catch (err) {
+                                    invalidateRealStreamToken(conn.id)
                                     if (import.meta.env.DEV) console.warn(`[LibraryCache] RealStream history fetch failed for ${account.name || account.id}, preserving last known items:`, err)
                                     trace('libraryCache', 'realstream.fetch.error', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, error: (err as Error)?.message })
                                     if (!toastedRealStreamFailures.has(conn.id)) {

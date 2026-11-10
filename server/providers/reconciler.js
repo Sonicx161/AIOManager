@@ -4,6 +4,7 @@ import { FALLBACK_KEYS } from '../keys.js'
 import { trace, traceEnabled } from '../utils/trace.js'
 import { connectionEffectiveAddons, connectionExcludedUrls, chainGuardFailureWithExclusions } from '../utils/addon-destinations.js'
 import { REFRESH_BUFFER_MS } from './token-refresh.js'
+import { invalidateCredentialBundleCache } from './credential-bundle-cache.js'
 import { isLocalHostname } from '../hydra/client.js'
 import { invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
 import { AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
@@ -24,6 +25,7 @@ let connectionCacheGeneration = 0
 
 export function invalidateConnectionCache(syncUser = null) {
     connectionCacheGeneration++
+    invalidateCredentialBundleCache(syncUser)
     if (!syncUser) {
         connectionCache.clear()
         return
