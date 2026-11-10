@@ -1456,6 +1456,15 @@
         }
       }
     },
+    "/api/activity/events/delete": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/credentials/sync": {
       "post": {
         "responses": {
