@@ -4,7 +4,7 @@ import { AlertCircle, AlertTriangle, CheckCircle, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
 
-function ToastAction({ toast, onDone }: { toast: Toast; onDone: () => void }) {
+function ToastAction({ toast, onDone, below }: { toast: Toast; onDone: () => void; below?: boolean }) {
   const action = toast.action
   const duration = toast.duration ?? DEFAULT_TOAST_DURATION
   const finite = Number.isFinite(duration) && duration > 0
@@ -23,7 +23,10 @@ function ToastAction({ toast, onDone }: { toast: Toast; onDone: () => void }) {
     <button
       type="button"
       onClick={() => { action.onClick(); onDone() }}
-      className="shrink-0 rounded-lg border border-border/50 bg-muted/50 px-2.5 py-1.5 text-xs font-bold tabular-nums text-foreground transition-colors hover:bg-muted"
+      className={cn(
+        'shrink-0 rounded-lg border border-border/50 bg-muted/50 px-2.5 py-1.5 text-xs font-bold tabular-nums text-foreground transition-colors hover:bg-muted',
+        below && 'mt-2 w-fit'
+      )}
     >
       {action.label}
       {seconds !== null && <span className="ml-1 font-medium text-muted-foreground">({seconds}s)</span>}
@@ -40,7 +43,8 @@ export function Toaster() {
         {toasts.map((toast) => {
           const isDestructive = toast.variant === 'destructive'
           const isWarning = toast.variant === 'warning'
-          const Icon = isDestructive ? AlertCircle : isWarning ? AlertTriangle : CheckCircle
+          const isAttention = toast.variant === 'attention'
+          const Icon = toast.icon ?? (isDestructive ? AlertCircle : isWarning || isAttention ? AlertTriangle : CheckCircle)
 
           return (
             <motion.div
@@ -62,7 +66,7 @@ export function Toaster() {
                   "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border shadow-sm",
                   isDestructive
                     ? "border-destructive/20 bg-destructive/10 text-destructive"
-                    : isWarning
+                    : isWarning || isAttention
                       ? "border-warning/20 bg-warning/10 text-warning"
                       : "border-border/40 bg-muted/45 text-foreground"
                 )}>
@@ -76,7 +80,8 @@ export function Toaster() {
                   )}
                   <p className={cn(
                     "line-clamp-2 text-sm font-semibold leading-snug [overflow-wrap:anywhere]",
-                    isDestructive && "text-destructive"
+                    isDestructive && "text-destructive",
+                    isAttention && "text-warning"
                   )}>
                     {toast.title}
                   </p>
@@ -85,8 +90,9 @@ export function Toaster() {
                       {toast.description}
                     </p>
                   )}
+                  {toast.action && toast.actionBelow && <ToastAction toast={toast} below onDone={() => dismiss(toast.id)} />}
                 </div>
-                {toast.action && <ToastAction toast={toast} onDone={() => dismiss(toast.id)} />}
+                {toast.action && !toast.actionBelow && <ToastAction toast={toast} onDone={() => dismiss(toast.id)} />}
                 <button
                   data-theme-part="button"
                   data-variant="ghost"

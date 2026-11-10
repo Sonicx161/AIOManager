@@ -8,6 +8,8 @@ import { Loader2, Lock, Mail, Key, QrCode, RefreshCw, Eye, EyeOff } from 'lucide
 import { loginWithCredentials } from '@/api/auth'
 import { stremioClient } from '@/api/stremio-client'
 import { createStremioLink, pollStremioLink } from '@/api/stremio-link'
+import { isStremioPasswordResetError } from '@/lib/stremio-password-reset'
+import { StremioPasswordResetPanel } from '@/components/accounts/StremioPasswordResetPanel'
 import type { QRSession } from '@/lib/qr-device-link'
 import { QRLinkDialog } from '@/components/qr/QRLinkDialog'
 import { StremioSocialAuth } from '@/components/accounts/StremioSocialAuth'
@@ -249,9 +251,13 @@ export function StremioSetupDialog({ accountId, open, onOpenChange, onComplete, 
                         </TabsContent>
                     </Tabs>
                     {error && (
-                        <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/10 border border-destructive/20 px-3 py-2 text-xs text-destructive">
-                            {error}
-                        </div>
+                        isStremioPasswordResetError(error) ? (
+                            <StremioPasswordResetPanel compact email={email} onTryAgain={() => void handlePasswordSignIn()} />
+                        ) : (
+                            <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-destructive/10 border border-destructive/20 px-3 py-2 text-xs text-destructive">
+                                {error}
+                            </div>
+                        )
                     )}
                     {onBackToPicker && (
                         <DialogFooter>

@@ -81,6 +81,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { PLATFORM_REGISTRY, getPlatformEntry } from '@/lib/platform-registry'
 import { AccountAvatar } from './AccountAvatar'
 import { ConnectionPicturesSection } from './ConnectionPicturesSection'
+import { StremioPasswordResetPanel } from './StremioPasswordResetPanel'
+import { isStremioPasswordResetError } from '@/lib/stremio-password-reset'
 import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 type AccountAuthMode = 'credentials' | 'oauth' | 'authKey' | 'qr'
@@ -578,7 +580,7 @@ export function AccountForm() {
     }
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e?: React.FormEvent) => {
     if (e) {
       e.preventDefault()
       e.stopPropagation()
@@ -1805,14 +1807,18 @@ export function AccountForm() {
           </div>
 
           {error && (
-            <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
-              <div className="flex items-start gap-3">
-                <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-sm font-bold text-destructive">{error}</p>
+            isStremioPasswordResetError(error) ? (
+              <StremioPasswordResetPanel email={email} onTryAgain={() => void handleSubmit()} />
+            ) : (
+              <div data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm font-bold text-destructive">{error}</p>
+                  </div>
                 </div>
               </div>
-            </div>
+            )
           )}
         </div>
       ) : (
@@ -1885,14 +1891,18 @@ export function AccountForm() {
         </div>
 
         {error && (
-          <div role="alert" data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
-            <div className="flex items-start gap-3">
-              <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-bold text-destructive">{error}</p>
+          isStremioPasswordResetError(error) ? (
+            <StremioPasswordResetPanel email={email} onTryAgain={() => void handleSubmit()} />
+          ) : (
+            <div role="alert" data-theme-tone="status" data-theme-part="panel" className="bg-destructive/10 border border-destructive/50 rounded-xl px-4 py-3 animate-in shake duration-500">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm font-bold text-destructive">{error}</p>
+                </div>
               </div>
             </div>
-          </div>
+          )
         )}
 
         <DialogFooter className="mt-6 pt-2">

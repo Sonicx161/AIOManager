@@ -1,3 +1,4 @@
+import type { ComponentType } from 'react'
 import { useCallback, useState, useEffect } from 'react'
 
 export const DEFAULT_TOAST_DURATION = 5000
@@ -11,9 +12,11 @@ export interface Toast {
   id: string
   title: string
   description?: React.ReactNode
-  variant?: 'default' | 'destructive' | 'warning'
+  variant?: 'default' | 'destructive' | 'warning' | 'attention'
+  icon?: ComponentType<{ className?: string }>
   className?: string
   action?: ToastAction
+  actionBelow?: boolean
   /** 'signin' marks this toast as a sign-in fix so the notification inbox can offer that action after the toast is gone. */
   actionHint?: 'signin'
   /** The connection a sign-in fix notice points at. */
@@ -53,9 +56,9 @@ function removeToast(id: string) {
 }
 
 // Standalone toast function that can be used outside of React components
-export function toast({ id: givenId, title, description, variant = 'default', className, action, actionHint, actionTarget, duration, href, accountId, history }: ToastInput) {
+export function toast({ id: givenId, title, description, variant = 'default', icon, className, action, actionBelow, actionHint, actionTarget, duration, href, accountId, history }: ToastInput) {
   const id = givenId ?? crypto.randomUUID()
-  const newToast: Toast = { id, title, description, variant, className, action, actionHint, actionTarget, duration, href, accountId, history, createdAt: Date.now() }
+  const newToast: Toast = { id, title, description, variant, icon, className, action, actionBelow, actionHint, actionTarget, duration, href, accountId, history, createdAt: Date.now() }
 
   const existingTimer = toastTimers.get(id)
   if (existingTimer) clearTimeout(existingTimer)

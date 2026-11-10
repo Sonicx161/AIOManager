@@ -7,7 +7,7 @@ import { ToolbarShell } from '@/components/ui/toolbar-shell'
 import { TabsContent } from '@/components/ui/tabs'
 import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Trash2, ArrowLeft, Loader2, Mail, Lock, Key, RefreshCw, Eye, EyeOff, QrCode, BookOpen, ChevronDown, Users, Power, Zap, TriangleAlert } from 'lucide-react'
+import { Trash2, ArrowLeft, Loader2, Mail, Lock, Key, RefreshCw, Eye, EyeOff, QrCode, BookOpen, ChevronDown, Users, Power, Zap, TriangleAlert, KeyRound } from 'lucide-react'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useConnectionStore } from '@/store/connectionStore'
 import { useAccountStore, getCachedAuthKey, getEncryptionKey, getAccountEmail, getStremioConnection } from '@/store/accountStore'
@@ -18,6 +18,8 @@ import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { stremioClient } from '@/api/stremio-client'
 import { getUserCached } from '@/lib/stremio-user-cache'
 import { loginWithCredentials } from '@/api/auth'
+import { buildResetPasswordUrl } from '@/api/stremio-relay'
+import { isStremioPasswordResetError, STREMIO_PASSWORD_RESET_COPY } from '@/lib/stremio-password-reset'
 import { nuvioAuth, realstreamAuth } from '@/api/hydra-providers'
 import { exchangeNuvioQr, pollNuvioQr, startNuvioQr } from '@/api/nuvio-qr'
 import { QRLinkDialog } from '@/components/qr/QRLinkDialog'
@@ -244,7 +246,22 @@ function StremioCredentialsSection({ accountId, connection }: { accountId: strin
             setPassword('')
             await useConnectionStore.getState().syncConnections(accountId)
         } catch (err) {
-            toast({ title: 'Re-authentication failed', description: errMsg(err), variant: 'destructive' })
+            if (isStremioPasswordResetError(err)) {
+                toast({
+                    title: STREMIO_PASSWORD_RESET_COPY.title,
+                    description: STREMIO_PASSWORD_RESET_COPY.body,
+                    action: {
+                        label: STREMIO_PASSWORD_RESET_COPY.actionLabel,
+                        onClick: () => window.open(buildResetPasswordUrl(email), '_blank', 'noopener,noreferrer'),
+                    },
+                    actionBelow: true,
+                    variant: 'attention',
+                    icon: KeyRound,
+                    duration: Infinity,
+                })
+            } else {
+                toast({ title: 'Re-authentication failed', description: errMsg(err), variant: 'destructive' })
+            }
         } finally {
             setSaving(false)
         }
