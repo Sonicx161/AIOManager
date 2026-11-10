@@ -3,7 +3,8 @@ import { useWatchEventStore, filterTombstonedEvents } from '@/store/watchEventSt
 import { useLibraryCache } from '@/store/libraryCache'
 import { useAccountStore } from '@/store/accountStore'
 import { ActivityItem, SavedEpisodesSummary } from '@/types/activity'
-import { getEpisodeIdentity, fetchCinemetaDetail, historyEntryToActivityItem } from '@/lib/activity-utils'
+import { getEpisodeIdentity, historyEntryToActivityItem } from '@/lib/activity-utils'
+import { fetchCinemetaSlimResult } from '@/lib/cinemeta-cache'
 import { resolveUnrecordedEpisodes } from '@/lib/episode-resolution'
 import { summarizeSavedEpisodes } from '@/lib/imported-watch-state'
 import { useJellyfinActivity, type MediaReadIssue } from '@/hooks/useJellyfinActivity'
@@ -195,6 +196,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         ? deferredInput
         : { events: rawEvents, liveItems: rawLiveItems }
     const [genreMap, setGenreMap] = useState<Map<string, string[]>>(loadGenreCache)
+    const [genreRetryTick, setGenreRetryTick] = useState(0)
 
     // Canonical-aware origin context: the CURRENT canonical login's items/events share the
     // bare account scope with legacy and server-merged canonical rows (so one watch never
@@ -503,7 +505,9 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         const { seen, needs: needsGenres, typeByItemId } = genreCrawlTargets(events, genreMap, genresEnabled)
         if (needsGenres.length === 0) return
         let cancelled = false
-        const BATCH = 5
+        let retryTimer: ReturnType<typeof setTimeout> | undefined
+        let anyTransient = false
+        const BATCH = 100
         const results = new Map<string, string[]>()
         const failed = new Set<string>()
         ;(async () => {
@@ -512,30 +516,34 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
                 if (cancelled) return
                 const batch = needsGenres.slice(i, i + BATCH)
                 await Promise.all(batch.map(async id => {
-                    const meta = await fetchCinemetaDetail(id, typeByItemId.get(id))
-                    if (meta && typeof meta.genre === 'string' && meta.genre.trim()) {
-                        const genres = meta.genre.split(',').map(g => g.trim()).filter(Boolean)
-                        if (genres.length > 0) results.set(id, genres)
-                        else failed.add(id)
-                    } else {
-                        failed.add(id)
-                    }
+                    const { slim: meta, transient } = await fetchCinemetaSlimResult(id, typeByItemId.get(id))
+                    if (meta?.genres?.length) results.set(id, meta.genres)
+                    else if (transient) anyTransient = true
+                    else failed.add(id)
                 }))
             }
             if (!cancelled) {
                 if (import.meta.env?.DEV) console.log('[GenreResolve] resolved', results.size, 'failed', failed.size, 'of', needsGenres.length)
                 const merged = new Map(genreMap)
-                for (const [id, g] of results) merged.set(id, g)
-                for (const id of failed) if (!merged.has(id)) merged.set(id, [])
+                let changed = false
+                for (const [id, g] of results) { merged.set(id, g); changed = true }
+                for (const id of failed) if (!merged.has(id)) { merged.set(id, []); changed = true }
                 for (const id of merged.keys()) {
-                    if (!seen.has(id)) merged.delete(id)
+                    if (!seen.has(id)) { merged.delete(id); changed = true }
                 }
-                saveGenreCache(merged)
-                setGenreMap(merged)
+                // Publishing an unchanged map re-runs this effect, which would spin while transient ids sit in backoff.
+                if (changed) {
+                    saveGenreCache(merged)
+                    setGenreMap(merged)
+                }
+                if (anyTransient) retryTimer = setTimeout(() => setGenreRetryTick(t => t + 1), 30_000)
             }
         })()
-        return () => { cancelled = true }
-    }, [events, genreMap, genresEnabled])
+        return () => {
+            cancelled = true
+            if (retryTimer) clearTimeout(retryTimer)
+        }
+    }, [events, genreMap, genresEnabled, genreRetryTick])
 
     const combinedHistoryCacheRef = useRef<{ deps: unknown[]; value: HistoryEntry[] } | null>(null)
     const combinedHistory = useMemo(() => {

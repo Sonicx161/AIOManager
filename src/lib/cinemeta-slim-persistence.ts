@@ -4,6 +4,9 @@ import { getActivePersistence, getActiveWorkspaceId, subscribeWorkspaceChanges }
 import { createSlimStore } from '@/lib/cinemeta-slim-store'
 
 export const cinemetaSlimStore = createSlimStore({
+    // A large feed walks tens of thousands of distinct ids in one session; the
+    // records are tiny, so the persisted store carries the whole working set.
+    maxEntries: 40000,
     context: () => {
         const key = useAuthStore.getState().encryptionKey
         if (!key) return null

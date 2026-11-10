@@ -1164,6 +1164,180 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         return { result: results }
     })
 
+    // Batch Cinemeta meta lookups for the activity/replay feeds. One POST replaces up
+    // to CINEMETA_META_BATCH_MAX per-row browser fetches to the Cinemeta CDN; results
+    // are the same { meta } documents the CDN serves, so the client-side mapping is
+    // unchanged. Ids and media types are validated, so no caller-controlled URL ever
+    // reaches the fetch below (SSRF surface stays empty by construction).
+    const CINEMETA_META_BASE = (process.env.CINEMETA_META_BASE || 'https://cinemeta-live.strem.io').replace(/\/+$/, '')
+    const CINEMETA_META_BATCH_MAX = 100
+    const CINEMETA_META_CONCURRENCY = 8
+    const CINEMETA_META_TIMEOUT_MS = 8000
+    const CINEMETA_META_CACHE_MAX = 2000
+    const CINEMETA_META_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+    const CINEMETA_META_NEGATIVE_TTL_MS = 5 * 60 * 1000
+    // Every cache miss shares one instance-wide upstream lane, and each owner may run
+    // only a few batches at once, so concurrent batches cannot multiply upstream fetches.
+    const CINEMETA_UPSTREAM_CONCURRENCY = 16
+    const CINEMETA_UPSTREAM_QUEUE_WAIT_MS = 15000
+    const CINEMETA_BATCHES_PER_OWNER = 4
+    const cinemetaOwnerBatches = new Map()
+    const cinemetaMetaCache = new Map()
+    const cinemetaMetaNegative = new Map()
+    const cinemetaMetaInflight = new Map()
+
+    const cinemetaCacheStats = { hits: 0, misses: 0 }
+    registerCacheLayer('cinemeta', { label: 'Cinemeta meta cache', stats: () => ({ ...cinemetaCacheStats, entries: cinemetaMetaCache.size, negative: cinemetaMetaNegative.size, inflight: cinemetaMetaInflight.size }) })
+
+    const cinemetaCacheGet = (key) => {
+        const hit = cinemetaMetaCache.get(key)
+        if (!hit) return null
+        if (Date.now() - hit.ts >= CINEMETA_META_CACHE_TTL_MS) { cinemetaMetaCache.delete(key); return null }
+        cinemetaMetaCache.delete(key)
+        cinemetaMetaCache.set(key, hit)
+        return hit.meta
+    }
+
+    const cinemetaNegativeGet = (key) => {
+        const hit = cinemetaMetaNegative.get(key)
+        if (!hit) return null
+        if (Date.now() - hit.ts >= CINEMETA_META_NEGATIVE_TTL_MS) { cinemetaMetaNegative.delete(key); return null }
+        return true
+    }
+
+    const cinemetaBoundedSet = (map, key, value, max) => {
+        map.delete(key)
+        map.set(key, value)
+        while (map.size > max) {
+            const oldest = map.keys().next()
+            if (oldest.done) break
+            map.delete(oldest.value)
+        }
+    }
+
+    const fetchCinemetaMetaEntry = (mediaType, imdbId) => {
+        const key = `${mediaType}:${imdbId}`
+        const cached = cinemetaCacheGet(key)
+        if (cached) { cinemetaCacheStats.hits++; return Promise.resolve({ status: 200, meta: cached }) }
+        if (cinemetaNegativeGet(key)) { cinemetaCacheStats.hits++; return Promise.resolve({ status: 404, meta: null }) }
+        let pending = cinemetaMetaInflight.get(key)
+        if (pending) return pending
+        cinemetaCacheStats.misses++
+        const url = `${CINEMETA_META_BASE}/meta/${mediaType}/${imdbId}.json`
+        pending = enqueueProxyRequest(url, async () => {
+            const controller = new AbortController()
+            const timeout = setTimeout(() => controller.abort(), CINEMETA_META_TIMEOUT_MS)
+            try {
+                const res = await fetch(url, {
+                    signal: controller.signal,
+                    headers: { Accept: 'application/json' },
+                })
+                if (res.status === 404) {
+                    cinemetaBoundedSet(cinemetaMetaNegative, key, { ts: Date.now() }, CINEMETA_META_CACHE_MAX)
+                    return { status: 404, meta: null }
+                }
+                if (!res.ok) return { status: res.status, meta: null }
+                const data = await res.json().catch(() => null)
+                const meta = data && typeof data === 'object' ? data.meta : null
+                if (!meta || typeof meta !== 'object') return { status: 502, meta: null }
+                cinemetaBoundedSet(cinemetaMetaCache, key, { meta, ts: Date.now() }, CINEMETA_META_CACHE_MAX)
+                return { status: 200, meta }
+            } catch {
+                return { status: 0, meta: null }
+            } finally {
+                clearTimeout(timeout)
+            }
+        }, {
+            lane: 'cinemeta',
+            concurrency: CINEMETA_UPSTREAM_CONCURRENCY,
+            throttleMs: 0,
+            deadline: Date.now() + CINEMETA_UPSTREAM_QUEUE_WAIT_MS,
+        }).catch(() => ({ status: 0, meta: null })).finally(() => cinemetaMetaInflight.delete(key))
+        cinemetaMetaInflight.set(key, pending)
+        return pending
+    }
+
+    fastify.post('/api/cinemeta-meta-batch', {
+        bodyLimit: 64 * 1024,
+        config: { rateLimit: { max: 3000, timeWindow: '1 minute' } },
+        schema: {
+            body: {
+                type: 'object',
+                required: ['metas'],
+                properties: {
+                    metas: {
+                        type: 'array',
+                        maxItems: CINEMETA_META_BATCH_MAX,
+                        items: {
+                            type: 'object',
+                            required: ['id', 'type'],
+                            properties: {
+                                id: { type: 'string', pattern: '^tt[0-9]{5,10}$' },
+                                type: { type: 'string', enum: ['movie', 'series'] },
+                            },
+                            additionalProperties: false,
+                        },
+                    },
+                },
+                additionalProperties: false,
+            },
+        },
+    }, async (request, reply) => {
+        const authResult = await requireProxyAuth(request, reply)
+        if (authResult) return authResult
+
+        const owner = String(request.deviceAuth?.accountUuid || request.headers['x-sync-user'] || '')
+        const ownerBatches = cinemetaOwnerBatches.get(owner) || 0
+        if (ownerBatches >= CINEMETA_BATCHES_PER_OWNER) {
+            reply.status(429).header('Retry-After', '2')
+            return { error: 'Too many concurrent Cinemeta batches' }
+        }
+        cinemetaOwnerBatches.set(owner, ownerBatches + 1)
+        try {
+            return await runCinemetaBatch(request)
+        } finally {
+            const remaining = (cinemetaOwnerBatches.get(owner) || 1) - 1
+            if (remaining <= 0) cinemetaOwnerBatches.delete(owner)
+            else cinemetaOwnerBatches.set(owner, remaining)
+        }
+    })
+
+    const runCinemetaBatch = async (request) => {
+        const requested = request.body.metas
+        const seen = new Set()
+        const entries = []
+        for (const item of requested) {
+            const key = `${item.type}:${item.id}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            entries.push(item)
+        }
+        const results = new Array(entries.length).fill(null)
+        let nextIndex = 0
+        const requestAbort = new AbortController()
+        const onRequestAborted = () => requestAbort.abort()
+        if (request.raw.aborted) requestAbort.abort()
+        else request.raw.once('aborted', onRequestAborted)
+        const workers = Array.from({ length: Math.min(CINEMETA_META_CONCURRENCY, entries.length) }, async () => {
+            while (nextIndex < entries.length) {
+                if (requestAbort.signal.aborted) return
+                const index = nextIndex++
+                const { id, type } = entries[index]
+                results[index] = await fetchCinemetaMetaEntry(type, id)
+            }
+        })
+        try {
+            await Promise.all(workers)
+        } finally {
+            request.raw.removeListener('aborted', onRequestAborted)
+        }
+        const metas = entries.map((entry, index) => {
+            const result = results[index] || { status: 0, meta: null }
+            return { id: entry.id, type: entry.type, status: result.status, ...(result.meta !== null ? { meta: result.meta } : {}) }
+        })
+        return { metas }
+    }
+
     fastify.post('/api/aiostreams-proxy/user', {
         bodyLimit: 1024 * 1024,
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } },

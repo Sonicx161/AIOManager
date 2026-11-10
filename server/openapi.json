@@ -504,6 +504,56 @@
         }
       }
     },
+    "/api/cinemeta-meta-batch": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "metas"
+                ],
+                "properties": {
+                  "metas": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "type"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^tt[0-9]{5,10}$"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "movie",
+                            "series"
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/aiostreams-proxy/user": {
       "post": {
         "requestBody": {

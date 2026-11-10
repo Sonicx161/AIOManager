@@ -45,7 +45,10 @@ export function useActivityMetadata(items: ActivityItem[]): ActivityItem[] {
     const firstPassForItems = useRef<unknown>(null)
 
     useEffect(() => {
-        const batch = selectMetadataBatch(items, resolved, failedAt.current, Date.now(), FAILED_LOOKUP_TTL_MS, 20)
+        const firstPass = firstPassForItems.current !== items
+        // The visible rows fill immediately; later passes pull many more per round
+        // because each lookup now rides a coalesced server batch.
+        const batch = selectMetadataBatch(items, resolved, failedAt.current, Date.now(), FAILED_LOOKUP_TTL_MS, firstPass ? 20 : 150)
         if (batch.length === 0) return
         let active = true
         // The first pass fills what is on screen right away; later passes only fill
