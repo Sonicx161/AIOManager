@@ -14,6 +14,13 @@ import { guardedResilientFetch, guardedWebFetch } from '../utils/safe-fetch.js'
 const BACKUP_EXPORT_MAX_BYTES = 50 * 1024 * 1024
 const RPC_DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 
+// GoTrue answers 400 (not 401) for a wrong password or a revoked refresh token.
+const AUTH_REJECTION_CODES = /^(invalid_credentials|invalid_grant|refresh_token_not_found|refresh_token_already_used|session_not_found|session_expired)$/
+function isNuvioAuthRejection(status, body) {
+    if (status !== 400 || !body || typeof body !== 'object') return false
+    return AUTH_REJECTION_CODES.test(String(body.error_code || body.error || ''))
+}
+
 // Hard size ceiling: abort oversized upstream bodies instead of materializing them.
 async function readJsonCapped(res, maxBytes) {
     const declared = Number(res.headers?.get?.('content-length'))
@@ -145,8 +152,8 @@ export function createNuvioDriver(options = {}) {
                 if (!res.ok) {
                     const err = new Error(`Nuvio auth failed: ${res.status}`)
                     err.status = res.status
-                    err.isAuthError = res.status === 401 || res.status === 403
                     try { err.data = await res.json() } catch { }
+                    err.isAuthError = res.status === 401 || res.status === 403 || isNuvioAuthRejection(res.status, err.data)
                     throw err
                 }
                 const data = await res.json()
@@ -199,7 +206,9 @@ export function createNuvioDriver(options = {}) {
                 if (!res.ok) {
                     const err = new Error(`Nuvio token refresh failed: ${res.status}`)
                     err.status = res.status
-                    err.isAuthError = res.status === 401
+                    let body = null
+                    try { body = await res.json() } catch { }
+                    err.isAuthError = res.status === 401 || isNuvioAuthRejection(res.status, body)
                     throw err
                 }
                 const data = await res.json()
