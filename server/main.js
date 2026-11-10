@@ -5,7 +5,7 @@ import fastifyStatic from '@fastify/static'
 import fastifyCompress from '@fastify/compress'
 import rateLimit from '@fastify/rate-limit'
 import swagger from '@fastify/swagger'
-import { hashApiKey } from './api-keys.js'
+import { rateLimitKey } from './utils/rate-limit-key.js'
 import db from './db.js'
 import fs from 'fs'
 import { logFormatters } from './admin/log-fields.js'
@@ -69,23 +69,7 @@ await fastify.register(cors, {
 
 await fastify.register(rateLimit, {
     global: false,
-    keyGenerator: (request) => {
-        // Hydra consumers authenticate by API key (not x-sync-user), so bucket them per-key.
-        // Critical on shared/proxied instances where every consumer can share one source IP.
-        const apiKey = request.headers['x-api-key']
-        if (apiKey) return `k:${hashApiKey(apiKey)}`
-        if (request.url?.startsWith('/api/sync/')) {
-            const rawId = request.url.split('?')[0].split('/')[3]
-            // Decode so percent-encoding variants of the same id can't split rate-limit
-            // buckets; malformed sequences fall back to the raw segment.
-            let id = null
-            try { id = rawId ? decodeURIComponent(rawId) : null } catch { id = rawId || null }
-            // id+ip hybrid: per-id stops cross-account NAT starvation, the ip component stops
-            // anyone who knows the id from exhausting the bucket pre-auth (401s still count).
-            return id ? `sync:${id}:${request.ip}` : request.ip
-        }
-        return request.headers['x-sync-user'] || request.ip
-    }
+    keyGenerator: rateLimitKey
 })
 
 await fastify.register(fastifyCompress, { global: true })
