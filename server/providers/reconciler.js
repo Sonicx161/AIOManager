@@ -92,7 +92,7 @@ function buildNativeConnection(type, row, accountId, bundle) {
         platform: type,
         accountId,
         driverType: 'native',
-        enabled: true,
+        enabled: bundle.enabled !== false,
         status: 'active',
         credentials: bundle,
         consecutiveFailures: 0,

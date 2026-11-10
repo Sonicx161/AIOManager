@@ -467,7 +467,7 @@ export function createProcessRule({
                     reconciledList = built.canonical
 
                     const stremioConn = { id: `${rule.account_id}:stremio`, platform: 'stremio', accountId: rule.account_id, enabled: true, status: 'active', credentials: { authKey: decryptedAuthKey }, capabilities: ['addons'], consecutiveFailures: 0 }
-                    const connectionTargets = hasChanged ? (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)).filter(c => c.platform !== 'stremio') : []
+                    const connectionTargets = hasChanged ? (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)).filter(c => c.enabled && c.platform !== 'stremio') : []
                     const stremioWriter = async (conn) => {
                         try {
                             await writeStremioCollection(conn.credentials.authKey, built.canonical, { remoteAddons: built.remoteAddons, normalizedActive: built.normalizedActive, accountId: rule.account_id, syncUser: rule.owner_sync_user, connectionId: conn.id, ruleId: rule.id, preserveUrls: built.preserveUrls || [] })
@@ -501,7 +501,7 @@ export function createProcessRule({
                     if (hasChanged && reconciler) {
                         try {
                             const conns = await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)
-                            const targets = conns.filter(c => c.platform !== 'stremio')
+                            const targets = conns.filter(c => c.enabled && c.platform !== 'stremio')
                             if (targets.length > 0) {
                                 const outcome = preserveUrls.length > 0
                                     ? await reconciler.enforceAccount(rule.account_id, targets, reconciledList ?? updatedAddonList, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, preserveUrls, canWrite: () => canWrite(rule) })

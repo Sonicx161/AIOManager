@@ -264,6 +264,91 @@ export function registerProviderRoutes(fastify, reconciler) {
         return credentialValue
     }
 
+    // A re-sign carries fresh tokens but no enabled flag; it must not silently re-enable
+    // a connection the user turned off.
+    async function preserveExistingDisabled(connectionId, credentialValue, accountId, syncUser, type, conn = db) {
+        let incoming = null
+        try { incoming = typeof credentialValue === 'string' ? JSON.parse(credentialValue) : credentialValue } catch { return credentialValue }
+        if (!incoming || typeof incoming !== 'object' || typeof incoming.enabled === 'boolean') return credentialValue
+        const existing = await conn.get(
+            'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND sync_user = $3 AND account_id = $4 ORDER BY updated_at DESC LIMIT 1',
+            [connectionId, type, syncUser, accountId]
+        )
+        if (!existing?.auth_key) return credentialValue
+        try {
+            const stored = JSON.parse(decrypt(existing.auth_key, FALLBACK_KEYS))
+            if (typeof stored?.enabled === 'boolean') {
+                return JSON.stringify({
+                    ...incoming,
+                    enabled: stored.enabled,
+                    ...(Number.isFinite(stored.enabledRev) ? { enabledRev: stored.enabledRev } : {}),
+                })
+            }
+        } catch { }
+        return credentialValue
+    }
+
+    // Merge-only: sets the enabled flag inside the sealed bundle and keeps the server's
+    // rotated tokens. Compare-and-set on auth_key so a concurrent token refresh is never lost.
+    // Ordering is a server-owned revision: an explicit toggle carries the revision the caller
+    // last saw and is refused (409, current state returned) when another toggle already moved
+    // it. Bundles without a revision — anything stored by an older build — read as revision 0,
+    // so no client clock, however far in the future, can ever block a toggle. A migration only
+    // fills a flag that was never stored and never touches the revision.
+    async function setNativeCredentialEnabled(conn, syncUser, accountId, connectionId, type, enabled, { knownRev = null, migrate = false } = {}) {
+        let updated = 0
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const rows = await conn.query(
+                'SELECT id, auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND sync_user = $3 AND account_id = $4',
+                [connectionId, type, syncUser, accountId]
+            )
+            let readable = 0
+            let conflicts = 0
+            let current = null
+            let currentRev = null
+            let revConflict = null
+            for (const row of rows || []) {
+                if (!row.auth_key) continue
+                let bundle
+                try { bundle = JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) } catch { continue }
+                if (!bundle || typeof bundle !== 'object') continue
+                readable++
+                const rev = Number(bundle.enabledRev) || 0
+                if (migrate) {
+                    if (typeof bundle.enabled === 'boolean') {
+                        if (current === null) { current = bundle.enabled !== false; currentRev = rev }
+                        continue
+                    }
+                } else if (knownRev !== null && rev !== knownRev) {
+                    if (!revConflict) revConflict = { enabled: bundle.enabled !== false, enabledRev: rev }
+                    continue
+                }
+                const next = { ...bundle, enabled }
+                if (!migrate) next.enabledRev = rev + 1
+                const result = await conn.run(
+                    'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE id = $3 AND sync_user = $4 AND account_id = $5 AND auth_key = $6',
+                    [encrypt(JSON.stringify(next), PRIMARY_KEY), Date.now(), row.id, syncUser, accountId, row.auth_key]
+                )
+                if (result?.changes || result?.rowCount) { updated++; current = enabled; currentRev = rev + 1 }
+                else conflicts++
+            }
+            if (!readable) return { status: 'missing', updated }
+            if (revConflict) return { status: 'revision', updated, enabled: revConflict.enabled, enabledRev: revConflict.enabledRev }
+            if (!conflicts) {
+                if (updated) {
+                    const { invalidateConnectionCache } = await import('../providers/reconciler.js')
+                    invalidateConnectionCache(syncUser)
+                }
+                return { status: 'ok', updated, enabled: current, enabledRev: currentRev }
+            }
+        }
+        if (updated) {
+            const { invalidateConnectionCache } = await import('../providers/reconciler.js')
+            invalidateConnectionCache(syncUser)
+        }
+        return { status: 'conflict', updated }
+    }
+
     fastify.post('/api/providers/connections/:connectionId/credentials', {
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
     }, async (request, reply) => {
@@ -272,7 +357,22 @@ export function registerProviderRoutes(fastify, reconciler) {
         assertWritablePrimary()
 
         const { connectionId } = request.params
-        const { accountId, credential, credentialType, connectionGeneration, createOnly } = request.body || {}
+        const { accountId, credential, credentialType, connectionGeneration, createOnly, setEnabled, knownRev, migrate } = request.body || {}
+        if (typeof setEnabled === 'boolean') {
+            if (!accountId || (credentialType !== 'nuvio' && credentialType !== 'realstream')) {
+                reply.code(400); return { error: 'Missing accountId or unsupported credential type' }
+            }
+            return withAccountWriteLock(authUser, [accountId], async (conn) => {
+                if (await isAccountTombstoned(authUser, accountId, conn)) { reply.code(409); return { error: ACCOUNT_DELETED_ERROR } }
+                // The revision the caller last saw; absent means the caller has none yet.
+                const expected = Number.isFinite(knownRev) && knownRev >= 0 ? Math.floor(knownRev) : null
+                const result = await setNativeCredentialEnabled(conn, authUser, accountId, connectionId, credentialType, setEnabled, { knownRev: expected, migrate: migrate === true })
+                if (result.status === 'missing') { reply.code(404); return { error: 'Connection credential not found' } }
+                if (result.status === 'revision') { reply.code(409); return { error: 'This connection was changed from another device. Showing its current state.', enabled: result.enabled, enabledRev: result.enabledRev } }
+                if (result.status === 'conflict') { reply.code(409); return { error: 'Connection was updated by another operation. Please retry.' } }
+                return { ok: true, updated: result.updated, enabled: result.enabled, enabledRev: result.enabledRev }
+            })
+        }
         if (!accountId || !credential) { reply.code(400); return { error: 'Missing accountId or credential' } }
         // Incarnation token of the connection (SOL-R1-BETA-04): stamps the row so a
         // delayed cleanup of a previous same-id incarnation cannot claim it.
@@ -299,6 +399,9 @@ export function registerProviderRoutes(fastify, reconciler) {
             let credentialValue = typeof credential === 'object' ? JSON.stringify(credential) : credential
             if (type === 'nuvio') {
                 credentialValue = await preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, authUser, conn)
+            }
+            if (type === 'nuvio' || type === 'realstream') {
+                credentialValue = await preserveExistingDisabled(connectionId, credentialValue, accountId, authUser, type, conn)
             }
             const encrypted = encrypt(credentialValue, PRIMARY_KEY)
             const id = `${type}:${accountId}:${connectionId}`
