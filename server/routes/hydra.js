@@ -177,6 +177,24 @@ function toHydraAddon(raw) {
     }
 }
 
+// Derived Hydra view (projection + JSON.stringify + sha256), memoized on the raw
+// collection's array identity. The canonical cache reuses one array object across
+// its hits and installs a new one on every refresh or invalidation, so identity is
+// exactly entry freshness; a WeakMap keyed by it never outlives the entry and needs
+// no manual invalidation. Scope is per (accountId, syncUser) cache entry by
+// construction, so nothing is shared across workspaces. Only the polled GETs use
+// this; mutation routes build their views from fresh arrays.
+const hydraViewByRaw = new WeakMap()
+function hydraDerivedView(raw) {
+    let view = hydraViewByRaw.get(raw)
+    if (!view) {
+        const addons = raw.map(toHydraAddon).filter(Boolean)
+        view = { addons, version: computeAddonsVersion(addons) }
+        hydraViewByRaw.set(raw, view)
+    }
+    return view
+}
+
 const CANONICAL_ONLY_WARNING = 'Written to the AIOManager store only; changes propagate to your Stremio when a logged-in AIOManager client syncs.'
 
 // Destination rules must be current for every external write. A TTL here could
@@ -463,8 +481,8 @@ export function registerHydraRoutes(fastify, reconciler = null) {
         if (!account) return
         try {
             const raw = await getCanonicalAddonsCached(account.account_id, account.sync_user)
-            const addons = raw.map(toHydraAddon).filter(Boolean)
-            return { version: computeAddonsVersion(addons) }
+            const { version } = hydraDerivedView(raw)
+            return { version }
         } catch {
             reply.code(503).header('Retry-After', '30')
             return UNAVAILABLE
@@ -479,7 +497,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
 
         try {
             const raw = await getCanonicalAddonsCached(account.account_id, account.sync_user)
-            const addons = raw.map(toHydraAddon).filter(Boolean)
+            const { addons } = hydraDerivedView(raw)
             return { addons }
         } catch {
             reply.code(503).header('Retry-After', '30')

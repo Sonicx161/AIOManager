@@ -11,7 +11,8 @@ import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js
 import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash, prepareLegacyPasswordUpgrade, applyLegacyPasswordUpgrade } from '../lib/sync-password.js'
 import { isRegistrationsClosed } from '../config.js'
 import { assertAccountActive, assertWritablePrimary, refreshAccountAdminState } from '../admin/account-state.js'
-import { invalidateSyncResponseCache, getSyncResponseCache, setSyncResponseCache, syncResponseCacheStats } from '../lib/sync-response-cache.js'
+import { invalidateSyncResponseCache, getSyncResponseCache, getSyncResponseCacheVariant, setSyncResponseCache, negotiateSyncResponseEncoding, syncResponseCacheStats } from '../lib/sync-response-cache.js'
+import { decodeCanonicalAddonsV2 } from '../lib/canonical-addons-v2.js'
 import { noteSyncWrite } from '../lib/wal-checkpoint.js'
 import { trace } from '../utils/trace.js'
 import { maskContext } from '../utils/log-helpers.js'
@@ -127,11 +128,13 @@ const SKIP_MISMATCH_WARNED_MAX = 5000
  * structurally equal parsed JSON (object key order ignored, array order and
  * primitives exact), 'rejected' otherwise. Never claims or writes rows, and
  * never rewrites a stored row whose bytes merely differ in serialization.
+ * Also reports each verified hub's stored-plaintext hash as its base version.
  */
 async function skipPathCanonicalReceipts(tx, id, canonicalAddons, log) {
     const receipts = {}
     const reasons = {}
-    if (!canonicalAddons || typeof canonicalAddons !== 'object') return { receipts, reasons }
+    const versions = {}
+    if (!canonicalAddons || typeof canonicalAddons !== 'object') return { receipts, reasons, versions }
     const submitted = Object.entries(canonicalAddons).filter(([accountId, addons]) => accountId && Array.isArray(addons))
     const stored = new Map()
     const CHUNK = 100
@@ -153,7 +156,9 @@ async function skipPathCanonicalReceipts(tx, id, canonicalAddons, log) {
             // a byte check would reject that hub on every skip forever while the
             // skip path keeps being chosen. The stored row itself is never rewritten.
             try {
-                verified = jsonStructurallyEqual(JSON.parse(decrypt(encrypted, FALLBACK_KEYS)), addons)
+                const plaintext = decrypt(encrypted, FALLBACK_KEYS)
+                verified = jsonStructurallyEqual(JSON.parse(plaintext), addons)
+                if (verified) versions[accountId] = crypto.createHash('sha256').update(plaintext).digest('hex')
             } catch {}
         }
         if (verified) {
@@ -176,7 +181,7 @@ async function skipPathCanonicalReceipts(tx, id, canonicalAddons, log) {
             trace('syncRoute', 'canonical.skip_mismatch', { accountId: id, hub: maskContext(accountId) })
         }
     }
-    return { receipts, reasons }
+    return { receipts, reasons, versions }
 }
 
 export function registerSyncRoutes(fastify) {
@@ -254,6 +259,16 @@ export function registerSyncRoutes(fastify) {
             // bytes without decrypt/parse. Auth above already gated this request.
             const cachedResponse = row.content_hash ? getSyncResponseCache(id, row.content_hash) : null
             if (cachedResponse) {
+                const encoding = negotiateSyncResponseEncoding(request)
+                const variantBytes = encoding ? getSyncResponseCacheVariant(id, row.content_hash, encoding) : null
+                if (variantBytes) {
+                    trace('syncRoute', 'pull.success', { accountId: id, bytes: cachedResponse.bytes, cache: 'hit-compressed', encoding, cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
+                    reply.header('ETag', row.content_hash)
+                    reply.header('content-type', 'application/json; charset=utf-8')
+                    reply.header('content-encoding', encoding)
+                    reply.header('vary', 'accept-encoding')
+                    return reply.send(variantBytes)
+                }
                 trace('syncRoute', 'pull.success', { accountId: id, bytes: cachedResponse.bytes, cache: 'hit', cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
                 reply.header('ETag', row.content_hash)
                 reply.header('content-type', 'application/json; charset=utf-8')
@@ -343,6 +358,30 @@ export function registerSyncRoutes(fastify) {
 
         const bodyStr = JSON.stringify(data)
         const contentHash = crypto.createHash('sha256').update(bodyStr).digest('hex')
+        // The deduplicated canonical form is expanded for the canonical store (per hub,
+        // bounded) while the kv blob keeps the compact form: the blob's canonicalAddons
+        // is stripped on every read, and expanding a very large workspace inline would
+        // blow the runtime string limit for no reader. An old inline canonicalAddons
+        // field from an older tab is accepted and stored unchanged.
+        let expandedCanonicalAddons = null
+        // Echoed on success so the client knows its V2 canonical part was applied; a
+        // rolled-back server never sends it and the client resends inline.
+        let canonicalV2Ack = {}
+        if (data.canonicalAddonsV2 !== undefined) {
+            const decoded = decodeCanonicalAddonsV2(data.canonicalAddonsV2)
+            if (!decoded) {
+                trace('syncRoute', 'push.error', { accountId: id, error: 'malformed-canonical-addons-v2' })
+                reply.status(400)
+                return { error: 'Malformed canonicalAddonsV2 payload' }
+            }
+            if (!data.canonicalAddons || typeof data.canonicalAddons !== 'object') {
+                expandedCanonicalAddons = decoded.accounts
+                data.canonicalAddons = decoded.compact
+                canonicalV2Ack = { canonicalAddonsV2: 'accepted' }
+            }
+            delete data.canonicalAddonsV2
+        }
+        const canonicalAddonsSource = expandedCanonicalAddons ?? data.canonicalAddons
         const clientSyncedAt = data.syncedAt ? new Date(data.syncedAt).getTime() : 0
         const force = data.force === true
         // contentHint is the client's hash of its logical state (pre-syncedAt stamp); unlike
@@ -512,7 +551,7 @@ export function registerSyncRoutes(fastify) {
                     // Receipts still describe what the server holds: a lost response
                     // before this retry may have committed the canonical writes, and
                     // empty receipts here would strand the caller's merge base.
-                    const skipCanonical = await skipPathCanonicalReceipts(tx, id, data.canonicalAddons, fastify.log)
+                    const skipCanonical = await skipPathCanonicalReceipts(tx, id, canonicalAddonsSource, fastify.log)
                     return {
                         success: true,
                         syncedAt: currentSyncedAt,
@@ -520,6 +559,8 @@ export function registerSyncRoutes(fastify) {
                         contentHash: row.content_hash,
                         serverStremioCredentialedAccounts,
                         canonical: skipCanonical.receipts,
+                        ...canonicalV2Ack,
+                        ...(Object.keys(skipCanonical.versions).length > 0 ? { canonicalVersions: skipCanonical.versions } : {}),
                         ...(Object.keys(skipCanonical.reasons).length > 0 ? { canonicalReasons: skipCanonical.reasons } : {}),
                     }
                 }
@@ -568,7 +609,7 @@ export function registerSyncRoutes(fastify) {
             // Server-readable canonical addon lists: the Hydra inbound source for Hubs the
             // server can't otherwise read (Nuvio-only / local-only). Midnight-safe: the guard
             // no-ops when an account's addon list is unchanged, so re-syncs don't churn the row.
-            const canonicalAddons = data.canonicalAddons
+            const canonicalAddons = canonicalAddonsSource
             const canonicalWrites = []
             // Per-hub receipts: the client advances its canonical merge base only
             // for hubs the server confirmed it holds. Old clients ignore these.
@@ -576,6 +617,9 @@ export function registerSyncRoutes(fastify) {
             // specific cause stays in server logs and traces only.
             const canonicalReceipts = {}
             const canonicalReasons = {}
+            // sha256 of each confirmed hub's stored plaintext: the client records it
+            // as its base version so the next reconcile can skip unchanged hubs.
+            const canonicalVersions = {}
             if (canonicalAddons && typeof canonicalAddons === 'object') {
                 const now = Date.now()
                 const emptyCanonicalIds = new Set()
@@ -678,11 +722,12 @@ export function registerSyncRoutes(fastify) {
                     canonicalWrites.splice(i, 1)
                 }
                 for (const [accountId, addons] of canonicalWrites) {
-                    const { outcome } = await writeEncryptedIfChanged(
+                    const stored = JSON.stringify(addons)
+                    const { outcome, plaintext } = await writeEncryptedIfChanged(
                         'account_canonical_addons',
                         { sql: 'account_id = $1 AND sync_user = $2', params: [accountId, id] },
                         'addon_list',
-                        JSON.stringify(addons),
+                        stored,
                         { alsoSet: { sync_user: id, updated_at: now }, runner: tx },
                     )
                     if (outcome === 'written') canonicalReceipts[accountId] = 'applied'
@@ -695,6 +740,7 @@ export function registerSyncRoutes(fastify) {
                         canonicalReasons[accountId] = 'not-applied'
                         fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'not-matched' }, `Canonical write matched no row for ${maskContext(accountId)}; the hub changed ownership during this push.`)
                     }
+                    if (plaintext) canonicalVersions[accountId] = crypto.createHash('sha256').update(plaintext).digest('hex')
                 }
             }
 
@@ -713,6 +759,8 @@ export function registerSyncRoutes(fastify) {
                 contentHash,
                 serverStremioCredentialedAccounts,
                 canonical: canonicalReceipts,
+                ...canonicalV2Ack,
+                ...(Object.keys(canonicalVersions).length > 0 ? { canonicalVersions } : {}),
                 ...(Object.keys(canonicalReasons).length > 0 ? { canonicalReasons } : {}),
             }
         })

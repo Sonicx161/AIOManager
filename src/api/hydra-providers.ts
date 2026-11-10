@@ -7,6 +7,8 @@ import type { AddonDescriptor } from '@/types/addon'
 export interface CanonicalEntry {
     addons: AddonDescriptor[]
     updatedAt: number
+    /** sha256 of the hub's stored canonical plaintext; absent on rows a server could not read. */
+    hash?: string
 }
 
 // jsonBody: false omits Content-Type: a bodyless request with that header makes
@@ -140,7 +142,7 @@ export async function realstreamSignup(
     return res.json()
 }
 
-let canonicalCache: { canonical: Record<string, CanonicalEntry>; serverStremioCredentialedAccounts: string[] | null; etag: string | null } | null = null
+let canonicalCache: { owner: string; canonical: Record<string, CanonicalEntry>; serverStremioCredentialedAccounts: string[] | null; etag: string | null } | null = null
 
 export function _clearCanonicalCache() {
     canonicalCache = null
@@ -159,20 +161,22 @@ export interface CanonicalFetchResult {
  */
 export async function fetchCanonical(): Promise<CanonicalFetchResult> {
     const base = getSyncApiPath(useSyncStore.getState().serverUrl)
+    const owner = `${base}|${useSyncStore.getState().auth.id}`
     const headers = await getAuthHeaders()
-    if (canonicalCache?.etag) headers['If-None-Match'] = canonicalCache.etag
+    const ownCache = canonicalCache?.owner === owner ? canonicalCache : null
+    if (ownCache?.etag) headers['If-None-Match'] = ownCache.etag
     const res = await resilientFetch(`${base}/providers/canonical`, {
         headers,
         timeout: 10000,
     })
-    if (res.status === 304 && canonicalCache) {
-        return { canonical: canonicalCache.canonical, serverStremioCredentialedAccounts: canonicalCache.serverStremioCredentialedAccounts }
+    if (res.status === 304 && ownCache) {
+        return { canonical: ownCache.canonical, serverStremioCredentialedAccounts: ownCache.serverStremioCredentialedAccounts }
     }
     if (!res.ok) return { canonical: {}, serverStremioCredentialedAccounts: null }
     const body = await res.json().catch(() => ({}))
     const canonical = (body.canonical || {}) as Record<string, CanonicalEntry>
     const serverStremioCredentialedAccounts = Array.isArray(body.serverStremioCredentialedAccounts) ? body.serverStremioCredentialedAccounts as string[] : null
-    canonicalCache = { canonical, serverStremioCredentialedAccounts, etag: res.headers.get('etag') }
+    canonicalCache = { owner, canonical, serverStremioCredentialedAccounts, etag: res.headers.get('etag') }
     return { canonical, serverStremioCredentialedAccounts }
 }
 

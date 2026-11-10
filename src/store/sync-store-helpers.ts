@@ -1,5 +1,6 @@
 import { clearSessionSyncToken } from '@/lib/session-sync-token'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
+import type { CanonicalV2Latch } from '@/lib/canonical-v2-capability'
 
 // Shared runtime for sync operations and their async continuations.
 export const syncRuntime = {
@@ -25,6 +26,10 @@ export const syncRuntime = {
     syncDebounceFirstAt: null as number | null,
     // Wire size of the last built push body; sizes the next auto-push debounce window.
     lastPushedEnvelopeBytes: null as number | null,
+    // Server capability: pushes use the deduplicated canonicalAddons form only after
+    // the server at this endpoint, for this identity, advertised it, so an older
+    // self-hosted server keeps receiving the legacy inline field. Null = not latched.
+    serverCanonicalAddonsV2: null as CanonicalV2Latch | null,
     // Workspace+markedAt of the pending-push marker this boot already retried (one attempt per marker).
     pendingPushMarkerAttemptKey: null as string | null,
     lastSyncedAccountCount: null as number | null,

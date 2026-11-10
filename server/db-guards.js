@@ -29,13 +29,15 @@ const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/
  * @param {Record<string, any>} [opts.alsoSet]  Extra columns to set on a real change,
  *                          e.g. `{ updated_at: Date.now() }`.
  * @param {{ get: Function, run: Function }} [opts.runner]  Optional tx runner from `db.tx`. Defaults to `db`.
- * @returns {Promise<{ written: boolean, outcome: 'written'|'unchanged'|'not-matched' }>}
+ * @returns {Promise<{ written: boolean, outcome: 'written'|'unchanged'|'not-matched', plaintext?: string }>}
  *                          `outcome` separates the three results: 'unchanged' = the
  *                          stored plaintext already equals the new one (no write issued);
  *                          'written' = the guarded UPDATE matched a row and wrote;
  *                          'not-matched' = the UPDATE matched zero rows (row absent, or
  *                          its ownership changed under the selector). `written` keeps
- *                          its original meaning for existing callers.
+ *                          its original meaning for existing callers. `plaintext` is
+ *                          the value now stored (the new one, or the equal existing
+ *                          one) so callers can fingerprint it without re-reading.
  */
 export async function writeEncryptedIfChanged(table, where, column, plaintext, opts = {}) {
     if (!IDENT.test(table)) throw new Error(`writeEncryptedIfChanged: unsafe table name "${table}"`)
@@ -51,7 +53,7 @@ export async function writeEncryptedIfChanged(table, where, column, plaintext, o
         try {
             const currentPlaintext = decrypt(current.val, FALLBACK_KEYS)
             if (currentPlaintext === plaintext) {
-                return { written: false, outcome: 'unchanged' }
+                return { written: false, outcome: 'unchanged', plaintext }
             }
         } catch {
         }
@@ -81,5 +83,5 @@ export async function writeEncryptedIfChanged(table, where, column, plaintext, o
         params,
     )
     const matched = (res?.changes || 0) > 0
-    return { written: matched, outcome: matched ? 'written' : 'not-matched' }
+    return { written: matched, outcome: matched ? 'written' : 'not-matched', ...(matched ? { plaintext } : {}) }
 }

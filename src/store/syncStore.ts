@@ -13,6 +13,8 @@ import { deriveSyncToken } from '@/lib/crypto'
 import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { resilientFetch, syncUploadTimeoutMs, SYNC_PULL_TIMEOUT_MS } from '@/lib/api-resilience'
 import { compressSyncPayload, decompressSyncPayload } from '@/lib/sync-payload-codec'
+import { dedupeCanonicalAddons } from '@/lib/canonical-addons-dedup'
+import * as capability from '@/lib/canonical-v2-capability'
 import { decodeSyncBlob, isValidAvatarPayload, isValidWatchPayload } from '@/lib/sync-blob-decode'
 import { applySyncedSettings, markSyncedSettingsPushed, readSyncedSettings, snapshotSyncedSettingsValues } from '@/lib/synced-settings'
 import { resolveRestoreSaltPolicy } from '@/lib/salt-policy'
@@ -73,6 +75,19 @@ import { exportAvatarValue } from '@/lib/avatar-export'
 
 // Suppress toasts during initial boot to prevent React "state update on unmounted component" warnings
 setTimeout(() => { syncRuntime.appReady = true }, 3000)
+
+// A health probe decides whether pushes may use the deduplicated canonicalAddons
+// form. Servers that do not advertise the acknowledging protocol keep receiving the
+// legacy inline field.
+async function probeServerCanonicalAddonsV2(apiPath: string): Promise<capability.CanonicalV2Probe> {
+    try {
+        const res = await resilientFetch(`${apiPath}/health`, { timeout: 5000 })
+        if (!res.ok) return 'unknown'
+        return capability.readCanonicalV2Probe(await res.json().catch(() => null))
+    } catch {
+        return 'unknown'
+    }
+}
 
 // A wrong-key AES-GCM decrypt throws an OperationError with an empty message; the push log and toast must never show a blank reason.
 export function pushErrorMessage(error: unknown): string {
@@ -1236,6 +1251,7 @@ export const useSyncStore = create<SyncState>()(
                 syncRuntime.lastPushedHash = null
                 syncRuntime.lastPulledNotes = null
                 syncRuntime.pendingRetry = false
+                syncRuntime.serverCanonicalAddonsV2 = null
                 resetAccountsHydration()
                 // Invalidate in-flight work before resetting session state.
                 syncRuntime.pullSeq++
@@ -1577,62 +1593,99 @@ export const useSyncStore = create<SyncState>()(
 
                     const syncToken = sessionCred?.token ?? await deriveSyncToken(auth.password)
                     ownership.assert()
-                    const pushBody = JSON.stringify({
+                    const hasCanonicalEntries = Object.keys(canonicalPayload).length > 0
+                    const canonicalV2Scope = capability.canonicalV2Scope(apiPath, auth.id)
+                    if (hasCanonicalEntries && capability.canonicalV2Decision(syncRuntime.serverCanonicalAddonsV2, canonicalV2Scope, Date.now()) === 'probe') {
+                        const probe = await probeServerCanonicalAddonsV2(apiPath)
+                        ownership.assert()
+                        syncRuntime.serverCanonicalAddonsV2 = capability.latchAfterProbe(syncRuntime.serverCanonicalAddonsV2, canonicalV2Scope, probe, Date.now())
+                    }
+                    const useCanonicalV2 = hasCanonicalEntries && capability.canonicalV2Decision(syncRuntime.serverCanonicalAddonsV2, canonicalV2Scope, Date.now()) === 'v2'
+                    const buildPushBody = async (canonicalV2: boolean, revision: { baseContentHash?: string; syncedAt?: string | null; contentHint?: string }) => JSON.stringify({
                         data: encryptedState,
                         isEncrypted: true,
                         compressed: isCompressed,
                         syncSalt: syncSaltB64,
-                        syncedAt: get().lastSyncedAt,
-                        baseContentHash: get().lastSyncedCloudEtag ?? undefined,
+                        syncedAt: revision.syncedAt,
+                        baseContentHash: revision.baseContentHash,
                         force: forcePush,
                         // Hash of the logical state (pre-syncedAt); lets the server skip the
                         // archive/rewrite/apiKeys churn when the content is byte-identical
                         // to what it already holds, since the envelope hash is IV-random.
-                        contentHint: (forceCanonicalRepublish || forceFull) ? undefined : stateHash,
+                        contentHint: revision.contentHint,
                         apiKeys: useAccountStore.getState().accounts.reduce<Record<string, string>>((map, a) => {
                             if (a.apiKey) map[a.id] = a.apiKey
                             return map
                         }, {}),
-                        canonicalAddons: canonicalPayload,
+                        // The deduplicated, deflated form travels only when the server
+                        // advertised support; the legacy inline field is byte-identical
+                        // to what older servers and rolled-back tabs have always sent.
+                        ...(canonicalV2
+                            ? { canonicalAddonsV2: { version: 2, compressed: true, data: await compressSyncPayload(JSON.stringify(dedupeCanonicalAddons(canonicalPayload))) } }
+                            : { canonicalAddons: canonicalPayload }),
                         emptiedHubs,
                     })
-                    // Debounce sizing input: the wire size this push actually uploads.
-                    syncRuntime.lastPushedEnvelopeBytes = pushBody.length
-                    const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'x-sync-password': syncToken
-                        },
-                        body: pushBody,
-                        // Multi-MB envelopes need minutes, not the 10 s default, on a slow uplink.
-                        timeout: syncUploadTimeoutMs(pushBody.length),
-                    })
-                    if (!pushCurrent()) return false
+                    const sendPush = async (pushBody: string): Promise<Record<string, unknown> | null> => {
+                        // Debounce sizing input: the wire size this push actually uploads.
+                        syncRuntime.lastPushedEnvelopeBytes = pushBody.length
+                        const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'x-sync-password': syncToken
+                            },
+                            body: pushBody,
+                            // Multi-MB envelopes need minutes, not the 10 s default, on a slow uplink.
+                            timeout: syncUploadTimeoutMs(pushBody.length),
+                        })
+                        if (!pushCurrent()) return null
 
-                    if (res.status === 401) {
-                        const profile = readIdentityProfile()
-                        set({ auth: { id: '', password: '', name: profile.name, avatar: profile.avatar, isAuthenticated: false }, isSyncing: false, isInitialSyncCompleted: false, needsReauth: false })
-                        clearSyncCredentialCaches()
-                        setActiveWorkspace(ANON_WORKSPACE_ID)
-                        const expiredOwnership = captureSyncOwnership()
-                        import('@/lib/device-session').then(({ deactivateDeviceAuth }) => {
-                            if (expiredOwnership.current() && !get().auth.isAuthenticated) deactivateDeviceAuth()
-                        }).catch(() => {})
-                        throw new Error('Sync session expired')
+                        if (res.status === 401) {
+                            const profile = readIdentityProfile()
+                            set({ auth: { id: '', password: '', name: profile.name, avatar: profile.avatar, isAuthenticated: false }, isSyncing: false, isInitialSyncCompleted: false, needsReauth: false })
+                            clearSyncCredentialCaches()
+                            setActiveWorkspace(ANON_WORKSPACE_ID)
+                            const expiredOwnership = captureSyncOwnership()
+                            import('@/lib/device-session').then(({ deactivateDeviceAuth }) => {
+                                if (expiredOwnership.current() && !get().auth.isAuthenticated) deactivateDeviceAuth()
+                            }).catch(() => {})
+                            throw new Error('Sync session expired')
+                        }
+
+                        if (res.status === 413) {
+                            throw new Error('Sync data was too large for the server to accept (413). If AIOManager sits behind nginx, raise client_max_body_size in its config. Your data is safe locally and will push once the limit is raised.')
+                        }
+
+                        if (!res.ok) {
+                            const errorData = await res.text().then(t => { try { return JSON.parse(t) } catch { return {} } }).catch(() => ({}))
+                            throw new Error(errorData.message || `Server Error: ${res.status}`)
+                        }
+
+                        const parsed = await res.text().then(t => { try { return JSON.parse(t) } catch { return {} } })
+                        if (!pushCurrent()) return null
+                        return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {}
                     }
 
-                    if (res.status === 413) {
-                        throw new Error('Sync data was too large for the server to accept (413). If AIOManager sits behind nginx, raise client_max_body_size in its config. Your data is safe locally and will push once the limit is raised.')
+                    let resData = await sendPush(await buildPushBody(useCanonicalV2, {
+                        syncedAt: get().lastSyncedAt,
+                        baseContentHash: get().lastSyncedCloudEtag ?? undefined,
+                        contentHint: (forceCanonicalRepublish || forceFull) ? undefined : stateHash,
+                    }))
+                    if (!resData) return false
+                    if (capability.canonicalV2PushOutcome(useCanonicalV2, resData) === 'retry-legacy') {
+                        // The blob landed but the server ignored the V2 canonical field (a
+                        // rollback or a server that predates the acknowledgment). Hold
+                        // legacy-only for this scope and resend inline on top of the blob
+                        // it just stored, without the content hint so the unchanged-content
+                        // skip cannot suppress the canonical write.
+                        syncRuntime.serverCanonicalAddonsV2 = capability.latchAfterMissingAck(canonicalV2Scope, Date.now())
+                        trace('sync', 'push.canonical-v2-unacknowledged', { accountId: auth.id })
+                        resData = await sendPush(await buildPushBody(false, {
+                            syncedAt: typeof resData.syncedAt === 'string' ? resData.syncedAt : get().lastSyncedAt,
+                            baseContentHash: typeof resData.contentHash === 'string' ? resData.contentHash : get().lastSyncedCloudEtag ?? undefined,
+                        }))
+                        if (!resData) return false
                     }
-
-                    if (!res.ok) {
-                        const errorData = await res.text().then(t => { try { return JSON.parse(t) } catch { return {} } }).catch(() => ({}))
-                        throw new Error(errorData.message || `Server Error: ${res.status}`)
-                    }
-
-                    const resData = await res.text().then(t => { try { return JSON.parse(t) } catch { return {} } })
-                    if (!pushCurrent()) return false
 
                     if (resData.conflict) {
                         if (import.meta.env.DEV) console.log('[Sync] Server reported conflict. Triggering pull.')
@@ -1701,8 +1754,19 @@ export const useSyncStore = create<SyncState>()(
                     const canonicalReceipts = resData.canonical
                     let rejectedHubs: string[] = []
                     if (canonicalBase) {
-                        canonicalBase.setCanonicalBases(canonicalBase.confirmedCanonicalEntries(canonicalPayload, canonicalReceipts))
-                        rejectedHubs = canonicalBase.rejectedCanonicalEntries(canonicalPayload, canonicalReceipts)
+                        // Server-reported per-hub stored-plaintext hashes ride the base so
+                        // the next reconcile can skip hubs the server still holds exactly
+                        // as pushed.
+                        const canonicalVersions = resData.canonicalVersions && typeof resData.canonicalVersions === 'object'
+                            ? resData.canonicalVersions as Record<string, unknown>
+                            : null
+                        const canonicalEntries: Record<string, import('@/lib/canonical-base').CanonicalBaseEntry> = {}
+                        for (const [hubId, addons] of Object.entries(canonicalPayload)) {
+                            const hash = canonicalVersions?.[hubId]
+                            canonicalEntries[hubId] = typeof hash === 'string' && hash ? { addons, hash } : { addons }
+                        }
+                        canonicalBase.setCanonicalBases(canonicalBase.confirmedCanonicalEntries(canonicalEntries, canonicalReceipts))
+                        rejectedHubs = canonicalBase.rejectedCanonicalEntries(canonicalEntries, canonicalReceipts)
                     }
                     if (rejectedHubs.length > 0) trace('sync', 'push.canonical-rejected', { accountId: auth.id, hubs: rejectedHubs.join(',') })
 

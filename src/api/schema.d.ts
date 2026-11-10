@@ -329,6 +329,10 @@ export interface paths {
                             mode?: string;
                             readOnly?: boolean;
                             optimized?: boolean;
+                            capabilities?: {
+                                canonicalAddonsV2?: boolean;
+                                canonicalAddonsV2Ack?: boolean;
+                            };
                             database?: {
                                 type?: string;
                                 healthy?: boolean;

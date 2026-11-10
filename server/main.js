@@ -199,6 +199,13 @@ fastify.get('/api/health', {
                     mode: { type: 'string' },
                     readOnly: { type: 'boolean' },
                     optimized: { type: 'boolean' },
+                    capabilities: {
+                        type: 'object',
+                        properties: {
+                            canonicalAddonsV2: { type: 'boolean' },
+                            canonicalAddonsV2Ack: { type: 'boolean' }
+                        }
+                    },
                     database: {
                         type: 'object',
                         properties: {
@@ -251,6 +258,7 @@ fastify.get('/api/health', {
         mode,
         readOnly,
         optimized: true,
+        capabilities: { canonicalAddonsV2: true, canonicalAddonsV2Ack: true },
         database: { type: db.type, healthy: true },
         autopilot: { lastRun: serverState.lastWorkerRun, running: serverState.isWorkerRunning, safeMode: autopilotTripwire.status() }
     }

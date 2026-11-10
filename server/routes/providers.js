@@ -1,5 +1,6 @@
 import { verifyAuth } from '../auth.js'
 import db from '../db.js'
+import { createHash } from 'node:crypto'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { isSafeUrlResolved } from '../utils/ssrf.js'
@@ -783,16 +784,20 @@ export function registerProviderRoutes(fastify, reconciler) {
         const canonical = {}
         for (const row of rows) {
             let addons = []
+            let hash
             if (row.addon_list) {
                 const decrypted = decrypt(row.addon_list, FALLBACK_KEYS)
                 if (decrypted) {
+                    // The stored plaintext hash lets a client skip reconciling hubs the
+                    // server still holds exactly as that client's last confirmed push.
+                    hash = createHash('sha256').update(decrypted).digest('hex')
                     try {
                         const parsed = JSON.parse(decrypted)
                         if (Array.isArray(parsed)) addons = parsed
                     } catch { }
                 }
             }
-            canonical[row.account_id] = { addons, updatedAt: row.updated_at || 0 }
+            canonical[row.account_id] = { addons, updatedAt: row.updated_at || 0, ...(hash ? { hash } : {}) }
         }
         reply.header('ETag', etag)
         return { canonical, serverStremioCredentialedAccounts: await listStremioCredentialedAccountIds(authUser) }
