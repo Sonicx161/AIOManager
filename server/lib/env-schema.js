@@ -127,6 +127,8 @@ export const FIELDS = {
         { defaultLabel: '<server>/data (Docker: /app/data)' }),
     MAX_SYNC_PAYLOAD_SIZE: int(104857600, { min: 1 },
         'Maximum size in bytes of the encrypted sync-state blob accepted by the sync API. Default: 100 MB (104857600).'),
+    MAX_AIOSTREAMS_PAYLOAD_SIZE: int(5242880, { min: 1024, clampBelowMin: true },
+        'Maximum size in bytes accepted by the AIOStreams proxy write routes (PUT/POST /api/aiostreams-proxy). One request carries the complete AIOStreams config object, so imported or externally grown configs can exceed small caps with a 413. Default: 5 MB (5242880).'),
 
     // --- Database ---
     DB_TYPE: enumString('sqlite', ['sqlite', 'postgres'],
@@ -289,7 +291,7 @@ export const FIELDS = {
 
 // Logical grouping used when generating .env.example (presentation only).
 export const ENV_GROUPS = [
-    { title: 'ESSENTIAL SETUP', vars: ['PORT', 'NODE_ENV', 'DATA_DIR', 'MAX_SYNC_PAYLOAD_SIZE'] },
+    { title: 'ESSENTIAL SETUP', vars: ['PORT', 'NODE_ENV', 'DATA_DIR', 'MAX_SYNC_PAYLOAD_SIZE', 'MAX_AIOSTREAMS_PAYLOAD_SIZE'] },
     { title: 'DATABASE', note: 'Pool settings are ignored when DB_TYPE=sqlite.', vars: ['DB_TYPE', 'DATABASE_URL', 'DB_SSL_REJECT_UNAUTHORIZED', 'DB_POOL_SIZE', 'DB_CONNECTION_TIMEOUT', 'DB_MAX_RETRIES', 'READ_ONLY_REPLICA'] },
     { title: 'SECURITY', vars: ['ENCRYPTION_KEY', 'CORS_ORIGINS', 'SSRF_ALLOW_PRIVATE', 'TRUST_PROXY', 'CUSTOM_HTML', 'REGISTRATIONS_CLOSED', 'UNIFIED_ENFORCEMENT'] },
     { title: 'DASHBOARD (OPT-IN)', note: 'Instance Dashboard for self-hosters at /dashboard. To turn it on, set ADMIN_ENABLED=true and ADMIN_CREDENTIALS. Proxies and home networks work without any other setting.', vars: ['ADMIN_ENABLED', 'ADMIN_CREDENTIALS'] },

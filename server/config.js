@@ -30,6 +30,10 @@ export const DATASTORE_META_BATCH_MAX = env.DATASTORE_META_BATCH_MAX
 export const DATASTORE_META_BATCH_CONCURRENCY = env.DATASTORE_META_BATCH_CONCURRENCY
 export const DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS = env.DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS
 export const AIOSTREAMS_USER_API_THROTTLE_MS = env.AIOSTREAMS_USER_API_THROTTLE_MS
+// Body cap for the AIOStreams proxy write routes. The whole AIOStreams config
+// object rides one request, so this is configurable headroom (Sol review:
+// a hardcoded 1 MiB guess is a compatibility risk for imported configs).
+export const AIOSTREAMS_PROXY_BODY_LIMIT = env.MAX_AIOSTREAMS_PAYLOAD_SIZE
 export const STREMIO_API = 'https://api.strem.io/api'
 // These three read process.env live on purpose: tests and ops tooling toggle
 // them after import. lib/env.js still validates them at boot when present.

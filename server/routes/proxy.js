@@ -1,7 +1,7 @@
 import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
 import { registerCacheLayer } from '../lib/ops-metrics.js'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import { AIOSTREAMS_USER_API_THROTTLE_MS, DATASTORE_META_BATCH_CONCURRENCY, DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS, DATASTORE_META_BATCH_MAX, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, STREMIO_API, VERSION } from '../config.js'
+import { AIOSTREAMS_PROXY_BODY_LIMIT, AIOSTREAMS_USER_API_THROTTLE_MS, DATASTORE_META_BATCH_CONCURRENCY, DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS, DATASTORE_META_BATCH_MAX, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, STREMIO_API, VERSION } from '../config.js'
 import { requireProxyAuth, verifyAuth } from '../auth.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
 import { isSafeUrl, isSafeUrlResolved } from '../utils/ssrf.js'
@@ -1213,7 +1213,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     })
 
     fastify.put('/api/aiostreams-proxy', {
-        bodyLimit: 1024 * 1024,
+        bodyLimit: AIOSTREAMS_PROXY_BODY_LIMIT,
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
         schema: {
             body: {
@@ -1259,7 +1259,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     })
 
     fastify.post('/api/aiostreams-proxy', {
-        bodyLimit: 1024 * 1024,
+        bodyLimit: AIOSTREAMS_PROXY_BODY_LIMIT,
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
         schema: {
             body: {
