@@ -9,6 +9,7 @@ import { queueAddonActionDeletes, addonDeleteAcks, InstallAbortedError, makeInst
 import { effectiveAddonsFor, normalizeDestinations, stripDestinationsForWire } from '@/lib/addon-destinations'
 import { AddonDescriptor } from '@/types/addon'
 import { dedupeAddonsByUrl, findInstallSlot } from '@/lib/addon-dedupe'
+import { resolveRemovalIndex, type RemoveAddonByIndexResult } from '@/lib/addon-removal'
 import { mapConcurrent } from '@/lib/concurrency'
 import { normalizeFailedConnectionState } from '@/lib/sync/push-outcome'
 import { syncManager } from '@/lib/sync/syncManager'
@@ -622,7 +623,9 @@ export async function removeAddonFromAccount(accountId: string, transportUrl: st
     }
 }
 
-export async function removeAddonByIndexFromAccount(accountId: string, index: number) {
+export type { RemoveAddonByIndexResult }
+
+export async function removeAddonByIndexFromAccount(accountId: string, index: number, expectedTransportUrl?: string): Promise<RemoveAddonByIndexResult> {
     const store = await getStore()
     store.setState({ error: null })
     setAccountLoading(accountId)
@@ -632,8 +635,12 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
         const account = getAccountById(store.getState().accounts, accountId)
         if (!account) throw new Error('Account not found')
 
-        const addonToRemove = account.addons[index]
-        if (!addonToRemove) throw new Error('Addon not found at index')
+        const resolvedIndex = resolveRemovalIndex(account.addons, index, expectedTransportUrl)
+        if (resolvedIndex < 0) {
+            if (expectedTransportUrl) return 'already-gone'
+            throw new Error('Addon not found at index')
+        }
+        const addonToRemove = account.addons[resolvedIndex]
 
         transportUrl = addonToRemove.transportUrl
         syncManager.addPendingRemoval(accountId, transportUrl)
@@ -652,7 +659,7 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
         }
 
         const updatedAddons = [...account.addons]
-        updatedAddons.splice(index, 1)
+        updatedAddons.splice(resolvedIndex, 1)
 
         let updatedAccount: Account = { ...account, addons: updatedAddons, deletedAddons: addTombstones(account.deletedAddons, [transportUrl], Date.now(), account.restoredAddons), lastSync: new Date() }
         updatedAccount = updateActiveProfile(updatedAccount, updatedAddons)
@@ -671,6 +678,7 @@ export async function removeAddonByIndexFromAccount(accountId: string, index: nu
         })
 
         backgroundSync(accountId, account, updatedAddons, { allowCollectionShrink: true }, 'remove-index')
+        return 'removed'
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to remove addon'
         store.setState({ error: message })

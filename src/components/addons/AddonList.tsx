@@ -536,7 +536,7 @@ export function AddonList({ accountId }: AddonListProps) {
     []
   )
   const handleRemoveAddon = useCallback(
-    (accId: string, _transportUrl: string, index?: number) => removeAddonByIndex(accId, index ?? 0),
+    (accId: string, transportUrl: string, index?: number) => removeAddonByIndex(accId, index ?? 0, transportUrl),
     [removeAddonByIndex]
   )
 

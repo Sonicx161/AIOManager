@@ -97,9 +97,9 @@ function isUpdatableVersion(installed: string | undefined, latest: string | unde
     return isNewerVersion(installed.trim(), latest.trim())
 }
 
-/** Removal ids are `${accountId}::${transportUrl}::${index}`; any index for the same addon blocks it. */
+/** Removal ids are `${accountId}::${normalizedUrl}::${duplicateOrdinal}`; any copy of the same addon blocks it. */
 export function isRemovalPending(pendingRemovalIds: Iterable<string>, accountId: string, transportUrl: string): boolean {
-    const prefix = `${accountId}::${transportUrl}::`
+    const prefix = `${accountId}::${normalizeAddonUrl(transportUrl)}::`
     for (const id of pendingRemovalIds) if (id.startsWith(prefix)) return true
     return false
 }

@@ -413,7 +413,7 @@ export interface AccountStore {
       installAddonToAccount: (accountId: string, addonUrl: string, savedMetadata?: import('@/types/addon').AddonDescriptor['metadata']) => Promise<void>
       installAddonsToAccount: (accountId: string, addonUrls: string[], concurrency?: number) => Promise<{ successCount: number; failCount: number }>
       removeAddonFromAccount: (accountId: string, transportUrl: string) => Promise<void>
-      removeAddonByIndexFromAccount: (accountId: string, index: number) => Promise<void>
+      removeAddonByIndexFromAccount: (accountId: string, index: number, expectedTransportUrl?: string) => Promise<'removed' | 'already-gone'>
       reorderAddons: (accountId: string, newOrder: AddonDescriptor[], options?: { explicitInstallUrls?: string[] }) => Promise<void>
       bulkDeleteAddons: (accountId: string, keptAddons: AddonDescriptor[], removedUrls: string[]) => Promise<void>
       exportAccounts: (includeCredentials: boolean) => Promise<string>
@@ -1071,9 +1071,9 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             return removeAddonFromAccount(accountId, transportUrl)
       },
 
-      removeAddonByIndexFromAccount: async (accountId: string, index: number) => {
+      removeAddonByIndexFromAccount: async (accountId: string, index: number, expectedTransportUrl?: string) => {
             const { removeAddonByIndexFromAccount } = await import('./account/accountAddonOps')
-            return removeAddonByIndexFromAccount(accountId, index)
+            return removeAddonByIndexFromAccount(accountId, index, expectedTransportUrl)
       },
 
       bulkDeleteAddons: async (accountId: string, keptAddons: AddonDescriptor[], removedUrls: string[]) => {

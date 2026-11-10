@@ -28,7 +28,7 @@ import { getLibraryActionSlot } from '@/lib/addon-library-action'
 import { isAIOMetadataAddon, parseAIOMetadataUrl } from '@/lib/aiometadata-utils'
 import { useNavigate } from 'react-router-dom'
 import { CinemetaManifest } from '@/types/cinemeta'
-import { cn, isNewerVersion } from '@/lib/utils'
+import { cn, isNewerVersion, normalizeAddonUrl } from '@/lib/utils'
 import { useAccountStore } from '@/store/accountStore'
 import { isAddonConnection } from '@/types/connection'
 import { useAddonStore } from '@/store/addonStore'
@@ -144,7 +144,7 @@ interface AddonCardProps {
   addon: AddonDescriptor
   accountId: string
   accountAuthKey: string
-  onRemove: (accountId: string, transportUrl: string, index?: number) => Promise<void>
+  onRemove: (accountId: string, transportUrl: string, index?: number) => Promise<'removed' | 'already-gone' | void>
   onUpdate?: (accountId: string, transportUrl: string) => Promise<void>
   latestVersion?: string
   manifestChange?: SavedAddonManifestChangeSummary | null
@@ -278,7 +278,15 @@ export const AddonCard = React.memo(function AddonCard({
   const [saving, setSaving] = useState(false)
   const [updating, setUpdating] = useState(false)
   const [removingNow, setRemoving] = useState(false)
-  const removalId = `${accountId}::${addon.transportUrl}::${index ?? ''}`
+  const duplicateOrdinal = useAccountStore((state) => {
+    if (index === undefined) return 0
+    const list = state.accounts.find(a => a.id === accountId)?.addons ?? []
+    const key = normalizeAddonUrl(addon.transportUrl)
+    let n = 0
+    for (let i = 0; i < index && i < list.length; i++) if (normalizeAddonUrl(list[i].transportUrl) === key) n++
+    return n
+  })
+  const removalId = `${accountId}::${normalizeAddonUrl(addon.transportUrl)}::${duplicateOrdinal}`
   const undoPending = useIsUndoPending('addon-remove', removalId)
   const removing = removingNow || undoPending
   const onRemoveRef = useRef(onRemove)
@@ -340,19 +348,17 @@ export const AddonCard = React.memo(function AddonCard({
   const removalLabel = addon.metadata?.customName || addon.manifest.name || getHostnameIdentifier(addon.transportUrl)
 
   const commitRemove = async () => {
-    const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
-    const current = index !== undefined ? account?.addons[index] : account?.addons.find(a => a.transportUrl === addon.transportUrl)
-    if (!current || current.transportUrl !== addon.transportUrl) {
-      toast({ variant: 'warning', title: 'Removal skipped', description: `The addon list changed, so ${removalLabel} was not removed.` })
-      return
-    }
     setRemoving(true)
     try {
-      await onRemoveRef.current(accountId, addon.transportUrl, index)
-      toast({
-        title: 'Addon Removed',
-        description: `Successfully removed ${addon.manifest.name}`
-      })
+      const result = await onRemoveRef.current(accountId, addon.transportUrl, index)
+      if (result === 'already-gone') {
+        toast({ title: 'Already removed', description: `${removalLabel} was no longer on this account.` })
+      } else {
+        toast({
+          title: 'Addon Removed',
+          description: `Successfully removed ${addon.manifest.name}`
+        })
+      }
     } catch (error) {
       if (import.meta.env.DEV) console.error('Failed to remove addon:', error)
       toast({
