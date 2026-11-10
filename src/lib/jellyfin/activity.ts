@@ -492,36 +492,99 @@ export function activityNowStatus(item: ActivityItem, now = Date.now()): Activit
     return age >= -60_000 && age < RECENT_ACTIVITY_WINDOW_MS ? 'recent' : undefined
 }
 
-/** Select from the full feed so searching cannot revive an older episode's badge. */
-export function activityNowStatuses(history: ActivityItem[], now = Date.now(), current: ActivityItem[] = []): Map<string, ActivityNowStatus> {
+/** Inputs of the now-status scan that depend only on the two history lists, not on the clock. */
+interface NowStatusInputs {
+    /** Latest eligible row per account (history first, then current). */
+    latest: Map<string, ActivityItem>
+    /** Latest history row per merge identity. */
+    latestByIdentity: Map<string, ActivityItem>
+    /** History rows by id, for the account-latest id match. */
+    rowsById: Map<string, ActivityItem>
+    /** History rows carrying a live observation: they can go 'playing' on their own. */
+    liveHistoryRows: ActivityItem[]
+    /** `latest` skipped rows newer than builtAt + 60s; stays valid while now + 60s stays below this. */
+    minFutureTime: number
+    builtAt: number
+}
+
+// Keyed by the history array identity, so it dies with the feed that produced it and
+// can never leak rows across workspaces or scope changes (a new publication is a new array).
+let nowStatusInputsCache: WeakMap<ActivityItem[], { current: ActivityItem[]; inputs: NowStatusInputs }> | null = null
+
+function buildNowStatusInputs(history: ActivityItem[], current: ActivityItem[], now: number): NowStatusInputs {
     const latest = new Map<string, ActivityItem>()
     const latestByIdentity = new Map<string, ActivityItem>()
-    for (const item of [...history, ...current]) {
+    const rowsById = new Map<string, ActivityItem>()
+    const liveHistoryRows: ActivityItem[] = []
+    let minFutureTime = Infinity
+    const cutoff = now + 60_000
+    const considerLatest = (item: ActivityItem) => {
+        if (item.backfill) return
         const time = item.timestamp.getTime()
-        if (item.backfill || !Number.isFinite(time) || time <= 0 || time > now + 60_000) continue
+        if (!Number.isFinite(time) || time <= 0) return
+        if (time > cutoff) {
+            if (time < minFutureTime) minFutureTime = time
+            return
+        }
         const prior = latest.get(item.accountId)
         if (!prior || time > prior.timestamp.getTime() || (time === prior.timestamp.getTime() && item.id < prior.id)) latest.set(item.accountId, item)
     }
     for (const item of history) {
-        const prior = latestByIdentity.get(identity(item))
-        if (!prior || item.timestamp > prior.timestamp) latestByIdentity.set(identity(item), item)
+        considerLatest(item)
+        const key = identity(item)
+        const prior = latestByIdentity.get(key)
+        if (!prior || item.timestamp > prior.timestamp) latestByIdentity.set(key, item)
+        if (!rowsById.has(item.id)) rowsById.set(item.id, item)
+        if (item.mediaObservation?.kind === 'live') liveHistoryRows.push(item)
     }
+    for (const item of current) considerLatest(item)
+    return { latest, latestByIdentity, rowsById, liveHistoryRows, minFutureTime, builtAt: now }
+}
+
+/** Select from the full feed so searching cannot revive an older episode's badge. */
+export function activityNowStatuses(history: ActivityItem[], now = Date.now(), current: ActivityItem[] = []): Map<string, ActivityNowStatus> {
+    const list = current
+    const cache = nowStatusInputsCache ??= new WeakMap()
+    let entry = cache.get(history)
+    if (!entry || entry.current !== list || now < entry.inputs.builtAt || now + 60_000 >= entry.inputs.minFutureTime) {
+        entry = { current: list, inputs: buildNowStatusInputs(history, list, now) }
+        cache.set(history, entry)
+    }
+    const { latest, latestByIdentity, rowsById, liveHistoryRows } = entry.inputs
+
     const liveByIdentity = new Map<string, ActivityItem>()
-    for (const item of current) {
+    for (const item of list) {
         if (item.mediaObservation?.kind === 'live') {
-            const prior = liveByIdentity.get(identity(item))
-            if (!prior || activityNowStatus(item, now) === 'playing') liveByIdentity.set(identity(item), item)
+            const key = identity(item)
+            const prior = liveByIdentity.get(key)
+            if (!prior || activityNowStatus(item, now) === 'playing') liveByIdentity.set(key, item)
         }
     }
+
+    // Only rows the full scan could ever report are evaluated per tick: the latest row of a
+    // live identity, the account-latest rows (by id and by identity), and history rows that
+    // carry a live observation themselves. Everything else can never gain a status.
     const status = new Map<string, ActivityNowStatus>()
-    for (const item of history) {
-        const live = liveByIdentity.get(identity(item))
-        if (live && latestByIdentity.get(identity(item))?.id !== item.id) continue
+    const evaluate = (item: ActivityItem) => {
+        const key = identity(item)
+        const live = liveByIdentity.get(key)
+        if (live && latestByIdentity.get(key)?.id !== item.id) return
         const latestItem = latest.get(item.accountId)
-        const isLatest = latestItem?.id === item.id || (!!latestItem && identity(latestItem) === identity(item) && latestByIdentity.get(identity(item))?.id === item.id)
+        const isLatest = latestItem?.id === item.id || (!!latestItem && identity(latestItem) === key && latestByIdentity.get(key)?.id === item.id)
         const value = activityNowStatus(live || (isLatest ? latestItem! : item), now)
         if (value === 'playing' || (value === 'recent' && isLatest)) status.set(item.id, value)
     }
+    for (const key of liveByIdentity.keys()) {
+        const row = latestByIdentity.get(key)
+        if (row) evaluate(row)
+    }
+    for (const latestItem of latest.values()) {
+        const row = rowsById.get(latestItem.id)
+        if (row) evaluate(row)
+        const latestRow = latestByIdentity.get(identity(latestItem))
+        if (latestRow) evaluate(latestRow)
+    }
+    for (const row of liveHistoryRows) evaluate(row)
     return status
 }
 

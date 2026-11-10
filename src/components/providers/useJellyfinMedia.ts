@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
-import { QueryClient, useQueries, type UseQueryResult } from '@tanstack/react-query'
+import { QueryClient, useQueries, replaceEqualDeep, type UseQueryResult } from '@tanstack/react-query'
 import { useAccountStore } from '@/store/accountStore'
 import { useAuthStore } from '@/store/authStore'
 import { useConnectionStore } from '@/store/connectionStore'
@@ -249,6 +249,95 @@ function withKnownParents(read: MediaRead<JellyfinItemResult>, keyOf: (seriesId:
     const items = applyKnownParents(read.data.items, parentSeries, keyOf)
     return items === read.data.items ? read : { ...read, data: { ...read.data, items } }
 }
+
+/**
+ * Structural sharing for composed reads: a poll whose content is unchanged
+ * keeps the previous read object (with its older checkedAt) so the activity
+ * projector cache and every derived history identity survive a no-op poll.
+ * Only the verification timestamp is allowed to drift; failures and changed
+ * data adopt the fresh object immediately.
+ */
+export function stableRead(previous: MediaRead<JellyfinItemResult> | undefined, next: MediaRead<JellyfinItemResult>): MediaRead<JellyfinItemResult> {
+    if (previous?.status === 'success' && next.status === 'success'
+        && sharedPlayedResult(previous.data, next.data) === previous.data) return previous
+    return next
+}
+
+// Composed rows are plain JSON DTOs, so this verdict compare can decide reuse
+// without replaceEqualDeep's shared-copy build at every level; anything not
+// plain (arrays, Dates, class instances) delegates to it for the verdict.
+function dtoEqual(a: unknown, b: unknown): boolean {
+    if (a === b) return true
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+    const protoA = Object.getPrototypeOf(a)
+    const protoB = Object.getPrototypeOf(b)
+    const plainA = protoA === Object.prototype || protoA === null
+    const plainB = protoB === Object.prototype || protoB === null
+    if (!plainA || !plainB) return replaceEqualDeep(a, b) === a
+    const aRecord = a as Record<string, unknown>
+    const bRecord = b as Record<string, unknown>
+    let aSize = 0
+    for (const _ in aRecord) aSize++
+    let bSize = 0
+    for (const key in bRecord) {
+        bSize++
+        const av = aRecord[key]
+        const bv = bRecord[key]
+        if (av === bv) {
+            if (bv === undefined && !Object.hasOwn(aRecord, key)) return false
+            continue
+        }
+        if (!dtoEqual(av, bv)) return false
+    }
+    return aSize === bSize
+}
+
+function sharedPlayedRows(previous: JellyfinItem[], next: JellyfinItem[]): JellyfinItem[] {
+    let shared: JellyfinItem[] | null = null
+    for (let i = 0; i < next.length; i++) {
+        const old: JellyfinItem | undefined = previous[i]
+        const row = next[i]!
+        let kept: JellyfinItem
+        if (old === undefined) kept = row
+        else if (old === row || dtoEqual(old, row)) kept = old
+        else kept = replaceEqualDeep(old, row)
+        if (shared === null) {
+            if (kept === old) continue
+            shared = previous.slice(0, i)
+        }
+        shared.push(kept)
+    }
+    return shared ?? (previous.length === next.length ? previous : previous.slice(0, next.length))
+}
+
+function playedFieldsEqual(previous: JellyfinItemResult, next: JellyfinItemResult): boolean {
+    const prevRecord = previous as unknown as Record<string, unknown>
+    const nextRecord = next as unknown as Record<string, unknown>
+    let aSize = 0
+    for (const _ in prevRecord) aSize++
+    let bSize = 0
+    for (const key in nextRecord) {
+        bSize++
+        if (key === 'items') continue
+        const av = prevRecord[key]
+        const bv = nextRecord[key]
+        if (av === bv) {
+            if (bv === undefined && !Object.hasOwn(prevRecord, key)) return false
+            continue
+        }
+        if (!dtoEqual(av, bv)) return false
+    }
+    return aSize === bSize
+}
+
+export function sharedPlayedResult(previous: JellyfinItemResult, next: JellyfinItemResult): JellyfinItemResult {
+    const rows = sharedPlayedRows(previous.items, next.items)
+    if (rows === previous.items && playedFieldsEqual(previous, next)) return previous
+    return { ...next, items: rows }
+}
+
+/** Last composed read objects per job, keyed by the same subject-scoped key as the compose memo. */
+type StableLibraryReads = { resume: MediaRead<JellyfinItemResult>; played: MediaRead<JellyfinItemResult>; historyPlayed: MediaRead<JellyfinItemResult> }
 
 function setSettledArchive(key: string, value: SettledArchiveRead): void {
     setBounded(settledArchives, key, value, archiveCacheLimit)
@@ -704,9 +793,19 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
                 return client.readAllPlayed(secret.accessToken, secret.userId, { onProgress, prefetchedHead: observedHead, pageRetries: ARCHIVE_PAGE_RETRIES, ...archiveWalkOptions(job) }, archiveSignal)
             }
             const publishPartial = () => {
+                // A settled head is never swapped for a partial re-read of itself:
+                // an in-progress head publish settles behind the previous settled
+                // one, so a no-op poll never invalidates downstream identities.
+                // First loads (no settled head yet) still publish progressive
+                // snapshots; failures and changed finals publish immediately.
+                const settledPrevious = previous?.played?.status === 'success' && previous.played.data.inProgress !== true
+                    ? previous.played
+                    : undefined
                 const visiblePlayed = played.status === 'waiting' && previous?.played && previous.played.status !== 'waiting'
                     ? previous.played
-                    : played
+                    : played.status === 'success' && played.data.inProgress === true && settledPrevious
+                        ? settledPrevious
+                        : played
                 mediaQueries.setQueryData<LibraryReads>([...job.queryKey, 'library'], { resume, played: visiblePlayed, readInitialArchive })
             }
             const resumePromise = captureMediaRead(
@@ -991,6 +1090,9 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
     // Keep the played union stable until one of its own inputs changes.
     const composeMemoRef = useRef<ReturnType<typeof createPlayedComposeMemo> | null>(null)
     if (!composeMemoRef.current) composeMemoRef.current = createPlayedComposeMemo()
+    const stableReadsRef = useRef<Map<string, StableLibraryReads> | null>(null)
+    if (!stableReadsRef.current) stableReadsRef.current = new Map()
+    const stableReads = stableReadsRef.current
     const composed = useMemo(() => {
         const diagnostics: PlayedComposeTrace[] = []
         const composeMemo = composeMemoRef.current!
@@ -1028,7 +1130,7 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
                 lastGood,
                 archiveOptional,
             ]
-            const { played, historyPlayed } = composeMemo(goodKey, composeInputs, () => composeJobPlayed({
+            const composedNow = composeMemo(goodKey, composeInputs, () => composeJobPlayed({
                 liveHead,
                 restoredHead: restored?.played,
                 liveArchive,
@@ -1042,12 +1144,23 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
                 known: read => withKnownParents(read, keyOf),
                 archiveOptional,
             }))
+            // Content-signature gate: a poll whose composed content is unchanged
+            // keeps the previous read objects (older checkedAt), so projector
+            // caches and every derived history identity survive it; a real
+            // change adopts the fresh objects immediately. The cache is keyed
+            // by the same subject-scoped key as the compose memo, so it never
+            // crosses accounts, vault epochs, users or servers.
+            const stable = stableReads.get(goodKey)
+            const played = stableRead(stable?.played, composedNow.played)
+            const historyPlayed = composedNow.historyPlayed === composedNow.played ? played : stableRead(stable?.historyPlayed, composedNow.historyPlayed)
+            const resume = stableRead(stable?.resume, withKnownParents(library.data[i]?.resume || restored?.resume || waiting, keyOf))
+            setBounded(stableReads, goodKey, { resume, played, historyPlayed }, archiveCacheLimit)
             if (played.status === 'success') setBounded(lastGoodPlayed, goodKey, played, archiveCacheLimit)
             diagnostics.push(playedComposeTrace({ connectionId: job.connection.id, played, liveArchive, settledArchive, restoredArchive: observation?.archive }))
             return {
                 accountId: job.accountId, connection: job.connection,
                 reads: {
-                    resume: withKnownParents(library.data[i]?.resume || restored?.resume || waiting, keyOf),
+                    resume,
                     played,
                 } satisfies LibraryReads,
                 historyPlayed,
@@ -1055,7 +1168,7 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
             }
         })
         return { entries, diagnostics }
-    }, [jobs, library.data, library.errors, archive.data, archive.errors, archive.fetching, hydration, archiveEnabled])
+    }, [jobs, library.data, library.errors, archive.data, archive.errors, archive.fetching, hydration, archiveEnabled, stableReads])
     const libraryResults = composed.entries
     // Diagnostics are an external side effect: emitted after commit, once per change.
     useEffect(() => {
