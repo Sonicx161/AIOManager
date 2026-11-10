@@ -404,7 +404,8 @@ DialogHeader.displayName = 'DialogHeader'
 
 const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
-    className={cn('flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:items-center sm:justify-end min-w-0 [&_button]:h-11 [&_button]:w-full [&_button]:rounded-full [&_button]:px-5 sm:[&_button]:w-auto', className)}
+    // Wrap an overfull footer; otherwise the primary button is the only one that shrinks and its label gets clipped.
+    className={cn('flex flex-col-reverse flex-wrap gap-3 pt-2 sm:flex-row sm:items-center sm:justify-end min-w-0 [&_button]:h-11 [&_button]:w-full [&_button]:rounded-full [&_button]:px-5 sm:[&_button]:w-auto', className)}
     {...props}
   />
 )

@@ -25,7 +25,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { PlatformLogo } from '@/components/providers/ConnectionPrimitives'
 import { useTheme } from '@/contexts/ThemeContext'
-import { Chip, PaneError, PaneLoading, Panel, PanelHead, ScreenHeader, StaleNotice, StatusBadge, TABLE_HEAD, TABLE_ROW, TABLE_SURFACE, TONE_TEXT } from '../AdminWidgets'
+import { Chip, PaneError, PaneLoading, Panel, PanelHead, ScreenHeader, StaleNotice, StatusBadge, TABLE_HEAD, TABLE_ROW, TONE_TEXT } from '../AdminWidgets'
 import { TypedActionDialog } from '../TypedActionDialog'
 
 const FILTERS: { id: UserFilterId; label: string }[] = [
@@ -37,6 +37,9 @@ const FILTERS: { id: UserFilterId; label: string }[] = [
 ]
 
 const SPLIT_PLATFORMS = ['stremio', 'nuvio', 'realstream', 'hydra']
+
+// No overflow-hidden here: the row menu opens inside the table and would be clipped.
+const USERS_SURFACE = 'rounded-2xl border border-border/45 bg-card shadow-sm'
 
 // The server's search contract: a lowercase acct- handle prefix, nothing else.
 const QUERY_RE = /^acct-[0-9a-f]{0,12}$/
@@ -459,9 +462,9 @@ export function UsersScreen() {
       ) : (
       <>
       {/* Phone: tile, handle, then status, platforms and rules; the row opens the detail page. */}
-      <div className={cn(TABLE_SURFACE, 'md:hidden')}>
+      <div className={cn(USERS_SURFACE, 'md:hidden')}>
         {rows.map(u => (
-          <div key={u.handle} className={cn(TABLE_ROW, 'relative flex min-h-12 w-full items-center gap-3 px-3.5 py-2')}>
+          <div key={u.handle} className={cn(TABLE_ROW, 'relative flex min-h-12 w-full items-center gap-3 px-3.5 py-2 first:rounded-t-2xl last:rounded-b-2xl')}>
             <Link
               to={`/dashboard/users/${encodeURIComponent(u.handle)}`}
               aria-label={`Open detail for ${u.handle}, last seen ${u.lastSeenLabel}`}
@@ -487,8 +490,8 @@ export function UsersScreen() {
       </div>
 
       {/* Desktop: the shared-column table with sortable seen columns. */}
-      <div className={cn(TABLE_SURFACE, 'hidden md:block')} role="table" aria-label="Accounts">
-        <div className={cn(USERS_GRID, TABLE_HEAD, 'min-h-[34px]')} role="row">
+      <div className={cn(USERS_SURFACE, 'hidden md:block')} role="table" aria-label="Accounts">
+        <div className={cn(USERS_GRID, TABLE_HEAD, 'min-h-[34px] rounded-t-2xl')} role="row">
           <span role="columnheader" aria-sort="none">Account</span>
           <span role="columnheader" aria-sort="none">
             <Popover>
@@ -524,7 +527,7 @@ export function UsersScreen() {
           <span role="columnheader" aria-sort="none" className="text-right">Actions</span>
         </div>
         {rows.map(u => (
-          <div key={u.handle} className={cn(USERS_GRID, TABLE_ROW, 'min-h-[52px] py-2')} role="row">
+          <div key={u.handle} className={cn(USERS_GRID, TABLE_ROW, 'min-h-[52px] py-2 last:rounded-b-2xl')} role="row">
             <span role="cell" className="flex min-w-0 items-center gap-2.5">
               <HandleTile handle={u.handle} />
               <span className="block truncate font-mono text-[12px] font-semibold text-foreground">{u.handle}</span>

@@ -275,7 +275,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                 {!session && <CredentialHelp />}
                 {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
                 <DialogFooter>
-                    {onBackToPicker && <Button type="button" variant="outline" disabled={busy || discoveringUsers} onClick={() => { close(false); onBackToPicker() }}>Back to connection picker</Button>}
+                    {onBackToPicker && !session && <Button type="button" variant="outline" disabled={busy || discoveringUsers} onClick={() => { close(false); onBackToPicker() }}>Back to connection picker</Button>}
                     <Button type="button" variant="subtle" disabled={busy} onClick={() => close(false)}>Cancel</Button>
                     {session && <Button type="button" variant="outline" disabled={busy} onClick={() => setSession(null)}>Back</Button>}
                     <Button type="submit" disabled={busy || discoveringUsers || loadingAddress || (!!reconnectCredentials && !encryptionKey)}>{submitLabel}</Button>

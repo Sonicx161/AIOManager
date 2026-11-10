@@ -72,6 +72,7 @@ import { aggregateAccountPlatforms, accountPlatformSources } from '@/components/
 import { toast } from '@/hooks/use-toast'
 import { formatFileSize, processImageFile } from '@/lib/image-upload'
 import type { ActivityItem } from '@/types/activity'
+import type { Account } from '@/types/account'
 import { cardVisibilitySummary, activeConnectionsLabel } from './profile-sheet'
 import { ColorPicker } from '@/components/ui/color-picker'
 import { ConnectionManager } from '@/components/providers/ConnectionManager'
@@ -98,7 +99,11 @@ export function AccountForm() {
   const closeDialog = useUIStore((state) => state.closeAddAccountDialog)
   const editingAccount = useUIStore((state) => state.editingAccount)
   const focusConnectionId = useUIStore((state) => state.addAccountFocusConnectionId)
-  const liveAccount = useAccountStore((s) => editingAccount ? s.accounts.find(a => a.id === editingAccount.id) ?? editingAccount : null)
+  // Closing clears editingAccount at once while the sheet is still fading out; hold it so the sheet does not swap to the add flow.
+  const [closingAccount, setClosingAccount] = useState<Account | null>(null)
+  const closingTimerRef = useRef<number | null>(null)
+  const editTarget = editingAccount ?? closingAccount
+  const liveAccount = useAccountStore((s) => editTarget ? s.accounts.find(a => a.id === editTarget.id) ?? editTarget : null)
   const encryptionKey = useAuthStore((state) => state.encryptionKey)
   const { addAccountByAuthKey, addAccountByCredentials, addLocalAccount, removeAccount, updateAccount, loading } = useAccounts()
   const { isLight } = useTheme()
@@ -139,7 +144,7 @@ export function AccountForm() {
   // transitions pull focus back to the sheet through the hook's containerRef.
   const editSheetRef = useRef<HTMLDivElement>(null)
   const { page: editPage, canBack: editCanBack, canForward: editCanForward, go: setEditPage, back: editPageBack, goForward: editPageForward, reset: resetEditPage } = useDrillHistory<'profile' | 'connections'>('profile', { containerRef: editSheetRef })
-  const isEditing = !!editingAccount
+  const isEditing = !!editTarget
   const [colorOpen, setColorOpen] = useState(false)
   const [cardOpen, setCardOpen] = useState(false)
   const [emojiOpen, setEmojiOpen] = useState(false)
@@ -152,7 +157,7 @@ export function AccountForm() {
 
   // Draft-aware dashboard card preview: the same read-only activity sources the real
   // AccountCard reads, hoisted here so the add flow never polls them.
-  const previewAccountId = editingAccount?.id
+  const previewAccountId = editTarget?.id
   const previewCachedItems = useLibraryCache(useShallow((state) => previewAccountId ? activityForAccount(state.items, previewAccountId) : []))
   const previewMedia = useJellyfinActivity(previewAccountId, !!previewAccountId, { archive: false })
   const previewItems = useMemo(
@@ -167,13 +172,15 @@ export function AccountForm() {
     )
   }, [previewAccountId, previewItems])
 
-  const isExpiredSession = editingAccount?.status === 'expired'
-  const expiredSessionConnection = editingAccount?.connections?.find(c => c.enabled !== false && c.status === 'expired')
+  const isExpiredSession = editTarget?.status === 'expired'
+  const expiredSessionConnection = editTarget?.connections?.find(c => c.enabled !== false && c.status === 'expired')
   const expiredSessionPlatformName = expiredSessionConnection
     ? getPlatformEntry(expiredSessionConnection.platform)?.name || expiredSessionConnection.platform
-    : editingAccount && hasPlatformConnection(editingAccount) ? 'Stremio' : 'Account'
+    : editTarget && hasPlatformConnection(editTarget) ? 'Stremio' : 'Account'
 
   useEffect(() => {
+    if (!isOpen) return
+    setClosingAccount(null)
     setOauthAuthKey('')
     setOauthEmail('')
     setOauthPassword('')
@@ -239,7 +246,17 @@ export function AccountForm() {
     }
   }, [editingAccount, isOpen, focusConnectionId, resetEditPage])
 
+  useEffect(() => () => {
+    if (closingTimerRef.current !== null) window.clearTimeout(closingTimerRef.current)
+  }, [])
+
   const handleClose = () => {
+    setClosingAccount(editingAccount)
+    if (closingTimerRef.current !== null) window.clearTimeout(closingTimerRef.current)
+    closingTimerRef.current = window.setTimeout(() => {
+      closingTimerRef.current = null
+      setClosingAccount(null)
+    }, 320)
     setCreatedAccountId(null)
     setConnectedPlatforms(new Set())
     closeDialog()
@@ -1346,11 +1363,11 @@ export function AccountForm() {
     </div>
   )
 
-  const connectionsCount = activeConnectionsLabel(liveAccount?.connections ?? editingAccount?.connections ?? [])
+  const connectionsCount = activeConnectionsLabel(liveAccount?.connections ?? editTarget?.connections ?? [])
   const hasAccentColor = !!accentColor && accentColor !== 'none'
 
   const renderEditingView = () => {
-    const previewAccount = liveAccount ?? editingAccount
+    const previewAccount = liveAccount ?? editTarget
     return (
     <form onSubmit={handleSubmit} className="mt-4 min-w-0">
       <div className="flex items-center gap-2 pb-4">
@@ -1700,8 +1717,8 @@ export function AccountForm() {
             </button>
           </div>
 
-          {editingAccount && encryptionKey && (
-            <ConnectionPicturesSection accountId={editingAccount.id} />
+          {editTarget && encryptionKey && (
+            <ConnectionPicturesSection accountId={editTarget.id} />
           )}
 
           <div className="space-y-2">
@@ -1800,11 +1817,11 @@ export function AccountForm() {
         </div>
       ) : (
         <div className="space-y-5">
-          {editingAccount && (
+          {editTarget && (
             <ConnectionManager
               variant="sheet"
-              accountId={editingAccount.id}
-              connections={liveAccount?.connections ?? editingAccount.connections}
+              accountId={editTarget.id}
+              connections={liveAccount?.connections ?? editTarget.connections}
               focusEditConnection={signInAgainTarget}
               onSubDialogChange={(open) => { connectionSubDialogRef.current = open; if (!open) subDialogClosedAtRef.current = Date.now() }}
             />
