@@ -21,8 +21,16 @@ export const adminAllowHttpLan = () => {
 }
 export const adminAllowIps = () => String(process.env.ADMIN_ALLOW_IPS || '').split(',').map((s) => s.trim()).filter(Boolean)
 export const trustedProxyCidrs = () => String(process.env.TRUSTED_PROXY_CIDRS || '').split(',').map((s) => s.trim()).filter(Boolean)
-// Unset or "auto": a trusted peer (loopback, private range or TRUSTED_PROXY_CIDRS) that sends
-// forwarding headers counts as one proxy. A number pins the hop count; 0 turns proxy trust off.
+// On unless set to a falsy value: loopback, private and Docker network addresses count as
+// trusted proxies automatically. Set TRUST_PRIVATE_NETWORKS=false to trust only Cloudflare
+// and TRUSTED_PROXY_CIDRS; loopback must then be listed there to count as a proxy.
+export const trustPrivateNetworks = () => {
+    const raw = String(process.env.TRUST_PRIVATE_NETWORKS ?? '').trim().toLowerCase()
+    return raw === '' || TRUTHY.includes(raw)
+}
+// Unset or "auto": X-Forwarded-For is walked right to left from a trusted peer (loopback,
+// private range or TRUSTED_PROXY_CIDRS) past every trusted proxy; the first untrusted entry
+// is the client. A number pins the hop count; 0 turns proxy trust off.
 export const proxyHopsAuto = () => {
     const raw = String(process.env.TRUST_PROXY_HOPS ?? '').trim().toLowerCase()
     return raw === '' || raw === 'auto'

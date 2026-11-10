@@ -36,6 +36,7 @@ import { isAdminEnabled } from './admin/config.js'
 import { fastifyTrustProxy } from './admin/net.js'
 import { isDashboardSpaPath } from './admin/paths.js'
 import { corsDelegator } from './lib/cors-policy.js'
+import { warnUnpinnedPublicProxy } from './lib/proxy-trust-warn.js'
 import { publicConfig } from './lib/public-config.js'
 import { reapplyStoredLiveSettings } from './lib/settings-boot.js'
 import { serverErrorHandler } from './lib/error-reply.js'
@@ -101,6 +102,13 @@ fastify.get('/openapi.json', { schema: { hide: true } }, async () => fastify.swa
 
 fastify.addHook('onRequest', async (request) => {
     request.startTime = Date.now()
+})
+
+// Once per start: forwarded headers that reveal an unrecognised public proxy (directly
+// connected, or forwarding through a trusted local proxy) mean its visitors share one
+// rate limit and one sign-in lockout. Warn in plain words before anything else runs.
+fastify.addHook('onRequest', async (request) => {
+    warnUnpinnedPublicProxy(request, fastify.log)
 })
 
 fastify.addHook('onRequest', deviceAuthHook)

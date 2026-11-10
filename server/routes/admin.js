@@ -124,7 +124,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
         log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY is on but TRUST_PROXY_HOPS is 0, so the Dashboard refuses sign-in when forwarded headers arrive. Remove TRUST_PROXY_HOPS to detect the proxy automatically, or set it to the number of proxies in front of the server.')
     }
     if (trustProxyHops() && !trustedProxyCidrs().length) {
-        log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY_HOPS is set without TRUSTED_PROXY_CIDRS, so any loopback or private-range host can act as a proxy and set X-Forwarded-For. Set TRUSTED_PROXY_CIDRS to the proxy addresses.')
+        log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY_HOPS is set without TRUSTED_PROXY_CIDRS, so any loopback or private-range host can act as a proxy and set X-Forwarded-For. TRUSTED_PROXY_CIDRS only adds trusted ranges, so prefer auto mode (remove TRUST_PROXY_HOPS) and keep the server port reachable only through your proxy.')
     }
 
     let storedHash = envHash
@@ -302,7 +302,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
                 reply.status(400)
                 return reply.send({
                     error: chainError === 'short-chain'
-                        ? 'The X-Forwarded-For chain has fewer entries than TRUST_PROXY_HOPS. Set TRUST_PROXY_HOPS to the number of proxies in front of the server, or remove it to detect one proxy automatically.'
+                        ? 'The X-Forwarded-For chain has fewer entries than TRUST_PROXY_HOPS. Set TRUST_PROXY_HOPS to the number of proxies in front of the server, or remove it to walk the trusted proxy chain automatically.'
                         : 'An X-Forwarded-For entry written by a trusted proxy is not an IP address. Check that each proxy appends the client address and nothing else.',
                 })
             }
