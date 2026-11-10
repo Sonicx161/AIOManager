@@ -34,11 +34,12 @@ async function validateSyncAuth(request, reply) {
 
     const verified = await verifySyncPassword(syncPassword, row.password)
     let authorized = verified === true
+    let upgradedHash = null
     if (verified === null) {
         const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
         if (decryptedPassword && timingSafeEqual(decryptedPassword, syncPassword)) {
             authorized = true
-            await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
+            upgradedHash = await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
         }
     }
     if (!authorized) {
@@ -46,7 +47,7 @@ async function validateSyncAuth(request, reply) {
         return null
     }
 
-    setCachedAuth('sync:' + syncUser, syncPassword)
+    setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
     return syncUser
 }
 

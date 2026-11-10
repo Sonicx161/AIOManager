@@ -52,6 +52,29 @@ export async function verifySyncPassword(password, stored) {
 
 // Opportunistic upgrade after a successful legacy auth. Never throws: a failed
 // upgrade must not fail the enclosing request; the next successful auth retries.
+// Best-effort hashing for an upgrade whose write happens later (outside a held tx).
+export async function prepareLegacyPasswordUpgrade(id, password) {
+    if (isReadOnlyReplica()) return null
+    try {
+        return await hashSyncPassword(password)
+    } catch (err) {
+        console.warn(`[SyncPassword] Legacy password hash upgrade failed for ${id}: ${err?.message}`)
+        return null
+    }
+}
+
+// Best-effort write of a prepared upgrade; a failure keeps the legacy credential.
+export async function applyLegacyPasswordUpgrade(runner, id, hashed) {
+    if (!hashed || isReadOnlyReplica()) return null
+    try {
+        await runner.run('UPDATE kv_store SET password = $1 WHERE key = $2', [hashed, id])
+        return hashed
+    } catch (err) {
+        console.warn(`[SyncPassword] Legacy password hash upgrade failed for ${id}: ${err?.message}`)
+        return null
+    }
+}
+
 export async function upgradeLegacyPasswordHash(runner, id, password) {
     // A read-only replica never writes; the primary upgrades on its next legacy auth.
     if (isReadOnlyReplica()) return null

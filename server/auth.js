@@ -126,18 +126,19 @@ export async function verifyAuth(request) {
         }
         const verified = await verifySyncPassword(syncPassword, row.password)
         let authorized = verified === true
+        let upgradedHash = null
         if (verified === null) {
             const decrypted = decrypt(row.password, FALLBACK_KEYS)
             if (decrypted && timingSafeEqual(decrypted, syncPassword)) {
                 authorized = true
-                await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
+                upgradedHash = await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
             }
         }
         if (!authorized) {
             trace('auth', 'verifyAuth.reject', { user: syncUser, reason: 'password-mismatch' })
             return null
         }
-        setCachedAuth('sync:' + syncUser, syncPassword)
+        setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
         trace('auth', 'verifyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
         return syncUser
     } catch (err) {
@@ -172,11 +173,12 @@ export async function requireProxyAuth(request, reply) {
         }
         const verified = await verifySyncPassword(syncPassword, row.password)
         let authorized = verified === true
+        let upgradedHash = null
         if (verified === null) {
             const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
             if (decryptedPassword && timingSafeEqual(decryptedPassword, syncPassword)) {
                 authorized = true
-                await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
+                upgradedHash = await upgradeLegacyPasswordHash(db, syncUser, syncPassword)
             }
         }
         if (!authorized) {
@@ -184,7 +186,7 @@ export async function requireProxyAuth(request, reply) {
             reply.status(401)
             return { error: 'Unauthorized' }
         }
-        setCachedAuth('sync:' + syncUser, syncPassword)
+        setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
         trace('auth', 'proxyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err

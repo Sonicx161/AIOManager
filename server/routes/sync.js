@@ -2,13 +2,13 @@ import crypto from 'crypto'
 import db from '../db.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
-import { getCachedAuth, setCachedAuth, invalidateCachedAuth, hashAuthPassword } from '../state.js'
+import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, hashAuthPassword } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { hashApiKey } from '../api-keys.js'
 import { writeEncryptedIfChanged } from '../db-guards.js'
 import { invalidateCanonicalAddons } from './hydra.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
-import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash } from '../lib/sync-password.js'
+import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash, prepareLegacyPasswordUpgrade, applyLegacyPasswordUpgrade } from '../lib/sync-password.js'
 import { isRegistrationsClosed } from '../config.js'
 import { assertAccountActive, assertWritablePrimary, refreshAccountAdminState } from '../admin/account-state.js'
 import { invalidateSyncResponseCache, getSyncResponseCache, setSyncResponseCache, syncResponseCacheStats } from '../lib/sync-response-cache.js'
@@ -239,7 +239,7 @@ export function registerSyncRoutes(fastify) {
                     reply.status(401);
                     return { error: 'Unauthorized: Invalid credentials' }
                 }
-                setCachedAuth('sync:' + id, password)
+                setCachedAuth('sync:' + id, password, row.password)
             }
 
             if (row.content_hash && request.headers['if-none-match'] === row.content_hash) {
@@ -382,8 +382,51 @@ export function registerSyncRoutes(fastify) {
         // For an EXISTING row the stored scrypt hash already verifies this exact
         // password (a mismatch 401s below), so the UPDATE below keeps row.password and
         // only a possible REGISTRATION (row missing) pays the KDF — still outside the tx.
-        const rowMayExist = request.deviceAuth || !!(await db.get('SELECT 1 AS ok FROM kv_store WHERE key = $1', [id]))
+        // Password verification also runs before the tx; inside the tx only a string
+        // compare re-checks that the stored credential is still the exact one verified.
+        // The pre-tx result stays request-local: nothing reaches the shared auth cache
+        // until the locked in-tx row confirms that exact credential, so a racing
+        // request can never reuse a half-finished verification.
+        const deviceSameAccount = request.deviceAuth?.accountUuid === id
+        const preTxRow = deviceSameAccount ? null : await db.get('SELECT password FROM kv_store WHERE key = $1', [id])
+        const preTxPassword = preTxRow?.password ?? null
+        const rowMayExist = request.deviceAuth || preTxRow != null
         const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
+
+        // Pre-tx verification against the just-read stored credential. A failure is
+        // deferred, not answered: the row may legally change before the tx lands (a
+        // client presenting the newer password after a racing restore must still
+        // authenticate), and the in-tx re-check below stays the decision point then.
+        // preVerified is an explicit boolean because verifiedPassword cannot carry the
+        // outcome on its own: a NULL stored password also reads as null, and a
+        // passwordless row must never authorize (P1-a).
+        let preVerified = false
+        let verifiedPassword = null // exact stored string the pre-tx check authenticated
+        let legacyUpgrade = null // { legacy, hashed } pending upgrade of a legacy-format row
+        if (!deviceSameAccount && preTxRow != null) {
+            const cachedPw = getCachedAuthBound('sync:' + id, preTxPassword)
+            if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
+                preVerified = true
+                verifiedPassword = preTxPassword
+            } else {
+                const verified = await verifySyncPassword(password, preTxPassword)
+                let authorized = verified === true
+                if (verified === null) {
+                    const decryptedPassword = decrypt(preTxPassword, FALLBACK_KEYS)
+                    if (decryptedPassword && timingSafeEqual(decryptedPassword, password)) {
+                        authorized = true
+                        // Legacy upgrade KDF runs here, outside the tx; the write itself
+                        // is applied inside the tx below, exactly where it used to happen.
+                        const hashed = await prepareLegacyPasswordUpgrade(id, password)
+                        if (hashed) legacyUpgrade = { legacy: preTxPassword, hashed }
+                    }
+                }
+                if (authorized) {
+                    preVerified = true
+                    verifiedPassword = preTxPassword
+                }
+            }
+        }
 
         const runPushTx = () => db.tx(async (tx) => {
             const row = await tx.get(
@@ -395,23 +438,49 @@ export function registerSyncRoutes(fastify) {
 
             if (row) {
                 let storedPassword = row.password
-                const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth('sync:' + id)
-                if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
-                } else if (request.deviceAuth?.accountUuid !== id) {
-                    const verified = await verifySyncPassword(password, row.password)
-                    let authorized = verified === true
-                    if (verified === null) {
-                        const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
-                        if (decryptedPassword && timingSafeEqual(decryptedPassword, password)) {
-                            authorized = true
-                            storedPassword = await upgradeLegacyPasswordHash(tx, id, password) || storedPassword
-                        }
+                if (!deviceSameAccount && preVerified && row.password === verifiedPassword) {
+                    // The locked row holds exactly the credential verified before the tx,
+                    // so the string compare alone confirms authorization. Publishing the
+                    // cache entry here (not pre-tx) is what lets a racing restore's
+                    // invalidation win, and the binding to the exact credential means a
+                    // hit can only ever certify that same string.
+                    if (legacyUpgrade) {
+                        // Legacy row verified pre-tx: persist the scrypt upgrade inside this
+                        // tx (same write the old in-tx path performed) and store the new hash.
+                        storedPassword = await applyLegacyPasswordUpgrade(tx, id, legacyUpgrade.hashed) || storedPassword
                     }
-                    if (!authorized) {
+                    setCachedAuth('sync:' + id, password, storedPassword)
+                } else if (!deviceSameAccount) {
+                    // The stored credential is not the exact string verified before the tx:
+                    // it changed mid-request, the pre-tx check failed, or the row carries no
+                    // password at all. Re-run the original check against the locked row;
+                    // scrypt inside the tx is confined to this rare path.
+                    const cachedPw = getCachedAuthBound('sync:' + id, row.password)
+                    if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
+                    } else if (row.password === preTxPassword) {
+                        // Deterministic short-circuit: the pre-tx cache-miss check already
+                        // failed against this exact stored string (the scrypt compare and
+                        // the legacy decrypt compare are deterministic, and a NULL stored
+                        // password fails both), so fail now without paying the KDF again
+                        // while the tx queue is held.
                         reply.status(401);
                         return { error: 'Unauthorized: Password mismatch' }
+                    } else {
+                        const verified = await verifySyncPassword(password, row.password)
+                        let authorized = verified === true
+                        if (verified === null) {
+                            const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
+                            if (decryptedPassword && timingSafeEqual(decryptedPassword, password)) {
+                                authorized = true
+                                storedPassword = await upgradeLegacyPasswordHash(tx, id, password) || storedPassword
+                            }
+                        }
+                        if (!authorized) {
+                            reply.status(401);
+                            return { error: 'Unauthorized: Password mismatch' }
+                        }
+                        setCachedAuth('sync:' + id, password, storedPassword)
                     }
-                    setCachedAuth('sync:' + id, password)
                 }
 
                 const serverUpdated = row.updated_at || 0
@@ -703,18 +772,19 @@ export function registerSyncRoutes(fastify) {
             if (request.deviceAuth?.accountUuid !== id && !(cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password)))) {
                 const verified = await verifySyncPassword(password, row.password)
                 let authorized = verified === true
+                let upgradedHash = null
                 if (verified === null) {
                     const decryptedPassword = decrypt(row.password, FALLBACK_KEYS)
                     if (decryptedPassword && timingSafeEqual(decryptedPassword, password)) {
                         authorized = true
-                        await upgradeLegacyPasswordHash(db, id, password)
+                        upgradedHash = await upgradeLegacyPasswordHash(db, id, password)
                     }
                 }
                 if (!authorized) {
                     reply.status(401)
                     return { error: 'Unauthorized: Invalid credentials' }
                 }
-                setCachedAuth('sync:' + id, password)
+                setCachedAuth('sync:' + id, password, upgradedHash || row.password)
             }
 
             const result = await db.tx(async (tx) => {
@@ -792,7 +862,7 @@ export function registerSyncRoutes(fastify) {
                 reply.status(401);
                 return { error: 'Unauthorized: Invalid credentials' }
             }
-            setCachedAuth('sync:' + id, password)
+            setCachedAuth('sync:' + id, password, row.password)
         }
 
         fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${maskContext(id)}`)
