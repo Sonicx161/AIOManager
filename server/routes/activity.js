@@ -218,6 +218,37 @@ export function registerActivityRoutes(fastify, activityEngine) {
         }
     })
 
+    // Bulk form of the per-event delete, so removing a long series costs a few requests
+    // instead of one per episode. Same ownership scoping and idempotence.
+    fastify.post('/api/activity/events/delete', {
+        config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+        bodyLimit: 1024 * 256
+    }, async (request, reply) => {
+        const syncUser = await validateSyncAuth(request, reply)
+        if (!syncUser) return { error: 'Invalid credentials' }
+        assertWritablePrimary()
+
+        const ids = request.body?.ids
+        if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500
+            || ids.some(id => typeof id !== 'string' || !id || id.length > 512)) {
+            reply.status(400)
+            return { error: 'Expected { ids: [1-500 event id strings] }' }
+        }
+
+        const unique = [...new Set(ids)]
+        try {
+            const result = await db.run(
+                `DELETE FROM activity_events WHERE sync_user = $1 AND id IN (${unique.map((_, i) => `$${i + 2}`).join(',')})`,
+                [syncUser, ...unique]
+            )
+            return { deleted: Math.max(0, Number(result?.changes ?? 0)) }
+        } catch (dbErr) {
+            fastify.log.error({ category: 'Activity' }, `Bulk event delete failed: ${dbErr.message}`)
+            reply.status(503)
+            return { error: 'database_unavailable' }
+        }
+    })
+
     fastify.post('/api/credentials/sync', {
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
         bodyLimit: 1024 * 512

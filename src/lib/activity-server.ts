@@ -321,7 +321,37 @@ export async function pushCredentialsToServer(): Promise<number> {
     return syncCredentialsToServer()
 }
 
-// Per-event server deletes, fired fire-and-forget from watchEventStore.removeEvents after the
+const BULK_DELETE_CHUNK = 500
+const MAX_RATE_LIMIT_RETRIES = 6
+
+function retryDelayMs(res: Response, attempt: number): number {
+    const header = Number(res.headers.get('retry-after'))
+    const seconds = Number.isFinite(header) && header > 0 ? header : Math.min(2 ** attempt, 30)
+    return Math.min(seconds, 65) * 1000
+}
+
+type DeleteOutcome = 'ok' | 'unsupported' | 'failed'
+
+// A 429 waits out Retry-After and retries; 404/405 means the server predates the bulk route.
+async function sendDelete(url: string, init: RequestInit): Promise<{ outcome: DeleteOutcome; res?: Response }> {
+    for (let attempt = 0; ; attempt++) {
+        let res: Response
+        try {
+            res = await fetchWithTimeout(url, init)
+        } catch {
+            return { outcome: 'failed' }
+        }
+        if (res.ok) return { outcome: 'ok', res }
+        if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, retryDelayMs(res, attempt)))
+            continue
+        }
+        return { outcome: res.status === 404 || res.status === 405 ? 'unsupported' : 'failed', res }
+    }
+}
+
+// Server deletes for removed events, in chunks to the bulk route (per-id fallback on older
+// servers), fired fire-and-forget from watchEventStore.removeEvents after the
 // local drop. Each id is the server's own event id (evt_…, preserved on locally merged server
 // events), so the route stays owner-scoped and idempotent — ids that never reached the server
 // (locally-generated events) simply delete nothing. Not engine-gated, like the credential core:
@@ -335,17 +365,34 @@ export async function deleteServerActivityEvents(eventIds: string[]): Promise<nu
     } catch { return 0 }
 
     const apiPath = getApiBase(serverUrl)
+    const unique = [...new Set(eventIds)]
     let deleted = 0
-    for (const eventId of eventIds) {
-        try {
-            // No body, so no JSON content type: Fastify answers 400 to an empty JSON body.
-            const { 'Content-Type': _contentType, ...headers } = authHeaders
-            const res = await fetchWithTimeout(`${apiPath}/activity/events/${encodeURIComponent(eventId)}`, {
-                method: 'DELETE',
-                headers,
+    let failed = 0
+    let bulkSupported = true
+    for (let i = 0; i < unique.length; i += BULK_DELETE_CHUNK) {
+        const chunk = unique.slice(i, i + BULK_DELETE_CHUNK)
+        if (bulkSupported) {
+            const { outcome, res } = await sendDelete(`${apiPath}/activity/events/delete`, {
+                method: 'POST',
+                headers: authHeaders,
+                body: JSON.stringify({ ids: chunk }),
             })
-            if (res.ok) deleted++
-        } catch { /* fire-and-forget: a missed row re-merges on the next pull and stays tombstoned locally */ }
+            if (outcome === 'ok') {
+                try { deleted += Number((await res!.json()).deleted) || 0 } catch { /* acknowledged, count unknown */ }
+                continue
+            }
+            if (outcome === 'failed') { failed += chunk.length; continue }
+            bulkSupported = false
+        }
+        // No body, so no JSON content type: Fastify answers 400 to an empty JSON body.
+        const { 'Content-Type': _contentType, ...headers } = authHeaders
+        for (const eventId of chunk) {
+            const { outcome } = await sendDelete(`${apiPath}/activity/events/${encodeURIComponent(eventId)}`, { method: 'DELETE', headers })
+            if (outcome === 'ok') deleted++
+            else failed++
+        }
     }
+    // A missed row re-merges on the next pull; it stays hidden by the local tombstone until then.
+    if (failed > 0) console.warn(`[ActivityServer] ${failed} of ${unique.length} event deletes were not acknowledged by the server`)
     return deleted
 }
