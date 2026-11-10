@@ -74,7 +74,11 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             fastify.log.warn({ category: 'Autopilot' }, `Failed to upsert credential for ${maskContext(accountId)}: ${credErr.message}`)
         }
     }
-    const { sendNotification, syncStremioLive, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState } = autopilotEngine
+    const { sendNotification, syncStremioLive, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState, decryptRuleField } = autopilotEngine
+    // Engine's versioned decrypt cache (keyed by rule id + updated_at, ciphertext
+    // revalidated before reuse). Falls back to a plain decrypt when a harness passes
+    // an engine stub without it.
+    const ruleDecryptField = decryptRuleField || ((rule, field) => decrypt(rule[field], FALLBACK_KEYS))
     const ENFORCEMENT_DEBOUNCE_MS = 30_000
     const MAX_BATCH_STATE_ACCOUNTS = 500
     const enforcementDebounce = new Map()
@@ -401,10 +405,13 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         }
     }
 
-    const parseStabilization = (value) => {
-        if (!value) return {}
+    const parseStabilization = (rule) => {
+        if (!rule.stabilization) return {}
         try {
-            return JSON.parse(decrypt(value, FALLBACK_KEYS) || '{}')
+            // ruleDecryptField is safe for stats-sourced stabilization: the memo is
+            // keyed by the rule's updated_at but revalidates the exact ciphertext, so
+            // a heartbeat that rewrites the stats blob misses and re-decrypts.
+            return JSON.parse(ruleDecryptField(rule, 'stabilization') || '{}')
         } catch {
             return {}
         }
@@ -415,12 +422,12 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         let customCheckUrls = []
         try {
             if (rule.custom_check_urls) {
-                const decrypted = decrypt(rule.custom_check_urls, FALLBACK_KEYS)
+                const decrypted = ruleDecryptField(rule, 'custom_check_urls')
                 const source = decrypted && decrypted.startsWith('[') ? decrypted : (rule.custom_check_urls.startsWith('[') ? rule.custom_check_urls : null)
                 if (source) customCheckUrls = normCustomChecks(JSON.parse(source))
             }
         } catch (e) { customCheckUrls = [] }
-        const priorityChain = rule.priority_chain ? JSON.parse(decrypt(rule.priority_chain, FALLBACK_KEYS) || '[]') : []
+        const priorityChain = rule.priority_chain ? JSON.parse(ruleDecryptField(rule, 'priority_chain') || '[]') : []
         const checkError = getRuleCheckError?.(rule.id)
         const lastCheck = runtime?.lastCheck ?? rule.last_check
         return {
@@ -428,15 +435,15 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             name: rule.name || null,
             cooldownMs: rule.cooldown_ms || null,
             priorityChain,
-            activeUrl: runtime?.activeUrl ?? (rule.active_url ? decrypt(rule.active_url, FALLBACK_KEYS) : null),
-            webhookUrl: rule.webhook_url ? decrypt(rule.webhook_url, FALLBACK_KEYS) : '',
+            activeUrl: runtime?.activeUrl ?? (rule.active_url ? ruleDecryptField(rule, 'active_url') : null),
+            webhookUrl: rule.webhook_url ? ruleDecryptField(rule, 'webhook_url') : '',
             // Only a saved mode is a statement (NULL = legacy row / older client): the
             // client keeps its local value when the key is absent.
             ...(rule.notify_enabled == null ? {} : { notifyEnabled: rule.notify_enabled === 1 }),
             isActive: rule.is_active === 1,
             isAutomatic: rule.is_automatic === 1,
             lastCheck: checkError && !(lastCheck >= checkError.at) ? checkError.at : lastCheck,
-            stabilization: runtime?.stabilization ?? parseStabilization(rule.stabilization),
+            stabilization: runtime?.stabilization ?? parseStabilization(rule),
             customCheckUrls: Array.isArray(customCheckUrls) ? customCheckUrls : [],
             messageTemplate: rule.message_template || null,
             platform: rule.platform || null,
@@ -808,7 +815,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
 
         try {
             const rules = await db.query(`
-                SELECT r.id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
+                SELECT r.id, r.updated_at, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
                        COALESCE(s.last_check, r.last_check) AS last_check,
                        COALESCE(s.stabilization, r.stabilization) AS stabilization,
                        r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
@@ -1296,7 +1303,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
 
         const placeholders = accountIds.map((_, i) => `$${i + 2}`).join(',')
         const rules = await db.query(
-            `SELECT r.id, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
+            `SELECT r.id, r.updated_at, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
                     COALESCE(s.last_check, r.last_check) AS last_check,
                     COALESCE(s.stabilization, r.stabilization) AS stabilization,
                     r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored

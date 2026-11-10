@@ -20,6 +20,7 @@ import { isSyncEligibleConnection } from '@/types/connection'
 import type { Account } from '@/types/account'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
 import { findRuleOverlaps, getRuleMissingConnection } from '@/lib/autopilot-conflicts'
+import { reuseUnchanged } from '@/lib/reuse-unchanged'
 
 const STORAGE_KEY = 'aioman:failover-rules'
 
@@ -218,11 +219,23 @@ type AddonEnabledSnapshot = {
     flags?: { enabled?: boolean }
 }
 
-const findAddonByNormalizedUrl = (addons: AddonEnabledSnapshot[] | undefined, normalizedUrl: string) =>
-    addons?.find(addon => normalizeAddonUrl(addon.transportUrl) === normalizedUrl)
+// URL-normalizer memo shared across a reconcile pass: chain lookups otherwise
+// re-normalize the same addon transport URLs once per link per rule.
+type UrlNormalizer = (url: string) => string
 
-const hasEnabledMismatch = (addons: AddonEnabledSnapshot[] | undefined, normalizedUrl: string, shouldBeEnabled: boolean) => {
-    const addon = findAddonByNormalizedUrl(addons, normalizedUrl)
+const memoizedAddonUrlNormalizer = (memo: Map<string, string>): UrlNormalizer => url => {
+    const hit = memo.get(url)
+    if (hit !== undefined) return hit
+    const normalized = normalizeAddonUrl(url)
+    memo.set(url, normalized)
+    return normalized
+}
+
+const findAddonByNormalizedUrl = (addons: AddonEnabledSnapshot[] | undefined, normalizedUrl: string, norm: UrlNormalizer = normalizeAddonUrl) =>
+    addons?.find(addon => norm(addon.transportUrl) === normalizedUrl)
+
+const hasEnabledMismatch = (addons: AddonEnabledSnapshot[] | undefined, normalizedUrl: string, shouldBeEnabled: boolean, norm?: UrlNormalizer) => {
+    const addon = findAddonByNormalizedUrl(addons, normalizedUrl, norm)
     if (!addon) return false
     return (addon.flags?.enabled !== false) !== shouldBeEnabled
 }
@@ -251,16 +264,17 @@ const normalizeCustomChecks = (checks: Array<CustomCheckEntry | string> | undefi
 // redundant and at worst re-clobbers managed chains with an intermediate state.
 // Manual user actions (addRule/updateRule/toggleRuleActive) omit it so intentional
 // edits still propagate.
-const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: { localOnly?: boolean }) => {
+const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: { localOnly?: boolean; urlMemo?: Map<string, string> }) => {
     if (!rule.isActive || !rule.priorityChain.length) return false
 
     const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
     if (!account) return false
     if (getRuleMissingConnection(rule, account) || rule.lastError?.code === 'contested_by_other_writer') return false
-    const overlaps = new Set(findRuleOverlaps(rule, useFailoverStore.getState().rules, account.addons).map(overlap => normalizeAddonUrl(overlap.url)))
+    const norm = memoizedAddonUrlNormalizer(opts?.urlMemo ?? new Map())
+    const overlaps = new Set(findRuleOverlaps(rule, useFailoverStore.getState().rules, account.addons).map(overlap => norm(overlap.url)))
 
     const activeUrl = rule.activeUrl || rule.priorityChain[0]
-    const normActive = normalizeAddonUrl(activeUrl)
+    const normActive = norm(activeUrl)
     if (overlaps.has(normActive)) return false
     const activeProfile = account.activeProfileId
         ? account.profiles?.find(profile => profile.id === account.activeProfileId)
@@ -270,21 +284,21 @@ const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: {
     let activeAddonMissing = false
 
     for (const url of rule.priorityChain) {
-        const normUrl = normalizeAddonUrl(url)
+        const normUrl = norm(url)
         if (overlaps.has(normUrl)) continue
         const shouldBeEnabled = normUrl === normActive
-        const accountAddon = findAddonByNormalizedUrl(account.addons, normUrl)
-        const profileMissingActive = !!activeProfile && shouldBeEnabled && !findAddonByNormalizedUrl(activeProfile.addons, normUrl)
+        const accountAddon = findAddonByNormalizedUrl(account.addons, normUrl, norm)
+        const profileMissingActive = !!activeProfile && shouldBeEnabled && !findAddonByNormalizedUrl(activeProfile.addons, normUrl, norm)
 
         if (!accountAddon) {
             if (shouldBeEnabled) activeAddonMissing = true
             continue
         }
 
-        const accountMismatch = hasEnabledMismatch(account.addons, normUrl, shouldBeEnabled)
+        const accountMismatch = hasEnabledMismatch(account.addons, normUrl, shouldBeEnabled, norm)
         const profileMismatch = !!activeProfile && (
             profileMissingActive ||
-            hasEnabledMismatch(activeProfile.addons, normUrl, shouldBeEnabled)
+            hasEnabledMismatch(activeProfile.addons, normUrl, shouldBeEnabled, norm)
         )
 
         if (!accountMismatch && !profileMismatch) continue
@@ -869,6 +883,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         let fetched = false
         let pullPartial = false
         const sessionAtStart = get().sessionGeneration
+        const urlMemo = new Map<string, string>()
 
         try {
             const { serverUrl } = (await import('@/store/syncStore')).useSyncStore.getState()
@@ -910,7 +925,10 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         let mergedRule: FailoverRule
                         if (existsIndex !== -1) {
                             preserveScopedChecksAtRisk(rules[existsIndex], processedRule.customCheckUrls)
-                            mergedRule = { ...rules[existsIndex], ...processedRule, skipReason: readSkipReason(sr), lastError: readRuleError(sr.lastError) }
+                            const candidate: FailoverRule = { ...rules[existsIndex], ...processedRule, skipReason: readSkipReason(sr), lastError: readRuleError(sr.lastError) }
+                            // Reuse the local object when nothing changed: an
+                            // observing-nothing pull rewrites no rule identities.
+                            mergedRule = reuseUnchanged(rules[existsIndex], candidate)
                             rules[existsIndex] = mergedRule
                         } else {
                             mergedRule = { ...processedRule, skipReason: readSkipReason(sr), lastError: readRuleError(sr.lastError) }
@@ -919,7 +937,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         processedRules.push(mergedRule)
                     }
 
-                    const reconcileResults = await mapConcurrent(processedRules, 3, (rule) => reconcileAccountAddonsWithActiveRule(rule, { localOnly: true }))
+                    const reconcileResults = await mapConcurrent(processedRules, 3, (rule) => reconcileAccountAddonsWithActiveRule(rule, { localOnly: true, urlMemo }))
                     if (reconcileResults.some(Boolean)) {
                         needsSync = true
                     }
@@ -949,8 +967,18 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             }
         }
 
-        set({ rules })
-        await localforage.setItem(STORAGE_KEY, rules)
+        // Publish and persist only into the session the pull started in, and
+        // only when a rule object actually changed, was added, filtered out, or
+        // deleted: an observing-nothing pull writes nothing (zero per-cycle
+        // Autopilot writes), and a pull finishing after logout or a workspace
+        // switch must not resurrect the old session's rules.
+        const currentRules = get().rules
+        const rulesChanged = rules.length !== currentRules.length
+            || rules.some((r, i) => r !== currentRules[i])
+        if (rulesChanged && get().sessionGeneration === sessionAtStart) {
+            set({ rules })
+            await localforage.setItem(STORAGE_KEY, rules)
+        }
         if (!pullPartial && get().sessionGeneration === sessionAtStart) {
             _lastCompletePullAt = Date.now()
             set({ lastCompletePullAt: _lastCompletePullAt })
@@ -994,6 +1022,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             let hasUpdates = false
             const updatedRules = [...rules]
             const seenRuleIds = new Set<string>()
+            const urlMemo = new Map<string, string>()
+            const norm = memoizedAddonUrlNormalizer(urlMemo)
 
             for (const accountId of Object.keys(batchedStates)) {
                 const serverStates = batchedStates[accountId]
@@ -1008,13 +1038,13 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                             ? localRule.priorityChain
                             : (Array.isArray(serverRule.priorityChain) ? (serverRule.priorityChain as string[]) : localRule.priorityChain)
                         const nextActiveUrl = (serverRule.activeUrl as string) || nextPriorityChain?.[0] || localRule.activeUrl
-                        const normNextActive = normalizeAddonUrl(nextActiveUrl || '')
+                        const normNextActive = norm(nextActiveUrl || '')
 
                         if (didActiveTierChange(localRule.activeUrl, nextActiveUrl)) {
                             if (import.meta.env.DEV) console.log(`[Failover] Server-side swap detected: ${localRule.id} -> ${nextActiveUrl}`)
                         }
 
-                        const normPrimary = normalizeAddonUrl(nextPriorityChain?.[0] || '')
+                        const normPrimary = norm(nextPriorityChain?.[0] || '')
                         // The per-rule notification mode is only adopted when the server states
                         // it (older servers omit it) and never while a local save is still in
                         // flight: a pull racing the save must not revert the user's edit.
@@ -1024,7 +1054,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         const nextNotifyEnabled = isPendingUpdate
                             ? localRule.notifyEnabled
                             : (serverRule.notifyEnabled != null ? Boolean(serverRule.notifyEnabled) : localRule.notifyEnabled)
-                        updatedRules[ruleIndex] = {
+                        const candidate: FailoverRule = {
                             ...localRule,
                             name: (serverRule.name as string) ?? localRule.name,
                             cooldown_ms: (serverRule.cooldownMs as number) ?? localRule.cooldown_ms,
@@ -1042,13 +1072,17 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                                 ? (normNextActive === normPrimary ? 'monitoring' : 'failed-over')
                                 : localRule.status
                         }
-                        hasUpdates = true
+                        // Reuse the local object when nothing changed: a pull that
+                        // observes identical state republishes and repersists nothing.
+                        const nextRule = reuseUnchanged(localRule, candidate)
+                        updatedRules[ruleIndex] = nextRule
+                        if (nextRule !== localRule) hasUpdates = true
 
                         // Consumer mode: the server already enforced this state on the
                         // platform, so reconciling must only APPLY it locally — never push
                         // the local list back out (backgroundSync/pushToConnections), which
                         // would resurrect the Swap & Hide clobber one level down the stack.
-                        if (await reconcileAccountAddonsWithActiveRule(updatedRules[ruleIndex], { localOnly: true })) {
+                        if (await reconcileAccountAddonsWithActiveRule(updatedRules[ruleIndex], { localOnly: true, urlMemo })) {
                             hasUpdates = true
                         }
                     }
