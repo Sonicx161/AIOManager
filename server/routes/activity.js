@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { encrypt } from '../crypto.js'
@@ -51,6 +52,34 @@ async function validateSyncAuth(request, reply) {
     return syncUser
 }
 
+const EVENT_COLUMNS = 'id, account_id, account_name, item_id, unique_item_id, item_name, item_type, poster, season, episode, video_id, event_type, event_ts, duration, progress, watched, times_watched, is_in_progress, overall_time_watched'
+
+// Status responses are memoized very briefly so bursts of idle sessions polling
+// status share one set of COUNT scans, and repeat polls 304 off the stored ETag.
+const STATUS_MEMO_TTL_MS = 5000
+const STATUS_MEMO_MAX_ENTRIES = 500
+const statusMemo = new Map()
+
+function buildEventsQuery({ syncUser, accountIdFilter, since, eventType, fetchLimit, fetchOffset }) {
+    const params = [syncUser]
+    const predicates = []
+    if (accountIdFilter) predicates.push(accountIdFilter(params))
+    if (since > 0) {
+        params.push(since)
+        predicates.push(`event_ts >= $${params.length}`)
+    }
+    if (eventType) {
+        params.push(eventType)
+        predicates.push(`event_type = $${params.length}`)
+    }
+    params.push(fetchLimit, fetchOffset)
+    const where = predicates.length > 0 ? `WHERE sync_user = $1 AND ${predicates.join(' AND ')}` : 'WHERE sync_user = $1'
+    return {
+        sql: `SELECT ${EVENT_COLUMNS} FROM activity_events ${where} ORDER BY event_ts DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params,
+    }
+}
+
 export function registerActivityRoutes(fastify, activityEngine) {
     fastify.get('/api/activity/events', {
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } }
@@ -68,34 +97,54 @@ export function registerActivityRoutes(fastify, activityEngine) {
         const accountId = request.query.accountId
         const eventType = request.query.type
 
-        let sql = 'SELECT * FROM activity_events WHERE sync_user = $1'
-        const params = [syncUser]
-
-        if (since > 0) {
-            params.push(since)
-            sql += ` AND event_ts >= $${params.length}`
-        }
-        if (accountId) {
-            // Two distinct parameter slots: this db layer expands each $n token to its own
-            // bind, so reusing one index for both predicates under-binds the statement.
-            params.push(accountId)
-            const eqIdx = params.length
-            params.push(`${accountId}::`)
-            // Per-connection rows live under `${accountId}::${connectionId}`; an
-            // account-scoped query must return them alongside the canonical rows.
-            sql += ` AND (account_id = $${eqIdx} OR account_id LIKE ($${params.length} || '%'))`
-        }
-        if (eventType) {
-            params.push(eventType)
-            sql += ` AND event_type = $${params.length}`
-        }
-
-        sql += ` ORDER BY event_ts DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`
-        params.push(limit, offset)
-
+        // This db layer expands every $n token to its own bind, so each occurrence
+        // carries its own parameter; no predicate may reuse a placeholder index.
         let events = []
         try {
-            events = await db.query(sql, params)
+            if (accountId && db.type === 'postgres') {
+                // Postgres databases may use ICU or libc locale collations, where
+                // ['id::', 'id:;') is not a prefix interval, so it keeps the prefix match.
+                const query = buildEventsQuery({
+                    syncUser, since, eventType, fetchLimit: limit, fetchOffset: offset,
+                    accountIdFilter: params => {
+                        params.push(accountId)
+                        const eqIdx = params.length
+                        params.push(`${accountId}::`)
+                        return `(account_id = $${eqIdx} OR account_id LIKE ($${params.length} || '%'))`
+                    },
+                })
+                events = await db.query(query.sql, query.params)
+            } else if (accountId) {
+                // SQLite compares TEXT with BINARY collation, where ':' precedes ';', so
+                // ['id::', 'id:;') holds exactly the `${accountId}::${connectionId}` rows
+                // and both searches stay on idx_activity_events_user_account_ts.
+                const exact = buildEventsQuery({
+                    syncUser, since, eventType, fetchLimit: limit + offset, fetchOffset: 0,
+                    accountIdFilter: params => {
+                        params.push(accountId)
+                        return `account_id = $${params.length}`
+                    },
+                })
+                const scoped = buildEventsQuery({
+                    syncUser, since, eventType, fetchLimit: limit + offset, fetchOffset: 0,
+                    accountIdFilter: params => {
+                        params.push(`${accountId}::`)
+                        const low = params.length
+                        params.push(`${accountId}:;`)
+                        return `account_id >= $${low} AND account_id < $${params.length}`
+                    },
+                })
+                const [exactRows, scopedRows] = await Promise.all([
+                    db.query(exact.sql, exact.params),
+                    db.query(scoped.sql, scoped.params),
+                ])
+                const merged = exactRows.concat(scopedRows)
+                merged.sort((x, y) => (Number(y.event_ts) || 0) - (Number(x.event_ts) || 0))
+                events = merged.slice(offset, offset + limit)
+            } else {
+                const query = buildEventsQuery({ syncUser, since, eventType, fetchLimit: limit, fetchOffset: offset, accountIdFilter: null })
+                events = await db.query(query.sql, query.params)
+            }
         } catch (dbErr) {
             fastify.log.error({ category: 'Activity' }, `Events query failed: ${dbErr.message}`)
             reply.status(503)
@@ -144,6 +193,16 @@ export function registerActivityRoutes(fastify, activityEngine) {
             }
         }
 
+        const memoed = statusMemo.get(syncUser)
+        if (memoed && Date.now() - memoed.at < STATUS_MEMO_TTL_MS) {
+            reply.header('ETag', memoed.etag)
+            if (request.headers['if-none-match'] === memoed.etag) {
+                reply.status(304)
+                return reply.send()
+            }
+            return memoed.payload
+        }
+
         let eventCount = { count: 0 }
         let snapshotCount = { count: 0 }
         try {
@@ -156,6 +215,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
                 [syncUser]
             )
         } catch (dbErr) {
+            statusMemo.delete(syncUser)
             fastify.log.error({ category: 'Activity' }, `Status query failed: ${dbErr.message}`)
             reply.status(503)
             return {
@@ -168,13 +228,25 @@ export function registerActivityRoutes(fastify, activityEngine) {
             }
         }
 
-        return {
+        const payload = {
             totalEvents: Number(eventCount?.count || 0),
             totalSnapshots: Number(snapshotCount?.count || 0),
             engineRunning: activityEngine.isRunning(),
             engineEnabled: activityEngine.isEnabled(),
             engineConfig: activityEngine.getConfig?.()
         }
+        // The ETag hashes the whole serialized body, so any changed field yields a new tag.
+        const etag = `"ac-${createHash('sha1').update(JSON.stringify(payload)).digest('base64url')}"`
+        if (statusMemo.size >= STATUS_MEMO_MAX_ENTRIES) statusMemo.clear()
+        statusMemo.set(syncUser, { at: Date.now(), payload, etag })
+
+        if (request.headers['if-none-match'] === etag) {
+            reply.header('ETag', etag)
+            reply.status(304)
+            return reply.send()
+        }
+        reply.header('ETag', etag)
+        return payload
     })
 
     fastify.post('/api/activity/trigger', {

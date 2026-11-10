@@ -21,7 +21,7 @@ interface ActivityServerStatus {
     totalSnapshots?: number
 }
 
-let statusCache: { key: string; ts: number; value: ActivityServerStatus | null } | null = null
+let statusCache: { key: string; ts: number; value: ActivityServerStatus | null; etag: string | null } | null = null
 
 function getApiBase(serverUrl: string | undefined): string {
     const base = (serverUrl || DEFAULT_SERVER).replace(/\/+$/, '')
@@ -46,16 +46,22 @@ async function getActivityServerStatus(apiPath: string, authHeaders: Record<stri
     }
 
     try {
-        const status = await fetchWithTimeout(`${apiPath}/activity/status`, { headers: authHeaders })
+        const headers: Record<string, string> = { ...authHeaders }
+        if (statusCache && statusCache.key === cacheKey && statusCache.etag) headers['If-None-Match'] = statusCache.etag
+        const status = await fetchWithTimeout(`${apiPath}/activity/status`, { headers })
+        if (status.status === 304 && statusCache && statusCache.key === cacheKey && statusCache.value) {
+            statusCache = { ...statusCache, ts: Date.now() }
+            return statusCache.value
+        }
         if (!status.ok) {
-            statusCache = { key: cacheKey, ts: Date.now(), value: null }
+            statusCache = { key: cacheKey, ts: Date.now(), value: null, etag: null }
             return null
         }
         const value = await status.json()
-        statusCache = { key: cacheKey, ts: Date.now(), value }
+        statusCache = { key: cacheKey, ts: Date.now(), value, etag: status.headers.get('etag') }
         return value
     } catch {
-        statusCache = { key: cacheKey, ts: Date.now(), value: null }
+        statusCache = { key: cacheKey, ts: Date.now(), value: null, etag: null }
         return null
     }
 }
