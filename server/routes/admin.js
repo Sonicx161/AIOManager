@@ -3,7 +3,7 @@ import db from '../db.js'
 import { PRIMARY_KEY } from '../keys.js'
 import { proxyQueue, proxyQueueKeyCounts, serverState } from '../state.js'
 import { metadataCache } from '../lib/metadata-cache.js'
-import { ADMIN_LIMITS, isAdminEnabled, adminSetupMode, adminCredentialsEnv, adminSecretHashEnv, adminUsernameEnv, adminReadOnly, proxyHopsAuto, trustProxyHops, adminAllowHttpLan, adminAllowIps, trustedProxyCidrs } from '../admin/config.js'
+import { ADMIN_LIMITS, isAdminEnabled, adminSetupMode, adminCredentialsEnv, adminSecretHashEnv, adminUsernameEnv, adminReadOnly, proxyHopsAuto, trustProxyHops, adminAllowHttpLan, adminAllowIps, trustedProxyCidrs, trustPrivateNetworks } from '../admin/config.js'
 import { adminHashProblem, verifyAdminLogin, hashAdminPassphrase, passphraseProblem, usernameProblem, normalizeAdminUsername, parseAdminCredentials, LEGACY_ADMIN_USERNAME } from '../admin/passphrase.js'
 import { adminClientIp, isDirectLoopback, limiterKey, forwardedInfo, forwardedHost, isAllowedIp, isLoopback, isPrivateOrLoopback, isSecureRequest, ipPrefix, uaHash, uaFamily, allowlistProblems } from '../admin/net.js'
 import { createLoginLimiter } from '../admin/limiter.js'
@@ -123,7 +123,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
     if (['1', 'true', 'yes', 'on'].includes(String(process.env.TRUST_PROXY || '').toLowerCase()) && !proxyHopsAuto() && !trustProxyHops()) {
         log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY is on but TRUST_PROXY_HOPS is 0, so the Dashboard refuses sign-in when forwarded headers arrive. Remove TRUST_PROXY_HOPS to detect the proxy automatically, or set it to the number of proxies in front of the server.')
     }
-    if (trustProxyHops() && !trustedProxyCidrs().length) {
+    if (trustProxyHops() && !trustedProxyCidrs().length && trustPrivateNetworks()) {
         log.warn({ category: 'Dashboard' }, 'Dashboard: TRUST_PROXY_HOPS is set without TRUSTED_PROXY_CIDRS, so any loopback or private-range host can act as a proxy and set X-Forwarded-For. TRUSTED_PROXY_CIDRS only adds trusted ranges, so prefer auto mode (remove TRUST_PROXY_HOPS) and keep the server port reachable only through your proxy.')
     }
 
@@ -183,7 +183,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
         if (!info.present || info.trusted || info.error) return null
         if (!proxyHopsAuto() && trustProxyHops()) return null
         const message = proxyHopsAuto()
-            ? 'This request came through a proxy whose address is not on a private network. Add the proxy address to TRUSTED_PROXY_CIDRS, then sign in again.'
+            ? "This request came through a proxy that isn't trusted. If it is your proxy, add its address to TRUSTED_PROXY_CIDRS in your .env file or Docker environment, restart, then sign in again."
             : 'This request came through a proxy, but TRUST_PROXY_HOPS=0 turns proxy support off. Remove TRUST_PROXY_HOPS so the proxy is detected automatically, then sign in again.'
         if (!warnedUntrustedProxy) {
             warnedUntrustedProxy = true

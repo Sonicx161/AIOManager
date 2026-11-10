@@ -33,6 +33,7 @@ export const ENV_ONLY = {
     ADMIN_ALLOW_HTTP_LAN: 'Guards how the Dashboard sign-in travels. A signed-in session must not be able to weaken it.',
     TRUST_PROXY_HOPS: 'Decides which client address the Dashboard allowlist and lockouts see. A signed-in session must not be able to change it.',
     TRUSTED_PROXY_CIDRS: 'Decides which hosts may supply client addresses to the Dashboard allowlist and lockouts. A signed-in session must not be able to change it.',
+    TRUST_PRIVATE_NETWORKS: 'Decides whether hosts on your own network may supply client addresses to the Dashboard allowlist and lockouts. A signed-in session must not be able to change it.',
     AIOMAN_TRACE: 'Writes request traces to disk. The Dashboard never starts capturing user traffic.',
     SQLITE_DB_PATH: 'Set by the server at boot from DATA_DIR.',
 }
