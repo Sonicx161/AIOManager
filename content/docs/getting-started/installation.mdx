@@ -68,6 +68,8 @@ docker compose up -d
 
 Open `http://localhost:1610` to access AIOManager.
 
+<Note>Behind a reverse proxy on the same machine, a Docker network, your LAN or Cloudflare, no proxy settings are needed: I recognise all of them automatically. Another proxy on a public address must be added to `TRUSTED_PROXY_CIDRS`, otherwise all of its visitors share one rate limit. See [Public Proxies and Cloudflare](#public-proxies-and-cloudflare).</Note>
+
 ### Docker CLI
 
 ```bash
@@ -214,6 +216,20 @@ Caddy automatically handles HTTPS with Let's Encrypt.
   <Step>**Enable WebSockets:** Enable Websockets Support.</Step>
   <Step>**Enable SSL:** Enable SSL with your certificate.</Step>
 </Steps>
+
+### Public Proxies and Cloudflare
+
+A proxy on the same machine, a Docker network, your home network or Cloudflare needs nothing: I recognise it automatically, and every visitor gets their own rate limit and sign-in lockout. That covers Cloudflare reaching the server directly, Cloudflare in front of your nginx, Caddy or Traefik, and a local `cloudflared` tunnel.
+
+Another proxy on a public address is the one case that needs a setting: add its address to `TRUSTED_PROXY_CIDRS` in `.env` (or the Docker environment) and restart.
+
+```bash
+TRUSTED_PROXY_CIDRS=203.0.113.7
+```
+
+Until it is added, what happens depends on how that proxy reaches the server: connecting directly, Dashboard sign-in is refused until the proxy is recognised; sitting in front of a local proxy, its visitors share one rate limit and one sign-in lockout, and I log one warning naming the address to add. `TRUST_PROXY=true` no longer has any effect and can be removed.
+
+By default I trust proxies on loopback, private and Docker network addresses automatically, which keeps the setups above zero-config but does not resist a hostile device on your own network pretending to be another visitor. If your server's private network has people or machines you don't trust, set `TRUST_PRIVATE_NETWORKS=false`: automatic trust then covers only Cloudflare and `TRUSTED_PROXY_CIDRS`, and loopback must be listed there too.
 
 ## HTTPS Requirement
 

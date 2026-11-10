@@ -50,4 +50,4 @@ If running directly on a VPS without Docker:
 
 ## 🔒 Security Requirements
 
-AIOManager **must** be served over **HTTPS** (or localhost) to enable the browser's Crypto APIs. Use a reverse proxy like **Nginx Proxy Manager**, **Caddy**, or **Traefik** to handle SSL termination.
+AIOManager **must** be served over **HTTPS** (or localhost) to enable the browser's Crypto APIs. Use a reverse proxy like **Nginx Proxy Manager**, **Caddy**, or **Traefik** to handle SSL termination. I recognise same-machine, Docker-network and LAN proxies automatically, plus Cloudflare directly or in front of your proxy; another proxy on a public address must be added to `TRUSTED_PROXY_CIDRS`, otherwise its visitors share one rate limit. See [Public Proxies and Cloudflare](content/docs/getting-started/installation.mdx#public-proxies-and-cloudflare) in the Self-Hosting guide.

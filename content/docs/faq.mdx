@@ -130,7 +130,7 @@ Answers to frequently asked questions about AIOManager.
     Export your data from Settings → Data & Sync. Set up PostgreSQL and set `DATABASE_URL` in your environment. Start a fresh AIOManager instance with `DB_TYPE=postgres`. Import your backup data.
   </Accordion>
   <Accordion title="Can I use AIOManager behind Cloudflare?">
-    Yes. Ensure WebSocket support is enabled in Cloudflare. If sync fails, increase the request timeout or bypass Cloudflare for `/api/*` routes.
+    Yes. Ensure WebSocket support is enabled in Cloudflare, and if sync fails increase the request timeout or bypass Cloudflare for `/api/*` routes. Cloudflare is recognised automatically (directly or in front of your proxy), so no proxy settings are needed; details in [Self-Hosting](/kronorium/getting-started/installation#public-proxies-and-cloudflare).
   </Accordion>
 </Accordions>
 

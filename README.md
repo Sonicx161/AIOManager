@@ -187,6 +187,9 @@ You don't need to manually configure encryption for it to work:
 > client_max_body_size 32m;
 > ```
 
+> [!IMPORTANT]
+> **Public proxies**: I automatically trust `X-Forwarded-For` from a proxy on the same machine, a Docker network, a private LAN address, and Cloudflare (directly or in front of your own nginx), so those setups need nothing. Another proxy on a **public address** must be added to `TRUSTED_PROXY_CIDRS`, otherwise every visitor behind it shares one rate limit and one Dashboard sign-in lockout. `TRUST_PROXY=true` no longer has an effect and can be removed. See [Public Proxies and Cloudflare](content/docs/getting-started/installation.mdx#public-proxies-and-cloudflare) in the Self-Hosting guide.
+
 #### Option 2: Browser Bypass (Advanced / Chrome & Edge)
 If you cannot set up a reverse proxy, you can force your browser to treat your server's IP as secure:
 1. Open `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
