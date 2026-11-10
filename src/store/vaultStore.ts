@@ -77,39 +77,48 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             return
         }
 
-        own.assert()
-        const initSeq = ++_initSeq
-        set({ loading: true, error: null })
-        // Publish only while ownership-current and still the latest initialize.
-        const mine = () => own.current() && _initSeq === initSeq
-        try {
-            const tombstones = normalizeTombstones(await localforage.getItem<VaultTombstone[]>(TOMBSTONE_KEY))
+        // Serialize initialization with the mutators on the same queue. An unqueued
+        // initialize can read the OLD persisted vault while a queued addKey is still
+        // encrypting, then publish its stale snapshot after the add completed — erasing
+        // the saved key from memory, which the next queued import persists durably. The
+        // queued body must not wait on the queue again (its callers already do).
+        const op = _vaultQueue.then(async () => {
             own.assert()
-            const encryptedData = await localforage.getItem<string>(STORAGE_KEY)
-            own.assert()
-            if (!encryptedData) {
-                if (mine()) set({ keys: [], tombstones, isLocked: false, loading: false })
-                return
-            }
+            const initSeq = ++_initSeq
+            set({ loading: true, error: null })
+            // Publish only while ownership-current and still the latest initialize.
+            const mine = () => own.current() && _initSeq === initSeq
+            try {
+                const tombstones = normalizeTombstones(await localforage.getItem<VaultTombstone[]>(TOMBSTONE_KEY))
+                own.assert()
+                const encryptedData = await localforage.getItem<string>(STORAGE_KEY)
+                own.assert()
+                if (!encryptedData) {
+                    if (mine()) set({ keys: [], tombstones, isLocked: false, loading: false })
+                    return
+                }
 
-            const decryptedData = await decrypt(encryptedData, encryptionKey)
-            const keys = JSON.parse(decryptedData) as VaultKey[]
-            // Recheck ownership before publishing hydrated state.
-            own.assert()
-            if (mine()) set({ keys, tombstones, isLocked: false, loading: false })
-        } catch (error) {
-            if (import.meta.env.DEV) console.error('Failed to initialize vault:', error)
+                const decryptedData = await decrypt(encryptedData, encryptionKey)
+                const keys = JSON.parse(decryptedData) as VaultKey[]
+                // Recheck ownership before publishing hydrated state.
+                own.assert()
+                if (mine()) set({ keys, tombstones, isLocked: false, loading: false })
+            } catch (error) {
+                if (import.meta.env.DEV) console.error('Failed to initialize vault:', error)
 
-            if (mine()) set({ error: 'Failed to decrypt vault. Your keys might be corrupted or the password changed.' })
-        } finally {
-            // The latest initialize owns the store: clear loading, or on ownership
-            // loss clear keys too; keeping isLocked true makes the next push
-            // re-initialize instead of exporting an empty vault.
-            if (_initSeq === initSeq) {
-                if (own.current()) set({ loading: false })
-                else set({ keys: [], isLocked: true, error: null, loading: false })
+                if (mine()) set({ error: 'Failed to decrypt vault. Your keys might be corrupted or the password changed.' })
+            } finally {
+                // The latest initialize owns the store: clear loading, or on ownership
+                // loss clear keys too; keeping isLocked true makes the next push
+                // re-initialize instead of exporting an empty vault.
+                if (_initSeq === initSeq) {
+                    if (own.current()) set({ loading: false })
+                    else set({ keys: [], isLocked: true, error: null, loading: false })
+                }
             }
-        }
+        })
+        _vaultQueue = op.catch(() => { })
+        return op
     },
 
     addKey: (newKey) => {
