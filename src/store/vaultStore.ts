@@ -239,63 +239,70 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
         triggerSync()
     },
 
-    importVault: async (keys, tombstones = [], ownership?: SyncOwnership) => {
+    importVault: (keys, tombstones = [], ownership?: SyncOwnership) => {
         const own = ownership ?? captureSyncOwnership()
-        if (import.meta.env.DEV) console.log('[VaultStore] Attempting to import vault keys. Count:', keys?.length)
-        const { encryptionKey } = useAuthStore.getState()
-        if (!encryptionKey) {
-            if (import.meta.env.DEV) console.warn('[VaultStore] Cannot import vault while locked. Keys will be ignored.')
-            return
-        }
-
-        if (!keys || !Array.isArray(keys)) {
-            if (import.meta.env.DEV) console.warn('[VaultStore] Invalid keys format for import:', keys)
-            return
-        }
-
-        const currentKeys = get().keys
-        const mergedTombstones = mergeTombstones(get().tombstones, tombstones)
-        const hasIncomingTombstones = normalizeTombstones(tombstones).length > 0
-        if (keys.length === 0 && !hasIncomingTombstones && currentKeys.length > 0) {
-            if (import.meta.env.DEV) console.warn('[VaultStore] Anti-wipe: refusing to import empty vault over existing keys.')
-            return
-        }
-
-        const tombstoneById = new Map(mergedTombstones.map(t => [t.id, t]))
-        const mergedById = new Map(currentKeys.map(k => [k.id, k]))
-        for (const key of keys) {
-            if (!key?.id) continue
-            const deletedAt = tombstoneById.get(key.id)?.deletedAt ?? 0
-            const keyUpdatedAt = typeof key.updatedAt === 'number' ? key.updatedAt : Number(key.updatedAt || 0)
-            if (deletedAt >= keyUpdatedAt) continue
-
-            const existing = mergedById.get(key.id)
-            const existingUpdatedAt = existing?.updatedAt ?? 0
-            if (!existing || keyUpdatedAt >= existingUpdatedAt) {
-                mergedById.set(key.id, key)
-            }
-        }
-
-        for (const tombstone of mergedTombstones) {
-            const existing = mergedById.get(tombstone.id)
-            if (existing && tombstone.deletedAt >= (existing.updatedAt || 0)) {
-                mergedById.delete(tombstone.id)
-            }
-        }
-
-        const mergedKeys = Array.from(mergedById.values())
-        const encryptedData = await encrypt(JSON.stringify(mergedKeys), encryptionKey)
-        // Fence key and tombstone writes separately, then fence state publication.
-        own.assert()
-        await localforage.setItem(STORAGE_KEY, encryptedData)
-        own.assert()
-        await persistTombstones(mergedTombstones, own)
-        own.assert()
-
-        set({ keys: mergedKeys, tombstones: mergedTombstones, isLocked: false })
-        if (import.meta.env.DEV) console.log('[VaultStore] Vault import successful (merged', keys.length, 'keys into', mergedKeys.length, 'total).')
+        // Runs on the same queue as the mutators so it merges against their latest state.
+        const op = _vaultQueue.then(() => importVaultInner(keys, tombstones, own))
+        _vaultQueue = op.catch(() => { })
+        return op
     }
 }))
+
+async function importVaultInner(keys: VaultKey[], tombstones: VaultTombstone[], own: SyncOwnership): Promise<void> {
+    if (import.meta.env.DEV) console.log('[VaultStore] Attempting to import vault keys. Count:', keys?.length)
+    const { encryptionKey } = useAuthStore.getState()
+    if (!encryptionKey) {
+        if (import.meta.env.DEV) console.warn('[VaultStore] Cannot import vault while locked. Keys will be ignored.')
+        return
+    }
+
+    if (!keys || !Array.isArray(keys)) {
+        if (import.meta.env.DEV) console.warn('[VaultStore] Invalid keys format for import:', keys)
+        return
+    }
+
+    const currentKeys = useVaultStore.getState().keys
+    const mergedTombstones = mergeTombstones(useVaultStore.getState().tombstones, tombstones)
+    const hasIncomingTombstones = normalizeTombstones(tombstones).length > 0
+    if (keys.length === 0 && !hasIncomingTombstones && currentKeys.length > 0) {
+        if (import.meta.env.DEV) console.warn('[VaultStore] Anti-wipe: refusing to import empty vault over existing keys.')
+        return
+    }
+
+    const tombstoneById = new Map(mergedTombstones.map(t => [t.id, t]))
+    const mergedById = new Map(currentKeys.map(k => [k.id, k]))
+    for (const key of keys) {
+        if (!key?.id) continue
+        const deletedAt = tombstoneById.get(key.id)?.deletedAt ?? 0
+        const keyUpdatedAt = typeof key.updatedAt === 'number' ? key.updatedAt : Number(key.updatedAt || 0)
+        if (deletedAt >= keyUpdatedAt) continue
+
+        const existing = mergedById.get(key.id)
+        const existingUpdatedAt = existing?.updatedAt ?? 0
+        if (!existing || keyUpdatedAt >= existingUpdatedAt) {
+            mergedById.set(key.id, key)
+        }
+    }
+
+    for (const tombstone of mergedTombstones) {
+        const existing = mergedById.get(tombstone.id)
+        if (existing && tombstone.deletedAt >= (existing.updatedAt || 0)) {
+            mergedById.delete(tombstone.id)
+        }
+    }
+
+    const mergedKeys = Array.from(mergedById.values())
+    const encryptedData = await encrypt(JSON.stringify(mergedKeys), encryptionKey)
+    // Fence key and tombstone writes separately, then fence state publication.
+    own.assert()
+    await localforage.setItem(STORAGE_KEY, encryptedData)
+    own.assert()
+    await persistTombstones(mergedTombstones, own)
+    own.assert()
+
+    useVaultStore.setState({ keys: mergedKeys, tombstones: mergedTombstones, isLocked: false })
+    if (import.meta.env.DEV) console.log('[VaultStore] Vault import successful (merged', keys.length, 'keys into', mergedKeys.length, 'total).')
+}
 
 useAuthStore.subscribe((state, prevState) => {
     if (state.encryptionKey && !prevState.encryptionKey) {
