@@ -13,6 +13,7 @@ export function connectionCredentialBundle(connection: Connection): Record<strin
             profileId: credentials.profileId || null,
             baseUrl: credentials.baseUrl || null,
             publishableKey: credentials.publishableKey || null,
+            enabled: connection.enabled !== false,
         }
     }
     if (connection.platform === 'realstream') {
@@ -23,6 +24,7 @@ export function connectionCredentialBundle(connection: Connection): Record<strin
             baseUrl: credentials.baseUrl || null,
             email: credentials.email || null,
             password: credentials.password || null,
+            enabled: connection.enabled !== false,
         }
     }
     return null

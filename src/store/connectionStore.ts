@@ -89,6 +89,188 @@ const safeUUID = () => {
 // cleanup of a removed incarnation never claims a re-added incarnation's rows.
 const newConnectionGeneration = () => safeUUID()
 
+// Connections switched off before the server stored the flag. Migration only fills a flag
+// the server never had, so a stale device can never undo a newer toggle. A connection
+// counts as reported only after the server confirms it; failed reports stay retryable with
+// backoff, and the report re-runs once authentication is ready, so a startup blip cannot
+// leave the flag missing for the whole session.
+const reportedDisabled = new Set<string>()
+const migrationsInFlight = new Set<string>()
+let migrationFailures = 0
+async function reportDisabledNativeConnections() {
+    const { useSyncStore } = await import('./syncStore')
+    const syncState = useSyncStore.getState()
+    if (!syncState.auth?.isAuthenticated) {
+        scheduleDisabledReport(5000) // retry at the authenticated session boundary
+        return
+    }
+    const context = await nativeToggleContext()
+    if (!context) return
+    let failed = false
+    let cancelled = false
+    const pending: Array<Promise<void>> = []
+    for (const account of useAccountStore.getState().accounts) {
+        for (const c of account.connections || []) {
+            if (c.enabled !== false || (c.platform !== 'nuvio' && c.platform !== 'realstream')) continue
+            const key = `${context.scope}|${account.id}|${c.id}|${c.generation || ''}`
+            if (reportedDisabled.has(key) || migrationsInFlight.has(key)) continue
+            migrationsInFlight.add(key)
+            const platform = c.platform
+            const report = import('@/api/hydra-providers')
+                .then(async ({ setConnectionCredentialEnabled }) => {
+                    // Never send a stale device's report into a replacement session,
+                    // workspace or connection incarnation: rechecked after the import,
+                    // with the request bound to the captured context.
+                    if (!contextCurrent(context) || !nativeGenerationCurrent(account.id, c.id, c.generation)) return false
+                    await setConnectionCredentialEnabled(account.id, c.id, platform, false, { migrate: true, context })
+                    return true
+                })
+                .then((sent) => { if (sent) reportedDisabled.add(key); else cancelled = true })
+                .catch(() => { failed = true })
+            pending.push(report)
+            report.finally(() => { migrationsInFlight.delete(key) })
+        }
+    }
+    if (!pending.length) return
+    await Promise.all(pending)
+    if (failed) {
+        migrationFailures += 1
+        scheduleDisabledReport(Math.min(60000, 2000 * 2 ** Math.min(migrationFailures, 5)))
+    } else {
+        migrationFailures = 0
+        if (cancelled) scheduleDisabledReport()
+    }
+}
+let reportTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleDisabledReport(delay = 2000) {
+    if (reportTimer) return
+    reportTimer = setTimeout(() => { reportTimer = null; reportDisabledNativeConnections().catch(() => {}) }, delay)
+}
+useAccountStore.subscribe((state, prev) => { if (state.accounts !== prev.accounts) scheduleDisabledReport() })
+scheduleDisabledReport()
+
+// The context a toggle or migration was made in (server URL, workspace, signed-in state):
+// pending work must never land in — or publish into — a replacement context. The module is
+// primed at load so the identity can also be read synchronously at the exact moment work is
+// queued or published; an await-only read could observe a replacement identity instead.
+// Sessions are also counted: every sign-out/sign-in or server/workspace switch starts a new
+// incarnation, so logging out and back in as the same user still retires pending work that
+// an unchanged scope string could not tell apart.
+interface NativeToggleContext {
+    scope: string
+    incarnation: number
+    serverUrl: string
+    auth: { id: string; password: string; isAuthenticated?: boolean }
+}
+
+let syncStoreModule: typeof import('./syncStore') | null = null
+let sessionIncarnation = 0
+function primeSyncStoreModule(m: typeof import('./syncStore')) {
+    if (syncStoreModule) return
+    syncStoreModule = m
+    m.useSyncStore.subscribe((state, prev) => {
+        if (toggleScopeOf(state.serverUrl, state.auth) !== toggleScopeOf(prev.serverUrl, prev.auth)) sessionIncarnation += 1
+    })
+}
+import('./syncStore').then(primeSyncStoreModule).catch(() => {})
+
+function toggleScopeOf(serverUrl: string, auth: { id?: string; isAuthenticated?: boolean } | null | undefined): string {
+    return `${serverUrl || ''}|${auth?.id || ''}|${auth?.isAuthenticated ? '1' : '0'}`
+}
+
+function currentToggleContext(): NativeToggleContext | null {
+    if (!syncStoreModule) return null
+    const { serverUrl, auth } = syncStoreModule.useSyncStore.getState()
+    return { scope: toggleScopeOf(serverUrl, auth), incarnation: sessionIncarnation, serverUrl, auth }
+}
+
+async function nativeToggleContext(): Promise<NativeToggleContext | null> {
+    if (!syncStoreModule) primeSyncStoreModule(await import('./syncStore'))
+    return currentToggleContext()
+}
+
+// Synchronous fence: pending work may only continue while the very same scope is still
+// current in the very same session incarnation.
+function contextCurrent(context: NativeToggleContext): boolean {
+    const now = currentToggleContext()
+    return now !== null && now.incarnation === context.incarnation && now.scope === context.scope
+}
+
+// A queued request may only act on the connection incarnation it was made for; a removal
+// or re-add of the same id retires it, and a missing connection is never current.
+function nativeGenerationCurrent(accountId: string, connectionId: string, generation?: string) {
+    const conn = useAccountStore.getState().accounts.find(a => a.id === accountId)?.connections?.find(c => c.id === connectionId)
+    if (!conn) return false
+    return (conn.generation || '') === (generation || '')
+}
+
+// Toggles go to the server one at a time per connection, each carrying the server-owned
+// revision the client last saw. The server refuses a stale revision and answers with its
+// current state, which is adopted here — no device clock is involved, so a skewed clock
+// can never wedge a connection.
+const toggleChains = new Map<string, Promise<void>>()
+const nativeEnabledRev = new Map<string, number>()
+// Latest queued intent per connection: only that connection's own newer toggle may
+// suppress reconciling its response, never an unrelated connection's timestamp.
+const nativeToggleIntent = new Map<string, number>()
+function sendNativeEnabled(accountId: string, connectionId: string, platform: 'nuvio' | 'realstream', enabled: boolean, generation?: string) {
+    const key = `${accountId}|${connectionId}`
+    const seq = (nativeToggleIntent.get(key) || 0) + 1
+    nativeToggleIntent.set(key, seq)
+    // The immutable context this request was made in, captured synchronously at enqueue
+    // — server, workspace, signed-in identity and session incarnation; the revision and
+    // intent bookkeeping travels inside it. Without a synchronous snapshot the toggle is
+    // dropped: it must never be captured later against a replacement identity.
+    const context = currentToggleContext()
+    const next = (toggleChains.get(key) || Promise.resolve()).then(async () => {
+        // Dropped, never redirected: a queued toggle must not reach the replacement
+        // session, server, workspace or a re-added connection incarnation.
+        if (!context || !contextCurrent(context) || !nativeGenerationCurrent(accountId, connectionId, generation)) return
+        const { setConnectionCredentialEnabled } = await import('@/api/hydra-providers')
+        // The dynamic import is an await: recheck before anything is sent.
+        if (!contextCurrent(context) || !nativeGenerationCurrent(accountId, connectionId, generation)) return
+        const revKey = `${context.scope}|${context.incarnation}|${key}`
+        // Every toggle participates in revision ordering, including the first one in
+        // this runtime: a never-seen revision is sent as 0, which the server compares
+        // like any other, so a newer change from another device wins instead of being
+        // overwritten. Both attempts below reuse this same expected revision — never a
+        // newer one — so a delayed retry can never replay this device's old intent
+        // over another device's confirmed newer state.
+        const options = { knownRev: nativeEnabledRev.get(revKey) ?? 0, context }
+        let result
+        try {
+            result = await setConnectionCredentialEnabled(accountId, connectionId, platform, enabled, options)
+        } catch {
+            // A retry is still the original request: it may only run while the very
+            // same context — session incarnation included — and the same connection
+            // incarnation are current, never in a replacement.
+            if (!contextCurrent(context) || !nativeGenerationCurrent(accountId, connectionId, generation)) return
+            result = await setConnectionCredentialEnabled(accountId, connectionId, platform, enabled, options)
+        }
+        // Never publish a late response into a replacement context or incarnation.
+        if (!contextCurrent(context) || !nativeGenerationCurrent(accountId, connectionId, generation)) return
+        if (typeof result.enabledRev === 'number') nativeEnabledRev.set(revKey, result.enabledRev)
+        // A newer toggle from another device won on the server: show that state here too.
+        if (result.applied === false && typeof result.enabled === 'boolean' && result.enabled !== enabled && nativeToggleIntent.get(key) === seq) {
+            const serverEnabled = result.enabled
+            await updateAccount(accountId, account => {
+                // Rechecked inside the account mutex: a replacement context or a
+                // re-added incarnation never adopts this late response.
+                if (!contextCurrent(context) || !nativeGenerationCurrent(accountId, connectionId, generation)) return account
+                return {
+                    ...account,
+                    connections: (account.connections || []).map(c => c.id === connectionId && c.enabled !== serverEnabled ? { ...c, enabled: serverEnabled } : c),
+                }
+            })
+        }
+    }).catch(() => {
+        toast({ variant: 'destructive', title: 'The server did not save this change', description: 'Autopilot may keep updating this connection. Toggle it again to retry.' })
+    })
+    toggleChains.set(key, next)
+    next.finally(() => { if (toggleChains.get(key) === next) toggleChains.delete(key) })
+    return next
+}
+
 async function updateAccount(accountId: string, updater: (account: Account) => Account, assertCurrent?: () => void) {
     const release = await acquireSyncMutex(accountId)
     try {
@@ -432,6 +614,9 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 authHeader: toggled.driverConfig.authHeader,
                 enabled: toggled.enabled,
             }, 'hydra', toggled.generation).catch(() => {})
+        }
+        if (toggled && (toggled.platform === 'nuvio' || toggled.platform === 'realstream')) {
+            sendNativeEnabled(accountId, connectionId, toggled.platform, toggled.enabled !== false, toggled.generation)
         }
         // The enabled flag is part of the encrypted envelope for every platform.
         if (toggled) triggerSync()

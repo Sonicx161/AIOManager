@@ -13,8 +13,9 @@ export interface CanonicalEntry {
 
 // jsonBody: false omits Content-Type: a bodyless request with that header makes
 // Fastify parse an empty JSON body and answer 400 (FST_ERR_CTP_EMPTY_JSON_BODY).
-async function getAuthHeaders(options?: { jsonBody?: boolean }): Promise<Record<string, string>> {
-    const { auth } = useSyncStore.getState()
+async function getAuthHeaders(options?: { jsonBody?: boolean; auth?: { id: string; password: string } }): Promise<Record<string, string>> {
+    // Bound to the caller's captured session when one is given, never to the live one.
+    const auth = options?.auth ?? useSyncStore.getState().auth
     return {
         ...(options?.jsonBody === false ? {} : { 'Content-Type': 'application/json' }),
         'x-sync-user': auth.id,
@@ -60,6 +61,57 @@ export async function storeConnectionCredential(
     if (!res.ok) {
         const body = await res.json().catch(() => ({ error: 'Unknown error' }))
         throw new Error(body.error || 'Failed to store credentials')
+    }
+}
+
+// Merge-only on the server: flips the flag inside the stored bundle, keeping the
+// server-rotated session tokens. Ordering is a server-owned revision: the caller sends the
+// revision it last saw; a mismatch is answered 409 with the server's current state, which
+// the caller adopts instead of throwing.
+export interface NativeEnabledResult {
+    applied: boolean
+    enabled?: boolean
+    enabledRev?: number
+}
+
+// The immutable session context a native toggle was queued in (server URL plus the
+// signed-in identity): the request URL and auth are bound to it, never to whatever
+// the live session holds at send time.
+export interface NativeToggleRequestContext {
+    serverUrl: string
+    auth: { id: string; password: string; isAuthenticated?: boolean }
+}
+
+export async function setConnectionCredentialEnabled(
+    accountId: string,
+    connectionId: string,
+    credentialType: 'nuvio' | 'realstream',
+    enabled: boolean,
+    options: { knownRev?: number; migrate?: boolean; context?: NativeToggleRequestContext } = {},
+): Promise<NativeEnabledResult> {
+    const { serverUrl, auth } = options.context ?? useSyncStore.getState()
+    const base = getSyncApiPath(serverUrl)
+    const res = await resilientFetch(`${base}/providers/connections/${connectionId}/credentials`, {
+        method: 'POST',
+        headers: await getAuthHeaders({ auth }),
+        body: JSON.stringify({ accountId, credentialType, setEnabled: enabled, ...(typeof options.knownRev === 'number' ? { knownRev: options.knownRev } : {}), ...(options.migrate ? { migrate: true } : {}) }),
+        timeout: 10000,
+    })
+    const body = await res.json().catch(() => ({}))
+    if (res.status === 409 && (typeof body?.enabledRev === 'number' || typeof body?.enabled === 'boolean')) {
+        return {
+            applied: false,
+            ...(typeof body?.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+            ...(typeof body?.enabledRev === 'number' ? { enabledRev: body.enabledRev } : {}),
+        }
+    }
+    if (!res.ok) {
+        throw new Error(body?.error || 'Failed to update connection')
+    }
+    return {
+        applied: true,
+        ...(typeof body?.enabled === 'boolean' ? { enabled: body.enabled } : {}),
+        ...(typeof body?.enabledRev === 'number' ? { enabledRev: body.enabledRev } : {}),
     }
 }
 
