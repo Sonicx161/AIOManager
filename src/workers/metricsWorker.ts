@@ -30,6 +30,17 @@ const subDays = (d: Date, n: number) => new Date(d.getTime() - n * 864e5)
 const isSeriesType = (t: string) => t === 'series' || t === 'anime' || t === 'episode'
 const BINGE_GAP_MINUTES = 90
 
+// Keyword lists are constant, so they are lowercased once here instead of once per
+// keyword per row on every message.
+const franchises = [
+    { name: 'Marvel', keywords: ['Marvel', 'Avengers', 'Iron Man', 'Spider-Man', 'Thor', 'Guardians', 'MCU'] },
+    { name: 'Star Trek', keywords: ['Star Trek', 'Discovery', 'Picard', 'Strange New Worlds', 'Enterprise'] },
+    { name: 'Star Wars', keywords: ['Star Wars', 'Mandalorian', 'Andor', 'Ahsoka', 'Skywalker', 'Boba Fett'] },
+    { name: 'DC Universe', keywords: ['Batman', 'Superman', 'Justice League', 'The Flash', 'Wonder Woman', 'Joker'] },
+    { name: 'Game of Thrones', keywords: ['Thrones', 'House of the Dragon', 'Westeros'] }
+]
+const franchiseKeywordsLower = franchises.map(f => ({ name: f.name, keywords: f.keywords.map(k => k.toLowerCase()) }))
+
 function toLocalDayKey(ts: number): string {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return 'unknown'
@@ -229,40 +240,40 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
     const thirtyDaysAgo = subDays(now, 30)
 
     const userAwardMap: Record<string, { midnightPlays: number, weekendPlays: number, totalStarts: number, totalFinishes: number }> = {}
-    const franchises = [
-        { name: 'Marvel', keywords: ['Marvel', 'Avengers', 'Iron Man', 'Spider-Man', 'Thor', 'Guardians', 'MCU'] },
-        { name: 'Star Trek', keywords: ['Star Trek', 'Discovery', 'Picard', 'Strange New Worlds', 'Enterprise'] },
-        { name: 'Star Wars', keywords: ['Star Wars', 'Mandalorian', 'Andor', 'Ahsoka', 'Skywalker', 'Boba Fett'] },
-        { name: 'DC Universe', keywords: ['Batman', 'Superman', 'Justice League', 'The Flash', 'Wonder Woman', 'Joker'] },
-        { name: 'Game of Thrones', keywords: ['Thrones', 'House of the Dragon', 'Westeros'] }
-    ]
     const franchiseCounts: Record<string, number> = {}
     franchises.forEach(f => franchiseCounts[f.name] = 0)
 
-    const contextItems = allItems.map((h: ActivityItem) => ({
-        ...h,
-        timestamp: h.timestamp instanceof Date ? h.timestamp : new Date(h.timestamp)
-    })).filter(h => !isNaN(h.timestamp.getTime()))
+    // One pass per row: the normalized row (rows arrive cloned over postMessage, so the
+    // spread is skipped when the timestamp is already a Date) and its watch-hours credit
+    // are built together instead of two full copies of the history per message.
+    const contextItems: ActivityItem[] = []
+    const hoursRows: WatchHoursRow[] = []
+    for (const h of allItems) {
+        const isDate = h.timestamp instanceof Date
+        const timestamp = isDate ? h.timestamp : new Date(h.timestamp)
+        if (isNaN(timestamp.getTime())) continue
+        contextItems.push(isDate ? h : { ...h, timestamp })
+        hoursRows.push({
+            itemId: h.itemId,
+            type: h.type,
+            timestamp: timestamp.getTime(),
+            watched: h.watched,
+            duration: h.duration,
+            progress: h.progress,
+            overallTimeWatched: h.overallTimeWatched,
+            counterKey: h.counterKey,
+            mediaServer: h.mediaServer,
+            mediaPlayed: h.mediaPlayed,
+            mediaPositionMs: h.mediaPositionMs,
+            mediaKey: h.mediaServer ? h.id : undefined,
+            excluded: !!h.backfill || !!h.importedSavedState,
+        })
+    }
     const periodStartMs = hasPeriod ? (periodStart as number) : -Infinity
     const normalizedItems = hasPeriod ? contextItems.filter(h => h.timestamp.getTime() >= periodStartMs) : contextItems
 
     // One shared definition of watch hours (also used by Activity and Replay), credited over
     // every row so a time window never re-seeds a cumulative counter.
-    const hoursRows: WatchHoursRow[] = contextItems.map(h => ({
-        itemId: h.itemId,
-        type: h.type,
-        timestamp: h.timestamp.getTime(),
-        watched: h.watched,
-        duration: h.duration,
-        progress: h.progress,
-        overallTimeWatched: h.overallTimeWatched,
-        counterKey: h.counterKey,
-        mediaServer: h.mediaServer,
-        mediaPlayed: h.mediaPlayed,
-        mediaPositionMs: h.mediaPositionMs,
-        mediaKey: h.mediaServer ? h.id : undefined,
-        excluded: !!h.backfill || !!h.importedSavedState,
-    }))
     const hours = computeWatchHours(hoursRows, runtimes ?? { typical: new Map(), longest: new Map() })
     const periodMs: number[] = []
     let periodTotalMs = 0
@@ -293,11 +304,10 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
         else typeCounts.other++
 
         // 3. Franchises
-        franchises.forEach(f => {
-            if (f.keywords.some(k => h.name.toLowerCase().includes(k.toLowerCase()))) {
-                franchiseCounts[f.name]++
-            }
-        })
+        const nameLower = h.name.toLowerCase()
+        for (const f of franchiseKeywordsLower) {
+            if (f.keywords.some(k => nameLower.includes(k))) franchiseCounts[f.name]++
+        }
 
         // 4. User Stats & Awards
         if (!userStats[h.accountId]) {
