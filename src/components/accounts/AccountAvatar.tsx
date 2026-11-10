@@ -118,7 +118,7 @@ export function AccountAvatar({
                     style={{ filter: 'var(--theme-avatar-filter, url(#squircle))' }}
                 />
             ) : (
-                <span className={cn('relative z-10 leading-none', dim.emoji)}>
+                <span aria-hidden="true" className={cn('relative z-10 leading-none', dim.emoji)}>
                     {account.emoji ? account.emoji : (
                         <span className={cn('font-bold text-muted-foreground', dim.letter)}>
                             {initial}

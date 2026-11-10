@@ -18,6 +18,7 @@ import { ReplayMilestones } from '@/components/replay/ReplayMilestones'
 import { ReplayInsights } from '@/components/replay/ReplayInsights'
 import { ReplayShareCard } from '@/components/replay/ReplayShareCard'
 import { ReplayAccountSwitcher } from '@/components/replay/ReplayAccountSwitcher'
+import { replayEntrancePlayed } from '@/components/replay/replay-entrance'
 import { cn } from '@/lib/utils'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 
@@ -37,6 +38,7 @@ export function ReplayPage() {
     const [activeSection, setActiveSection] = useState('hero')
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
     const reduceMotion = useReducedMotion()
+    const [skipEntrance] = useState(() => reduceMotion || replayEntrancePlayed())
     const namePrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
     const emailPrivacy = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelEmail : 0))
 
@@ -358,7 +360,7 @@ export function ReplayPage() {
                                                             return (
                                                                 <div key={monthStr} className="flex flex-col items-center gap-1 text-center">
                                                                     <motion.button
-                                                                        initial={{ opacity: 0, scale: 0.8 }}
+                                                                        initial={skipEntrance ? false : { opacity: 0, scale: 0.8 }}
                                                                         animate={{ opacity: 1, scale: 1 }}
                                                                         exit={{ opacity: 0, scale: 0.8 }}
                                                                         transition={{ delay: index * 0.04 }}
@@ -511,7 +513,7 @@ export function ReplayPage() {
                     <AnimatePresence mode="wait">
                         <motion.div
                             key={activeSelectedYear}
-                            initial={{ opacity: 0, scale: 0.98 }}
+                            initial={skipEntrance ? false : { opacity: 0, scale: 0.98 }}
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 1.02 }}
                             transition={{ duration: 0.4, ease: "circOut" }}

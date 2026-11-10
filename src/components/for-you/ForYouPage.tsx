@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import { Suspense, useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Link } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, RefreshCw, AlertCircle, Sparkles, ArrowRight, Dice3, Info, Search, Bookmark, LayoutGrid, Upload } from 'lucide-react'
@@ -18,7 +18,8 @@ import { cn, maskNameLevel, formatStaleAgo, loadImdbTmdbCache, saveImdbTmdbCache
 import { Tooltip } from '@/components/ui/tooltip'
 import { OperationProgress } from '@/components/ui/operation-progress'
 import { useUIStore } from '@/store/uiStore'
-import { ActivityDetailModal, type DetailItem } from '@/components/activity/ActivityDetailModal'
+import type { DetailItem } from '@/components/activity/ActivityDetailModal'
+import { lazyChunk } from '@/lib/lazy-chunk'
 import { buildTasteProfile, computeHouseholdPopularity, type TasteProfile } from '@/lib/taste-profile'
 import { useExternalRatings } from '@/lib/external-ratings-store'
 import { useRailSize } from '@/lib/discovery-prefs-store'
@@ -39,6 +40,8 @@ import { getWatchlist, type WatchlistItem } from '@/lib/watchlist'
 import { bucketize, bucketsToPmdbRails, itemIdFromCanonical, type BucketItem } from '@/lib/rail-buckets'
 import type { ActivityItem } from '@/types/activity'
 import type { Account } from '@/types/account'
+
+const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
 const HOUSEHOLD_RAIL_MAX = 12
 
@@ -594,6 +597,8 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
 
     const [searchOpen, setSearchOpen] = useState(false)
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
+    const [detailModalSeen, setDetailModalSeen] = useState(false)
+    useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
     const [pmdbDialogOpen, setPmdbDialogOpen] = useState(false)
     const [hasPmdbKey, setHasPmdbKey] = useState(false)
     const [pmdbLastPublished, setPmdbLastPublished] = useState<number | null>(null)
@@ -1046,11 +1051,15 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
                 }}
             />
 
+            {detailModalSeen && (
+            <Suspense fallback={null}>
             <ActivityDetailModal
                 open={detailItem !== null}
-                onOpenChange={(open) => { if (!open) { setDetailItem(null); refreshWatchlist() } }}
+                onOpenChange={(open: boolean) => { if (!open) { setDetailItem(null); refreshWatchlist() } }}
                 item={detailItem}
             />
+            </Suspense>
+            )}
         </WorkspaceTabs>
     )
 }

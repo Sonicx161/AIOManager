@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, animate, useInView } from 'framer-motion'
+import { motion, animate, useInView, useReducedMotion } from 'framer-motion'
 import { ReplayData } from '@/types/ReplayTypes'
 import { useReplayDisplayMeta } from '@/hooks/useReplayDisplayMeta'
 
@@ -11,16 +11,21 @@ function MiniCounter({ value, suffix = '' }: { value: number; suffix?: string })
     const [display, setDisplay] = useState(0)
     const ref = useRef(null)
     const isInView = useInView(ref, { once: true, margin: '-50px' })
+    const reduceMotion = useReducedMotion()
 
     useEffect(() => {
         if (!isInView) return
+        if (reduceMotion) {
+            setDisplay(value)
+            return
+        }
         const controls = animate(0, value, {
             duration: 1.8,
             ease: [0.23, 1, 0.32, 1],
             onUpdate: (latest) => setDisplay(Math.floor(latest)),
         })
         return () => controls.stop()
-    }, [value, isInView])
+    }, [value, isInView, reduceMotion])
 
     return <span ref={ref}>{display.toLocaleString()}{suffix}</span>
 }

@@ -23,7 +23,6 @@ const OFFICIAL_ADDONS: Record<string, { name: string; logo?: string; description
     },
     'local': {
         name: 'Local Files',
-        logo: '📦',
         description: 'Files from your local computer'
     },
     'aiostreams': {

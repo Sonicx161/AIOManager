@@ -57,10 +57,11 @@ export function SavedAddonGrid({
     onToggleSelect(id)
   }, [onEnterSelectionMode, onToggleSelect])
 
+  const itemClassName = viewMode === 'list' ? 'content-auto-addon-row' : 'content-auto-addon-card'
   const renderAddon = (addon: SavedAddon, profileName?: string, showHighlight = false) => {
     if (viewMode === 'list') {
       return (
-        <StaggerItem key={addon.id}>
+        <StaggerItem key={addon.id} contentAutoClass={itemClassName}>
           <SavedAddonListRow
             savedAddon={addon}
             latestVersion={getLatestAddonVersion(latestVersions, {
@@ -82,7 +83,7 @@ export function SavedAddonGrid({
     }
 
     return (
-      <StaggerItem key={addon.id}>
+      <StaggerItem key={addon.id} contentAutoClass={itemClassName}>
         <SavedAddonCard
           savedAddon={addon}
           latestVersion={getLatestAddonVersion(latestVersions, {

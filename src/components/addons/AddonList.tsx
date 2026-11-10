@@ -40,7 +40,10 @@ const FailoverManager = React.lazy(() =>
   import('@/components/accounts/FailoverManager').then((m) => ({ default: m.FailoverManager }))
 )
 type FailoverView = import('@/components/accounts/FailoverManager').FailoverView
-import { ConnectionManager } from '@/components/providers/ConnectionManager'
+const ConnectionManager = React.lazy(() =>
+  import('@/components/providers/ConnectionManager').then((m) => ({ default: m.ConnectionManager }))
+)
+const preloadConnectionManager = () => { void import('@/components/providers/ConnectionManager') }
 
 import { EmptyState } from '@/components/common/EmptyState'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
@@ -729,7 +732,7 @@ export function AddonList({ accountId }: AddonListProps) {
           <TabsTrigger value="changelog">
             Changelog
           </TabsTrigger>
-          <TabsTrigger value="connections">
+          <TabsTrigger value="connections" onPointerEnter={preloadConnectionManager} onFocus={preloadConnectionManager}>
             Connections
           </TabsTrigger>
         </TabsList>
@@ -1048,12 +1051,14 @@ export function AddonList({ accountId }: AddonListProps) {
 
         <TabsContent value="connections">
           <div className="space-y-4">
+            <Suspense fallback={null}>
             <ConnectionManager
               accountId={accountId}
               account={account ?? undefined}
               connections={account?.connections}
               onShowInstalledAddons={() => handleTabChange('addons')}
             />
+            </Suspense>
 
           </div>
         </TabsContent>

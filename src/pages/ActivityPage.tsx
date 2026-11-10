@@ -1,7 +1,7 @@
 import { triggerSync } from '@/lib/sync-trigger'
 import { ActivityFeed } from '@/components/activity/ActivityFeed'
 import { MediaReadBanner } from '@/components/activity/MediaReadBanner'
-import { ActivityDetailModal } from '@/components/activity/ActivityDetailModal'
+import { lazyChunk } from '@/lib/lazy-chunk'
 import { ForYouPage } from '@/components/for-you/ForYouPage'
 import { AccountDetailPage } from '@/components/for-you/AccountDetailPage'
 import { ContentRail } from '@/components/ui/content-rail'
@@ -40,7 +40,7 @@ import type { Account } from '@/types/account'
 import { FloatingActionBar } from '@/components/ui/floating-action-bar'
 import { Grid, List, Search, Check, X } from 'lucide-react'
 import { AnimatedRefreshIcon, AnimatedTrashIcon } from '@/components/ui/AnimatedIcons'
-import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
+import { Suspense, useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { toast } from '@/hooks/use-toast'
 import { useDocumentTitle } from '@/hooks/use-document-title'
@@ -60,6 +60,8 @@ import { trace } from '@/lib/trace'
 const ACTIVITY_ACCOUNT_DELETE_CONCURRENCY = 4
 const CONTINUE_WATCHING_LIMIT = 24
 const ACTIVITY_ITEM_DELETE_CONCURRENCY = 5
+
+const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
 /**
  * The sealed Stremio key + request context a delete/writeback must use for one item:
@@ -399,6 +401,8 @@ export function ActivityPage() {
     const [isDeletingWholeShow, setIsDeletingWholeShow] = useState(false)
     const [isBulkMode, setIsBulkMode] = useState(false)
     const [detailItem, setDetailItem] = useState<ActivityItem | null>(null)
+    const [detailModalSeen, setDetailModalSeen] = useState(false)
+    useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
     const cloudRefreshAttemptedRef = useRef(false)
 
     useEffect(() => {
@@ -1241,12 +1245,16 @@ export function ActivityPage() {
                 />
             )}
 
+            {detailModalSeen && (
+            <Suspense fallback={null}>
             <ActivityDetailModal
                 open={detailItem !== null}
-                onOpenChange={(open) => { if (!open) setDetailItem(null) }}
+                onOpenChange={(open: boolean) => { if (!open) setDetailItem(null) }}
                 item={detailItem}
                 watchHistory={watchHistory}
             />
+            </Suspense>
+            )}
 
             <ConfirmationDialog
                 open={!!pendingWholeShow}

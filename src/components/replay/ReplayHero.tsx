@@ -4,6 +4,7 @@ import { Sparkles, Clock, Film, Flame } from 'lucide-react'
 import { ReplayData } from '@/types/ReplayTypes'
 import { useReplayDisplayMeta } from '@/hooks/useReplayDisplayMeta'
 import { Poster } from '@/components/common/Poster'
+import { markReplayEntrancePlayed, replayEntrancePlayed } from '@/components/replay/replay-entrance'
 
 interface ReplayHeroProps {
     data: ReplayData
@@ -11,10 +12,14 @@ interface ReplayHeroProps {
 }
 
 
-function AnimatedNumber({ target, duration, delay = 0 }: { target: number, duration: number, delay?: number }) {
-    const [count, setCount] = useState(0);
+function AnimatedNumber({ target, duration, delay = 0, instant = false }: { target: number, duration: number, delay?: number, instant?: boolean }) {
+    const [count, setCount] = useState(instant ? target : 0);
 
     useEffect(() => {
+        if (instant) {
+            setCount(target);
+            return;
+        }
         const controls = animate(0, target, {
             duration: duration / 1000,
             delay: delay / 1000,
@@ -25,7 +30,7 @@ function AnimatedNumber({ target, duration, delay = 0 }: { target: number, durat
         });
 
         return controls.stop;
-    }, [target, duration, delay]);
+    }, [target, duration, delay, instant]);
 
     return <>{count}</>;
 }
@@ -33,6 +38,7 @@ function AnimatedNumber({ target, duration, delay = 0 }: { target: number, durat
 export function ReplayHero({ data, userName }: ReplayHeroProps) {
     const { displayYear, displayMonth, isCurrentYear } = useReplayDisplayMeta(data.year)
     const reduceMotion = useReducedMotion()
+    const [skipEntrance] = useState(() => reduceMotion || replayEntrancePlayed())
 
     const posters = (data.heroPosterArt || []).filter(Boolean).slice(0, 40); // Cap to 40 posters for optimal link size / visual balance
 
@@ -52,18 +58,20 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
             </>
         );
 
-    const [statsVisible, setStatsVisible] = useState(false);
-    const [readyMosaic, setReadyMosaic] = useState(false);
-    const [readyPills, setReadyPills] = useState(false);
-    const [readyIndicator, setReadyIndicator] = useState(false);
+    const [statsVisible, setStatsVisible] = useState(skipEntrance);
+    const [readyMosaic, setReadyMosaic] = useState(skipEntrance);
+    const [readyPills, setReadyPills] = useState(skipEntrance);
+    const [readyIndicator, setReadyIndicator] = useState(skipEntrance);
 
     useEffect(() => {
+        markReplayEntrancePlayed();
+        if (skipEntrance) return;
         const t0 = setTimeout(() => setStatsVisible(true), 100);
         const t1 = setTimeout(() => setReadyMosaic(true), 50);
         const t2 = setTimeout(() => setReadyPills(true), 1100);
         const t3 = setTimeout(() => setReadyIndicator(true), 2400);
         return () => { clearTimeout(t0); clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); }
-    }, []);
+    }, [skipEntrance]);
 
     return (
         <section
@@ -130,7 +138,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
 
 
                 <motion.div
-                    initial={{ opacity: 0, y: 8 }}
+                    initial={skipEntrance ? false : { opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ type: "spring", stiffness: 300, damping: 20, delay: 0.2 }}
                     className="flex items-center gap-2 mb-8"
@@ -154,7 +162,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
 
 
                 <motion.div
-                    initial={{ opacity: 0, y: 40 }}
+                    initial={skipEntrance ? false : { opacity: 0, y: 40 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 1, ease: [0.23, 1, 0.32, 1], delay: 0.1 }}
                     className="flex flex-col items-center relative z-10"
@@ -193,7 +201,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                             Replay.
                             {isCurrentYear && (
                                 <motion.div
-                                    initial={{ scale: 0, y: 6, rotate: 12, opacity: 0 }}
+                                    initial={skipEntrance ? false : { scale: 0, y: 6, rotate: 12, opacity: 0 }}
                                     animate={{
                                         scale: 1,
                                         y: 0,
@@ -230,7 +238,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
 
 
                 <motion.div
-                    initial={{ opacity: 0, y: 12 }}
+                    initial={skipEntrance ? false : { opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.9, ease: "easeOut", delay: 0.7 }}
                     className="mt-8 mx-auto"
@@ -269,7 +277,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                         }}
                     >
                         <div style={{ fontSize: '48px', fontWeight: 700, letterSpacing: '-0.03em', color: 'white', lineHeight: 1 }}>
-                            <AnimatedNumber target={data.totalTitles} duration={1800} delay={700} />
+                            <AnimatedNumber target={data.totalTitles} duration={1800} delay={700} instant={skipEntrance} />
                         </div>
                         <div style={{ fontFamily: '"Inter", monospace', fontSize: '12px', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>
                             Titles Watched
@@ -288,7 +296,7 @@ export function ReplayHero({ data, userName }: ReplayHeroProps) {
                         }}
                     >
                         <div style={{ fontSize: '48px', fontWeight: 700, letterSpacing: '-0.03em', color: 'white', lineHeight: 1 }}>
-                            <AnimatedNumber target={data.totalHours} duration={2000} delay={900} />
+                            <AnimatedNumber target={data.totalHours} duration={2000} delay={900} instant={skipEntrance} />
                         </div>
                         <div style={{ fontFamily: '"Inter", monospace', fontSize: '12px', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.6)', marginTop: '8px' }}>
                             Hours Streamed

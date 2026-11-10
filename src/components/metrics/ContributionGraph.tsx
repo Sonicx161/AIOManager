@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { motion } from 'framer-motion'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CHART_PALETTE } from '@/lib/chart-colors'
-import { useInView } from '@/hooks/use-in-view'
 import { CALENDAR_CELL as CELL, CALENDAR_GAP as GAP, weekColumnIntrinsicSize } from '@/components/metrics/calendar-grid'
 
 interface ContributionGraphProps {
@@ -32,7 +30,6 @@ const INTENSITY_COLORS = [
 ]
 
 export function ContributionGraph({ dailyActivity, loading }: ContributionGraphProps) {
-    const { ref, inView } = useInView<HTMLDivElement>()
     const { weeks, monthBorders, maxVal, total } = useMemo(() => {
         const entries = Object.entries(dailyActivity)
         if (entries.length === 0) return { weeks: [] as { date: string; count: number }[][], monthBorders: [] as { label: string; weekIndex: number }[], maxVal: 0, total: 0 }
@@ -110,7 +107,7 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
     const intrinsic = weekColumnIntrinsicSize(CELL, GAP)
 
     return (
-        <div ref={ref} data-theme-part="panel" className="rounded-2xl border border-border/35 bg-muted/15 p-3">
+        <div data-theme-part="panel" className="rounded-2xl border border-border/35 bg-muted/15 p-3">
             <div className="mb-3 flex items-center justify-between">
                 <span className="text-xs font-medium text-muted-foreground">{total} plays in this period</span>
             </div>
@@ -176,16 +173,18 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
                                                 }}
                                             />
                                         ) : (
-                                            <motion.div
+                                            <div
+                                                key={di}
+                                                // Compositor entrance (fade from 0, zoom from half) with the same
+                                                // per-cell stagger: hundreds of JS springs rewrite style every frame.
+                                                className="animate-in fade-in zoom-in-50 fill-mode-backwards duration-300 motion-reduce:animate-none"
                                                 style={{
                                                     height: `${CELL}px`,
                                                     width: `${CELL}px`,
                                                     borderRadius: '2px',
                                                     background: INTENSITY_COLORS[intensity],
+                                                    animationDelay: `${Math.min(wi * 7 + di, 400)}ms`,
                                                 }}
-                                                initial={{ opacity: 0, scale: 0.5 }}
-                                                animate={inView ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.5 }}
-                                                transition={{ type: 'spring', stiffness: 200, damping: 20, delay: Math.min((wi * 7 + di) * 0.001, 0.4) }}
                                             />
                                         )
                                         return useLightweightCells ? cell : (

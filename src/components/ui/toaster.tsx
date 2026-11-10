@@ -4,6 +4,21 @@ import { AlertCircle, AlertTriangle, CheckCircle, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
 
+// Aim each tick at the countdown's next second boundary so drift never freezes the label.
+export function scheduleCountdownTicks(end: number, onTick: () => void): () => void {
+  const msToNextBoundary = () => {
+    const remaining = ((end - Date.now()) % 1000 + 1000) % 1000
+    return (remaining || 1000) + 5
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const tick = () => {
+    onTick()
+    timer = setTimeout(tick, msToNextBoundary())
+  }
+  timer = setTimeout(tick, msToNextBoundary())
+  return () => { if (timer !== undefined) clearTimeout(timer) }
+}
+
 function ToastAction({ toast, onDone, below }: { toast: Toast; onDone: () => void; below?: boolean }) {
   const action = toast.action
   const duration = toast.duration ?? DEFAULT_TOAST_DURATION
@@ -12,9 +27,15 @@ function ToastAction({ toast, onDone, below }: { toast: Toast; onDone: () => voi
 
   useEffect(() => {
     if (!finite) return
-    const timer = setInterval(() => setNow(Date.now()), 250)
-    return () => clearInterval(timer)
-  }, [finite, toast.createdAt])
+    const update = () => { if (!document.hidden) setNow(Date.now()) }
+    const cancelTicks = scheduleCountdownTicks(toast.createdAt + duration, update)
+    const onVisible = () => { if (!document.hidden) update() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      cancelTicks()
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [finite, toast.createdAt, duration])
 
   if (!action) return null
   const seconds = finite ? Math.max(0, Math.ceil((toast.createdAt + duration - now) / 1000)) : null

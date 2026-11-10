@@ -15,6 +15,11 @@ const MIN_ICON_ASPECT_RATIO = 1 / MAX_ICON_ASPECT_RATIO
 const SAMPLE_SIZE = 24
 const MIN_SAMPLE_DISPLAY_SIZE = 20
 
+// Emoji and other non-URL logo strings can only fail as <img src>; the letter renders at once.
+export function isUsableLogoSrc(value: string): boolean {
+  return /^(https?:|data:|blob:|\/)/i.test(value)
+}
+
 let sharedCanvas: HTMLCanvasElement | null = null
 let sharedCanvasContext: CanvasRenderingContext2D | null = null
 
@@ -109,7 +114,8 @@ export function AddonIcon({
 }: AddonIconProps) {
   const [rejectedLogo, setRejectedLogo] = useState<string | null>(null)
   const fallbackLetter = (name || '').trim().charAt(0).toUpperCase() || '?'
-  const shouldShowLogo = Boolean(logo) && rejectedLogo !== logo
+  const usableLogo = logo && isUsableLogoSrc(logo) ? logo : null
+  const shouldShowLogo = Boolean(usableLogo) && rejectedLogo !== usableLogo
   const shouldShowFallback = !shouldShowLogo
 
   return (
@@ -119,24 +125,24 @@ export function AddonIcon({
           {fallbackLetter}
         </span>
       ) : null}
-      {logo && shouldShowLogo ? (
+      {usableLogo && shouldShowLogo ? (
         <img
           loading="lazy"
           decoding="async"
-          src={logo}
+          src={usableLogo}
           alt={alt}
           className={cn('absolute inset-0 z-10 h-full w-full rounded-[inherit] object-contain p-1', imageClassName)}
-          onError={() => setRejectedLogo(logo)}
+          onError={() => setRejectedLogo(usableLogo)}
           onLoad={(event) => {
             const image = event.currentTarget
             if (hasBadIconShape(image.naturalWidth, image.naturalHeight)) {
-              setRejectedLogo(logo)
+              setRejectedLogo(usableLogo)
               return
             }
 
             try {
               if (hasPoorVisibleContent(image)) {
-                setRejectedLogo(logo)
+                setRejectedLogo(usableLogo)
               }
             } catch {
               return

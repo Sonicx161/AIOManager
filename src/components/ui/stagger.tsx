@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, createContext, useContext } from 'react'
 import { cn } from '@/lib/utils'
 import { observeIntersection } from '@/lib/shared-in-view'
+import { useOffscreenGate } from '@/hooks/use-offscreen-gate'
 
 interface StaggerContainerProps {
   children: React.ReactNode
@@ -37,15 +38,18 @@ function StaggerContainer({
 function StaggerItem({
   children,
   className,
+  contentAutoClass,
   'data-theme-part': themePart,
 }: {
   children: React.ReactNode
   className?: string
+  contentAutoClass?: string
   'data-theme-part'?: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(() => !appBootSettled)
   const [settled, setSettled] = useState(() => !appBootSettled)
+  const gatedContentAutoClass = useOffscreenGate(ref, contentAutoClass)
   const { delay, nextIndex } = useContext(StaggerContext)
   const indexRef = useRef<number | null>(null)
   if (indexRef.current === null) {
@@ -102,7 +106,7 @@ function StaggerItem({
     <div
       ref={ref}
       data-theme-part={themePart}
-      className={cn('h-full', className)}
+      className={cn('h-full', className, gatedContentAutoClass)}
       style={style}
     >
       {children}

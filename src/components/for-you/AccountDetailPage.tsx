@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Info, Sparkles, Bookmark, LayoutGrid, RefreshCw, Upload } from 'lucide-react'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { historyEntryToActivityItem } from '@/lib/activity-utils'
@@ -22,7 +22,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { ContentRail, ContentRailCard, ContentRailSkeleton } from '@/components/ui/content-rail'
 import { EmptyState } from '@/components/common/EmptyState'
 import type { ActivityItem } from '@/types/activity'
-import { ActivityDetailModal, type DetailItem } from '@/components/activity/ActivityDetailModal'
+import type { DetailItem } from '@/components/activity/ActivityDetailModal'
+import { lazyChunk } from '@/lib/lazy-chunk'
 import { DiscoveryPreferencesModal } from '@/components/for-you/DiscoveryPreferencesModal'
 import { PublishToPmdbDialog } from '@/components/for-you/PublishToPmdbDialog'
 import { checkPmdbKeyConfigured, getLastPublishTime } from '@/lib/pmdb-list-publisher'
@@ -30,6 +31,8 @@ import { useTmdbKeyStatus } from '@/hooks/useTmdbKeyStatus'
 import { buildCinemetaFatRails } from '@/lib/cinemeta-rails'
 import { getWatchlist, type WatchlistItem } from '@/lib/watchlist'
 import { bucketize, bucketsToPmdbRails, itemIdFromCanonical, type BucketItem } from '@/lib/rail-buckets'
+
+const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
 interface AccountDetailPageProps {
     accountId: string
@@ -102,8 +105,11 @@ export function AccountDetailPage({ accountId, onBack }: AccountDetailPageProps)
     const externalRatings = useExternalRatings()
 
     const tasteProfile = useMemo(
-        () => buildTasteProfile(accountId, allActivity, externalRatings),
-        [allActivity, accountId, externalRatings]
+        // Only this account's rows: buildTasteProfile filters to the account
+        // internally, so passing all accounts' activity would re-walk every
+        // other account's history on each rebuild.
+        () => buildTasteProfile(accountId, accountActivity, externalRatings),
+        [accountActivity, accountId, externalRatings]
     )
 
     const discoveryPrefs = useDiscoveryPrefs(accountId || HOUSEHOLD_CONTEXT)
@@ -122,6 +128,8 @@ export function AccountDetailPage({ accountId, onBack }: AccountDetailPageProps)
     const tmdbKeyStatus = useTmdbKeyStatus()
     const [popularFallbackNotice, setPopularFallbackNotice] = useState(false)
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
+    const [detailModalSeen, setDetailModalSeen] = useState(false)
+    useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
     const [catalogOpen, setCatalogOpen] = useState(false)
 
     const [pmdbDialogOpen, setPmdbDialogOpen] = useState(false)
@@ -522,11 +530,15 @@ export function AccountDetailPage({ accountId, onBack }: AccountDetailPageProps)
                 </>
             )}
 
+            {detailModalSeen && (
+            <Suspense fallback={null}>
             <ActivityDetailModal
                 open={detailItem !== null}
-                onOpenChange={(open) => { if (!open) { setDetailItem(null); refreshWatchlist() } }}
+                onOpenChange={(open: boolean) => { if (!open) { setDetailItem(null); refreshWatchlist() } }}
                 item={detailItem}
             />
+            </Suspense>
+            )}
 
             <DiscoveryPreferencesModal
                 open={catalogOpen}

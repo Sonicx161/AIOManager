@@ -183,6 +183,30 @@ export default defineConfig(({ mode }) => {
                         const rel = id.slice(idx + marker.length + 1).replace(/\\/g, '/')
                         const segs = rel.split('/')
                         const pkg = segs[0]?.startsWith('@') ? `${segs[0]}/${segs[1]}` : segs[0]
+                        const radixPackageChunks: Record<string, string> = {
+                            '@radix-ui/react-alert-dialog': 'alert-dialog',
+                            '@radix-ui/react-checkbox': 'checkbox',
+                            '@radix-ui/react-popover': 'popover',
+                            '@radix-ui/react-progress': 'progress',
+                            '@radix-ui/react-scroll-area': 'scroll-area',
+                            '@radix-ui/react-select': 'select',
+                            '@radix-ui/react-tabs': 'tabs',
+                            '@radix-ui/react-tooltip': 'tooltip',
+                        }
+                        const coreOverlayDeps = new Set([
+                            '@radix-ui/react-accordion',
+                            '@radix-ui/react-collapsible',
+                            '@radix-ui/react-dialog',
+                            'aria-hidden',
+                            'detect-node-es',
+                            'get-nonce',
+                            'react-remove-scroll',
+                            'react-remove-scroll-bar',
+                            'react-style-singleton',
+                            'tslib',
+                            'use-callback-ref',
+                            'use-sidecar',
+                        ])
                         switch (pkg) {
                             case 'react':
                             case 'react-router-dom':
@@ -197,15 +221,6 @@ export default defineConfig(({ mode }) => {
                                 return /react-dom\/server|react-dom-server/.test(rel) ? undefined : 'vendor-react'
                             case 'framer-motion':
                                 return 'vendor-motion'
-                            case '@radix-ui/react-checkbox':
-                            case '@radix-ui/react-select':
-                            case '@radix-ui/react-tabs':
-                            case '@radix-ui/react-tooltip':
-                            case '@radix-ui/react-popover':
-                            case '@radix-ui/react-alert-dialog':
-                            case '@radix-ui/react-progress':
-                            case '@radix-ui/react-scroll-area':
-                                return 'vendor-radix'
                             case '@dnd-kit/core':
                             case '@dnd-kit/sortable':
                             case '@dnd-kit/utilities':
@@ -215,8 +230,19 @@ export default defineConfig(({ mode }) => {
                                 return 'vendor-date'
                             case 'recharts':
                                 return 'vendor-charts'
-                            default:
+                            default: {
+                                // Per-package radix chunks: a page preloads only the
+                                // primitives it imports instead of every radix package.
+                                // Shared radix internals and their overlay deps form one
+                                // core chunk; compose-refs must stay with react or
+                                // react-slot closes a chunk cycle.
+                                const radixChunk = radixPackageChunks[pkg]
+                                if (radixChunk) return `vendor-radix-${radixChunk}`
+                                if (pkg === '@radix-ui/react-compose-refs') return 'vendor-react'
+                                if (coreOverlayDeps.has(pkg)) return 'vendor-radix-dialog'
+                                if (pkg.startsWith('@radix-ui/')) return 'vendor-radix-core'
                                 return undefined
+                            }
                         }
                     },
                 }

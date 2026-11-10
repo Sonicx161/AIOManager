@@ -35,7 +35,7 @@ import {
   X,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useState, useRef } from 'react'
 import { AddonPreviewTile } from './AddonPreviewTile'
 import { Link } from 'react-router-dom'
 import {
@@ -75,7 +75,10 @@ import type { ActivityItem } from '@/types/activity'
 import type { Account } from '@/types/account'
 import { cardVisibilitySummary, activeConnectionsLabel } from './profile-sheet'
 import { ColorPicker } from '@/components/ui/color-picker'
-import { ConnectionManager } from '@/components/providers/ConnectionManager'
+const ConnectionManager = lazy(() =>
+  import('@/components/providers/ConnectionManager').then((m) => ({ default: m.ConnectionManager }))
+)
+const preloadConnectionManager = () => { void import('@/components/providers/ConnectionManager') }
 import { useTheme } from '@/contexts/ThemeContext'
 import { motion, AnimatePresence } from 'framer-motion'
 import { PLATFORM_REGISTRY, getPlatformEntry } from '@/lib/platform-registry'
@@ -199,6 +202,7 @@ export function AccountForm() {
     // (sync failure fix button) also lands on Connections, focused on that
     // connection's own sign-in sheet.
     resetEditPage(editingAccount?.status === 'expired' || (editingAccount && focusConnectionId) ? ['profile', 'connections'] : 'profile')
+    if (editingAccount?.status === 'expired' || (editingAccount && focusConnectionId)) preloadConnectionManager()
     setColorOpen(false)
     setCardOpen(false)
     setEmojiOpen(false)
@@ -1448,6 +1452,7 @@ export function AccountForm() {
                   size="sm"
                   className="h-9 shrink-0 border-warning/35 bg-background/60 text-warning hover:bg-warning/10"
                   onClick={() => {
+                    preloadConnectionManager()
                     setEditPage('connections')
                     setSignInAgainTarget({ id: expiredSessionConnection.id, nonce: Date.now() })
                   }}
@@ -1708,7 +1713,9 @@ export function AccountForm() {
 
             <button
               type="button"
-              onClick={() => setEditPage('connections')}
+              onClick={() => { preloadConnectionManager(); setEditPage('connections') }}
+              onPointerEnter={preloadConnectionManager}
+              onFocus={preloadConnectionManager}
               className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-1.5 text-left transition-colors hover:bg-muted/30"
             >
               <span className="text-sm font-semibold">Connections</span>
@@ -1824,6 +1831,7 @@ export function AccountForm() {
       ) : (
         <div className="space-y-5">
           {editTarget && (
+            <Suspense fallback={null}>
             <ConnectionManager
               variant="sheet"
               accountId={editTarget.id}
@@ -1831,6 +1839,7 @@ export function AccountForm() {
               focusEditConnection={signInAgainTarget}
               onSubDialogChange={(open) => { connectionSubDialogRef.current = open; if (!open) subDialogClosedAtRef.current = Date.now() }}
             />
+            </Suspense>
           )}
         </div>
       )}

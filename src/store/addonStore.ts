@@ -276,7 +276,7 @@ export interface AddonStore {
   exportLibrary: (forSync?: boolean) => string | Record<string, unknown>
   importLibrary: (json: string | Record<string, unknown>, merge: boolean, isSilent?: boolean, isImmediate?: boolean, ownership?: SyncOwnership) => Promise<void>
 
-  checkAllHealth: () => Promise<void>
+  checkAllHealth: (deferUntilQuiet?: boolean) => Promise<void>
   updateHealthStatus: (statuses: Array<{ id: string; isOnline: boolean }>) => Promise<void>
 
   clearError: () => void
@@ -285,6 +285,32 @@ export interface AddonStore {
   repairLibrary: () => Promise<void>
   setAddonSyncToLibrary: (accountId: string, transportUrl: string, value: boolean) => Promise<void>
   replaceTransportUrlUniversally: (savedAddonId: string | null, oldUrl: string, newUrl: string, accountId?: string, descriptor?: AddonDescriptor) => Promise<ReplaceTransportUrlResult>
+}
+
+// Health probes wait out the page's own download window so the grid paints first.
+// The run flag spans the deferral too, so a second caller cannot double-start the batch.
+let healthRunInFlight = false
+
+function waitForPageQuiet(quietMs = 1800, maxWaitMs = 5000): Promise<void> {  return new Promise(resolve => {
+    if (typeof window === 'undefined' || typeof requestAnimationFrame !== 'function' || !performance?.getEntriesByType) {
+      setTimeout(resolve, quietMs)
+      return
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const startedAt = performance.now()
+      const poll = () => {
+        const entries = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+        let lastEnd = 0
+        for (let i = Math.max(0, entries.length - 60); i < entries.length; i++) {
+          lastEnd = Math.max(lastEnd, entries[i].startTime + entries[i].duration)
+        }
+        const now = performance.now()
+        if (now - Math.max(lastEnd, startedAt) >= quietMs || now - startedAt >= maxWaitMs) resolve()
+        else setTimeout(poll, 200)
+      }
+      poll()
+    }))
+  })
 }
 
 export const useAddonStore = create<AddonStore>((set, get) => ({
@@ -1268,11 +1294,11 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     }
   },
 
-  checkAllHealth: async () => {
+  checkAllHealth: async (deferUntilQuiet?: boolean) => {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
 
-    const { library, checkingHealth, lastHealthCheck } = get()
-    if (checkingHealth) return
+    const { lastHealthCheck } = get()
+    if (healthRunInFlight) return
 
     const COOLDOWN = 3 * 60 * 1000
     if (lastHealthCheck && (Date.now() - lastHealthCheck < COOLDOWN)) {
@@ -1280,8 +1306,14 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       return
     }
 
-    set({ checkingHealth: true })
+    healthRunInFlight = true
     try {
+      if (deferUntilQuiet) {
+        await waitForPageQuiet()
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      }
+      set({ checkingHealth: true })
+      const { library } = get()
       const addons = Object.values(library)
       const results = await checkAllAddonsHealth(addons)
 
@@ -1343,6 +1375,7 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
     } catch (error) {
       if (import.meta.env.DEV) console.error('Health check failed:', error)
     } finally {
+      healthRunInFlight = false
       set({ checkingHealth: false })
     }
   },

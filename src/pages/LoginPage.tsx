@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { Suspense, useState, useEffect, useRef } from 'react'
 import { useSyncStore } from '@/store/syncStore'
 import { captureSyncOwnership, syncRuntime, type SyncOwnership } from '@/store/sync-store-helpers'
 import { Button } from '@/components/ui/button'
@@ -12,7 +12,7 @@ import { toast } from '@/hooks/use-toast'
 import { useSearchParams, useNavigate, Link } from 'react-router-dom'
 import { useTheme } from '@/contexts/ThemeContext'
 import { BrandLogo } from '@/components/common/BrandLogo'
-import { DashboardEntry } from '@/components/common/DashboardEntry'
+import { lazyChunk } from '@/lib/lazy-chunk'
 import { useAuthStore } from '@/store/authStore'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
@@ -36,6 +36,8 @@ import pkg from '../../package.json'
 interface LoginPageProps {
     initialMode?: 'login' | 'register'
 }
+
+const DashboardEntry = lazyChunk(() => import('@/components/common/DashboardEntry').then(m => ({ default: m.DashboardEntry })))
 
 // A failed login can restore its prior workspace while retaining the same generation.
 const isSupersededAuthFailure = (e: unknown, attempt: number, latest: number, ownership?: SyncOwnership) =>
@@ -759,7 +761,9 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                 </Dialog>
 
                 <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
-                    <DashboardEntry />
+                    <Suspense fallback={null}>
+                        <DashboardEntry />
+                    </Suspense>
                     <Link
                         to="/kronorium"
                         className="text-xs text-muted-foreground hover:text-primary transition-colors"

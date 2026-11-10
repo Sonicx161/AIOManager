@@ -190,9 +190,11 @@ function App() {
     return () => { cancelled = true }
   }, [renderReady, sessionReady])
 
-  // Nav pages: prefetch every main route's lazy chunk while idle (Cider's
-  // preloadSidebarPages), only for an authenticated, unlocked session, skipped on
-  // Save-Data and slow connections. Locking or signing out cancels what has not run.
+  // Nav pages: once the first authenticated screen has settled (network quiet)
+  // plus idle, prefetch the most likely next routes' lazy chunks (Cider's
+  // preloadSidebarPages); the other routes rely on hover/intent prefetch and
+  // load on demand. Skipped on Save-Data and slow connections. Locking or
+  // signing out cancels what has not run.
   useEffect(() => {
     if (!isInitialized || isLocked || !auth.isAuthenticated) return
     return scheduleIdleRoutePreload({ preload: preloadRouteChunk })

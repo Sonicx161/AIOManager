@@ -141,13 +141,16 @@ export async function checkAllAddonsHealth(
     return promise
   }
 
-  for (let i = 0; i < addons.length; i += CONCURRENT_LIMIT) {
-    if (budgetExceeded()) break
+  let nextIndex = 0
+  let completed = 0
 
-    const batch = addons.slice(i, Math.min(i + CONCURRENT_LIMIT, addons.length))
-
-    await Promise.all(batch.map(async (addon, batchIndex) => {
-      const globalIndex = i + batchIndex
+  // Bounded pool: a worker takes the next addon as soon as it frees, so one slow check
+  // never parks the other slots for the addons queued behind it. Checks past the budget
+  // never start; in-flight ones still finish and write their result.
+  const worker = async (): Promise<void> => {
+    while (nextIndex < addons.length && !budgetExceeded()) {
+      const globalIndex = nextIndex++
+      const addon = addons[globalIndex]
       const status = await checkOnce(addon)
 
       results[globalIndex] = {
@@ -159,12 +162,14 @@ export async function checkAllAddonsHealth(
           latencyMs: status.latencyMs,
         },
       }
-    }))
 
-    if (onProgress) {
-      onProgress(Math.min(i + CONCURRENT_LIMIT, addons.length), addons.length)
+      completed++
+      if (onProgress) onProgress(completed, addons.length)
     }
   }
+
+  const workerCount = Math.min(CONCURRENT_LIMIT, addons.length)
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
 
   return results
 }

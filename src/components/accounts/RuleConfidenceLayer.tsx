@@ -11,7 +11,7 @@ import { maskNameLevel, normalizeAddonUrl } from '@/lib/utils'
 import { useUIStore } from '@/store/uiStore'
 import { findRuleOverlaps, getRuleMissingConnection } from '@/lib/autopilot-conflicts'
 import {
-    AUTOPILOT_FIX_LABEL, AUTOPILOT_SAFE_MODE_DETAIL, AUTOPILOT_SKIP_DETAIL, AUTOPILOT_WORKER_OFF_TITLE, describeRuleError, liveAccountCheck, resolveAutopilotFreshness, resolveRuleFix, ruleConflictDetail, type AutopilotRuleFix,
+    AUTOPILOT_FIX_LABEL, AUTOPILOT_SAFE_MODE_DETAIL, AUTOPILOT_SKIP_DETAIL, AUTOPILOT_WORKER_OFF_TITLE, describeRuleError, resolveAutopilotFreshness, resolveRuleFix, ruleConflictDetail, type AutopilotRuleFix,
 } from '@/lib/autopilot-freshness'
 import { getStremioConnection, useAccountStore } from '@/store/accountStore'
 import { useFailoverStore, type AutopilotCycleStats, type AutopilotStabilizationEntry, type FailoverRule } from '@/store/failoverStore'
@@ -323,7 +323,12 @@ export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAd
     const pullUnverified = useFailoverStore(s => s.statePullFailed || s.statePullPartial)
     const workerEnabled = useFailoverStore(s => s.workerEnabled)
     const safeMode = useFailoverStore(s => s.safeMode)
-    const accountExists = useAccountStore(s => liveAccountCheck(s.accounts.map(a => a.id), s.deletedAccounts, s.restoredAccounts)(rule.accountId))
+    // Primitive-only reads: no per-notification id array, and membership from the
+    // tombstone records directly (same rule as liveAccountCheck).
+    const accountExists = useAccountStore((s) => {
+        const deleted = s.deletedAccounts[rule.accountId]
+        return s.accounts.some(a => a.id === rule.accountId) && !(deleted !== undefined && deleted >= (s.restoredAccounts[rule.accountId] ?? 0))
+    })
     const confidence = getConfidenceState(rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName, pullUnverified, workerEnabled)
     const Icon = confidence.icon
     const checkedRelative = checkedAt ? formatRelativeLabel(checkedAt) || 'just now' : null

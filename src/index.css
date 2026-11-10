@@ -334,6 +334,28 @@ html.theme-light {
     content-visibility: auto;
     contain-intrinsic-size: 160px 240px;
   }
+
+  /* Offscreen card/row subtrees skip layout, paint and a11y text computation.
+     The auto keyword keeps each item's last rendered size so scrolling stays put. */
+  .content-auto-addon-card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 240px;
+  }
+
+  .content-auto-addon-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 64px;
+  }
+
+  .content-auto-account-card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 210px;
+  }
+
+  .content-auto-account-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 68px;
+  }
 }
 
 /* Scrollbars inside scroll areas (dialogs, lists) stay visible but thin */

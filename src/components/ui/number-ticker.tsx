@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useMemo } from 'react'
-import { useInView, useMotionValue, useSpring } from 'framer-motion'
+import { useInView, useMotionValue, useReducedMotion, useSpring } from 'framer-motion'
 import { cn } from '@/lib/utils'
 
 interface NumberTickerProps {
@@ -22,12 +22,13 @@ export function NumberTicker({
   className,
 }: NumberTickerProps) {
   const ref = useRef<HTMLSpanElement>(null)
+  const prefersReducedMotion = useReducedMotion()
   const initialValue = useMemo(() => direction === 'down' ? value : startValue, []) // eslint-disable-line react-hooks/exhaustive-deps
   const motionValue = useMotionValue(initialValue)
-  const springValue = useSpring(motionValue, {
-    damping: 60,
-    stiffness: 100,
-  })
+  // A physics spring only rests within 0.5 of its target, so large values creep for seconds.
+  const springValue = useSpring(motionValue, prefersReducedMotion
+    ? { duration: 0.01, bounce: 0 }
+    : { duration: 1, bounce: 0 })
   const isInView = useInView(ref, { once: true, margin: '0px' })
   const formatter = useMemo(() => Intl.NumberFormat('en-US', {
     minimumFractionDigits: decimalPlaces,
@@ -46,7 +47,8 @@ export function NumberTicker({
   useEffect(() => {
     const update = (latest: number) => {
       if (ref.current) {
-        ref.current.textContent = formatter.format(Number(latest.toFixed(decimalPlaces)))
+        const text = formatter.format(Number(latest.toFixed(decimalPlaces)))
+        if (ref.current.textContent !== text) ref.current.textContent = text
       }
     }
     update(springValue.get())

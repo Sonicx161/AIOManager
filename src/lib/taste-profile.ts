@@ -192,11 +192,14 @@ export function buildTasteProfile(accountId: string, items: ActivityItem[], exte
   const aggregated = aggregateAccountItems(own)
 
   if (externalRatings && externalRatings.length > 0) {
+    // Aggregated item ids are unique (grouped by itemId), so a Map answers the
+    // same first-match lookup as Array.find without scanning all items per rating.
+    const aggregatedById = new Map(aggregated.map(a => [a.itemId, a]))
     for (const r of externalRatings) {
       if (!r.imdbId || r.rating < 1) continue
       const weight = ratingToWeight(r.rating)
       if (weight === 0) continue
-      const existing = aggregated.find(a => a.itemId === r.imdbId)
+      const existing = aggregatedById.get(r.imdbId)
       if (existing) {
         if (weight > existing.engagement) {
           existing.engagement = weight

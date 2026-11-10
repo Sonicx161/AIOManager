@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import { ProviderHealth, ProviderState } from '@/types/provider'
+import type { ProviderHealth, ProviderState } from '@/types/provider'
 import { useVaultStore } from './vaultStore'
 import localforage from 'localforage'
 import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
+import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 
 const PROVIDER_COOLDOWN = 12 * 60 * 60 * 1000 // debrid subscription expiry only moves day-to-day; 12h is plenty
 const CACHE_KEY = 'aio_provider_health'
@@ -22,6 +23,75 @@ async function boundedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promis
 const persistHealth = (health: Record<string, ProviderHealth>, lastRefreshed: number) => {
     localforage.setItem(CACHE_KEY, JSON.stringify(health)).catch(() => {})
     localforage.setItem(LAST_REFRESHED_KEY, String(lastRefreshed)).catch(() => {})
+}
+
+// Bulk refresh rows publish in ~150ms waves instead of one store update per row. Only the
+// newest check of a key in the workspace that started it may publish.
+type ProviderSet = (partial: (state: ProviderStore) => Partial<ProviderStore>) => void
+const BATCH_WAVE_MS = 150
+interface CheckTicket { id: string; seq: number; ws: string }
+let checkSeq = 0
+const latestCheck: Record<string, number> = {}
+let batchDepth = 0
+let pendingHealth: Record<string, { entry: ProviderHealth; ticket: CheckTicket }> | null = null
+let waveTimer: ReturnType<typeof setTimeout> | null = null
+
+const beginCheck = (id: string): CheckTicket => {
+    const seq = ++checkSeq
+    latestCheck[id] = seq
+    return { id, seq, ws: getActiveWorkspaceId() }
+}
+
+const ticketCurrent = (ticket: CheckTicket) =>
+    latestCheck[ticket.id] === ticket.seq && getActiveWorkspaceId() === ticket.ws
+
+const healthNow = (get: () => ProviderStore): Record<string, ProviderHealth> => {
+    if (!pendingHealth) return get().health
+    const merged = { ...get().health }
+    for (const [id, { entry }] of Object.entries(pendingHealth)) merged[id] = entry
+    return merged
+}
+
+const publishHealth = (set: ProviderSet, ticket: CheckTicket, entry: ProviderHealth, defer: boolean) => {
+    if (!ticketCurrent(ticket)) return
+    if (defer && batchDepth > 0) {
+        pendingHealth ??= {}
+        pendingHealth[ticket.id] = { entry, ticket }
+        if (waveTimer === null) {
+            waveTimer = setTimeout(() => {
+                waveTimer = null
+                drainHealth(set)
+            }, BATCH_WAVE_MS)
+        }
+        return
+    }
+    if (pendingHealth) delete pendingHealth[ticket.id]
+    set((state) => ({ health: { ...state.health, [ticket.id]: entry } }))
+}
+
+const drainHealth = (set: ProviderSet) => {
+    if (!pendingHealth) return
+    const pending = pendingHealth
+    pendingHealth = null
+    set((state) => {
+        const liveIds = new Set(useVaultStore.getState().keys.map((k) => k.id))
+        let health: Record<string, ProviderHealth> | null = null
+        for (const [id, { entry, ticket }] of Object.entries(pending)) {
+            if (!liveIds.has(id) || !ticketCurrent(ticket)) continue
+            health ??= { ...state.health }
+            health[id] = entry
+        }
+        return health ? { health } : {}
+    })
+}
+
+const flushHealth = (set: ProviderSet) => {
+    if (waveTimer !== null) {
+        clearTimeout(waveTimer)
+        waveTimer = null
+    }
+    if (batchDepth > 0 || !pendingHealth) return
+    drainHealth(set)
 }
 
 const loadCachedHealth = async (): Promise<{ health: Record<string, ProviderHealth>; lastRefreshed: number }> => {
@@ -46,7 +116,7 @@ interface ProviderStore extends ProviderState {
     hydrateAndRefresh: () => Promise<void>
     refreshAll: () => Promise<void>
     forceRefreshAll: () => Promise<void>
-    refreshProvider: (id: string) => Promise<void>
+    refreshProvider: (id: string, defer?: boolean) => Promise<void>
 }
 
 export const getDaysRemaining = (dateString: string | null): number | null => {
@@ -76,62 +146,48 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         await get().refreshAll()
     },
 
-    refreshProvider: async (id: string) => {
+    refreshProvider: async (id: string, defer = false) => {
         const key = useVaultStore.getState().keys.find((k) => k.id === id)
         if (!key) return
+        const ticket = beginCheck(id)
 
-        set((state) => ({
-            health: {
-                ...state.health,
-                [id]: {
-                    ...(state.health[id] || {
-                        id,
-                        name: key.name,
-                        provider: key.provider,
-                        status: 'none',
-                        daysRemaining: null,
-                        expiresAt: null,
-                        lastChecked: 0,
-                    }),
-                    loading: true,
-                },
-            },
-        }))
+        publishHealth(set, ticket, {
+            ...(healthNow(get)[id] || {
+                id,
+                name: key.name,
+                provider: key.provider,
+                status: 'none',
+                daysRemaining: null,
+                expiresAt: null,
+                lastChecked: 0,
+            }),
+            loading: true,
+        }, defer)
 
 
         if (key.provider === 'other') {
             if (key.customExpiry) {
                 const expiresAt = key.customExpiry
                 const daysRemaining = getDaysRemaining(expiresAt)
-                set((state) => ({
-                    health: {
-                        ...state.health,
-                        [id]: {
-                            ...state.health[id],
-                            status: (daysRemaining ?? 0) > 0 ? 'active' : 'expired',
-                            daysRemaining,
-                            expiresAt,
-                            loading: false,
-                            lastChecked: Date.now(),
-                        },
-                    },
-                }))
+                publishHealth(set, ticket, {
+                    ...healthNow(get)[id],
+                    status: (daysRemaining ?? 0) > 0 ? 'active' : 'expired',
+                    daysRemaining,
+                    expiresAt,
+                    loading: false,
+                    lastChecked: Date.now(),
+                }, defer)
             } else {
-                set((state) => ({
-                    health: {
-                        ...state.health,
-                        [id]: {
-                            ...state.health[id],
-                            status: 'none',
-                            daysRemaining: null,
-                            expiresAt: null,
-                            loading: false,
-                            lastChecked: Date.now(),
-                        },
-                    },
-                }))
+                publishHealth(set, ticket, {
+                    ...healthNow(get)[id],
+                    status: 'none',
+                    daysRemaining: null,
+                    expiresAt: null,
+                    loading: false,
+                    lastChecked: Date.now(),
+                }, defer)
             }
-            persistHealth(get().health, get().lastRefreshed)
+            persistHealth(healthNow(get), get().lastRefreshed)
             return
         }
 
@@ -241,50 +297,35 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                     status = 'expired'
                 }
             } else {
-                set((state) => ({
-                    health: {
-                        ...state.health,
-                        [id]: { ...state.health[id], loading: false, status: 'none', lastChecked: Date.now() }
-                    }
-                }))
-                persistHealth(get().health, get().lastRefreshed)
+                publishHealth(set, ticket, { ...healthNow(get)[id], loading: false, status: 'none', lastChecked: Date.now() }, defer)
+                persistHealth(healthNow(get), get().lastRefreshed)
                 return
             }
 
             if ((daysRemaining ?? 0) <= 0) status = 'expired'
 
-            set((state) => ({
-                health: {
-                    ...state.health,
-                    [id]: {
-                        id,
-                        name: key.name,
-                        provider: key.provider,
-                        status,
-                        daysRemaining,
-                        expiresAt,
-                        lastChecked: Date.now(),
-                        loading: false,
-                    },
-                },
-            }))
+            publishHealth(set, ticket, {
+                id,
+                name: key.name,
+                provider: key.provider,
+                status,
+                daysRemaining,
+                expiresAt,
+                lastChecked: Date.now(),
+                loading: false,
+            }, defer)
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
             console.warn(`[ProviderStore] Health check failed for ${key.name}: ${msg}`)
-            set((state) => ({
-                health: {
-                    ...state.health,
-                    [id]: {
-                        ...state.health[id],
-                        status: 'error',
-                        error: msg,
-                        loading: false,
-                        lastChecked: Date.now(),
-                    },
-                },
-            }))
+            publishHealth(set, ticket, {
+                ...healthNow(get)[id],
+                status: 'error',
+                error: msg,
+                loading: false,
+                lastChecked: Date.now(),
+            }, defer)
         }
-        persistHealth(get().health, get().lastRefreshed)
+        persistHealth(healthNow(get), get().lastRefreshed)
     },
 
     refreshAll: async () => {
@@ -305,8 +346,14 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
 
         set({ isRefreshing: true })
         try {
-            await boundedAll(keys.map((k) => () => get().refreshProvider(k.id)), 3)
-            set({ lastRefreshed: Date.now() })
+            batchDepth++
+            try {
+                await boundedAll(keys.map((k) => () => get().refreshProvider(k.id, true)), 3)
+                set({ lastRefreshed: Date.now() })
+            } finally {
+                batchDepth--
+                flushHealth(set)
+            }
         } finally {
             set({ isRefreshing: false })
         }
@@ -323,8 +370,14 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
 
         set({ isRefreshing: true })
         try {
-            await boundedAll(keys.map((k) => () => get().refreshProvider(k.id)), 3)
-            set({ lastRefreshed: Date.now() })
+            batchDepth++
+            try {
+                await boundedAll(keys.map((k) => () => get().refreshProvider(k.id, true)), 3)
+                set({ lastRefreshed: Date.now() })
+            } finally {
+                batchDepth--
+                flushHealth(set)
+            }
         } finally {
             set({ isRefreshing: false })
         }

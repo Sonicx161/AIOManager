@@ -36,7 +36,7 @@ import {
     LayoutGrid,
 } from 'lucide-react'
 
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { Suspense, useEffect, useState, useMemo, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn, maskNameLevel, maskEmailLevel, formatHoursAsDays } from '@/lib/utils'
 import { AccountSwitcher } from '@/components/common/AccountSwitcher'
@@ -50,10 +50,13 @@ import { ToolbarShell } from '@/components/ui/toolbar-shell'
 import { StatusChip } from '@/components/ui/status-chip'
 import { Tooltip } from '@/components/ui/tooltip'
 import { OperationProgress } from '@/components/ui/operation-progress'
-import { ActivityDetailModal, type DetailItem } from '@/components/activity/ActivityDetailModal'
+import type { DetailItem } from '@/components/activity/ActivityDetailModal'
+import { lazyChunk } from '@/lib/lazy-chunk'
 import { ActivityHeatmap, ActivitySparkline, WatchFunnel, ContentDonut, FranchiseBars, VelocityChart, WeekComparison, ContributionGraph, SessionDepth, WeeklyRhythm, ComebackRate, DropOffPoint } from '@/components/metrics'
 import { pressable, PRESSABLE_FOCUS } from '@/components/metrics/pressable'
 import { rankedProfileCount } from '@/components/metrics/profile-counts'
+
+const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
 const PERSONA_DESCRIPTIONS: Record<string, string> = {
     'The Completer': 'Finishes over 80% of what they start',
@@ -151,6 +154,8 @@ export function MetricsPage() {
     const [selectedAccountId, setSelectedAccountId] = useState<string>('all')
     const [selectedPeriod, setSelectedPeriod] = useState<MetricPeriodId>('all')
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
+    const [detailModalSeen, setDetailModalSeen] = useState(false)
+    useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
 
     const openDetail = useCallback((type?: string, itemId?: string, name?: string, poster?: string) => {
         if (!itemId) return
@@ -1251,11 +1256,15 @@ export function MetricsPage() {
                 </> )}
             </Tabs >
 
+            {detailModalSeen && (
+            <Suspense fallback={null}>
             <ActivityDetailModal
                 open={!!detailItem}
-                onOpenChange={(open) => { if (!open) setDetailItem(null) }}
+                onOpenChange={(open: boolean) => { if (!open) setDetailItem(null) }}
                 item={detailItem}
             />
+            </Suspense>
+            )}
         </div >
     )
 }

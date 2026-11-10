@@ -412,7 +412,7 @@ export function SavedAddonLibrary() {
     const init = async () => {
       await initialize()
       // Defer health check to prevent state update during mount warning
-      setTimeout(() => checkAllHealth(), 0)
+      setTimeout(() => checkAllHealth(true), 0)
     }
     init()
   }, [initialize, checkAllHealth])

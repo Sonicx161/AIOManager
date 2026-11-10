@@ -72,6 +72,7 @@ export const AccountCard = memo(function AccountCard({
     }
   }, [])
   const [noteOpen, setNoteOpen] = useState(false)
+  const [noteMounted, setNoteMounted] = useState(false)
   const [noteValue, setNoteValue] = useState(account.note || '')
   const [noteHistory, setNoteHistory] = useState<string[]>([account.note || ''])
   const [noteHistoryIdx, setNoteHistoryIdx] = useState(0)
@@ -133,6 +134,7 @@ export const AccountCard = memo(function AccountCard({
     setNoteHistory([account.note || ''])
     setNoteHistoryIdx(0)
     setNoteIsEditing(!account.note?.trim())
+    setNoteMounted(true)
     setNoteOpen(true)
   }, [account.note])
 
@@ -332,6 +334,7 @@ export const AccountCard = memo(function AccountCard({
         <div
           data-theme-part="checkbox"
           data-state="checked"
+          aria-hidden="true"
           className="absolute -top-2 -right-2 z-30 w-6 h-6 rounded-full border-2 border-background bg-primary shadow-lg flex items-center justify-center transition-[transform,opacity,box-shadow] animate-in zoom-in-50 duration-200"
         >
           <svg className="w-3.5 h-3.5 text-primary-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
@@ -609,6 +612,7 @@ export const AccountCard = memo(function AccountCard({
         </CardFooter>
       </div>
 
+      {(noteMounted || noteOpen) && (
       <Dialog open={noteOpen} onOpenChange={handleNoteClose}>
         <DialogContent
           className="flex max-h-[85vh] flex-col gap-0 overflow-hidden rounded-[1.75rem] border-border/45 bg-card p-0 shadow-[0_24px_80px_hsl(0_0%_0%/0.32)] sm:max-w-xl"
@@ -739,6 +743,7 @@ export const AccountCard = memo(function AccountCard({
           )}
         </DialogContent>
       </Dialog>
+      )}
 
     </Card>
   )

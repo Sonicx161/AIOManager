@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { motion, animate, useInView } from 'framer-motion'
+import { motion, animate, useInView, useReducedMotion } from 'framer-motion'
 import { ReplayData } from '@/types/ReplayTypes'
 
 interface ReplayStatsProps {
@@ -59,9 +59,14 @@ function Counter({ value }: { value: number }) {
     const [display, setDisplay] = useState(0)
     const ref = useRef(null)
     const isInView = useInView(ref, { once: true, margin: "0px" })
+    const reduceMotion = useReducedMotion()
 
     useEffect(() => {
         if (!isInView) return
+        if (reduceMotion) {
+            setDisplay(value)
+            return
+        }
 
         const controls = animate(0, value, {
             duration: 1.5,
@@ -69,7 +74,7 @@ function Counter({ value }: { value: number }) {
             onUpdate: (latest) => setDisplay(Math.floor(latest))
         })
         return () => controls.stop()
-    }, [value, isInView])
+    }, [value, isInView, reduceMotion])
 
     return <span ref={ref}>{display.toLocaleString()}</span>
 }

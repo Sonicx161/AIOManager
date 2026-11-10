@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { isUsableLogoSrc } from '@/components/ui/addon-icon'
 import { tileLetter } from './account-stat-chips'
 
 /** Addon logo tile with a letter fallback while loading or when the logo fails. */
@@ -10,7 +11,7 @@ export function AddonPreviewTile({ src, name }: { src?: string; name?: string })
   return (
     <div data-theme-part="image-tile" className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted/30 ring-1 ring-border/20 md:h-6 md:w-6">
       <span aria-hidden="true" className={cn('text-[10px] font-semibold leading-none text-muted-foreground transition-opacity duration-200', loaded && 'opacity-0')}>{tileLetter(name)}</span>
-      {src && !failed && (
+      {src && !failed && isUsableLogoSrc(src) && (
         <img
           ref={(el) => { if (el && !loaded && el.complete && el.naturalWidth > 0) setLoaded(true) }}
           src={src}
