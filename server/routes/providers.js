@@ -513,6 +513,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     })
 
     fastify.post('/api/providers/nuvio/auth', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -541,6 +542,7 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // TV QR login step 1: the anonToken is returned so clients reuse it for polls (anon grants are rate-limited upstream).
     fastify.post('/api/providers/nuvio/qr/start', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -574,6 +576,7 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // TV QR login step 2: polls with the client's anonToken; anon JWTs expire mid-flow, so refetch exactly once on 401.
     fastify.post('/api/providers/nuvio/qr/poll', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -601,6 +604,7 @@ export function registerProviderRoutes(fastify, reconciler) {
 
     // TV QR login step 3: swaps the approved code for tokens; response shape mirrors nuvio/auth.
     fastify.post('/api/providers/nuvio/qr/exchange', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -625,6 +629,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     })
 
     fastify.post('/api/providers/realstream/auth', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -658,6 +663,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     })
 
     fastify.post('/api/providers/nuvio/signup', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 5, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -686,6 +692,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     })
 
     fastify.post('/api/providers/realstream/signup', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 5, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -711,6 +718,7 @@ export function registerProviderRoutes(fastify, reconciler) {
     })
 
     fastify.post('/api/providers/hydra/test', {
+        bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)

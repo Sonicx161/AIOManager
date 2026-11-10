@@ -300,7 +300,7 @@ fastify.get('/api/config', { config: { rateLimit: { max: 60, timeWindow: '1 minu
 })
 
 // Debug trace sink: client seams batch-POST here so client + server traces land in one
-fastify.post('/api/debug/trace', { config: { rateLimit: { max: 600, timeWindow: '1 minute' } } }, async (request, reply) => {
+fastify.post('/api/debug/trace', { bodyLimit: 1024 * 1024, config: { rateLimit: { max: 600, timeWindow: '1 minute' } } }, async (request, reply) => {
     if (!traceEnabled()) {
         reply.status(204)
         return null

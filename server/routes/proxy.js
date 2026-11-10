@@ -1213,6 +1213,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     })
 
     fastify.put('/api/aiostreams-proxy', {
+        bodyLimit: 1024 * 1024,
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
         schema: {
             body: {
@@ -1299,6 +1300,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     })
 
     fastify.delete('/api/aiostreams-proxy', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
         schema: {
             body: {
@@ -1654,6 +1656,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     }
 
     fastify.post('/api/proxy/mint-token', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
@@ -1668,7 +1671,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         return { token: `${encoded}.${sig}` }
     })
 
-    fastify.all('/api/proxy/:token/*', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
+    fastify.all('/api/proxy/:token/*', { bodyLimit: 1024 * 16, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
         const { token } = request.params
         const pathSuffix = request.params['*']
 

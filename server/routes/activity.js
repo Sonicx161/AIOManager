@@ -177,6 +177,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
     })
 
     fastify.post('/api/activity/trigger', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 6, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const syncUser = await validateSyncAuth(request, reply)
@@ -191,6 +192,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
     // nothing). Not gated on activityEngine.isEnabled(): like the credential route, removing
     // rows is data management, not telemetry.
     fastify.delete('/api/activity/events/:eventId', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const syncUser = await validateSyncAuth(request, reply)

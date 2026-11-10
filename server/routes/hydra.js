@@ -540,6 +540,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     })
 
     fastify.delete('/hydra/addons', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 30, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
@@ -765,6 +766,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
     })
 
     fastify.post('/hydra/sync', {
+        bodyLimit: 1024 * 16,
         config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
     }, async (request, reply) => {
         const account = await lookupAccountByApiKey(request, reply)
