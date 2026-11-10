@@ -89,6 +89,9 @@ const isValidMetaRows = (rows) => {
 export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     const manifestCache = new Map()
     const MANIFEST_CACHE_TTL = 600000 // 10 minutes
+    // stremio-addons.net serves Cache-Control: public, max-age=86400, so the directory proxy
+    // may keep entries for a full day.
+    const DISCOVER_CACHE_TTL_MS = 24 * 60 * 60 * 1000
     const MANIFEST_NEGATIVE_TTL = 60000
     const MANIFEST_NEGATIVE_MAX = 1000
 
@@ -324,6 +327,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     const manifestNegative = new Map()
     const manifestInflight = new Map()
     const discoverInflight = new Map()
+    const discoverCache = new Map()
 
     const manifestCacheGet = (url) => {
         const cached = manifestCache.get(url)
@@ -2027,30 +2031,36 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             return reply.code(400).send({ error: 'Invalid URL' })
         }
 
+        // Cross-origin clients need Date to age a browser-cached answer against its max-age.
+        reply.header('Access-Control-Expose-Headers', 'Age, Date, Cache-TTL-Ms')
         const start = Date.now()
         const cacheKey = `discover:${targetUrl}`
-        const cached = manifestCache.get(cacheKey)
-        const isCategory = targetUrl.includes('/categories')
-        const ttl = isCategory ? 60 * 60 * 1000 : 30 * 60 * 1000
-        const cacheHit = Boolean(cached && Date.now() - cached.ts < ttl)
-        trace('discover-proxy', 'request', { url: targetUrl, cacheHit })
+        // The directory allows 24h caching (Cache-Control: public, max-age=86400) and this is
+        // public data, so it gets its own long-TTL cache instead of the shared manifest cache.
+        const ttl = DISCOVER_CACHE_TTL_MS
+        const isRefresh = request.query.refresh === '1'
+        const cached = isRefresh ? null : discoverCache.get(cacheKey)
+        const cacheHit = Boolean(cached && Date.now() - cached.ts < cached.ttl)
+        trace('discover-proxy', 'request', { url: targetUrl, cacheHit, refresh: isRefresh })
 
         if (cacheHit) {
             reply.header('X-Cache', 'HIT')
-            reply.header('Cache-TTL-Ms', ttl - (Date.now() - cached.ts))
-            reply.header('Cache-Control', 'public, max-age=600')
+            reply.header('Cache-TTL-Ms', cached.ttl - (Date.now() - cached.ts))
+            reply.header('Cache-Control', `public, max-age=${Math.floor((cached.ttl - (Date.now() - cached.ts)) / 1000)}`)
             trace('discover-proxy', 'response', { url: targetUrl, cacheHit: true, timing: Date.now() - start })
             return reply.send(cached.data)
         }
 
-        const negative = manifestNegativeGet(cacheKey)
-        if (negative) {
-            if (cached) {
-                reply.header('X-Cache', 'STALE')
-                return reply.send(cached.data)
+        if (!isRefresh) {
+            const negative = manifestNegativeGet(cacheKey)
+            if (negative) {
+                if (cached) {
+                    reply.header('X-Cache', 'STALE')
+                    return reply.send(cached.data)
+                }
+                reply.header('X-Cache', 'NEGATIVE')
+                return reply.code(negative.status).send(negative.data)
             }
-            reply.header('X-Cache', 'NEGATIVE')
-            return reply.code(negative.status).send(negative.data)
         }
 
         try {
@@ -2069,7 +2079,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     } finally {
                         clearTimeout(timeout)
                     }
-                }).finally(() => discoverInflight.delete(cacheKey))
+                }, { lane: 'discover', concurrency: 6, throttleMs: 50 }).finally(() => discoverInflight.delete(cacheKey))
                 discoverInflight.set(cacheKey, pending)
             }
             const { status, data } = await pending
@@ -2077,30 +2087,37 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
 
             if (data.error) {
                 manifestNegativeSet(cacheKey, { status, data })
-                reply.header('X-Cache', 'MISS')
+                reply.header('X-Cache', isRefresh ? 'REFRESH' : 'MISS')
                 trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, error: true, timing: Date.now() - start })
                 return reply.send(data)
             } else {
-                manifestCache.set(cacheKey, { data, ts: Date.now() })
-                if (manifestCache.size > 5000) {
+                discoverCache.set(cacheKey, { data, ts: Date.now(), ttl })
+                if (discoverCache.size > 5000) {
                     const now = Date.now()
-                    for (const [k, v] of manifestCache) {
-                        if (now - v.ts > MANIFEST_CACHE_TTL) manifestCache.delete(k)
+                    for (const [k, v] of discoverCache) {
+                        if (now - v.ts > v.ttl) discoverCache.delete(k)
                     }
-                    while (manifestCache.size > 4000) {
-                        const oldestKey = manifestCache.keys().next().value
+                    while (discoverCache.size > 4000) {
+                        const oldestKey = discoverCache.keys().next().value
                         if (oldestKey === undefined) break
-                        manifestCache.delete(oldestKey)
+                        discoverCache.delete(oldestKey)
                     }
                 }
-                reply.header('X-Cache', 'MISS')
-                reply.header('Cache-Control', 'public, max-age=600')
+                if (isRefresh) {
+                    // A refresh answer must not sit in the browser cache under its URL, or the
+                    // next manual refresh would replay it instead of reaching upstream.
+                    reply.header('Cache-Control', 'no-store')
+                    reply.header('X-Cache', 'REFRESH')
+                } else {
+                    reply.header('X-Cache', 'MISS')
+                    reply.header('Cache-Control', `public, max-age=${Math.floor(ttl / 1000)}`)
+                }
                 trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, timing: Date.now() - start })
                 return reply.send(data)
             }
         } catch (err) {
             manifestNegativeSet(cacheKey, { status: 502, data: { error: 'Failed to fetch from stremio-addons.net' } })
-            const cachedStale = manifestCache.get(cacheKey)
+            const cachedStale = discoverCache.get(cacheKey)
             if (cachedStale) {
                 reply.header('X-Cache', 'STALE')
                 trace('discover-proxy', 'response', { url: targetUrl, cacheHit: false, stale: true, timing: Date.now() - start })

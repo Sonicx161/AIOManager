@@ -151,6 +151,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
 
   const [addons, setAddons] = useState<DiscoverAddon[]>([])
   const [page, setPage] = useState(1)
+  const cursorRef = useRef<string | null>(null)
   const [hasNextPage, setHasNextPage] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -272,6 +273,7 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
       if (targetPage === 1) setLoading(true)
       else setLoadingMore(true)
       setError(null)
+      if (targetPage === 1) cursorRef.current = null
       try {
         const res = await fetchDiscoverAddons({
           search: debouncedSearch,
@@ -280,11 +282,13 @@ export function DiscoverPanel({ replayKey = 0 }: { replayKey?: number }) {
           category: selectedCategories,
           nsfw: showAdult ? undefined : 'exclude',
           page: targetPage,
+          cursor: targetPage > 1 ? (cursorRef.current ?? undefined) : undefined,
           limit: PAGE_SIZE,
         }, signal)
         if (token !== requestRef.current) return
+        cursorRef.current = res.nextCursor ?? null
         setAddons((prev) => (targetPage === 1 ? res.addons : [...prev, ...res.addons]))
-        setHasNextPage(res.pagination?.hasNextPage ?? false)
+        setHasNextPage(res.pagination?.hasNextPage ?? Boolean(res.nextCursor))
         setPage(targetPage)
       } catch (err) {
         if (token !== requestRef.current) return

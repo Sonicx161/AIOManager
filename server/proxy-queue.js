@@ -80,6 +80,87 @@ const scheduleWake = (waitMs) => {
     }, waitMs)
 }
 
+// Lanes are small dedicated schedulers for callers whose traffic pattern fits the shared queue's
+// global concurrency and default domain throttle badly. Discover opens with one parallel burst of
+// shelf requests to a single origin; behind the shared queue every call waited its turn at the
+// default spacing and behind unrelated background work.
+const lanes = new Map()
+
+const runLaneTask = async (lane, request) => {
+    try {
+        const result = await request.task()
+        request.resolve(result)
+    } catch (err) {
+        request.reject(err)
+    } finally {
+        releaseKey(request)
+        serverState.activeProxyRequests--
+        lane.active--
+        pumpLane(lane)
+    }
+}
+
+const pumpLane = (lane) => {
+    let minThrottleWait = Infinity
+    for (let i = 0; i < lane.entries.length && lane.active < lane.concurrency;) {
+        const request = lane.entries[i]
+        const lastRequest = domainLastRequestTime.get(request.origin) || 0
+        const waitTime = Math.max(0, (request.throttleMs ?? DOMAIN_THROTTLE_MS) - (Date.now() - lastRequest))
+        if (waitTime > 0) {
+            if (waitTime < minThrottleWait) minThrottleWait = waitTime
+            i++
+            continue
+        }
+        lane.entries.splice(i, 1)
+        if (request.expiryTimer) clearTimeout(request.expiryTimer)
+        domainLastRequestTime.set(request.origin, Date.now())
+        lane.active++
+        serverState.activeProxyRequests++
+        runLaneTask(lane, request)
+    }
+    if (minThrottleWait !== Infinity && lane.entries.length > 0 && lane.active < lane.concurrency) {
+        const waitMs = Math.max(Math.min(minThrottleWait, 60000), 10)
+        const at = Date.now() + waitMs
+        if (lane.timer && lane.wakeAt <= at) return
+        if (lane.timer) clearTimeout(lane.timer)
+        lane.wakeAt = at
+        lane.timer = setTimeout(() => {
+            lane.timer = null
+            lane.wakeAt = Infinity
+            pumpLane(lane)
+        }, waitMs)
+    }
+}
+
+const enqueueLaneRequest = (laneName, laneOptions, url, task, resolve, reject) => {
+    const { concurrency, throttleMs, queueKey = null, maxPerKey = MAX_QUEUE_PER_KEY, deadline = null } = laneOptions
+    let lane = lanes.get(laneName)
+    if (!lane) {
+        lane = { name: laneName, entries: [], active: 0, concurrency, timer: null, wakeAt: Infinity }
+        lanes.set(laneName, lane)
+    }
+    if (lane.entries.length >= MAX_QUEUE_SIZE) {
+        reject(new Error('Proxy queue saturated. Please try again in a moment.'))
+        return
+    }
+    let origin = ''
+    try {
+        origin = new URL(url).origin
+    } catch (e) { origin = url }
+    const entry = { url, origin, task, resolve, reject, queueKey, throttleMs, expiryTimer: null }
+    if (deadline) {
+        entry.expiryTimer = setTimeout(() => {
+            const index = lane.entries.indexOf(entry)
+            if (index < 0) return
+            lane.entries.splice(index, 1)
+            releaseKey(entry)
+            reject(Object.assign(new Error('Proxy queue wait exceeded'), { code: 'queue-timeout' }))
+        }, Math.max(0, deadline - Date.now()))
+    }
+    lane.entries.push(entry)
+    pumpLane(lane)
+}
+
 export const enqueueProxyRequest = (url, task, options = null) => {
     return new Promise((resolve, reject) => {
         if (proxyQueue.length >= MAX_QUEUE_SIZE) {
@@ -89,7 +170,11 @@ export const enqueueProxyRequest = (url, task, options = null) => {
         const queueOptions = typeof options === 'string'
             ? { queueKey: options }
             : (options || {})
-        const { queueKey = null, throttleMs = DOMAIN_THROTTLE_MS, maxPerKey = MAX_QUEUE_PER_KEY, deadline = null } = queueOptions
+        const { lane = null, concurrency = 0, queueKey = null, throttleMs = DOMAIN_THROTTLE_MS, maxPerKey = MAX_QUEUE_PER_KEY, deadline = null } = queueOptions
+        if (lane && (!Number.isInteger(concurrency) || concurrency < 1)) {
+            reject(new Error(`Lane "${lane}" needs a positive integer concurrency`))
+            return
+        }
         if (queueKey) {
             const current = proxyQueueKeyCounts.get(queueKey) || 0
             if (current >= maxPerKey) {
@@ -97,6 +182,10 @@ export const enqueueProxyRequest = (url, task, options = null) => {
                 return
             }
             proxyQueueKeyCounts.set(queueKey, current + 1)
+        }
+        if (lane) {
+            enqueueLaneRequest(lane, { concurrency, throttleMs, queueKey, maxPerKey, deadline }, url, task, resolve, reject)
+            return
         }
         let origin = ''
         try {
