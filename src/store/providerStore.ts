@@ -6,8 +6,29 @@ import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 
 const PROVIDER_COOLDOWN = 12 * 60 * 60 * 1000 // debrid subscription expiry only moves day-to-day; 12h is plenty
+const ERROR_RETRY_MS = 30 * 60 * 1000
 const CACHE_KEY = 'aio_provider_health'
 const LAST_REFRESHED_KEY = 'aio_provider_lastRefreshed'
+
+// Hash, never the raw value: the fingerprint only has to prove THIS key text was
+// already checked, so a stale health entry cannot silence a rotated or re-entered key.
+const keyFingerprint = (key: { provider: string; value: string; customExpiry?: string | null }): string => {
+    const basis = `${key.provider}|${key.value}|${key.customExpiry ?? ''}`
+    let h = 0x811c9dc5
+    for (let i = 0; i < basis.length; i++) {
+        h ^= basis.charCodeAt(i)
+        h = Math.imul(h, 0x01000193) >>> 0
+    }
+    return `${h.toString(16)}:${basis.length}`
+}
+
+const providerNeedsCheck = (entry: ProviderHealth | undefined, fp: string): boolean => {
+    if (!entry || entry.fp !== fp) return true
+    if (entry.loading) return false
+    const age = Date.now() - (entry.lastChecked || 0)
+    if (entry.status === 'error') return age >= ERROR_RETRY_MS
+    return age >= PROVIDER_COOLDOWN
+}
 
 async function boundedAll<T>(tasks: (() => Promise<T>)[], limit: number): Promise<void> {
     let idx = 0
@@ -116,7 +137,7 @@ interface ProviderStore extends ProviderState {
     hydrateAndRefresh: () => Promise<void>
     refreshAll: () => Promise<void>
     forceRefreshAll: () => Promise<void>
-    refreshProvider: (id: string, defer?: boolean) => Promise<void>
+    refreshProvider: (id: string, defer?: boolean, force?: boolean) => Promise<void>
 }
 
 export const getDaysRemaining = (dateString: string | null): number | null => {
@@ -146,9 +167,11 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         await get().refreshAll()
     },
 
-    refreshProvider: async (id: string, defer = false) => {
+    refreshProvider: async (id: string, defer = false, force = false) => {
         const key = useVaultStore.getState().keys.find((k) => k.id === id)
         if (!key) return
+        const fp = keyFingerprint(key)
+        if (!force && !providerNeedsCheck(healthNow(get)[id], fp)) return
         const ticket = beginCheck(id)
 
         publishHealth(set, ticket, {
@@ -176,6 +199,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                     expiresAt,
                     loading: false,
                     lastChecked: Date.now(),
+                    fp,
                 }, defer)
             } else {
                 publishHealth(set, ticket, {
@@ -185,6 +209,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                     expiresAt: null,
                     loading: false,
                     lastChecked: Date.now(),
+                    fp,
                 }, defer)
             }
             persistHealth(healthNow(get), get().lastRefreshed)
@@ -313,6 +338,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                 expiresAt,
                 lastChecked: Date.now(),
                 loading: false,
+                fp,
             }, defer)
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error)
@@ -323,6 +349,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
                 error: msg,
                 loading: false,
                 lastChecked: Date.now(),
+                fp,
             }, defer)
         }
         persistHealth(healthNow(get), get().lastRefreshed)
@@ -332,23 +359,24 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         if (get().isRefreshing) return
 
         // Load the persisted cache first if we haven't yet, so a still-fresh result short-circuits
-        // the cooldown gate instead of re-hitting every debrid API on a cold store / page load.
+        // the check gate instead of re-hitting every debrid API on a cold store / page load.
         if (!get()._hydrated) await get().hydrateFromCache()
-
-        const { lastRefreshed, health } = get()
-        const hasErrors = Object.values(health).some(h => h.status === 'error' && h.lastChecked && (Date.now() - h.lastChecked < 30 * 60 * 1000))
-        if (!hasErrors && lastRefreshed && (Date.now() - lastRefreshed < PROVIDER_COOLDOWN)) return
 
         const keys = useVaultStore.getState().keys.filter(k =>
             ['real-debrid', 'torbox', 'premiumize', 'alldebrid', 'debrid-link', 'other'].includes(k.provider)
         )
         if (keys.length === 0) return
 
+        // Only changed, stale or retry-eligible keys hit the network; unchanged keys keep
+        // their cached verdict, so revisits cost zero requests.
+        const needingCheck = keys.filter(k => providerNeedsCheck(healthNow(get)[k.id], keyFingerprint(k)))
+        if (needingCheck.length === 0) return
+
         set({ isRefreshing: true })
         try {
             batchDepth++
             try {
-                await boundedAll(keys.map((k) => () => get().refreshProvider(k.id, true)), 3)
+                await boundedAll(needingCheck.map((k) => () => get().refreshProvider(k.id, true)), 3)
                 set({ lastRefreshed: Date.now() })
             } finally {
                 batchDepth--
@@ -372,7 +400,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         try {
             batchDepth++
             try {
-                await boundedAll(keys.map((k) => () => get().refreshProvider(k.id, true)), 3)
+                await boundedAll(keys.map((k) => () => get().refreshProvider(k.id, true, true)), 3)
                 set({ lastRefreshed: Date.now() })
             } finally {
                 batchDepth--

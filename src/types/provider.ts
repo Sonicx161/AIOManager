@@ -21,6 +21,8 @@ export interface ProviderHealth {
     lastChecked: number
     loading?: boolean
     error?: string
+    /** Fingerprint of the vault key this result was computed from. */
+    fp?: string
 }
 
 export interface ProviderState {

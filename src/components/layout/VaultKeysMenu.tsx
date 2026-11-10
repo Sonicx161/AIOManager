@@ -451,7 +451,7 @@ export function VaultKeysMenu({ onClose }: { onClose: () => void }) {
   const actions = useMemo<RowActions>(() => ({
     copy: (id, field) => { void copyVaultKeyField(id, field, copyDeps) },
     renew: url => { window.open(safeHref(url), '_blank', 'noopener,noreferrer') },
-    check: id => { void useProviderStore.getState().refreshProvider(id) },
+    check: id => { void useProviderStore.getState().refreshProvider(id, false, true) },
     pin: toggle,
     hide: id => {
       updateSettings(cur => setVaultHeaderShown(cur, id, false))
