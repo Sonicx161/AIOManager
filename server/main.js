@@ -38,7 +38,7 @@ import { isDashboardSpaPath } from './admin/paths.js'
 import { corsDelegator } from './lib/cors-policy.js'
 import { publicConfig } from './lib/public-config.js'
 import { reapplyStoredLiveSettings } from './lib/settings-boot.js'
-import { applyAccountStateErrorMapping } from './admin/account-state.js'
+import { serverErrorHandler } from './lib/error-reply.js'
 import { registerAccountNoticeRoutes } from './admin/account-actions.js'
 
 import { traceClientBatch, traceEnabled } from './utils/trace.js'
@@ -49,6 +49,8 @@ const fastify = Fastify({
     bodyLimit: parseInt(process.env.MAX_SYNC_PAYLOAD_SIZE || '104857600'),
     trustProxy: fastifyTrustProxy()
 })
+
+fastify.setErrorHandler(serverErrorHandler)
 
 ensureDataDirectory(fastify)
 initializeEncryptionKeys(fastify)
@@ -191,30 +193,6 @@ if (fs.existsSync(distPath)) {
         return reply.sendFile('index.html')
     })
 
-    fastify.setErrorHandler((error, request, reply) => {
-        // Fixed account-state replies (disabled/deleted/unavailable/replica) map in one
-        // place for every gated surface; see server/admin/account-state.js.
-        const stateBody = applyAccountStateErrorMapping(error, reply)
-        if (stateBody) {
-            reply.header('Cache-Control', 'no-store')
-            return stateBody
-        }
-        const status = error.statusCode || error.status || 500
-        // A client killing its own connection (tab close, navigation, an
-        // extension aborting in-flight requests) surfaces here as stream
-        // teardown. Normal churn, not a server fault: log it quietly.
-        const clientAborted = error.code === 'FST_ERR_REQUEST_ABORTED'
-            || error.code === 'ERR_STREAM_PREMATURE_CLOSE'
-            || request.raw.socket?.destroyed === true
-        if (clientAborted) {
-            request.log.info(`Client aborted ${request.method}:${request.routeOptions?.url || request.url.split('?')[0]}`)
-        } else if (status >= 500) {
-            request.log.error({ err: error }, `Unhandled error on ${request.method}:${request.routeOptions?.url || request.url.split('?')[0]}`)
-        }
-        if (status >= 400) reply.header('Cache-Control', 'no-store')
-        reply.status(status >= 400 && status < 600 ? status : 500)
-        return { error: error.message || 'Internal Server Error' }
-    })
 }
 
 fastify.get('/api/health', {
