@@ -104,14 +104,17 @@ export function Toaster() {
                 </button>
               </div>
               {toast.action && Number.isFinite(toast.duration ?? DEFAULT_TOAST_DURATION) && (
-                <motion.div
-                  key={toast.createdAt}
-                  aria-hidden="true"
-                  className="absolute inset-x-0 bottom-0 h-0.5 origin-left bg-primary/60"
-                  initial={{ scaleX: 1 }}
-                  animate={{ scaleX: 0 }}
-                  transition={{ duration: (toast.duration ?? DEFAULT_TOAST_DURATION) / 1000, ease: 'linear' }}
-                />
+                <div aria-hidden="true" className="-mt-1.5 pb-3.5 pl-[68px] pr-4">
+                  <div className="h-1 overflow-hidden rounded-full bg-foreground/[0.07]">
+                    <motion.div
+                      key={toast.createdAt}
+                      className="h-full origin-left rounded-full bg-foreground/30"
+                      initial={{ scaleX: 1 }}
+                      animate={{ scaleX: 0 }}
+                      transition={{ duration: (toast.duration ?? DEFAULT_TOAST_DURATION) / 1000, ease: 'linear' }}
+                    />
+                  </div>
+                </div>
               )}
             </motion.div>
           )
