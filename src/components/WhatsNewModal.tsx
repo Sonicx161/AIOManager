@@ -6,6 +6,7 @@ import { useEffect, useState, useCallback } from 'react'
 import pkg from '../../package.json'
 import { useUIStore } from '@/store/uiStore'
 import { useSyncStore } from '@/store/syncStore'
+import { openWhenNoTextEntry } from '@/lib/text-entry-focus'
 
 interface Release {
     tag_name: string
@@ -107,11 +108,9 @@ export function WhatsNewModal({ triggerOpen, onOpenChange }: {
         // The operator console is not the app; release notes wait for the next app visit.
         if (window.location.pathname.startsWith('/dashboard')) return
         if (lastSeenVersion !== currentVersion) {
-            // Small delay so the app finishes mounting first
-            const timer = setTimeout(() => {
-                setOpen(true)
-            }, 1500)
-            return () => clearTimeout(timer)
+            // Small delay so the app finishes mounting first, and the dialog never pulls
+            // focus out of a field the user is typing in.
+            return openWhenNoTextEntry(() => setOpen(true), 1500)
         }
     }, [currentVersion, setOpen, lastSeenVersion])
 
