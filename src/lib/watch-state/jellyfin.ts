@@ -6,6 +6,7 @@ import type { JellyfinSecret } from '../jellyfin/connection-data.ts'
 import type { JellyfinItem, JellyfinProduct, JellyfinServerDetails, JellyfinUser, JellyfinUserDataUpdate } from '../jellyfin/types.ts'
 import { hasSavedWatchState, sameWatchTitle, sourceTime, watchFingerprint } from './records.ts'
 import type { MigrationProgress, MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
+import { GlobalMatchFailure } from './failures.ts'
 import {
     episodeWatchIdentities,
     looksLikeFacadeStub,
@@ -366,7 +367,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         if (record.identities.length === 0) return []
         const index = await ensureIndex(resolveSignal)
         if (!index.complete) {
-            throw new Error('The destination library could not be read completely, so matches cannot be verified safely. Try the preview again.')
+            throw new GlobalMatchFailure('The destination library could not be read completely, so matches cannot be verified safely. Try the preview again.')
         }
         const matches = new Map<string, JellyfinItem>()
         for (const identity of record.identities) {
@@ -401,9 +402,26 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
             } else {
                 const seriesId = packedFacadeSeriesId(identity)
                 if (seriesId === null || parsed.season === undefined || parsed.episode === undefined) continue
-                const seriesProviders = await loadParent(seriesId, resolveSignal)
-                if (seriesProviders === undefined) continue
-                const listing = await listEpisodeChildren(seriesId, resolveSignal)
+                let listing: { episodes: JellyfinItem[]; complete: boolean }
+                try {
+                    await loadParent(seriesId, resolveSignal)
+                    listing = await listEpisodeChildren(seriesId, resolveSignal)
+                } catch (error) {
+                    if (!(error instanceof JellyfinError)) throw error
+                    const status = error.status ?? 0
+                    if (![400, 404, 405, 501].includes(status)) throw error
+                    const leafId = packedFacadeItemId(identity)
+                    if (leafId === null) throw error
+                    listing = {
+                        episodes: await gatedBinding.client.queryUserItems(
+                            gatedBinding.secret.accessToken,
+                            gatedBinding.secret.userId,
+                            { ids: [leafId], includeItemTypes: 'Episode' },
+                            resolveSignal
+                        ),
+                        complete: true,
+                    }
+                }
                 if (!listing.complete) continue
                 for (const candidate of listing.episodes) {
                     if (candidate.ParentIndexNumber !== parsed.season || candidate.IndexNumber !== parsed.episode) continue

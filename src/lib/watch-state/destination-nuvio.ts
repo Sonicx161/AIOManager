@@ -26,6 +26,8 @@
 //     carry them.
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { canonicalWatchIdentity, hasSavedWatchState, sameWatchTitle, sourceTime, watchFingerprint } from './records.ts'
+import { GlobalMatchFailure } from './failures.ts'
+import { NUVIO_SCOPE_MATCH_MESSAGES } from './error-messages.ts'
 import { assertFreshChecks, StaleChecksError } from './prewrite-fresh.ts'
 
 export type NuvioWatchRpcName = 'sync_pull_watched_items' | 'sync_pull_watch_progress' | 'sync_push_watched_items' | 'sync_push_watch_progress'
@@ -232,6 +234,16 @@ async function pullProgress(profileIndex: number, rpc: NuvioWatchDestinationTran
     return { rows: byIdentity, complete }
 }
 
+function nuvioPullFailureMessage(error: unknown): string {
+    if (error instanceof Error && error.message.startsWith('The Nuvio profile could not be read')) return error.message
+    const status = (error as { status?: unknown } | null)?.status
+    const http = typeof status === 'number' && Number.isInteger(status) ? status
+        : Number(/HTTP (\d{3})/.exec(error instanceof Error ? error.message : '')?.[1] ?? 0)
+    return http > 0
+        ? `The Nuvio profile could not be read (HTTP ${http}); matches cannot be verified safely. Test the connection, then preview again.`
+        : 'The Nuvio profile could not be read; matches cannot be verified safely. Test the connection, then preview again.'
+}
+
 async function pullAll(profileIndex: number, rpc: NuvioWatchDestinationTransport['rpc'], signal: AbortSignal): Promise<NuvioPull> {
     const [history, progress] = await Promise.all([
         pullWatched(profileIndex, rpc, signal),
@@ -324,7 +336,13 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
             const built = (async () => {
                 const transport = await options.open(signal)
                 signal.throwIfAborted()
-                return pullAll(transport.profileIndex, transport.rpc, signal)
+                try {
+                    return await pullAll(transport.profileIndex, transport.rpc, signal)
+                } catch (error) {
+                    signal.throwIfAborted()
+                    if (error instanceof Error && NUVIO_SCOPE_MATCH_MESSAGES.includes(error.message)) throw error
+                    throw new GlobalMatchFailure(nuvioPullFailureMessage(error))
+                }
             })()
             previewPull = built
             built.catch(() => {
@@ -356,7 +374,7 @@ export function createNuvioWatchDestination(options: NuvioWatchDestinationOption
             matches.push(await mergedRecord(scope, target, history?.row ?? null, progress?.row ?? null))
         }
         if (matches.length > 0) return matches
-        if (!pull.complete) throw new Error('The Nuvio profile could not be read completely, so matches cannot be verified safely. Try the preview again.')
+        if (!pull.complete) throw new GlobalMatchFailure('The Nuvio profile could not be read completely, so matches cannot be verified safely. Try the preview again.')
         return [await placeholderRecord(scope, targets[0], record)]
     }
 

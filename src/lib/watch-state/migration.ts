@@ -1,15 +1,12 @@
 import { hasSavedWatchState, matchesWatchPatch, sameWatchTitle, undatedRowCount } from './records.ts'
 import { migrationFailure, migrationFailureMessage, WatchMigrationError } from './failures.ts'
 import { ratingFavoriteCounts } from './result-counts.ts'
+import { globalMatchAbortError, isGlobalMatchFailure, matchFailureReason, repeatedMatchFailureMessage } from './error-messages.ts'
 import { StaleChecksError } from './prewrite-fresh.ts'
 import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, MigrationWriteResult, WatchMigrationPlan, WatchStateDestination, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
 
-function isTransientMatchFailure(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return false
-    const candidate = error as { kind?: unknown; status?: unknown }
-    return candidate.kind === 'server' || candidate.kind === 'network' || candidate.kind === 'timeout'
-        || candidate.status === 429 || candidate.status === 503
-}
+const REPEATED_MATCH_FAILURE_LIMIT = 3
+const REPEATED_CONSECUTIVE_FAILURE_LIMIT = 10
 
 // A row whose checks went stale was never written, so it restarts instead of failing.
 const STALE_APPLY_RETRIES = 2
@@ -24,6 +21,10 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
     const rows: MigrationRow[] = new Array(source.records.length)
     const controller = new AbortController()
     const matchingSignal = AbortSignal.any([signal, controller.signal])
+    const matchFailureCounts = new Map<string, number>()
+    let respondedTitles = 0
+    let repeatedReason: string | null = null
+    let repeatedStreak = 0
     let next = 0
     let completed = 0
     const worker = async () => {
@@ -97,18 +98,27 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
             try {
                 matches = await destination.resolve(record, matchingSignal)
             } catch (error) {
-                // A facade can rate-limit or briefly lose upstream metadata while
-                // matching a large source. Keep the preview useful and retryable:
-                // one bad match must not discard every row already resolved.
-                if (isTransientMatchFailure(error)) {
-                    row.status = 'skipped'
-                    row.reason = 'The destination temporarily limited matching for this title. Preview again to retry it.'
-                    finish()
-                    continue
+                matchingSignal.throwIfAborted()
+                if (isGlobalMatchFailure(error)) throw globalMatchAbortError(error)
+                const reason = matchFailureReason(error)
+                const count = (matchFailureCounts.get(reason) ?? 0) + 1
+                matchFailureCounts.set(reason, count)
+                if (repeatedReason === reason) repeatedStreak++
+                else {
+                    repeatedReason = reason
+                    repeatedStreak = 1
                 }
-                throw error
+                const allFailedSoFar = respondedTitles === 0 && count >= REPEATED_MATCH_FAILURE_LIMIT
+                if (allFailedSoFar || repeatedStreak >= REPEATED_CONSECUTIVE_FAILURE_LIMIT) throw new Error(repeatedMatchFailureMessage(error))
+                row.status = 'skipped'
+                row.reason = reason
+                finish()
+                continue
             }
             matchingSignal.throwIfAborted()
+            respondedTitles++
+            repeatedReason = null
+            repeatedStreak = 0
             const verified = matches.filter(item => sameWatchTitle(record, item))
             if (verified.length !== 1 || matches.length !== 1) {
                 row.status = matches.length ? 'conflict' : 'skipped'

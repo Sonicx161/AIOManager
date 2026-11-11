@@ -19,7 +19,7 @@ import { createWatchMigrationDestination } from '@/lib/watch-state/destinations'
 import { createWatchMigrationSource, migrationSourceLabel, watchMigrationSources } from '@/lib/watch-state/sources'
 import { watchConnectionLabel } from './watch-migration-labels'
 import { executeWatchMigration, migrationReport, planWatchMigration } from '@/lib/watch-state/migration'
-import { migrationFailureMessage, WatchMigrationError } from '@/lib/watch-state/failures'
+import { migrationErrorMessage } from '@/lib/watch-state/error-messages'
 import { isStaleKeptResult } from '@/lib/watch-state/result-counts'
 import { undatedRowCount, watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
 import type { MigrationResult, MigrationRow, WatchMigrationPlan, WatchStateDestination, WatchStateSource } from '@/lib/watch-state/types'
@@ -120,20 +120,6 @@ function readableNote(note: string): string {
     if (note === 'Watched marks may be forwarded to the watch-state sinks this AIOStreams server reports to.') return 'AIOStreams may also send these updates to its linked tracking services.'
     if (note === 'Original watch dates cannot be preserved by this destination.') return 'The source date won’t be copied. This server may show the import time instead.'
     return note.replaceAll('watched flags', 'watched titles').replaceAll('resume points', 'saved playback positions').replaceAll('play counts', 'number of plays')
-}
-
-function migrationErrorMessage(error: unknown, fallback: string): string {
-    if (error instanceof WatchMigrationError) return migrationFailureMessage(error.failure)
-    const messages = [
-        'The destination library could not be read completely, so matches cannot be verified safely. Try the preview again.',
-        'The destination sign-in expired. Reconnect and preview again.',
-        'The destination changed. Preview again before importing.',
-        'The source user or profile changed. Preview again before importing.',
-        'The write could not be verified. Preview again before continuing.',
-    ]
-    if (error instanceof Error && messages.includes(error.message)) return error.message
-    const code = error instanceof Error ? /\bHTTP (\d{3})\b|\((\d{3})\)/.exec(error.message) : null
-    return code ? `${fallback} (the server answered ${code[1] ?? code[2]})` : fallback
 }
 
 export function WatchMigrationDialog({ open, onOpenChange, accountId, connection }: Props) {

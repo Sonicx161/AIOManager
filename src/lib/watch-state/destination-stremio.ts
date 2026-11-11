@@ -26,7 +26,7 @@ import { canonicalWatchIdentity, hasSavedWatchState, sourceTime, watchFingerprin
 import { skippedNoIdRowsNote } from './source-stremio.ts'
 import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
 import { isLiveLibraryRow } from '../stremio-liveness.ts'
-import { migrationStage, WatchMigrationError } from './failures.ts'
+import { migrationStage, GlobalMatchFailure, WatchMigrationError } from './failures.ts'
 import { assertFreshChecks } from './prewrite-fresh.ts'
 
 export interface StremioDestinationVideo {
@@ -366,9 +366,12 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
                 signal.throwIfAborted()
                 const result = await request({ collection: 'libraryItem', all: true }, signal)
                 signal.throwIfAborted()
-                const entries = libraryEntries(result)
+                let entries: unknown[]
+                try { entries = libraryEntries(result) } catch (error) {
+                    throw new GlobalMatchFailure(error instanceof Error && error.message ? error.message : 'The destination library could not be read.')
+                }
                 if (entries.length > MAX_LIBRARY_ITEMS) {
-                    throw new Error(`The destination library exceeded ${MAX_LIBRARY_ITEMS.toLocaleString()} items, so matches cannot be verified safely.`)
+                    throw new GlobalMatchFailure(`The destination library exceeded ${MAX_LIBRARY_ITEMS.toLocaleString()} items, so matches cannot be verified safely.`)
                 }
                 const rows = new Map<string, DestinationRow>()
                 let skippedNoId = 0
@@ -378,7 +381,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
                         skippedNoId++
                         continue
                     }
-                    if (rows.has(row.id)) throw new Error('Stremio returned duplicate library rows; refusing to guess.')
+                    if (rows.has(row.id)) throw new GlobalMatchFailure('Stremio returned duplicate library rows; refusing to guess.')
                     rows.set(row.id, row)
                 }
                 // Surfaced through the plan notes: the destination capabilities array is

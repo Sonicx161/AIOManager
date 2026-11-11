@@ -12,6 +12,13 @@ export class WatchMigrationError extends Error {
     }
 }
 
+export class GlobalMatchFailure extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'GlobalMatchFailure'
+    }
+}
+
 export function migrationFailure(error: unknown, stage: MigrationFailure['stage'] = 'write'): MigrationFailure {
     if (error instanceof WatchMigrationError) return { ...error.failure }
     const name = error instanceof Error ? error.name : ''
