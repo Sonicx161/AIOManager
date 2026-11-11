@@ -1026,6 +1026,18 @@ export async function initializeDatabase(fastify) {
         delete_token: `ALTER TABLE account_addon_actions ADD COLUMN delete_token TEXT`,
     }, ['sync_user', 'account_id', 'url_key'])
 
+    // Shared Cinemeta metadata cache (public catalog data, no user columns); keep DDL in sync with migrations/008_cinemeta_meta_cache.sql.
+    await ensureTable('cinemeta_meta_cache', `CREATE TABLE IF NOT EXISTS cinemeta_meta_cache (
+            imdb_id TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            payload ${db.type === 'postgres' ? 'BYTEA' : 'BLOB'},
+            fetched_at BIGINT NOT NULL,
+            PRIMARY KEY (imdb_id, media_type)
+        );`, [
+        `CREATE INDEX IF NOT EXISTS idx_cinemeta_meta_cache_fetched ON cinemeta_meta_cache (fetched_at)`,
+    ], ['imdb_id', 'media_type', 'status', 'payload', 'fetched_at'], null, ['imdb_id', 'media_type'])
+
     // Remembered-device credentials; keep DDL in sync with migrations/003_device_credentials.sql.
     const deviceCredentialsDdl = db.type === 'postgres'
         ? `CREATE TABLE IF NOT EXISTS device_credentials (

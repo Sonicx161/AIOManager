@@ -1,11 +1,13 @@
 import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
 import { registerCacheLayer } from '../lib/ops-metrics.js'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import { AIOSTREAMS_PROXY_BODY_LIMIT, AIOSTREAMS_USER_API_THROTTLE_MS, DATASTORE_META_BATCH_CONCURRENCY, DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS, DATASTORE_META_BATCH_MAX, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, STREMIO_API, VERSION } from '../config.js'
+import { AIOSTREAMS_PROXY_BODY_LIMIT, AIOSTREAMS_USER_API_THROTTLE_MS, CINEMETA_CACHE_MAX_ROWS, DATASTORE_META_BATCH_CONCURRENCY, DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS, DATASTORE_META_BATCH_MAX, IMAGE_CACHE_MAX_BYTES, IMAGE_CACHE_MAX_ITEM_BYTES, IMAGE_CACHE_TTL_MS, IMAGE_PROXY_QUEUE_LIMIT, IMAGE_PROXY_THROTTLE_MS, IMAGE_PROXY_TIMEOUT_MS, STREMIO_API, VERSION, isReadOnlyReplica } from '../config.js'
 import { requireProxyAuth, verifyAuth } from '../auth.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
 import { isSafeUrl, isSafeUrlResolved } from '../utils/ssrf.js'
-import { guardedWebFetch } from '../utils/safe-fetch.js'
+import { guardedWebFetch, safeFetchWithRedirects } from '../utils/safe-fetch.js'
+import db from '../db.js'
+import { createCinemetaCache, createCinemetaStore } from '../lib/cinemeta-cache.js'
 import { deriveAddonName, maskContext, truncateUrl } from '../utils/log-helpers.js'
 import { trace, keyTag, traceEnabled, hostOf } from '../utils/trace.js'
 import { getAddonUrlKey } from '../utils/addon-url.js'
@@ -1169,97 +1171,60 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
     })
 
     // Batch Cinemeta meta lookups for the activity/replay feeds. One POST replaces up
-    // to CINEMETA_META_BATCH_MAX per-row browser fetches to the Cinemeta CDN; results
-    // are the same { meta } documents the CDN serves, so the client-side mapping is
-    // unchanged. Ids and media types are validated, so no caller-controlled URL ever
-    // reaches the fetch below (SSRF surface stays empty by construction).
+    // to CINEMETA_META_BATCH_MAX per-row browser fetches to the Cinemeta CDN. Lookups
+    // answer from memory, then the shared durable table, and only the remainder goes
+    // upstream. Ids and media types are validated and the upstream URL is built from
+    // them alone, so no caller-controlled URL reaches the fetch; the cache holds public
+    // catalog data keyed by IMDb id and is never written from client input.
     const CINEMETA_META_BASE = (process.env.CINEMETA_META_BASE || 'https://cinemeta-live.strem.io').replace(/\/+$/, '')
     const CINEMETA_META_BATCH_MAX = 100
-    const CINEMETA_META_CONCURRENCY = 8
     const CINEMETA_META_TIMEOUT_MS = 8000
-    const CINEMETA_META_CACHE_MAX = 2000
-    const CINEMETA_META_CACHE_TTL_MS = 24 * 60 * 60 * 1000
-    const CINEMETA_META_NEGATIVE_TTL_MS = 5 * 60 * 1000
     // Every cache miss shares one instance-wide upstream lane, and each owner may run
     // only a few batches at once, so concurrent batches cannot multiply upstream fetches.
     const CINEMETA_UPSTREAM_CONCURRENCY = 16
     const CINEMETA_UPSTREAM_QUEUE_WAIT_MS = 15000
     const CINEMETA_BATCHES_PER_OWNER = 4
     const cinemetaOwnerBatches = new Map()
-    const cinemetaMetaCache = new Map()
-    const cinemetaMetaNegative = new Map()
-    const cinemetaMetaInflight = new Map()
 
-    const cinemetaCacheStats = { hits: 0, misses: 0 }
-    registerCacheLayer('cinemeta', { label: 'Cinemeta meta cache', stats: () => ({ ...cinemetaCacheStats, entries: cinemetaMetaCache.size, negative: cinemetaMetaNegative.size, inflight: cinemetaMetaInflight.size }) })
+    // Foreground misses and background stale refreshes both come through here, so both
+    // share the one global lane. A lane timeout or throw is a transient failure (status 0)
+    // and is never stored as a negative entry.
+    const fetchCinemetaUpstream = (mediaType, imdbId) => enqueueProxyRequest(`${CINEMETA_META_BASE}/meta/${mediaType}/${imdbId}.json`, () => fetchCinemetaUpstreamNow(mediaType, imdbId), {
+        lane: 'cinemeta',
+        concurrency: CINEMETA_UPSTREAM_CONCURRENCY,
+        throttleMs: 0,
+        deadline: Date.now() + CINEMETA_UPSTREAM_QUEUE_WAIT_MS,
+    }).catch(() => ({ status: 0, meta: null }))
 
-    const cinemetaCacheGet = (key) => {
-        const hit = cinemetaMetaCache.get(key)
-        if (!hit) return null
-        if (Date.now() - hit.ts >= CINEMETA_META_CACHE_TTL_MS) { cinemetaMetaCache.delete(key); return null }
-        cinemetaMetaCache.delete(key)
-        cinemetaMetaCache.set(key, hit)
-        return hit.meta
-    }
-
-    const cinemetaNegativeGet = (key) => {
-        const hit = cinemetaMetaNegative.get(key)
-        if (!hit) return null
-        if (Date.now() - hit.ts >= CINEMETA_META_NEGATIVE_TTL_MS) { cinemetaMetaNegative.delete(key); return null }
-        return true
-    }
-
-    const cinemetaBoundedSet = (map, key, value, max) => {
-        map.delete(key)
-        map.set(key, value)
-        while (map.size > max) {
-            const oldest = map.keys().next()
-            if (oldest.done) break
-            map.delete(oldest.value)
+    const fetchCinemetaUpstreamNow = async (mediaType, imdbId) => {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), CINEMETA_META_TIMEOUT_MS)
+        try {
+            const res = await safeFetchWithRedirects(`${CINEMETA_META_BASE}/meta/${mediaType}/${imdbId}.json`, {
+                signal: controller.signal,
+                headers: { Accept: 'application/json' },
+                method: 'GET',
+            })
+            if (!res) return { status: 0, meta: null }
+            if (res.status === 404) return { status: 404, meta: null }
+            if (!res.ok) return { status: res.status, meta: null }
+            const data = await res.json().catch(() => null)
+            const meta = data && typeof data === 'object' ? data.meta : null
+            if (!meta || typeof meta !== 'object') return { status: 502, meta: null }
+            return { status: 200, meta }
+        } catch {
+            return { status: 0, meta: null }
+        } finally {
+            clearTimeout(timeout)
         }
     }
 
-    const fetchCinemetaMetaEntry = (mediaType, imdbId) => {
-        const key = `${mediaType}:${imdbId}`
-        const cached = cinemetaCacheGet(key)
-        if (cached) { cinemetaCacheStats.hits++; return Promise.resolve({ status: 200, meta: cached }) }
-        if (cinemetaNegativeGet(key)) { cinemetaCacheStats.hits++; return Promise.resolve({ status: 404, meta: null }) }
-        let pending = cinemetaMetaInflight.get(key)
-        if (pending) return pending
-        cinemetaCacheStats.misses++
-        const url = `${CINEMETA_META_BASE}/meta/${mediaType}/${imdbId}.json`
-        pending = enqueueProxyRequest(url, async () => {
-            const controller = new AbortController()
-            const timeout = setTimeout(() => controller.abort(), CINEMETA_META_TIMEOUT_MS)
-            try {
-                const res = await fetch(url, {
-                    signal: controller.signal,
-                    headers: { Accept: 'application/json' },
-                })
-                if (res.status === 404) {
-                    cinemetaBoundedSet(cinemetaMetaNegative, key, { ts: Date.now() }, CINEMETA_META_CACHE_MAX)
-                    return { status: 404, meta: null }
-                }
-                if (!res.ok) return { status: res.status, meta: null }
-                const data = await res.json().catch(() => null)
-                const meta = data && typeof data === 'object' ? data.meta : null
-                if (!meta || typeof meta !== 'object') return { status: 502, meta: null }
-                cinemetaBoundedSet(cinemetaMetaCache, key, { meta, ts: Date.now() }, CINEMETA_META_CACHE_MAX)
-                return { status: 200, meta }
-            } catch {
-                return { status: 0, meta: null }
-            } finally {
-                clearTimeout(timeout)
-            }
-        }, {
-            lane: 'cinemeta',
-            concurrency: CINEMETA_UPSTREAM_CONCURRENCY,
-            throttleMs: 0,
-            deadline: Date.now() + CINEMETA_UPSTREAM_QUEUE_WAIT_MS,
-        }).catch(() => ({ status: 0, meta: null })).finally(() => cinemetaMetaInflight.delete(key))
-        cinemetaMetaInflight.set(key, pending)
-        return pending
-    }
+    const cinemetaCache = createCinemetaCache({
+        store: createCinemetaStore({ database: db, maxRows: CINEMETA_CACHE_MAX_ROWS, readOnly: isReadOnlyReplica, log: fastify.log }),
+        fetchUpstream: fetchCinemetaUpstream,
+        readOnly: isReadOnlyReplica,
+    })
+    registerCacheLayer('cinemeta', { label: 'Cinemeta meta cache', stats: () => cinemetaCache.stats() })
 
     fastify.post('/api/cinemeta-meta-batch', {
         bodyLimit: 64 * 1024,
@@ -1316,27 +1281,18 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             seen.add(key)
             entries.push(item)
         }
-        const results = new Array(entries.length).fill(null)
-        let nextIndex = 0
         const requestAbort = new AbortController()
         const onRequestAborted = () => requestAbort.abort()
         if (request.raw.aborted) requestAbort.abort()
         else request.raw.once('aborted', onRequestAborted)
-        const workers = Array.from({ length: Math.min(CINEMETA_META_CONCURRENCY, entries.length) }, async () => {
-            while (nextIndex < entries.length) {
-                if (requestAbort.signal.aborted) return
-                const index = nextIndex++
-                const { id, type } = entries[index]
-                results[index] = await fetchCinemetaMetaEntry(type, id)
-            }
-        })
+        let results
         try {
-            await Promise.all(workers)
+            results = await cinemetaCache.resolve(entries, { signal: requestAbort.signal })
         } finally {
             request.raw.removeListener('aborted', onRequestAborted)
         }
         const metas = entries.map((entry, index) => {
-            const result = results[index] || { status: 0, meta: null }
+            const result = results[index]
             return { id: entry.id, type: entry.type, status: result.status, ...(result.meta !== null ? { meta: result.meta } : {}) }
         })
         return { metas }

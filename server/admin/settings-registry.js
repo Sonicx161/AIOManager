@@ -82,6 +82,7 @@ export const LABELS = {
     IMAGE_CACHE_TTL_MS: 'Poster cache lifetime',
     IMAGE_CACHE_MAX_BYTES: 'Poster cache size',
     IMAGE_CACHE_MAX_ITEM_BYTES: 'Largest cached poster',
+    CINEMETA_CACHE_MAX_ROWS: 'Cinemeta cache size',
     DATASTORE_META_BATCH_MAX: 'Library check batch size',
     DATASTORE_META_BATCH_CONCURRENCY: 'Library check concurrency',
     DATASTORE_META_BATCH_ENTRY_TIMEOUT_MS: 'Library check timeout',
