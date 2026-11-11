@@ -248,7 +248,8 @@ export function EpisodeDetailPage({
         const apply = () => {
             frame = 0
             const f = heroCollapseState(scroller.scrollTop, geo)
-            bar.style.setProperty('--bar-bg', String(f.bg))
+            // Episode header text sits below the still, so go solid with the title handoff, not the hero bottom.
+            bar.style.setProperty('--bar-bg', String(Math.max(f.bg, 1 - f.heroTitleOpacity)))
             bar.style.setProperty('--bar-title', String(f.barTitleOpacity))
             const sticky = episodeStickyRef.current
             const joined = !!sticky && sticky.getBoundingClientRect().top - bar.getBoundingClientRect().bottom < 1
