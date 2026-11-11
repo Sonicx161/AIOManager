@@ -8,6 +8,7 @@
 // dated watch, a percent, or a completed show.
 
 import type { LibraryItem, SavedEpisodesSummary, SavedSeasonSummary, SavedEpisodeRange } from '../types/activity.ts'
+import { isPlausibleWatchDateString } from './watch-time.ts'
 
 const SERIES_TYPES = new Set(['series', 'anime', 'episode'])
 
@@ -27,7 +28,7 @@ export function isSavedOnlySeriesRow(item: LibraryItem): boolean {
     if (s.video_id && s.video_id.trim() !== '') return false
     if ((s.timeOffset ?? 0) > 0) return false
     if ((s.timeWatched ?? 0) > 0 || (s.overallTimeWatched ?? 0) > 0) return false
-    if (typeof s.lastWatched === 'string' && s.lastWatched.trim() !== '') return false
+    if (isPlausibleWatchDateString(s.lastWatched)) return false
     return (s.timesWatched ?? 0) > 0 || (s.flaggedWatched ?? 0) > 0
 }
 
@@ -44,7 +45,7 @@ export function isFlaggedOnlyMovieRow(item: LibraryItem): boolean {
     if ((s.timesWatched ?? 0) > 0) return false
     if ((s.timeOffset ?? 0) > 0) return false
     if ((s.timeWatched ?? 0) > 0 || (s.overallTimeWatched ?? 0) > 0) return false
-    if (typeof s.lastWatched === 'string' && s.lastWatched.trim() !== '') return false
+    if (isPlausibleWatchDateString(s.lastWatched)) return false
     return true
 }
 

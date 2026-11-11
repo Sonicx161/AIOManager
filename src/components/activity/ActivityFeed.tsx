@@ -12,6 +12,7 @@ import { activityNowStatuses } from '@/lib/jellyfin/activity'
 import { buildRuntimeIndex, msToHours } from '@/lib/watch-hours'
 import { activityHeaderHoursCached } from '@/lib/activity-hours'
 import { localDayToken } from '@/lib/local-time-token'
+import { MIN_PLAUSIBLE_WATCH_MS } from '@/lib/watch-time'
 import {
     buildFeedRows,
     buildItemOrder,
@@ -253,6 +254,7 @@ export const ActivityFeed = memo(function ActivityFeed({
     const formatDateHeader = useCallback((dateStr: string) => {
         if (dateStr === 'Unknown Date' || dateStr === SAVED_GROUP_DATE) return dateStr
         const date = new Date(dateStr)
+        if (!Number.isFinite(date.getTime()) || date.getTime() < MIN_PLAUSIBLE_WATCH_MS) return dateStr
         if (isToday(date)) return 'Today'
         if (isYesterday(date)) return 'Yesterday'
         return format(date, 'MMMM d, yyyy')

@@ -2,6 +2,7 @@ import type { ActivityItem } from '../../types/activity'
 import type { ActivityNowStatus } from '../../lib/jellyfin/activity'
 import { localTimeZoneKey } from '../../lib/local-time-token.ts'
 import { createWorkspaceResetSubscription } from '../../lib/workspace-reset-subscription.ts'
+import { isPlausibleWatchMs } from '../../lib/watch-time.ts'
 
 // Pure row-model helpers for the ActivityFeed long-history windowing.
 // The component layers @tanstack/react-virtual on top of this model.
@@ -70,9 +71,15 @@ function nowTier(item: ActivityItem, nowStatuses?: NowStatusMap): number {
     return status === 'playing' ? 0 : status === 'recent' ? 1 : 2
 }
 
-function dayStart(timestamp: ActivityItem['timestamp']): number {
+/** The row's parsed watch date, or null when it is invalid or a pre-1995 placeholder. */
+function plausibleDay(timestamp: ActivityItem['timestamp']): Date | null {
     const d = new Date(timestamp)
-    return isNaN(d.getTime()) ? -Infinity : new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+    return isPlausibleWatchMs(d.getTime()) ? d : null
+}
+
+function dayStart(timestamp: ActivityItem['timestamp']): number {
+    const d = plausibleDay(timestamp)
+    return d ? new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() : -Infinity
 }
 
 function compareNewestFirst(a: ActivityItem, b: ActivityItem, nowStatuses?: NowStatusMap): number {
@@ -197,13 +204,6 @@ export function sortFeedItems(items: ActivityItem[], nowStatuses?: NowStatusMap)
     return sorted
 }
 
-function toDateId(dateStr: string): string {
-    if (dateStr === 'Unknown Date' || dateStr === SAVED_GROUP_DATE) return ''
-    const d = new Date(dateStr)
-    if (isNaN(d.getTime())) return ''
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
 /** Same grouping semantics the feed always had: newest-first, one bucket per calendar day, invalid timestamps last; undated saved state gets its own explicit trailing bucket instead of borrowing the observation-time day. */
 export function groupByDate(items: ActivityItem[], nowStatuses?: NowStatusMap): DateGroup[] {
     return groupSortedByDate(sortFeedItems(items, nowStatuses), localTimeZoneKey())
@@ -213,7 +213,7 @@ export function groupByDate(items: ActivityItem[], nowStatuses?: NowStatusMap): 
 // Calendar-day strings are pure per (item, zone); the overlay republishes the
 // feed with replaced copies, so a WeakMap keeps grouping O(n) cheap lookups.
 // A runtime zone switch invalidates every day key, so the zone rides the entry.
-interface DayKeyEntry { zone: string; key: string }
+interface DayKeyEntry { zone: string; key: string; dateId: string }
 let dayKeyCache = new WeakMap<ActivityItem, DayKeyEntry>()
 let fullDayCountsCache = new WeakMap<ActivityItem[], { zone: string; counts: Map<string, number> }>()
 
@@ -222,18 +222,21 @@ let fullDayCountsCache = new WeakMap<ActivityItem[], { zone: string; counts: Map
 // map is reusable only while the zone holds.
 let lastDayCounts: { items: ActivityItem[]; counts: Map<string, number>; zone: string } | null = null
 
-function dayKeyOf(item: ActivityItem, zone: string): string {
+// One parse feeds both the group key and the anchor id; WebKit reparses year 0 keys as 1900+.
+function dayKeyOf(item: ActivityItem, zone: string): DayKeyEntry {
     const cached = dayKeyCache.get(item)
-    if (cached && cached.zone === zone) return cached.key
-    let key: string
+    if (cached && cached.zone === zone) return cached
+    let entry: DayKeyEntry
     if (item.importedSavedState === true) {
-        key = SAVED_GROUP_DATE
+        entry = { zone, key: SAVED_GROUP_DATE, dateId: '' }
     } else {
-        const date = new Date(item.timestamp)
-        key = isNaN(date.getTime()) ? 'Unknown Date' : date.toDateString()
+        const date = plausibleDay(item.timestamp)
+        entry = date
+            ? { zone, key: date.toDateString(), dateId: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` }
+            : { zone, key: 'Unknown Date', dateId: '' }
     }
-    dayKeyCache.set(item, { zone, key })
-    return key
+    dayKeyCache.set(item, entry)
+    return entry
 }
 
 // Day-count equality check for the reuse path: copies that keep (id,
@@ -255,17 +258,19 @@ function dayCountsReusable(items: ActivityItem[], prev: ActivityItem[]): boolean
 function groupSortedByDate(sorted: ActivityItem[], zone: string): DateGroup[] {
     const dates: string[] = []
     const itemsByDate: Record<string, ActivityItem[]> = {}
+    const dateIdByKey = new Map<string, string>()
 
     for (const item of sorted) {
-        const dateStr = dayKeyOf(item, zone)
+        const { key: dateStr, dateId } = dayKeyOf(item, zone)
         if (!itemsByDate[dateStr]) {
             itemsByDate[dateStr] = []
             dates.push(dateStr)
+            dateIdByKey.set(dateStr, dateId)
         }
         itemsByDate[dateStr].push(item)
     }
 
-    return dates.map(date => ({ date, dateId: toDateId(date), items: itemsByDate[date], watchCount: itemsByDate[date].length }))
+    return dates.map(date => ({ date, dateId: dateIdByKey.get(date) ?? '', items: itemsByDate[date], watchCount: itemsByDate[date].length }))
 }
 
 /**

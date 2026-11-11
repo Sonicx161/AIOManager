@@ -2,6 +2,8 @@ import { ActivityItem } from '@/types/activity'
 import { ReplayData, RankedTitle, GenreStat, MonthStat, Milestone, HourlyDistribution, DailyDistribution, YearOverYearDelta } from '@/types/ReplayTypes'
 import { getCinemetaPosterUrl } from '@/lib/cinemeta-utils'
 import { cumulativeWatchKey } from '@/lib/activity-utils'
+import { isDatedWatchTimestamp, isPlausibleWatchMs } from './watch-time.ts'
+import { partitionReplayHistory } from './replay-history.ts'
 import { buildRuntimeIndex, computeWatchHours, hoursRowFromItem, msToHours, type RuntimeIndex } from '@/lib/watch-hours'
 import { format } from 'date-fns'
 
@@ -75,11 +77,13 @@ function longestRun(dayKeys: string[]): number {
 export type ReplayDataWithEstimate = ReplayData & { estimatedHours: number }
 
 export function computeReplayData(
-    history: ActivityItem[],
+    rawHistory: ActivityItem[],
     targetYear: number | string,
     options?: { canonicalConnections?: ReadonlyMap<string, string | undefined>; now?: Date }
 ): ReplayDataWithEstimate {
     const canonical = options?.canonicalConnections
+    // Undated rows keep counter baselines but join no period; date-fns format() throws on them.
+    const { context: history, dated: datedHistory } = partitionReplayHistory(rawHistory)
     const isSpecificMonth = typeof targetYear === 'string' && targetYear !== 'all-time' && targetYear.includes('-');
 
     // Parsing each timestamp once per call removes repeated `new Date` allocations; output is unchanged.
@@ -96,8 +100,8 @@ export function computeReplayData(
     const filteredHistory = targetYear === 'all-time'
         ? history
         : isSpecificMonth
-            ? history.filter(item => format(toDate(item), 'yyyy-MM') === targetYear)
-            : history.filter(item => toDate(item).getFullYear() === targetYear)
+            ? datedHistory.filter(item => format(toDate(item), 'yyyy-MM') === targetYear)
+            : datedHistory.filter(item => toDate(item).getFullYear() === targetYear)
 
     const historyBeforeTarget = targetYear === 'all-time'
         ? []
@@ -105,14 +109,14 @@ export function computeReplayData(
             ? (() => {
                 const [dy, dm] = (targetYear as string).split('-').map(Number)
                 const monthStart = new Date(dy, dm - 1, 1)
-                return history.filter(item => toDate(item) < monthStart)
+                return datedHistory.filter(item => toDate(item) < monthStart)
             })()
-            : history.filter(item => toDate(item).getFullYear() < (targetYear as number))
+            : datedHistory.filter(item => toDate(item).getFullYear() < (targetYear as number))
 
     // Backfilled episodes (recovered from the watched-bitfield) have a synthetic timestamp, so they
     // count toward titles/episodes/discoveries but are excluded from every time-based stat (monthly
     // breakdown, streaks, hourly/daily distribution, busiest day, YoY hours).
-    const timeHistory = filteredHistory.filter(item => !item.backfill)
+    const timeHistory = filteredHistory.filter(item => !item.backfill && isDatedWatchTimestamp(item.timestamp))
     const runtimes = buildRuntimeIndex(history)
     const { times: timeByRow, sumOver } = watchTimeByRow(history, runtimes, canonical)
     const { totalMs: periodMs, estimatedMs: periodEstimatedMs } = sumOver(filteredHistory)
@@ -144,7 +148,8 @@ export function computeReplayData(
 
         current.count++
         current.totalHours += hours
-        current.years.add(toDate(item).getFullYear())
+        const watchYear = toDate(item).getFullYear()
+        if (isPlausibleWatchMs(watchYear)) current.years.add(watchYear)
         titleMap.set(uniqueId, current)
 
         if (item.genres) {
@@ -365,7 +370,7 @@ export function computeReplayData(
     let yearOverYear: YearOverYearDelta | null = null
     if (typeof targetYear === 'number') {
         const prevYearNum = targetYear - 1
-        const prevYearHistory = history.filter(item => toDate(item).getFullYear() === prevYearNum)
+        const prevYearHistory = datedHistory.filter(item => toDate(item).getFullYear() === prevYearNum)
 
         if (prevYearHistory.length > 0) {
             const prevYearTimeHistory = prevYearHistory.filter(i => !i.backfill)
@@ -412,8 +417,8 @@ export function computeReplayData(
         discoveries,
         marathonTitles,
         hiddenGems,
-        availableYears: Array.from(new Set(history.map(item => toDate(item).getFullYear()))).sort((a, b) => b - a),
-        availableMonths: Array.from(new Set(history.map(item => format(toDate(item), 'yyyy-MM')))).sort((a, b) => b.localeCompare(a)),
+        availableYears: Array.from(new Set(datedHistory.map(item => toDate(item).getFullYear()))).sort((a, b) => b - a),
+        availableMonths: Array.from(new Set(datedHistory.map(item => format(toDate(item), 'yyyy-MM')))).sort((a, b) => b.localeCompare(a)),
         heroPosterArt,
         persona: persona.name,
         personaDescription: persona.description,

@@ -223,6 +223,7 @@ interface LibraryCacheState {
 }
 
 import { isActuallyWatched, transformLibraryItemToActivityItem, transformNuvioWatchedItemToActivityItem, transformNuvioProgressToActivityItem, createCinemetaMemo, watchContextKey } from '@/lib/activity-utils'
+import { normalizeWatchTimestamp } from '@/lib/watch-time'
 import { canonicalIds, registerKnownTmdbAliases, tmdbAliasVersion } from '@/lib/activity-id-alias'
 import { isLiveLibraryRow } from '@/lib/stremio-liveness'
 
@@ -432,13 +433,10 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                 if (item.source === 'realstream' && item.type !== 'movie' && item.episode == null) return false
                                 return true
                             })
-                            const hydratedItems = filteredItems.map(i => {
-                                const t = new Date(i.timestamp)
-                                return {
-                                    ...i,
-                                    timestamp: t.getTime() > now ? new Date(now) : t
-                                }
-                            })
+                            const hydratedItems = filteredItems.map(i => ({
+                                ...i,
+                                timestamp: normalizeWatchTimestamp(i.timestamp, now)
+                            }))
 
                             if (isFresh && hasCov) {
                                 set({

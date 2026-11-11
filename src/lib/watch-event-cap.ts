@@ -17,15 +17,18 @@ function guaranteedShare(cap: number, accountCount: number): number {
 }
 
 export function capWatchEvents(events: WatchEvent[]): WatchEvent[] {
+    // The rollup fold skips undated events, so evicting them would lose them: cap dated only.
+    const undated = events.filter(e => !Number.isFinite(e.event_ts))
+    const dated = undated.length === 0 ? events : events.filter(e => Number.isFinite(e.event_ts))
     // The cap floats at >= MIN_EVENTS_GLOBAL for any account count, so a log at or
     // under the floor can never exceed it: skip the accountId scan entirely.
-    if (events.length <= MIN_EVENTS_GLOBAL) return events
-    const accountIds = new Set(events.map(e => e.accountId))
+    if (dated.length <= MIN_EVENTS_GLOBAL) return events
+    const accountIds = new Set(dated.map(e => e.accountId))
     const accountCount = accountIds.size
     const cap = globalCapFor(accountCount)
-    if (events.length <= cap) return events
+    if (dated.length <= cap) return events
 
-    const sorted = [...events].sort((a, b) => b.event_ts - a.event_ts)
+    const sorted = [...dated].sort((a, b) => b.event_ts - a.event_ts)
     const share = guaranteedShare(cap, accountCount)
 
     // Walk newest-first giving every account its guaranteed share first; leftover
@@ -52,7 +55,7 @@ export function capWatchEvents(events: WatchEvent[]): WatchEvent[] {
         }
     }
 
-    return kept
+    return [...kept, ...undated]
 }
 
 const SEASON_EPISODE_SUFFIX = /:\d+:\d+$/

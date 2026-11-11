@@ -101,7 +101,8 @@ export function foldEvicted(events: WatchEvent[], rollups: EventRollups): EventR
             highWater = existing === undefined ? -Infinity : existing
             baseWatermark[event.accountId] = highWater
         }
-        if (event.event_ts <= highWater) continue
+        // NaN timestamps can't be ordered by the watermark and would re-fold on every write.
+        if (!Number.isFinite(event.event_ts) || event.event_ts <= highWater) continue
 
         const keys = localKeys(event.event_ts)
         const key = `${event.accountId}:${event.itemId}:${keys.ym}`

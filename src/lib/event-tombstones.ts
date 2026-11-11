@@ -4,7 +4,8 @@
 export function isIdentityDeleted(identityKey: string, tombstones: Record<string, number>, eventTs?: number): boolean {
     const deletedAt = tombstones[identityKey]
     if (deletedAt === undefined) return false
-    return eventTs === undefined || eventTs <= deletedAt
+    // Undated events can't prove a newer re-watch, so their tombstone is absolute.
+    return eventTs === undefined || !Number.isFinite(eventTs) || eventTs <= deletedAt
 }
 
 // Max-wins union used by BOTH sync directions: the pull path folds cloud tombstones into

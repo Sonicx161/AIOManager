@@ -4,6 +4,7 @@ import { WatchEvent, SnapshotItem, LibraryItem } from '@/types/activity'
 import { Account } from '@/types/account'
 import { getSeasonEpisode, isActuallyWatched, isDatelessSavedWatchState, isResumeDismissal, getLocalDayKey, getEpisodeIdentity, watchContextKey, parseScopedAccountId, tombstoneReplayProven } from '@/lib/activity-utils'
 import { scopeIndexesFor, reuseScopePartitionedIndexes, stremioTimeOf } from '@/lib/watch-event-indexes'
+import { isPlausibleWatchMs, plausibleWatchEventTs } from '@/lib/watch-time'
 import { MIN_EVENTS_GLOBAL, hasSeriesEventIdentity } from '@/lib/watch-event-cap'
 import { decodeWatchedBitfield, hasNoWatchedBits, isWellFormedWatchedField, resolveWatchedBitsAgainstVideos } from '@/lib/watched-bitfield'
 import { mapConcurrent } from '@/lib/concurrency'
@@ -187,8 +188,9 @@ function serverTimeWatched(se: ServerActivityEvent): number {
     return Number(se.watched) || 0
 }
 
-function collapseDayDuplicates(events: WatchEvent[]): WatchEvent[] {
-    const byKey = new Map<string, WatchEvent>()
+const sameEventTs = (a: number, b: number) => a === b || (a !== a && b !== b)
+
+function collapseDayDuplicates(events: WatchEvent[]): WatchEvent[] {    const byKey = new Map<string, WatchEvent>()
     for (const e of events) {
         const ek = getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
         const key = `${eventScopeKey(e)}:${ek}:${getLocalDayKey(e.event_ts)}`
@@ -388,6 +390,10 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     const isSeries = e.type === 'series' || e.type === 'anime' || e.type === 'episode'
                     if (isSeries && e.season != null && e.season > 100) return false
                     return hasSeriesEventIdentity(e)
+                }).map(e => {
+                    // JSON stores NaN as null.
+                    const ts = plausibleWatchEventTs(e.event_ts)
+                    return ts === e.event_ts ? e : { ...e, event_ts: ts }
                 })
                 const collapsed = filterTombstonedEvents(collapseDayDuplicates(cleaned), deleted)
                 const rollups = stored.rollups ? { ...emptyRollups(), ...stored.rollups } : get().rollups
@@ -1043,12 +1049,13 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             // REAL account (display, filters) plus the exact originating connection.
             const { accountId, sourceConnectionId } = parseScopedAccountId(se.accountId)
             const video_id = se.videoId || se.uniqueItemId || se.itemId
+            const event_ts = plausibleWatchEventTs(se.timestamp)
             const event: WatchEvent = {
                 id: se.id,
                 accountId,
                 itemId: se.itemId,
                 video_id,
-                event_ts: se.timestamp,
+                event_ts,
                 detected_ts: now,
                 name: se.name || 'Unknown',
                 type: se.type || 'other',
@@ -1072,6 +1079,9 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             const existingEvent = eventsById.get(se.id)
             if (existingEvent) {
                 const mergedEvent = { ...existingEvent, ...event }
+                if (!isPlausibleWatchMs(mergedEvent.event_ts)) {
+                    mergedEvent.event_ts = isPlausibleWatchMs(existingEvent.event_ts) ? existingEvent.event_ts : NaN
+                }
                 if (
                     existingEvent.video_id !== mergedEvent.video_id ||
                     existingEvent.time_watched !== mergedEvent.time_watched ||
@@ -1081,7 +1091,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     existingEvent.episode !== mergedEvent.episode ||
                     existingEvent.sourceConnectionId !== mergedEvent.sourceConnectionId ||
                     existingEvent.scopeKey !== mergedEvent.scopeKey ||
-                    existingEvent.event_ts !== mergedEvent.event_ts ||
+                    !sameEventTs(existingEvent.event_ts, mergedEvent.event_ts) ||
                     existingEvent.overall_time_watched !== mergedEvent.overall_time_watched
                 ) {
                     eventsById.set(se.id, mergedEvent)
@@ -1091,7 +1101,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             }
 
             const ek = getEpisodeIdentity(se.itemId, video_id, event.season, event.episode, event.type)
-            const dayKey = `${watchContextKey(accountId, sourceConnectionId)}:${ek}:${getLocalDayKey(se.timestamp)}`
+            const dayKey = `${watchContextKey(accountId, sourceConnectionId)}:${ek}:${getLocalDayKey(event_ts)}`
             if (localDayKeys.has(dayKey)) continue
 
             newEvents.push(event)
@@ -1108,6 +1118,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const newSnapshot = { ...state.snapshot }
         const snapshotAcc = new Map<string, Record<string, SnapshotItem>>()
         for (const e of alive) {
+            if (!Number.isFinite(e.event_ts)) continue
             const ctx = eventScopeKey(e)
             let acc = snapshotAcc.get(ctx)
             if (!acc) {

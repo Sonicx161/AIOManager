@@ -1,4 +1,5 @@
 import { computeWatchHours, msToHours, type RuntimeIndex, type WatchHoursRow } from '@/lib/watch-hours'
+import { MIN_PLAUSIBLE_WATCH_MS } from '@/lib/watch-time'
 
 // Mirrors MetricsWorkerItem in hooks/useMetricsWorker.ts.
 interface ActivityItem {
@@ -185,17 +186,14 @@ interface MetricsResult {
     _message?: string
 }
 
-self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; periodStart?: number | null; rollups?: EventRollupsPayload; runtimes?: RuntimeIndex }>) => {
-    // Every reply echoes the request id so the main thread can drop replies that
-    // no longer match a pending request (parked-worker stragglers, supersessions).
-    const reqId = typeof e.data?.reqId === 'number' ? e.data.reqId : -1
-    const reply = (result: MetricsResult | { _error: true; _message: string } | null) => self.postMessage({ reqId, result })
-    try {
-    const { items: allItems, periodStart, rollups, runtimes } = e.data
-    if (!allItems || allItems.length === 0) {
-        reply(null)
-        return
-    }
+export function computeMetrics(
+    allItems: ActivityItem[],
+    periodStart: number | null | undefined,
+    rollups: EventRollupsPayload | undefined,
+    runtimes: RuntimeIndex | undefined,
+    now = new Date(),
+): MetricsResult | null {
+    if (!allItems || allItems.length === 0) return null
     // Rows before periodStart are credit context only; every stat below counts in-period rows.
     const hasPeriod = typeof periodStart === 'number' && Number.isFinite(periodStart)
     const inPeriod = (value: Date | string | number) => {
@@ -203,12 +201,7 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
         return Number.isFinite(time) && time >= (periodStart as number)
     }
     const items = hasPeriod ? allItems.filter(h => inPeriod(h.timestamp)) : allItems
-    if (items.length === 0) {
-        reply(null)
-        return
-    }
-
-    const now = new Date()
+    if (items.length === 0) return null
 
     const itemsByHour = new Array(24).fill(0)
     const typeCounts = { movie: 0, series: 0, other: 0 }
@@ -239,7 +232,7 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
     const fourteenDaysAgo = subDays(now, 14)
     const thirtyDaysAgo = subDays(now, 30)
 
-    const userAwardMap: Record<string, { midnightPlays: number, weekendPlays: number, totalStarts: number, totalFinishes: number }> = {}
+    const userAwardMap: Record<string, { midnightPlays: number, weekendPlays: number, totalStarts: number, datedStarts: number, totalFinishes: number }> = {}
     const franchiseCounts: Record<string, number> = {}
     franchises.forEach(f => franchiseCounts[f.name] = 0)
 
@@ -251,12 +244,13 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
     for (const h of allItems) {
         const isDate = h.timestamp instanceof Date
         const timestamp = isDate ? h.timestamp : new Date(h.timestamp)
-        if (isNaN(timestamp.getTime())) continue
-        contextItems.push(isDate ? h : { ...h, timestamp })
+        // Undated rows stay in the hours context so cumulative counter baselines hold.
+        const undated = !(timestamp.getTime() >= MIN_PLAUSIBLE_WATCH_MS)
+        contextItems.push(undated ? { ...h, timestamp: new Date(0) } : isDate ? h : { ...h, timestamp })
         hoursRows.push({
             itemId: h.itemId,
             type: h.type,
-            timestamp: timestamp.getTime(),
+            timestamp: undated ? 0 : timestamp.getTime(),
             watched: h.watched,
             duration: h.duration,
             progress: h.progress,
@@ -290,13 +284,13 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
         const timestamp = h.timestamp
 
         const hTime = timestamp.getTime()
-        const hDate = timestamp
-        const hour = hDate.getHours()
-        const day = hDate.getDay()
+        const undated = !(hTime >= MIN_PLAUSIBLE_WATCH_MS)
+        const hour = undated ? -1 : timestamp.getHours()
+        const day = undated ? -1 : timestamp.getDay()
 
         // 1. Totals
         const minutes = minutesByRow[index]
-        itemsByHour[hour]++
+        if (!undated) itemsByHour[hour]++
 
         // 2. Types
         if (h.type === 'movie') typeCounts.movie++
@@ -315,13 +309,13 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
                 name: h.accountName || 'Unknown',
                 count: 0,
                 duration: 0,
-                lastActive: h.timestamp,
+                lastActive: undated ? new Date(0) : h.timestamp,
                 recentHistory: [],
                 allDates: [],
                 hourlyActivity: new Array(24).fill(0),
                 formatCounts: { movie: 0, series: 0 }
             }
-            userAwardMap[h.accountId] = { midnightPlays: 0, weekendPlays: 0, totalStarts: 0, totalFinishes: 0 }
+            userAwardMap[h.accountId] = { midnightPlays: 0, weekendPlays: 0, totalStarts: 0, datedStarts: 0, totalFinishes: 0 }
         }
 
         const u = userStats[h.accountId]
@@ -329,9 +323,11 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
 
         u.count++
         u.duration += minutes
-        u.allDates.push(h.timestamp)
-        if (h.timestamp > u.lastActive) u.lastActive = h.timestamp
-        u.hourlyActivity[hour]++
+        if (!undated) {
+            u.allDates.push(h.timestamp)
+            if (h.timestamp > u.lastActive) u.lastActive = h.timestamp
+            u.hourlyActivity[hour]++
+        }
 
         if (h.type === 'movie') u.formatCounts.movie++
         else if (isSeriesType(h.type)) u.formatCounts.series++
@@ -340,10 +336,15 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
             u.recentHistory.push(h)
         }
 
-        if (hour >= 0 && hour <= 5) m.midnightPlays++
-        if (day === 0 || day === 6) m.weekendPlays++
+        if (!undated) {
+            if (hour >= 0 && hour <= 5) m.midnightPlays++
+            if (day === 0 || day === 6) m.weekendPlays++
+            if (h.progress > 0) m.datedStarts++
+        }
         if (h.progress > 0) m.totalStarts++
         if (h.progress >= 90) m.totalFinishes++
+
+        if (undated) return
 
         // 5. Trending (Last 14d). A wider window keeps the rail useful on quiet days.
         if (hTime > fourteenDaysAgo.getTime()) {
@@ -408,10 +409,9 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
     }
     const totalMs = periodTotalMs + rollupMinutesTotal * 60000
 
-    // Binge Logic. Rows without a real watch date (backfill/importedSavedState) are
-    // excluded first: their synthetic timestamps cluster at sync time and would
-    // otherwise chain a whole large-library import into one fake giant session.
-    const bingeEligible = normalizedItems.filter(h => !h.backfill && !h.importedSavedState)
+    // Synthetic or missing timestamps would chain fake sessions.
+    const bingeEligible = normalizedItems.filter(h =>
+        !h.backfill && !h.importedSavedState && h.timestamp.getTime() >= MIN_PLAUSIBLE_WATCH_MS)
     const chronoHistory = [...bingeEligible].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
     const tempBingeTracker: Record<string, { currentChain: ActivityItem[], lastTime: Date }> = {}
     const userBinges: Record<string, { duration: number; items: ActivityItem[] }> = {}
@@ -452,9 +452,9 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
         const badges = []
         if (completionRate > 80 && data.totalFinishes > 10) badges.push({ type: 'The Completer', icon: 'CheckCircle', color: 'emerald' })
         if (completionRate < 30 && data.totalStarts > 20) badges.push({ type: 'The Sampler', icon: 'Ghost', color: 'pink' })
-        if (data.midnightPlays > data.totalStarts * 0.3) badges.push({ type: 'The Night Owl', icon: 'Moon', color: 'violet' })
+        if (data.midnightPlays > data.datedStarts * 0.3) badges.push({ type: 'The Night Owl', icon: 'Moon', color: 'violet' })
         if (bingeLen > 8) badges.push({ type: 'Binge King', icon: 'Flame', color: 'orange' })
-        if (data.weekendPlays > data.totalStarts * 0.6) badges.push({ type: 'Weekend Warrior', icon: 'Zap', color: 'yellow' })
+        if (data.weekendPlays > data.datedStarts * 0.6) badges.push({ type: 'Weekend Warrior', icon: 'Zap', color: 'yellow' })
         return { id, name: u.name, badges }
     })
 
@@ -595,6 +595,7 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
 
     normalizedItems.forEach((h: ActivityItem) => {
         const ts = h.timestamp instanceof Date ? h.timestamp : new Date(h.timestamp)
+        if (!(ts.getTime() >= MIN_PLAUSIBLE_WATCH_MS)) return
         const dayKey = toLocalDayKey(ts.getTime())
         dailyActivity[dayKey] = (dailyActivity[dayKey] || 0) + 1
         const dow = ts.getDay()
@@ -636,6 +637,7 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
     // Group once; scanning all history for every repeated title makes this pass quadratic.
     const playsByItemId = new Map<string, ActivityItem[]>()
     for (const item of normalizedItems) {
+        if (!(item.timestamp.getTime() >= MIN_PLAUSIBLE_WATCH_MS)) continue
         const plays = playsByItemId.get(item.itemId)
         if (plays) plays.push(item)
         else playsByItemId.set(item.itemId, [item])
@@ -722,8 +724,19 @@ self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; perio
         dropOffAvg,
     }
 
-    reply(result)
-    } catch (err) {
-        reply({ _error: true, _message: err instanceof Error ? err.message : String(err) })
+    return result
+}
+
+if (typeof self !== 'undefined') {
+    self.onmessage = (e: MessageEvent<{ reqId?: number; items: ActivityItem[]; periodStart?: number | null; rollups?: EventRollupsPayload; runtimes?: RuntimeIndex }>) => {
+        // Every reply echoes the request id so the main thread can drop replies that
+        // no longer match a pending request (parked-worker stragglers, supersessions).
+        const reqId = typeof e.data?.reqId === 'number' ? e.data.reqId : -1
+        const reply = (result: MetricsResult | { _error: true; _message: string } | null) => self.postMessage({ reqId, result })
+        try {
+            reply(computeMetrics(e.data.items, e.data.periodStart, e.data.rollups, e.data.runtimes))
+        } catch (err) {
+            reply({ _error: true, _message: err instanceof Error ? err.message : String(err) })
+        }
     }
 }

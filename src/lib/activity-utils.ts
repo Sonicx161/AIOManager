@@ -13,9 +13,12 @@ import {
     summarizeSavedEpisodes,
     formatSavedEpisodeRanges,
 } from './imported-watch-state.ts'
+import { getWatchTimestamp, isPlausibleWatchMs, isResumeDismissal, MIN_PLAUSIBLE_WATCH_MS } from './watch-time.ts'
 
 export { sanitizePosterUrl }
 export { isSavedOnlySeriesRow, isFlaggedOnlyMovieRow, isDatelessSavedWatchState, resolveWatchBadgePct, summarizeSavedEpisodes, formatSavedEpisodeRanges }
+export { getWatchTimestamp, isPlausibleWatchMs, isResumeDismissal, MIN_PLAUSIBLE_WATCH_MS }
+export type { ResumeDismissalPrior } from './watch-time.ts'
 
 /**
  * Stable per-connection scope key for watch attribution: a secondary Stremio login's
@@ -135,67 +138,6 @@ export function getUniqueItemId(item: LibraryItem): string {
     return baseId
 }
 
-// Stremio uses placeholder dates such as 0001-01-01 for "never"; anything this old is not a watch.
-export const MIN_PLAUSIBLE_WATCH_MS = Date.UTC(1995, 0, 1)
-
-const DISMISSAL_MTIME_LEAD_MS = 10 * 60 * 1000
-const DISMISSAL_CLOCK_SLACK_MS = 1000
-
-export interface ResumeDismissalPrior {
-    mtime?: number
-    video_id?: string
-    timeOffset?: number
-    overallTimeWatched?: number
-    timeWatched?: number
-}
-
-/**
- * Stremio's Continue Watching dismiss zeroes the resume offset and bumps _mtime while
- * lastWatched stays put. Without a prior snapshot the signal is _mtime running well past
- * lastWatched at a zero offset; with one, a resume offset dropping to zero with no new
- * watch time and no lastWatched advance past the prior scan.
- */
-export function isResumeDismissal(item: LibraryItem, prior?: ResumeDismissalPrior): boolean {
-    const s = item.state
-    if ((s?.timeOffset ?? 0) > 0) return false
-    const lwRaw = s?.lastWatched ? new Date(s.lastWatched).getTime() : NaN
-    const lw = Number.isFinite(lwRaw) && lwRaw >= MIN_PLAUSIBLE_WATCH_MS ? lwRaw : undefined
-
-    if (prior) {
-        if (prior.video_id && s?.video_id && prior.video_id !== s.video_id) return false
-        const overallDelta = (s?.overallTimeWatched ?? 0) - (prior.overallTimeWatched ?? 0)
-        const watchedDelta = (s?.timeWatched ?? 0) - (prior.timeWatched ?? 0)
-        if (overallDelta > 0 || watchedDelta > 0) return false
-        if ((prior.timeOffset ?? 0) > 0 && prior.mtime) {
-            return lw === undefined || lw <= prior.mtime + DISMISSAL_CLOCK_SLACK_MS
-        }
-    }
-
-    if (lw === undefined || !item._mtime) return false
-    const mt = new Date(item._mtime).getTime()
-    return Number.isFinite(mt) && mt - lw > DISMISSAL_MTIME_LEAD_MS
-}
-
-export function getWatchTimestamp(item: LibraryItem): Date {
-    const times: number[] = []
-    if (item.state?.lastWatched) {
-        const d = new Date(item.state.lastWatched)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-    if (item._mtime && !isResumeDismissal(item)) {
-        const d = new Date(item._mtime)
-        if (!isNaN(d.getTime())) times.push(d.getTime())
-    }
-    const now = Date.now()
-
-    // This protects against Stremio sending bad timestamps (e.g. 12h future)
-    // which would otherwise be clamped to "now" and appear as "Just now"
-    const validTimes = times.filter(t => t <= now + 5 * 60 * 1000)
-
-    const maxTime = validTimes.length > 0 ? Math.max(...validTimes) : now
-
-    return new Date(Math.min(maxTime, now))
-}
 
 export function getSeasonEpisode(item: LibraryItem): { season?: number; episode?: number } {
     if ((item.type !== 'series' && item.type !== 'anime' && item.type !== 'episode') || !item.state?.video_id) {
