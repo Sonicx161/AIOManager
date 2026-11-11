@@ -64,6 +64,7 @@ export function useActivityMetadata(items: ActivityItem[]): ActivityItem[] {
     const [resolved, setResolved] = useState<Map<string, ResolvedMetadata>>(() => new Map())
     const failedAt = useRef(new Map<string, number>())
     const [completedPass, setCompletedPass] = useState(0)
+    const reuseBySource = useRef(new WeakMap<ActivityItem, ActivityItem>())
     // Items identity marks the first (immediate) resolution pass for a feed; the
     // follow-up passes only fill rows below the fold and are deferred to idle.
     const firstPassForItems = useRef<unknown>(null)
@@ -154,5 +155,5 @@ export function useActivityMetadata(items: ActivityItem[]): ActivityItem[] {
         return next
     }, [items, resolved])
 
-    return useMemo(() => applyResolvedMetadataOverlay(items, sharedResolved), [items, sharedResolved])
+    return useMemo(() => applyResolvedMetadataOverlay(items, sharedResolved, reuseBySource.current), [items, sharedResolved])
 }

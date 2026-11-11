@@ -205,11 +205,13 @@ function titleConflictIndex(items: ActivityItem[]): TitleConflictIndex {
  * Apply resolved metadata over feed items: replace only bad names, fill only
  * missing poster/genres. IDs, provenance and watch state are untouched, and the
  * input array/objects are never mutated. Returns the same array reference when
- * nothing changed so downstream memoization stays stable.
+ * nothing changed so downstream memoization stays stable. `reuse` returns the
+ * previous output object when the resolved values did not change.
  */
 export function applyResolvedMetadataOverlay(
     items: ActivityItem[],
     resolved: Map<string, ResolvedMetadata>,
+    reuse?: WeakMap<ActivityItem, ActivityItem>,
 ): ActivityItem[] {
     if (resolved.size === 0) return items
     let changed = false
@@ -224,13 +226,20 @@ export function applyResolvedMetadataOverlay(
         const poster = item.poster || entry.poster
         const genres = item.genres?.length ? item.genres : entry.genres
         if (name === item.name && poster === item.poster && genres === item.genres) return item
+        const prior = reuse?.get(item)
+        if (prior && prior.name === name && prior.poster === poster && prior.genres === genres) {
+            changed = true
+            return prior
+        }
         changed = true
-        return {
+        const merged = {
             ...item,
             name,
             ...(poster ? { poster } : {}),
             ...(genres ? { genres } : {}),
         }
+        reuse?.set(item, merged)
+        return merged
     })
     return changed ? next : items
 }

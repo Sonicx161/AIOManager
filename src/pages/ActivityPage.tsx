@@ -542,8 +542,14 @@ export function ActivityPage() {
     }, [])
 
 
+    // Refs keep the feed callbacks stable so memoized rows skip metadata commits.
+    const historyRef = useRef(history)
+    historyRef.current = history
+    const selectedItemsRef = useRef(selectedItems)
+    selectedItemsRef.current = selectedItems
+
     const handleToggleSelect = useCallback((itemId: string | string[]) => {
-        const mutable = new Set(history.filter(item => !isReadOnlyMediaActivity(item)).map(item => item.id))
+        const mutable = new Set(historyRef.current.filter(item => !isReadOnlyMediaActivity(item)).map(item => item.id))
         const ids = (Array.isArray(itemId) ? itemId : [itemId]).filter(id => mutable.has(id))
         setSelectedItems(prev => {
             const newSet = new Set(prev)
@@ -555,7 +561,7 @@ export function ActivityPage() {
             }
             return newSet
         })
-    }, [history])
+    }, [])
 
     const handleSelectAll = useCallback(() => {
         setSelectedItems(new Set(filteredHistory.filter(item => !isReadOnlyMediaActivity(item)).map((item: ActivityItem) => item.id)))
@@ -573,10 +579,10 @@ export function ActivityPage() {
 
     const scheduleActivityDelete = useCallback((ids: string[], bulk: boolean) => {
         const idSet = new Set(ids)
-        const items = history.filter(item => idSet.has(item.id))
+        const items = historyRef.current.filter(item => idSet.has(item.id))
         if (items.length === 0) return
         const count = items.length
-        const previousSelection = bulk ? new Set(selectedItems) : null
+        const previousSelection = bulk ? new Set(selectedItemsRef.current) : null
         const summary = originTargetsSummary(items, accountById, privacyLevel, emailPrivacyLevel)
         const mediaTargets = new Set(items.flatMap(item => (item.mediaTargets || []).map(target => `${item.accountId}|${target.connectionId}|${target.itemId}`))).size
         const notes = [
@@ -594,18 +600,20 @@ export function ActivityPage() {
                 : { title: count > 1 ? 'Episodes Deleted' : 'Item Deleted', description: 'Removed from activity history.' }),
             onUndo: () => { if (previousSelection) setSelectedItems(previousSelection) },
         })
-    }, [history, selectedItems, accountById, privacyLevel, emailPrivacyLevel])
+    }, [accountById, privacyLevel, emailPrivacyLevel])
 
     const handleFeedDelete = useCallback((id: string | string[]) => {
         const ids = Array.isArray(id) ? id : [id]
-        const mutable = new Set(history.filter(item => !isReadOnlyMediaActivity(item)).map(item => item.id))
+        const mutable = new Set(historyRef.current.filter(item => !isReadOnlyMediaActivity(item)).map(item => item.id))
         const allowed = ids.filter(itemId => mutable.has(itemId))
         if (allowed.length) scheduleActivityDelete(allowed, false)
-    }, [history, scheduleActivityDelete])
+    }, [scheduleActivityDelete])
 
     const handleOpenDetail = useCallback((item: ActivityItem) => {
         setDetailItem(item)
     }, [])
+
+    const handleFeedRefresh = useCallback(() => fetchActivity(), [fetchActivity])
 
     // Deep-link sync with the detail modal's URL params. Opening the modal
     // pushes ?detail=… (handled inside ActivityDetailModal); this covers the
@@ -1241,7 +1249,7 @@ export function ActivityPage() {
                     onToggleSelect={handleFeedToggleSelect}
                     onDelete={handleFeedDelete}
                     onOpenDetail={handleOpenDetail}
-                    onRefresh={() => fetchActivity()}
+                    onRefresh={handleFeedRefresh}
                 />
             )}
 

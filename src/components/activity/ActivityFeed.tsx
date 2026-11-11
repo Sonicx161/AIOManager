@@ -2,7 +2,7 @@
 import { ActivityItem } from '@/types/activity'
 import { isToday, isYesterday, format } from 'date-fns'
 import { Activity, ArrowUp } from 'lucide-react'
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
+import { memo, useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { TabsTrigger } from '@/components/ui/tabs'
 import { WorkspaceTabs } from '@/components/ui/workspace-tabs'
@@ -68,7 +68,7 @@ interface ActivityFeedProps {
     onRefresh?: () => unknown
 }
 
-export function ActivityFeed({
+export const ActivityFeed = memo(function ActivityFeed({
     history,
     allHistory = history,
     hoursSource = allHistory,
@@ -331,7 +331,7 @@ export function ActivityFeed({
 
     // ---- rendering -------------------------------------------------------------
 
-    const cardSlot = {
+    const cardSlot = useMemo(() => ({
         nowStatuses,
         viewMode: viewMode as 'grid' | 'list',
         safeSelectedItems,
@@ -339,7 +339,7 @@ export function ActivityFeed({
         onToggleSelect,
         onDelete,
         onOpenDetail,
-    }
+    }), [nowStatuses, viewMode, safeSelectedItems, isBulkMode, onToggleSelect, onDelete, onOpenDetail])
 
     const renderEmptyState = () => (
         <ActivityEmptyState
@@ -363,7 +363,7 @@ export function ActivityFeed({
                     itemIdToRowIndex={feedModel.itemIdToRowIndex}
                     formatDateHeader={formatDateHeader}
                     bindScrollToRow={bindScrollToRow}
-                    {...cardSlot}
+                    slot={cardSlot}
                 />
             )
             : (
@@ -459,4 +459,5 @@ export function ActivityFeed({
             </div>
         </div>
     )
-}
+})
+ActivityFeed.displayName = 'ActivityFeed'

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { defaultRangeExtractor, useVirtualizer, useWindowVirtualizer, type Range } from '@tanstack/react-virtual'
 import { Activity, Bookmark } from 'lucide-react'
 import { StatusChip } from '@/components/ui/status-chip'
@@ -72,7 +72,7 @@ export function ActivityDateHeader({ date, watchCount, formatDateHeader }: {
 }
 
 /** Card plus the wrapper that carries the item id for focus/keyboard handling. */
-export function ActivityItemSlot({ entry, slot }: { entry: ActivityItem; slot: ActivityCardSlotProps }) {
+const ActivityItemSlot = memo(function ActivityItemSlot({ entry, slot }: { entry: ActivityItem; slot: ActivityCardSlotProps }) {
     return (
         <div data-activity-item={entry.id} className="min-w-0">
             <ActivityItemCard
@@ -87,9 +87,10 @@ export function ActivityItemSlot({ entry, slot }: { entry: ActivityItem; slot: A
             />
         </div>
     )
-}
+})
+ActivityItemSlot.displayName = 'ActivityItemSlot'
 
-interface VirtualActivityListProps extends ActivityCardSlotProps {
+interface VirtualActivityListProps {
     rows: FeedRow[]
     groupAnchors: Array<{ dateId: string; rowIndex: number; key: string }>
     /** Effective grid columns (1 in list mode). */
@@ -99,9 +100,10 @@ interface VirtualActivityListProps extends ActivityCardSlotProps {
     formatDateHeader: (dateStr: string) => string
     /** Parent routes keyboard-driven jumps through the virtualizer. */
     bindScrollToRow: (fn: ((rowIndex: number) => void) | null) => void
+    slot: ActivityCardSlotProps
 }
 
-export function VirtualActivityList({
+const VirtualActivityList = memo(function VirtualActivityList({
     rows,
     groupAnchors,
     columns,
@@ -109,7 +111,7 @@ export function VirtualActivityList({
     itemIdToRowIndex,
     formatDateHeader,
     bindScrollToRow,
-    ...slot
+    slot,
 }: VirtualActivityListProps) {
     const listRef = useRef<HTMLDivElement | null>(null)
     const [listOffset, setListOffset] = useState(0)
@@ -405,7 +407,7 @@ export function VirtualActivityList({
     const scrollMargin = virtualizer.options.scrollMargin
 
     const renderCards = (items: ActivityItem[]) => items.map(entry => (
-        <ActivityItemSlot key={entry.id} entry={entry} slot={{ ...slot }} />
+        <ActivityItemSlot key={entry.id} entry={entry} slot={slot} />
     ))
 
     const renderRow = (row: FeedRow) => {
@@ -475,4 +477,7 @@ export function VirtualActivityList({
             ))}
         </div>
     )
-}
+})
+VirtualActivityList.displayName = 'VirtualActivityList'
+
+export { VirtualActivityList, ActivityItemSlot }
