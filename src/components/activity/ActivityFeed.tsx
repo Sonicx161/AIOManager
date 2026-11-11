@@ -10,6 +10,7 @@ import { ActivityEmptyState } from '@/components/common/PageEmptyStates'
 import { activityNowStatuses } from '@/lib/jellyfin/activity'
 import { buildRuntimeIndex, msToHours } from '@/lib/watch-hours'
 import { activityHeaderHoursCached } from '@/lib/activity-hours'
+import { localDayToken } from '@/lib/local-time-token'
 import {
     buildFeedRows,
     buildItemOrder,
@@ -173,14 +174,34 @@ export function ActivityFeed({
 
     const runtimeIndex = useMemo(() => buildRuntimeIndex(hoursSource), [hoursSource])
     // Stable identity for the visible-id set (rebuilt only when the filtered feed
-    // changes) so the cached header-hours computation can hit across feed remounts.
+    // actually changes) so the cached header-hours computation can hit across feed remounts.
+    // A metadata-overlay commit republishes the same rows as replaced copies: same
+    // ids in the same positions, so the set content and identity are preserved.
     const visibleIdsRef = useRef<{ source: typeof filteredHistory; ids: Set<string> } | null>(null)
     if (!visibleIdsRef.current || visibleIdsRef.current.source !== filteredHistory) {
-        const ids = new Set<string>()
-        for (const item of filteredHistory) ids.add(item.id)
-        visibleIdsRef.current = { source: filteredHistory, ids }
+        const prev = visibleIdsRef.current
+        let reusedIds: Set<string> | null = null
+        if (prev && prev.source.length === filteredHistory.length) {
+            let same = true
+            for (let i = 0; i < filteredHistory.length; i++) {
+                if (filteredHistory[i].id !== (prev.source[i]?.id ?? null)) { same = false; break }
+            }
+            if (same) reusedIds = prev.ids
+        }
+        if (reusedIds) {
+            visibleIdsRef.current = { source: filteredHistory, ids: reusedIds }
+        } else {
+            const ids = new Set<string>()
+            for (const item of filteredHistory) ids.add(item.id)
+            visibleIdsRef.current = { source: filteredHistory, ids }
+        }
     }
     const visibleIds = visibleIdsRef.current.ids
+    // Today/Yesterday sums depend on the local calendar day and zone. The
+    // visible-id Set stays identity-stable across overlay commits, so the day
+    // token is what re-runs this memo at midnight and on a zone change; it is
+    // derived from the existing 30s clock tick.
+    const headerDayToken = localDayToken(now)
     const headerHours = useMemo(() => {
         const { totalMs, todayMs, yesterdayMs } = activityHeaderHoursCached(hoursSource, runtimeIndex, canonicalConnections, Date.now(), hoursScope, visibleIds)
         return {
@@ -188,7 +209,10 @@ export function ActivityFeed({
             today: Math.round(todayMs / 360000) / 10,
             trend: todayMs >= yesterdayMs ? 'up' as const : 'down' as const,
         }
-    }, [visibleIds, hoursSource, runtimeIndex, canonicalConnections, hoursScope, activeTab, rollupMinutes])
+        // headerDayToken is an invalidation token: the sums depend on the local
+        // calendar day and zone, not on any value read above.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [visibleIds, hoursSource, runtimeIndex, canonicalConnections, hoursScope, activeTab, rollupMinutes, headerDayToken])
     const filteredWatchHours = headerHours.total
     const todayHours = headerHours.today
     const todayTrend = headerHours.trend

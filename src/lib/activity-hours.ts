@@ -1,5 +1,6 @@
 import { cumulativeWatchKey } from '@/lib/activity-utils'
 import { computeWatchHours, hoursRowFromItem, type RuntimeIndex } from '@/lib/watch-hours'
+import { localDayToken } from './local-time-token.ts'
 import type { ActivityItem } from '@/types/activity'
 
 const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/
@@ -56,10 +57,13 @@ export function activityHeaderHours(
     return { totalMs, todayMs, yesterdayMs }
 }
 
-// The feed remounts on every route open and recomputes the same sums over the same
-// rows. A last-call cache keyed on input identity (plus a minute bucket, which is
-// finer than the day boundaries the result depends on) returns a bit-identical
-// result while the inputs hold still.
+// The feed remounts on every route open and recomputes the same sums over the
+// same rows. A last-call cache keyed on input identity (plus a minute bucket,
+// which is finer than the day boundaries the result depends on) returns a
+// bit-identical result while the inputs hold still. The local day/zone token
+// rides the key like every other day-derived cache: today/yesterday partition
+// by the runtime zone, and a zone switch within the same minute must not
+// return the previous zone's sums.
 interface HeaderHoursCache {
     raw: ReadonlyArray<ActivityItem>
     runtimes: RuntimeIndex
@@ -67,6 +71,7 @@ interface HeaderHoursCache {
     scope: ReadonlySet<string> | undefined
     visible: ReadonlySet<string>
     minute: number
+    day: string
     result: { totalMs: number; todayMs: number; yesterdayMs: number }
 }
 let headerHoursCache: HeaderHoursCache | null = null
@@ -80,13 +85,14 @@ export function activityHeaderHoursCached(
     visible: ReadonlySet<string>,
 ): { totalMs: number; todayMs: number; yesterdayMs: number } {
     const minute = Math.floor(now / 60000)
+    const day = localDayToken(now)
     const hit = headerHoursCache
     if (
-        hit && hit.minute === minute && hit.raw === raw && hit.runtimes === runtimes
+        hit && hit.minute === minute && hit.day === day && hit.raw === raw && hit.runtimes === runtimes
         && hit.canonical === canonical && hit.scope === scope && hit.visible === visible
     ) return hit.result
     const result = activityHeaderHours(raw, runtimes, canonical, now, scope, visible)
-    headerHoursCache = { raw, runtimes, canonical, scope, visible, minute, result }
+    headerHoursCache = { raw, runtimes, canonical, scope, visible, minute, day, result }
     return result
 }
 

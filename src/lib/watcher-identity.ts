@@ -30,6 +30,13 @@ function ttIdOf(itemId: string | null | undefined): string | null {
     return match ? match[1].toLowerCase() : null
 }
 
+// Per-object memo for the identity keys: the Activity feed recomputes these for
+// every item on every metadata-overlay commit and every enrichment pass, and the
+// keys are pure functions of (itemId, name, type) on items the pipeline always
+// replaces instead of mutating. A WeakMap keeps the memo pinned to the item's own
+// lifetime, so a new item object (a fresh name) always recomputes.
+const watcherKeysCache = new WeakMap<WatcherItemIdentity, readonly string[]>()
+
 export function watcherMatchesItem(item: WatcherItemIdentity, show: WatcherItemIdentity): boolean {
     if (item.itemId === show.itemId) return true
     const ttItem = ttIdOf(item.itemId)
@@ -44,7 +51,9 @@ export function watcherMatchesItem(item: WatcherItemIdentity, show: WatcherItemI
 }
 
 /** Safe identity keys shared by display enrichment and watcher cross-linking. */
-export function watcherIdentityKeys(item: WatcherItemIdentity): string[] {
+export function watcherIdentityKeys(item: WatcherItemIdentity): readonly string[] {
+    const cached = watcherKeysCache.get(item)
+    if (cached) return cached
     const keys: string[] = []
     const tt = ttIdOf(item.itemId)
     if (tt) keys.push(`tt:${tt}`)
@@ -55,6 +64,7 @@ export function watcherIdentityKeys(item: WatcherItemIdentity): string[] {
         const title = normalizeWatcherTitle(item.name)
         if (title) keys.push(`${seriesLike(item.type) ? 's' : 'm'}:${title}`)
     }
+    watcherKeysCache.set(item, keys)
     return keys
 }
 

@@ -4,6 +4,7 @@ import type { JellyfinMediaReads } from './reads.ts'
 import type { JellyfinItem, JellyfinNowPlayingItem, JellyfinSession } from './types.ts'
 import { metahubPosterUrl } from '../activity-artwork.ts'
 import { jellyfinCanonicalId, jellyfinTmdbId } from './metadata.ts'
+import { createWorkspaceResetSubscription } from '../workspace-reset-subscription.ts'
 
 export interface MediaAccount { id: string; name: string }
 export interface MediaPlayback {
@@ -511,6 +512,58 @@ interface NowStatusInputs {
 // can never leak rows across workspaces or scope changes (a new publication is a new array).
 let nowStatusInputsCache: WeakMap<ActivityItem[], { current: ActivityItem[]; inputs: NowStatusInputs }> | null = null
 
+// One-step reuse across the metadata-overlay commits: the overlay republishes the
+// feed with items replaced by copies that only differ in display fields. Those
+// copies feed activityNowStatus exactly the same answers, so the full scan can
+// be skipped when every position is either the same object or such a copy.
+let lastNowStatusInputs: { history: ActivityItem[]; current: ActivityItem[]; inputs: NowStatusInputs } | null = null
+
+/**
+ * Release the retained scan inputs. Invoked on sign-out and workspace switch
+ * (store-coordinator) and on every persistence namespace transition below;
+ * without this the roots below outlive the page and hold the previous
+ * workspace's rows until another Activity render overwrites them.
+ */
+export function resetNowStatusCaches(): void {
+    nowStatusInputsCache = null
+    lastNowStatusInputs = null
+    workspaceSubscription.release()
+}
+
+// Namespace transitions (login, session expiry, the sync-store reset) switch
+// persistence directly and never run the store-coordinator reset; explicit
+// logout still goes through resetAllStores. The subscription activates on the
+// first cache use, is released by the reset above, and its HMR dispose keeps
+// superseded module generations from stacking listeners.
+const workspaceSubscription = createWorkspaceResetSubscription(resetNowStatusCaches, import.meta.hot)
+
+/** Cache-shape introspection for tests: whether the retained inputs root is live. */
+export function nowStatusCacheStatsForTests(): { retained: number } {
+    return { retained: lastNowStatusInputs ? 1 : 0 }
+}
+
+const itemTimeMs = (t: ActivityItem['timestamp']): number => (t instanceof Date ? t.getTime() : new Date(t).getTime())
+
+function nowStatusInputsReusable(history: ActivityItem[], prev: ActivityItem[]): boolean {
+    if (prev.length !== history.length) return false
+    for (let i = 0; i < history.length; i++) {
+        const a = history[i]
+        const b = prev[i]
+        if (a === b) continue
+        // Every field buildNowStatusInputs and the per-tick evaluation read.
+        if (
+            a.id !== b.id || a.accountId !== b.accountId || a.itemId !== b.itemId
+            || a.uniqueItemId !== b.uniqueItemId || a.type !== b.type || a.source !== b.source
+            || a.sourceConnectionId !== b.sourceConnectionId || a.season !== b.season || a.episode !== b.episode
+            || a.backfill !== b.backfill || a.isInProgress !== b.isInProgress
+            || a.progress !== b.progress || a.flaggedWatched !== b.flaggedWatched
+            || a.mediaObservation !== b.mediaObservation
+            || itemTimeMs(a.timestamp) !== itemTimeMs(b.timestamp)
+        ) return false
+    }
+    return true
+}
+
 function buildNowStatusInputs(history: ActivityItem[], current: ActivityItem[], now: number): NowStatusInputs {
     const latest = new Map<string, ActivityItem>()
     const latestByIdentity = new Map<string, ActivityItem>()
@@ -543,13 +596,28 @@ function buildNowStatusInputs(history: ActivityItem[], current: ActivityItem[], 
 
 /** Select from the full feed so searching cannot revive an older episode's badge. */
 export function activityNowStatuses(history: ActivityItem[], now = Date.now(), current: ActivityItem[] = []): Map<string, ActivityNowStatus> {
+    // The workspace-release subscription above activates on this first cache
+    // use; importing or resetting the module without scanning rows must not
+    // install a listener.
+    workspaceSubscription.ensure()
     const list = current
     const cache = nowStatusInputsCache ??= new WeakMap()
     let entry = cache.get(history)
     if (!entry || entry.current !== list || now < entry.inputs.builtAt || now + 60_000 >= entry.inputs.minFutureTime) {
-        entry = { current: list, inputs: buildNowStatusInputs(history, list, now) }
+        let inputs: NowStatusInputs | null = null
+        const last = lastNowStatusInputs
+        if (
+            entry === undefined && last && last.current === list
+            && now >= last.inputs.builtAt && now + 60_000 < last.inputs.minFutureTime
+            && nowStatusInputsReusable(history, last.history)
+        ) {
+            inputs = last.inputs
+        }
+        if (!inputs) inputs = buildNowStatusInputs(history, list, now)
+        entry = { current: list, inputs }
         cache.set(history, entry)
     }
+    lastNowStatusInputs = { history, current: list, inputs: entry.inputs }
     const { latest, latestByIdentity, rowsById, liveHistoryRows } = entry.inputs
 
     const liveByIdentity = new Map<string, ActivityItem>()

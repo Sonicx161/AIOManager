@@ -1,5 +1,7 @@
 import type { ActivityItem } from '../../types/activity'
 import type { ActivityNowStatus } from '../../lib/jellyfin/activity'
+import { localTimeZoneKey } from '../../lib/local-time-token.ts'
+import { createWorkspaceResetSubscription } from '../../lib/workspace-reset-subscription.ts'
 
 // Pure row-model helpers for the ActivityFeed long-history windowing.
 // The component layers @tanstack/react-virtual on top of this model.
@@ -91,18 +93,107 @@ function compareNewestFirst(a: ActivityItem, b: ActivityItem, nowStatuses?: NowS
     return (isNaN(tb) ? -Infinity : tb) - (isNaN(ta) ? -Infinity : ta)
 }
 
-// Sorting and grouping are pure per (items, nowStatuses) pair, and the feed asks
-// for both on every reveal increment while the inputs hold still. Caching by
-// input identity keeps repeated reveals O(slice) instead of O(n log n) Date-parsing
-// sorts. Callers never mutate the returned array.
-const sortedFeedCache = new WeakMap<ActivityItem[], { statuses: NowStatusMap | undefined; items: ActivityItem[] }>()
-const fullDayCountsCache = new WeakMap<ActivityItem[], { statuses: NowStatusMap | undefined; counts: Map<string, number> }>()
+// The comparator reads exactly (importedSavedState, timestamp, id-tier via the
+// shared statuses map), so a cached key per item object is a complete summary.
+// The overlay replaces items instead of mutating them, so a changed item is a
+// new object and always rekeys. Keys carry no day component, so the runtime
+// zone is not part of this cache.
+interface FeedSortKey { saved: boolean; ts: number }
+let sortKeyCache = new WeakMap<ActivityItem, FeedSortKey>()
+
+function feedSortKey(item: ActivityItem): FeedSortKey {
+    const cached = sortKeyCache.get(item)
+    if (cached) return cached
+    const time = new Date(item.timestamp).getTime()
+    const key = { saved: item.importedSavedState === true, ts: isNaN(time) ? -Infinity : time }
+    sortKeyCache.set(item, key)
+    return key
+}
+
+// Sorting and grouping are pure per (items, nowStatuses, zone) triple, and the
+// feed asks for them on every reveal increment while the inputs hold still.
+// The status-variant slot is BOUNDED to the latest status map plus the
+// status-free order: live playback can mint a new status map on every poll
+// transition, and retaining one sorted array per transition is unbounded.
+// The zone is part of the key because the comparator partitions by local
+// calendar day. Callers never mutate the returned array.
+interface SortedFeedEntry {
+    zone: string
+    slots: number
+    free?: ActivityItem[]
+    lastStatuses?: NowStatusMap
+    lastSorted?: ActivityItem[]
+}
+let sortedFeedCache = new WeakMap<ActivityItem[], SortedFeedEntry>()
+// One-step order reuse: the metadata overlay republishes the feed with a few
+// items replaced by equal-key copies (new name/poster, same id and sort key).
+// Re-sorting that is wasted work; remapping the previous sorted order through
+// the replacements is exact, because equal keys at equal positions leave every
+// pairwise comparator result unchanged. The zone must match too: equal-key
+// reuse only proves the old order correct for the zone it was computed in.
+let lastSortedFeed: { items: ActivityItem[]; statuses: NowStatusMap | undefined; sorted: ActivityItem[]; zone: string } | null = null
+
+function sortFeedItemsFresh(items: ActivityItem[], nowStatuses?: NowStatusMap): ActivityItem[] {
+    return [...items].sort((a, b) => compareNewestFirst(a, b, nowStatuses))
+}
+
+function sortedFeedOrderReusable(
+    items: ActivityItem[],
+    prev: ActivityItem[],
+    statuses: NowStatusMap | undefined,
+): boolean {
+    if (prev.length !== items.length) return false
+    for (let i = 0; i < items.length; i++) {
+        const a = items[i]
+        const b = prev[i]
+        if (a === b) continue
+        if (a.id !== b.id) return false
+        const ka = feedSortKey(a)
+        const kb = feedSortKey(b)
+        if (ka.saved !== kb.saved || ka.ts !== kb.ts) return false
+        if (statuses && statuses.size > 0 && nowTier(a, statuses) !== nowTier(b, statuses)) return false
+    }
+    return true
+}
 
 export function sortFeedItems(items: ActivityItem[], nowStatuses?: NowStatusMap): ActivityItem[] {
-    const cached = sortedFeedCache.get(items)
-    if (cached && cached.statuses === nowStatuses) return cached.items
-    const sorted = [...items].sort((a, b) => compareNewestFirst(a, b, nowStatuses))
-    sortedFeedCache.set(items, { statuses: nowStatuses, items: sorted })
+    // The workspace-release subscription below activates on this first cache
+    // use: importing or resetting the module without touching a cache
+    // (resetAllStores) must not install a listener.
+    workspaceSubscription.ensure()
+    const zone = localTimeZoneKey()
+    let entry = sortedFeedCache.get(items)
+    if (!entry || entry.zone !== zone) {
+        entry = { zone, slots: 0 }
+        sortedFeedCache.set(items, entry)
+    }
+    if (nowStatuses === undefined && entry.free) return entry.free
+    if (nowStatuses !== undefined && entry.lastStatuses === nowStatuses && entry.lastSorted) return entry.lastSorted
+
+    let sorted: ActivityItem[] | null = null
+    const last = lastSortedFeed
+    if (last && last.zone === zone && last.statuses === nowStatuses && sortedFeedOrderReusable(items, last.items, nowStatuses)) {
+        // Same ids in the same positions with equal sort keys: carry the previous
+        // order over the current item objects. Only replaced positions need remapping.
+        const replacementsById = new Map<string, ActivityItem>()
+        for (let i = 0; i < items.length; i++) {
+            if (items[i] !== last.items[i]) replacementsById.set(items[i].id, items[i])
+        }
+        sorted = replacementsById.size === 0
+            ? last.sorted
+            : last.sorted.map(prev => replacementsById.get(prev.id) ?? prev)
+    }
+    if (!sorted) sorted = sortFeedItemsFresh(items, nowStatuses)
+
+    if (nowStatuses === undefined) {
+        if (!entry.free) entry.slots++
+        entry.free = sorted
+    } else {
+        if (!entry.lastSorted) entry.slots++
+        entry.lastStatuses = nowStatuses
+        entry.lastSorted = sorted
+    }
+    lastSortedFeed = { items, statuses: nowStatuses, sorted, zone }
     return sorted
 }
 
@@ -115,22 +206,58 @@ function toDateId(dateStr: string): string {
 
 /** Same grouping semantics the feed always had: newest-first, one bucket per calendar day, invalid timestamps last; undated saved state gets its own explicit trailing bucket instead of borrowing the observation-time day. */
 export function groupByDate(items: ActivityItem[], nowStatuses?: NowStatusMap): DateGroup[] {
-    return groupSortedByDate(sortFeedItems(items, nowStatuses))
+    return groupSortedByDate(sortFeedItems(items, nowStatuses), localTimeZoneKey())
 }
 
 /** Group already-sorted items without re-sorting (a sorted prefix stays sorted). */
-function groupSortedByDate(sorted: ActivityItem[]): DateGroup[] {
+// Calendar-day strings are pure per (item, zone); the overlay republishes the
+// feed with replaced copies, so a WeakMap keeps grouping O(n) cheap lookups.
+// A runtime zone switch invalidates every day key, so the zone rides the entry.
+interface DayKeyEntry { zone: string; key: string }
+let dayKeyCache = new WeakMap<ActivityItem, DayKeyEntry>()
+let fullDayCountsCache = new WeakMap<ActivityItem[], { zone: string; counts: Map<string, number> }>()
+
+// Day counts depend only on each row's (id, timestamp, importedSavedState) within
+// one zone; copies that keep those equal produce identical counts, so the previous
+// map is reusable only while the zone holds.
+let lastDayCounts: { items: ActivityItem[]; counts: Map<string, number>; zone: string } | null = null
+
+function dayKeyOf(item: ActivityItem, zone: string): string {
+    const cached = dayKeyCache.get(item)
+    if (cached && cached.zone === zone) return cached.key
+    let key: string
+    if (item.importedSavedState === true) {
+        key = SAVED_GROUP_DATE
+    } else {
+        const date = new Date(item.timestamp)
+        key = isNaN(date.getTime()) ? 'Unknown Date' : date.toDateString()
+    }
+    dayKeyCache.set(item, { zone, key })
+    return key
+}
+
+// Day-count equality check for the reuse path: copies that keep (id,
+// importedSavedState, timestamp) equal produce identical counts within a zone.
+function dayCountsReusable(items: ActivityItem[], prev: ActivityItem[]): boolean {
+    if (prev.length !== items.length) return false
+    for (let i = 0; i < items.length; i++) {
+        const a = items[i]
+        const b = prev[i]
+        if (a === b) continue
+        if (a.id !== b.id || a.importedSavedState !== b.importedSavedState) return false
+        const ta = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime()
+        const tb = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime()
+        if (isNaN(ta) !== isNaN(tb) || (!isNaN(ta) && ta !== tb)) return false
+    }
+    return true
+}
+
+function groupSortedByDate(sorted: ActivityItem[], zone: string): DateGroup[] {
     const dates: string[] = []
     const itemsByDate: Record<string, ActivityItem[]> = {}
 
     for (const item of sorted) {
-        let dateStr: string
-        if (item.importedSavedState === true) {
-            dateStr = SAVED_GROUP_DATE
-        } else {
-            const date = new Date(item.timestamp)
-            dateStr = isNaN(date.getTime()) ? 'Unknown Date' : date.toDateString()
-        }
+        const dateStr = dayKeyOf(item, zone)
         if (!itemsByDate[dateStr]) {
             itemsByDate[dateStr] = []
             dates.push(dateStr)
@@ -162,15 +289,25 @@ export function buildFeedRows(items: ActivityItem[], visibleCount: number, optio
     const sliced = visibleItemCount === sorted.length ? sorted : sorted.slice(0, visibleItemCount)
 
     // A slice of the sorted array is already in feed order; group it without re-sorting.
-    const groups = groupSortedByDate(sliced)
-    const fullDayCountsCacheHit = fullDayCountsCache.get(items)
+    const zone = localTimeZoneKey()
+    const groups = groupSortedByDate(sliced, zone)
     let fullDayCounts: Map<string, number>
-    if (fullDayCountsCacheHit && fullDayCountsCacheHit.statuses === undefined) {
+    const fullDayCountsCacheHit = fullDayCountsCache.get(items)
+    if (fullDayCountsCacheHit && fullDayCountsCacheHit.zone === zone) {
         fullDayCounts = fullDayCountsCacheHit.counts
+    } else if (
+        lastDayCounts && lastDayCounts.zone === zone && lastDayCounts.items.length === items.length
+        && dayCountsReusable(items, lastDayCounts.items)
+    ) {
+        // Same rows by id with unchanged day keys (the overlay's replaced copies):
+        // the full-day totals are identical, so reuse the previous counts map.
+        fullDayCounts = lastDayCounts.counts
+        fullDayCountsCache.set(items, { zone, counts: fullDayCounts })
     } else {
         fullDayCounts = new Map(groupByDate(items).map(g => [g.date, g.watchCount]))
-        fullDayCountsCache.set(items, { statuses: undefined, counts: fullDayCounts })
+        fullDayCountsCache.set(items, { zone, counts: fullDayCounts })
     }
+    lastDayCounts = { items, counts: fullDayCounts, zone }
 
     const rows: FeedRow[] = []
     const groupAnchors: FeedRowsResult['groupAnchors'] = []
@@ -238,6 +375,34 @@ export const GRID_BREAKPOINT_COLUMNS: ReadonlyArray<{ minWidth: number; columns:
     { minWidth: 768, columns: 4 },
     { minWidth: 640, columns: 3 },
 ]
+
+/**
+ * Release every module-level cache root this module owns. Invoked on sign-out
+ * and workspace switch (store-coordinator) so a previous workspace's feed rows
+ * and sorted orders are never retained until the next Activity visit.
+ */
+export function resetActivityRowCaches(): void {
+    sortedFeedCache = new WeakMap()
+    dayKeyCache = new WeakMap()
+    fullDayCountsCache = new WeakMap()
+    sortKeyCache = new WeakMap()
+    lastSortedFeed = null
+    lastDayCounts = null
+    workspaceSubscription.release()
+}
+
+// Namespace transitions (login, session expiry, the sync-store reset) switch
+// persistence directly and never run the store-coordinator reset, so this
+// subscription is what releases the previous workspace's roots on every
+// actual transition; explicit logout still goes through resetAllStores. It
+// activates on the first cache use, is released by the reset above, and its
+// HMR dispose keeps superseded module generations from stacking listeners.
+const workspaceSubscription = createWorkspaceResetSubscription(resetActivityRowCaches, import.meta.hot)
+
+/** Cache-shape introspection for tests: the latest feed's retained variant slots. */
+export function activityRowCacheStatsForTests(): { lastFeedStatusSlots: number } {
+    return { lastFeedStatusSlots: lastSortedFeed && sortedFeedCache.get(lastSortedFeed.items) ? (sortedFeedCache.get(lastSortedFeed.items) as SortedFeedEntry).slots : 0 }
+}
 
 export function detectGridColumns(matches: (query: string) => boolean, fallback = 2): number {
     for (const breakpoint of GRID_BREAKPOINT_COLUMNS) {

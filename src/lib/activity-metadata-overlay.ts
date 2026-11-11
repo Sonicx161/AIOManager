@@ -44,46 +44,62 @@ export function metadataTargetKey(target: PendingMetadataTarget): string {
  * for title targets, by identity. `resolved` is keyed by metadataTargetKey.
  * Rows with configured names are never collected: resolution only ever fills
  * blank/identifier titles and never overrides real metadata.
+ *
+ * The candidate list is pure in `history` alone (the `resolved` filter is
+ * applied by the caller per pass), so it is memoized by input identity: the
+ * resolver commits once per batch and used to rescan every row each time.
  */
+const unresolvedCandidatesCache = new WeakMap<object, PendingMetadataTarget[]>()
+
 export function collectUnresolvedMetadataTargets(
     history: Array<Pick<ActivityItem, 'itemId' | 'uniqueItemId' | 'name' | 'poster' | 'type'>>,
     resolved: { has(itemId: string): boolean },
 ): PendingMetadataTarget[] {
-    const targets: PendingMetadataTarget[] = []
-    const seen = new Set<string>()
-    for (const item of history) {
-        if (!item?.itemId || seen.has(item.itemId) || resolved.has(item.itemId)) continue
-        if (!isUnresolvedActivityName(item.name) && item.poster) continue
-        if (item.itemId.startsWith('tt')) {
-            seen.add(item.itemId)
-            targets.push(item.type ? { kind: 'imdb', itemId: item.itemId, type: item.type } : { kind: 'imdb', itemId: item.itemId })
-            continue
-        }
-        const tmdbId = /^tmdb:(\d+)$/i.exec(item.itemId)?.[1]
-        if (tmdbId && (item.type === 'movie' || item.type === 'series' || item.type === 'anime' || item.type === 'episode')) {
-            seen.add(item.itemId)
-            targets.push({ kind: 'tmdb', itemId: item.itemId, tmdbId, type: item.type === 'movie' ? 'movie' : 'series', name: item.name })
-            continue
-        }
-        // Episode rows can carry the provider id on the episode-aware unique id
-        // (e.g. itemId "kitsu:43248", uniqueItemId "kitsu:43248:1:6"); accept both.
-        const kitsuId = parseKitsuId(item.itemId) ?? parseKitsuId(item.uniqueItemId)
-        if (kitsuId) {
-            seen.add(item.itemId)
-            targets.push({ kind: 'kitsu', itemId: item.itemId, kitsuId })
-            continue
-        }
-        if (!isUnresolvedActivityName(item.name)
-            && !item.poster
-            && (item.type === 'movie' || item.type === 'series' || item.type === 'anime')) {
-            const identity = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
-            if (identity && !seen.has(identity) && !resolved.has(identity)) {
-                seen.add(identity)
-                targets.push({ kind: 'title', itemId: item.itemId, identity, name: item.name, type: item.type })
+    let candidates = unresolvedCandidatesCache.get(history)
+    if (!candidates) {
+        candidates = []
+        const seen = new Set<string>()
+        for (const item of history) {
+            if (!item?.itemId || seen.has(item.itemId) || resolved.has(item.itemId)) continue
+            if (!isUnresolvedActivityName(item.name) && item.poster) continue
+            if (item.itemId.startsWith('tt')) {
+                seen.add(item.itemId)
+                candidates.push(item.type ? { kind: 'imdb', itemId: item.itemId, type: item.type } : { kind: 'imdb', itemId: item.itemId })
+                continue
+            }
+            const tmdbId = /^tmdb:(\d+)$/i.exec(item.itemId)?.[1]
+            if (tmdbId && (item.type === 'movie' || item.type === 'series' || item.type === 'anime' || item.type === 'episode')) {
+                seen.add(item.itemId)
+                candidates.push({ kind: 'tmdb', itemId: item.itemId, tmdbId, type: item.type === 'movie' ? 'movie' : 'series', name: item.name })
+                continue
+            }
+            // Episode rows can carry the provider id on the episode-aware unique id
+            // (e.g. itemId "kitsu:43248", uniqueItemId "kitsu:43248:1:6"); accept both.
+            const kitsuId = parseKitsuId(item.itemId) ?? parseKitsuId(item.uniqueItemId)
+            if (kitsuId) {
+                seen.add(item.itemId)
+                candidates.push({ kind: 'kitsu', itemId: item.itemId, kitsuId })
+                continue
+            }
+            if (!isUnresolvedActivityName(item.name)
+                && !item.poster
+                && (item.type === 'movie' || item.type === 'series' || item.type === 'anime')) {
+                const identity = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
+                if (identity && !seen.has(identity) && !resolved.has(identity)) {
+                    seen.add(identity)
+                    candidates.push({ kind: 'title', itemId: item.itemId, identity, name: item.name, type: item.type })
+                }
             }
         }
+        unresolvedCandidatesCache.set(history, candidates)
     }
-    return targets
+    // The memo above skipped already-resolved itemIds when it was built; a later
+    // pass must still skip ids and title identities resolved since, without
+    // rebuilding the ordering. Both exclusion keys are checked every call: title
+    // targets are recorded under their identity, not their itemId.
+    return candidates.some(target => resolved.has(target.itemId) || (target.kind === 'title' && resolved.has(target.identity)))
+        ? candidates.filter(target => !resolved.has(target.itemId) && (target.kind !== 'title' || !resolved.has(target.identity)))
+        : candidates
 }
 
 /** Next resolver batch, skipping targets whose last failed attempt is within retryMs. */
@@ -153,6 +169,38 @@ export function createTitleMetadataSearch(
     }
 }
 
+// The title-conflict scan is pure in `items` (it never looks at `resolved`), but
+// the overlay runs once per resolver commit and used to rescan every row twice
+// each time. Keyed by input identity, same contract as the feed's row caches.
+interface TitleConflictIndex {
+    titleKeyByItem: Map<ActivityItem, string | undefined>
+    conflictingTitles: Set<string>
+}
+const titleConflictCache = new WeakMap<ActivityItem[], TitleConflictIndex>()
+
+function titleConflictIndex(items: ActivityItem[]): TitleConflictIndex {
+    const cached = titleConflictCache.get(items)
+    if (cached) return cached
+    const titleKeyByItem = new Map<ActivityItem, string | undefined>()
+    const titleIds = new Map<string, Set<string>>()
+    for (const item of items) {
+        // Every row keeps its computed title key, even without an IMDb id: the
+        // apply pass must suppress alias matching for a non-IMDb row whose title
+        // is ambiguous across IMDb ids, exactly like the original inline scan.
+        const titleKey = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
+        titleKeyByItem.set(item, titleKey)
+        const tt = /^tt\d+/i.exec(item.itemId || '')?.[0].toLowerCase()
+        if (!titleKey || !tt) continue
+        const ids = titleIds.get(titleKey) || new Set<string>()
+        ids.add(tt)
+        titleIds.set(titleKey, ids)
+    }
+    const conflictingTitles = new Set([...titleIds].filter(([, ids]) => ids.size > 1).map(([key]) => key))
+    const index = { titleKeyByItem, conflictingTitles }
+    titleConflictCache.set(items, index)
+    return index
+}
+
 /**
  * Apply resolved metadata over feed items: replace only bad names, fill only
  * missing poster/genres. IDs, provenance and watch state are untouched, and the
@@ -165,19 +213,10 @@ export function applyResolvedMetadataOverlay(
 ): ActivityItem[] {
     if (resolved.size === 0) return items
     let changed = false
-    const titleIds = new Map<string, Set<string>>()
-    for (const item of items) {
-        const titleKey = watcherIdentityKeys(item).find(key => key.startsWith('m:') || key.startsWith('s:'))
-        const tt = /^tt\d+/i.exec(item.itemId || '')?.[0].toLowerCase()
-        if (!titleKey || !tt) continue
-        const ids = titleIds.get(titleKey) || new Set<string>()
-        ids.add(tt)
-        titleIds.set(titleKey, ids)
-    }
-    const conflictingTitles = new Set([...titleIds].filter(([, ids]) => ids.size > 1).map(([key]) => key))
+    const { titleKeyByItem, conflictingTitles } = titleConflictIndex(items)
     const next = items.map(item => {
         const keys = watcherIdentityKeys(item)
-        const titleKey = keys.find(key => key.startsWith('m:') || key.startsWith('s:'))
+        const titleKey = titleKeyByItem.get(item)
         const safeKeys = titleKey && conflictingTitles.has(titleKey) ? keys.filter(key => key.startsWith('tt:')) : keys
         const entry = resolved.get(item.itemId) || safeKeys.map(key => resolved.get(key)).find(Boolean)
         if (!entry) return item
