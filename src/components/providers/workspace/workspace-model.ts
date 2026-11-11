@@ -178,6 +178,14 @@ export function pullFreshness(lastSeenAt: number | null | undefined, now: number
     return now - lastSeenAt > PULL_STALE_AFTER_MS ? 'stale' : 'synced'
 }
 
+// Role evidence: a successful reinstall records last_push_at, a successful pull read records
+// last_pull_at, and the subscribers API exposes evidence only while the account has exactly
+// one app. The lone sender (pushes, never pulled) is the only reclassified card; every other
+// state keeps beta's card, rendered from register-driven last_seen_at exactly as on beta.
+export function subscriberIsSender(lastPullAt: number | null | undefined, lastPushAt: number | null | undefined): boolean {
+    return !!lastPushAt && !lastPullAt
+}
+
 // The install URL needs the encrypted password the user endpoint returns
 // beside userData, never inside it.
 export function aiostreamsInstallUrl(baseUrl: string, uuid: string | undefined, encryptedPassword: string | null | undefined): string | null {

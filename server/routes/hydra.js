@@ -66,6 +66,35 @@ async function lookupAccountByApiKey(request, reply) {
     return row
 }
 
+// Calls other than register carry no app name, so they can only be attributed to an app when
+// exactly one subscriber exists on the account: the COUNT guard makes the UPDATE a no-op on
+// shared accounts. These stamps are classification evidence only - last_seen_at stays exactly
+// as on beta, written by register alone. Pull evidence is written only after a successful
+// collection read, push evidence only after a successful reinstall, so a 503 never records a
+// pull. The guard column is the one being written, which coalesces polling to at most one
+// write per window; the threshold is passed pre-computed so the timestamp parameter stays
+// bigint on Postgres. Every placeholder occurs exactly once because the SQLite adapter turns
+// each occurrence into its own anonymous ?.
+const STAMP_SQL = {
+    pull: `UPDATE hydra_subscribers
+           SET last_pull_at = $1
+           WHERE account_id = $2 AND sync_user = $3
+             AND (SELECT COUNT(*) FROM hydra_subscribers s WHERE s.account_id = $4 AND s.sync_user = $5) = 1
+             AND (last_pull_at IS NULL OR last_pull_at < $6)`,
+    push: `UPDATE hydra_subscribers
+           SET last_push_at = $1
+           WHERE account_id = $2 AND sync_user = $3
+             AND (SELECT COUNT(*) FROM hydra_subscribers s WHERE s.account_id = $4 AND s.sync_user = $5) = 1
+             AND (last_push_at IS NULL OR last_push_at < $6)`,
+}
+
+async function stampSubscriberActivity(account, kind) {
+    if (isReadOnlyReplica()) return
+    const now = Date.now()
+    db.run(STAMP_SQL[kind], [now, account.account_id, account.sync_user || '', account.account_id, account.sync_user || '', now - LAST_USED_COALESCE_MS])
+        .catch(err => logger.warn({ category: 'Hydra' }, `Subscriber ${kind} stamp failed: ${err.message}`))
+}
+
 // syncUser comes from the API-key lookup, not the request. Every query is scoped to it so a key
 // maliciously registered against another user's accountId (account_api_keys is populated from the
 // client sync blob) resolves only to the key owner's own data -- never the victim's credentials,
@@ -482,6 +511,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
         try {
             const raw = await getCanonicalAddonsCached(account.account_id, account.sync_user)
             const { version } = hydraDerivedView(raw)
+            stampSubscriberActivity(account, 'pull')
             return { version }
         } catch {
             reply.code(503).header('Retry-After', '30')
@@ -498,6 +528,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
         try {
             const raw = await getCanonicalAddonsCached(account.account_id, account.sync_user)
             const { addons } = hydraDerivedView(raw)
+            stampSubscriberActivity(account, 'pull')
             return { addons }
         } catch {
             reply.code(503).header('Retry-After', '30')
@@ -754,6 +785,7 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                 return { updated, mode }
             })
             if (result === UNAVAILABLE) return UNAVAILABLE
+            stampSubscriberActivity(account, 'push')
 
             // Fan-outs run one at a time per account and each enforces the canonical state read inside its own turn.
             if (reconciler) {

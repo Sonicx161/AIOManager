@@ -220,9 +220,21 @@ export function registerProviderRoutes(fastify, reconciler) {
         if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
 
         const { accountId } = request.params
+        // Role evidence is exposed only while attribution is unambiguous (exactly one subscriber
+        // on the account). With two or more apps, anonymous Hydra calls cannot be attributed, so
+        // every row renders exactly as it did before role tracking: beta's register-driven
+        // last_seen freshness. The stamps themselves already skip shared accounts (routes/hydra.js).
+        // Every placeholder occurs exactly once: the SQLite adapter turns each occurrence into
+        // its own anonymous ?.
         const rows = await db.query(
-            'SELECT name, logo, created_at, last_seen_at FROM hydra_subscribers WHERE account_id = $1 AND sync_user = $2 ORDER BY last_seen_at DESC',
-            [accountId, authUser]
+            `SELECT h.name, h.logo, h.created_at, h.last_seen_at,
+                    CASE WHEN c.n = 1 THEN h.last_pull_at END AS last_pull_at,
+                    CASE WHEN c.n = 1 THEN h.last_push_at END AS last_push_at
+             FROM hydra_subscribers h
+             CROSS JOIN (SELECT COUNT(*) AS n FROM hydra_subscribers WHERE account_id = $3 AND sync_user = $4) c
+             WHERE h.account_id = $1 AND h.sync_user = $2
+             ORDER BY h.last_seen_at DESC`,
+            [accountId, authUser, accountId, authUser]
         )
         return { subscribers: rows || [] }
     })

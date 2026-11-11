@@ -398,8 +398,9 @@ export async function initializeDatabase(fastify) {
         updated_at: 'ALTER TABLE account_canonical_addons ADD COLUMN updated_at BIGINT',
     }, ['account_id'])
 
-    // Pull-mode Hydra apps (backendless, e.g. Fusion) register on connect so they surface as
-    // connection cards with a last-seen time. AIOManager never pushes to them; they pull.
+    // Hydra apps register on connect so they surface as connection cards with a last-seen time.
+    // Role evidence: last_pull_at is set only by successful pull reads, last_push_at only by a
+    // successful reinstall. Rows with neither stay unclassified and keep the legacy card.
     await ensureTable('hydra_subscribers', `
       CREATE TABLE IF NOT EXISTS hydra_subscribers (
         id TEXT PRIMARY KEY,
@@ -408,7 +409,9 @@ export async function initializeDatabase(fastify) {
         name TEXT,
         logo TEXT,
         created_at BIGINT NOT NULL,
-        last_seen_at BIGINT
+        last_seen_at BIGINT,
+        last_pull_at BIGINT,
+        last_push_at BIGINT
       );
     `, [
         `CREATE INDEX IF NOT EXISTS idx_hydra_subs_account ON hydra_subscribers (account_id, sync_user)`,
@@ -416,6 +419,8 @@ export async function initializeDatabase(fastify) {
         name: 'ALTER TABLE hydra_subscribers ADD COLUMN name TEXT',
         logo: 'ALTER TABLE hydra_subscribers ADD COLUMN logo TEXT',
         last_seen_at: 'ALTER TABLE hydra_subscribers ADD COLUMN last_seen_at BIGINT',
+        last_pull_at: 'ALTER TABLE hydra_subscribers ADD COLUMN last_pull_at BIGINT',
+        last_push_at: 'ALTER TABLE hydra_subscribers ADD COLUMN last_push_at BIGINT',
     }, ['id'])
 
     const metadataKeysCreateDdl = db.type === 'postgres'

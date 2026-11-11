@@ -1,25 +1,26 @@
 import { Button } from '@/components/ui/button'
 import { StatusChip } from '@/components/ui/status-chip'
 import { Tooltip } from '@/components/ui/tooltip'
-import { Trash2, Download, ChevronRight } from 'lucide-react'
+import { Trash2, Download, Upload, ChevronRight } from 'lucide-react'
 import { useState, memo } from 'react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/connection-format'
 import type { HydraSubscriber } from '@/api/hydra-providers'
-import { pullFreshness } from './workspace/workspace-model'
+import { pullFreshness, subscriberIsSender } from './workspace/workspace-model'
 import { PullAppLogo } from './HydraPullPanel'
 
-// First-class connection card for a Hydra pull app. Shares ConnectionCard's shell so pull apps
-// sit as equals in the connections grid. The push/pull asymmetry shows inside the card: a Pull
-// badge, Synced/Stale in place of the live status pill, and a remove action where native cards
-// carry an enable toggle (a backendless app can't be reached to toggle or push to).
+// First-class connection card for a Hydra app. Shares ConnectionCard's shell so these apps
+// sit as equals in the connections grid. The lone sender (successful pushes, no pulls, sole
+// app on its account) gets the approved Sends card with last active from push evidence;
+// every other app renders beta's pull card exactly, from register-driven last_seen_at.
 export const SubscriberCard = memo(function SubscriberCard({ subscriber, onRemove, onOpen }: {
     subscriber: HydraSubscriber
     onRemove: (name: string) => void
     onOpen?: () => void
 }) {
     const [confirmRemove, setConfirmRemove] = useState(false)
-    const stale = pullFreshness(subscriber.last_seen_at, Date.now()) !== 'synced'
+    const sender = subscriberIsSender(subscriber.last_pull_at, subscriber.last_push_at)
+    const stale = !sender && pullFreshness(subscriber.last_seen_at, Date.now()) !== 'synced'
     const stop = (e: React.SyntheticEvent) => e.stopPropagation()
     const stopActivate = (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation() }
 
@@ -45,20 +46,24 @@ export const SubscriberCard = memo(function SubscriberCard({ subscriber, onRemov
                     <div className="flex flex-wrap items-center gap-1.5">
                         <span className="text-sm font-semibold leading-tight truncate">{subscriber.name}</span>
                         <StatusChip size="sm" variant="muted" className="h-5 gap-1 px-2 text-[11px]">
-                            <Download className="h-3 w-3" />
-                            Pull
+                            {sender ? <Upload className="h-3 w-3" /> : <Download className="h-3 w-3" />}
+                            {sender ? 'Sends' : 'Pull'}
                         </StatusChip>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                        <StatusChip size="sm" variant={stale ? 'warning' : 'success'} className="h-5 gap-1.5 px-2 text-[11px]">
-                            <span className={cn('h-1.5 w-1.5 rounded-full', stale ? 'bg-warning' : 'bg-success')} />
-                            {stale ? 'Stale' : 'Synced'}
-                        </StatusChip>
-                    </div>
-                    <p className="line-clamp-1 text-xs text-muted-foreground">
-                        Pulls your addons · {subscriber.last_seen_at ? `synced ${timeAgo(subscriber.last_seen_at)}` : 'not pulled yet'}
+                    {!sender && (
+                        <div className="flex items-center gap-1.5">
+                            <StatusChip size="sm" variant={stale ? 'warning' : 'success'} className="h-5 gap-1.5 px-2 text-[11px]">
+                                <span className={cn('h-1.5 w-1.5 rounded-full', stale ? 'bg-warning' : 'bg-success')} />
+                                {stale ? 'Stale' : 'Synced'}
+                            </StatusChip>
+                        </div>
+                    )}
+                    <p className={cn('text-xs text-muted-foreground', sender ? '' : 'line-clamp-1')}>
+                        {sender
+                            ? `Sends its addon to this account · last active ${timeAgo(subscriber.last_push_at)}`
+                            : `Pulls your addons · ${subscriber.last_seen_at ? `synced ${timeAgo(subscriber.last_seen_at)}` : 'not pulled yet'}`}
                     </p>
-                    <p className="text-xs text-muted-foreground/60">Backendless app · read-only pull</p>
+                    <p className="text-xs text-muted-foreground/60">{sender ? 'Backendless app' : 'Backendless app · read-only pull'}</p>
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1" onClick={stop} onKeyDown={stopActivate}>
                     {confirmRemove ? (

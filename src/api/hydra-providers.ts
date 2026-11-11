@@ -237,6 +237,8 @@ export interface HydraSubscriber {
     logo: string | null
     created_at: number
     last_seen_at: number
+    last_pull_at?: number | null
+    last_push_at?: number | null
 }
 
 export async function fetchSubscribers(accountId: string): Promise<HydraSubscriber[]> {

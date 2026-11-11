@@ -187,7 +187,9 @@ CREATE TABLE IF NOT EXISTS hydra_subscribers (
   name TEXT,
   logo TEXT,
   created_at BIGINT NOT NULL,
-  last_seen_at BIGINT
+  last_seen_at BIGINT,
+  last_pull_at BIGINT,
+  last_push_at BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS hydra_push_senders (
