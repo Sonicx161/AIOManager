@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'reac
 import type { ActivityItem } from '@/types/activity'
 import type { EventRollups } from '@/lib/watch-event-rollups'
 import { cumulativeWatchKey } from '@/lib/activity-utils'
-import { buildRuntimeIndex, mediaResumePositionMs, type RuntimeIndex } from '@/lib/watch-hours'
-import { createItemsFingerprintMemo } from '@/lib/metrics-fingerprint'
+import { buildRuntimeIndex, mediaResumePositionMs, runtimeIndexFingerprint, type RuntimeIndex } from '@/lib/watch-hours'
+import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo, workerSupersedeAction } from '@/lib/metrics-fingerprint'
 import { useSyncStore } from '@/store/syncStore'
 import { useAuthStore } from '@/store/authStore'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
@@ -317,6 +317,8 @@ export function findPendingReplyIndex(pending: ReadonlyArray<{ reqId: number }>,
     return pending.findIndex(job => job.reqId === reqId)
 }
 
+export { workerSupersedeAction, type WorkerSupersedeAction } from '@/lib/metrics-fingerprint'
+
 function getTimestampMs(value: MetricsWorkerItem['timestamp']): number {
     const time = value instanceof Date ? value.getTime() : new Date(value).getTime()
     return Number.isFinite(time) ? time : 0
@@ -382,10 +384,24 @@ function createRollupsFingerprint(rollups: MetricsRollupInput): string {
     for (const [accountId, days] of Object.entries(rollups.daysByAccount)) {
         mix(accountId)
         mix(days.length)
-        if (days.length > 0) mix(days[0])
+        for (const day of days) mix(day)
     }
 
     return `${byMonthKeys.length}-${hash >>> 0}`
+}
+
+// Data identity of the whole viewer history, independent of viewer/period
+// selection: rows hashed through the real worker transform in a memo isolated
+// from the result-key cache, plus canonical attribution and all rollup days.
+const sourceIdentityMemo = createIsolatedItemsFingerprintMemo()
+
+export function createMetricsSourceIdentity(
+    history: ReadonlyArray<ActivityItem>,
+    rollups: MetricsRollupInput | undefined,
+    canonical: ReadonlyMap<string, string | undefined> | undefined,
+): string {
+    const mapped = history.map(item => toMetricsWorkerItem(item, canonical))
+    return `${sourceIdentityMemo(history, mapped, canonical, null)}|${rollups ? createRollupsFingerprint(rollups) : ''}`
 }
 
 export interface MetricsWorkerOptions {
@@ -395,6 +411,8 @@ export interface MetricsWorkerOptions {
     periodStart?: number | null
     /** Unfiltered history that title runtimes are taken from, so every period agrees. */
     runtimeSource?: ReadonlyArray<Pick<ActivityItem, 'itemId' | 'duration'>>
+    /** Selection-independent identity of the source data (full history, canonical attribution, rollups). */
+    sourceIdentity?: string
 }
 
 interface ScopedResult { scope: string; key: string; value: MetricsResult }
@@ -425,6 +443,18 @@ export function pickScopedResult(scoped: ScopedResult | null, scope: string): Me
     return scoped && scoped.scope === scope ? scoped.value : null
 }
 interface PendingJob { reqId: number; scope: string; key: string; fullKey: string }
+
+/** A whole request as one coherent unit: identity plus the exact payload to compute. */
+interface PendingRequestSnapshot {
+    scope: string
+    key: string
+    fullKey: string
+    dataKey: string
+    items: MetricsWorkerItem[]
+    periodStart: number | null
+    rollups: MetricsRollupInput | undefined
+    runtimes: RuntimeIndex
+}
 
 // Request ids are unique per app session so a reply can always be matched to its
 // request, even across parked-worker handovers.
@@ -460,6 +490,14 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
         () => (workerItems.length === 0 ? '' : `${filterKey}\u0001${itemsFingerprint}|${rollupsFingerprint}|${runtimeSubset.fingerprint}`),
         [workerItems, filterKey, itemsFingerprint, rollupsFingerprint, runtimeSubset]
     )
+    // Supersession identity: selection-independent source data (full history
+    // through the real transform, canonical attribution, rollups, runtime index)
+    // plus the session scope. Viewer and period selection stay out of it, so a
+    // selection change never discards in-flight work while a data change does.
+    const runtimeFullFingerprint = runtimeIndexFingerprint(runtimeIndex)
+    const dataKey = options?.sourceIdentity
+        ? `${scope}\u0000${options.sourceIdentity}|${runtimeFullFingerprint}`
+        : `${scope}\u0000${itemsFingerprint}|${rollupsFingerprint}|${runtimeFullFingerprint}`
     const [scoped, setScoped] = useState<ScopedResult | null>(() => {
         const hit = resultKey ? metricsResultCache.get(scope, resultKey) : undefined
         return hit ? { scope, key: resultKey, value: hit } : null
@@ -467,12 +505,10 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
     const [isComputing, setIsComputing] = useState(false)
     const workerRef = useRef<Worker | null>(null)
     const pendingRef = useRef<PendingJob[]>([])
+    const deferredRef = useRef<PendingRequestSnapshot | null>(null)
     const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const lastKeyRef = useRef('')
-    const rollupsRef = useRef(rollups)
-    rollupsRef.current = rollups
-    const runtimesRef = useRef(runtimeSubset.runtimes)
-    runtimesRef.current = runtimeSubset.runtimes
+    const lastDataKeyRef = useRef('')
 
     // A result from another session is never returned, even for the render in which the scope changed.
     const results = pickScopedResult(scoped, scope)
@@ -492,7 +528,9 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
             }
             workerRef.current = null
             pendingRef.current = []
+            deferredRef.current = null
             lastKeyRef.current = ''
+            lastDataKeyRef.current = ''
         }
     }, [])
 
@@ -510,7 +548,9 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
 
         if (workerItems.length === 0) {
             dropWorker()
+            deferredRef.current = null
             lastKeyRef.current = ''
+            lastDataKeyRef.current = ''
             setScoped({ scope, key: resultKey, value: createEmptyMetricsResult() })
             setIsComputing(false)
             return
@@ -524,6 +564,7 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
         if (cached) {
             // Responses still in flight belong to other keys; drop them with the worker.
             dropWorker()
+            deferredRef.current = null
             setScoped({ scope, key: resultKey, value: cached })
             setIsComputing(false)
             return
@@ -536,12 +577,60 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 if (import.meta.env.DEV) console.error('[useMetricsWorker] Worker timeout - terminating and restarting')
                 dropWorker()
                 lastKeyRef.current = ''
-                setIsComputing(false)
-                if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: `Metrics calculation timed out after ${METRICS_WORKER_TIMEOUT_MS / 1000}s.` } as MetricsResult })
+                lastDataKeyRef.current = ''
+                const held = deferredRef.current
+                deferredRef.current = null
+                if (held) {
+                    // The newest selection never ran: restart it with its own
+                    // snapshot so the current view keeps computing. If it fails
+                    // again, deferredRef is already cleared and the error then
+                    // publishes under that held key.
+                    ensureWorker()
+                    lastKeyRef.current = held.fullKey
+                    postSnapshot(held)
+                } else {
+                    setIsComputing(false)
+                    if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: `Metrics calculation timed out after ${METRICS_WORKER_TIMEOUT_MS / 1000}s.` } as MetricsResult })
+                }
             }, METRICS_WORKER_TIMEOUT_MS)
         }
 
-        if (!workerRef.current) {
+        // One coherent request snapshot: key, scope, data identity and payload are
+        // captured together from committed render state, so a drained held
+        // selection can never pair its key with a newer render's payload.
+        const snapshot: PendingRequestSnapshot = { scope, key: resultKey, fullKey, dataKey, items: workerItems, periodStart, rollups, runtimes: runtimeSubset.runtimes }
+
+        // A request whose underlying data differs from the one still computing
+        // supersedes it: terminating the busy worker frees the stale computation
+        // and its queued full-history clone at once instead of stacking runs
+        // (the sync-churn path that OOMs WebKit tabs). A selection-only change
+        // holds the newest selection in deferredRef instead of queueing clones:
+        // at most one in-flight computation plus one pending selection exist,
+        // and intermediate selections never reach postMessage.
+        if (workerSupersedeAction(!!workerRef.current, pendingRef.current.length, lastDataKeyRef.current, dataKey) === 'terminate') {
+            workerRef.current?.terminate()
+            workerRef.current = null
+            pendingRef.current = []
+            deferredRef.current = null
+        } else if (workerRef.current && pendingRef.current.length > 0) {
+            deferredRef.current = snapshot
+            return
+        } else {
+            deferredRef.current = null
+        }
+
+        const postSnapshot = (snap: PendingRequestSnapshot) => {
+            const reqId = ++metricsRequestSeq
+            pendingRef.current.push({ reqId, scope: snap.scope, key: snap.key, fullKey: snap.fullKey })
+            // Record the identity of the payload actually posted, never a newer render's.
+            lastDataKeyRef.current = snap.dataKey
+            armTimeout()
+            setIsComputing(true)
+            workerRef.current?.postMessage({ reqId, items: snap.items, periodStart: snap.periodStart, rollups: snap.rollups, runtimes: snap.runtimes })
+        }
+
+        const ensureWorker = () => {
+            if (workerRef.current) return
             const worker = takeMetricsWorker()
             workerRef.current = worker
             worker.onmessage = (e) => {
@@ -552,7 +641,14 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 const jobIndex = findPendingReplyIndex(pendingRef.current, (e.data as { reqId?: unknown } | null)?.reqId)
                 if (jobIndex === -1) return
                 const job = pendingRef.current.splice(jobIndex, 1)[0]
-                armTimeout()
+                // The worker is free: post the newest held selection snapshot, if any.
+                const deferred = deferredRef.current
+                if (pendingRef.current.length === 0 && deferred) {
+                    deferredRef.current = null
+                    postSnapshot(deferred)
+                } else {
+                    armTimeout()
+                }
                 // A null result (empty in-period rows) flows to the cache/screen
                 // exactly as before; it keeps the skeleton edge behavior unchanged.
                 const result = ((e.data as { result?: MetricsResult | null }).result ?? null) as MetricsResult
@@ -568,17 +664,28 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 const failed = pendingRef.current[pendingRef.current.length - 1]
                 dropWorker()
                 lastKeyRef.current = ''
-                setIsComputing(false)
-                if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: 'Metrics worker crashed.' } as MetricsResult })
+                lastDataKeyRef.current = ''
+                const held = deferredRef.current
+                deferredRef.current = null
+                if (held) {
+                    // Resume the newest selection with its own snapshot; if it
+                    // errors again, deferredRef is already cleared and the next
+                    // failure publishes under that held key.
+                    ensureWorker()
+                    lastKeyRef.current = held.fullKey
+                    postSnapshot(held)
+                } else {
+                    setIsComputing(false)
+                    if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: 'Metrics worker crashed.' } as MetricsResult })
+                }
             }
         }
 
-        const reqId = ++metricsRequestSeq
-        pendingRef.current.push({ reqId, scope, key: resultKey, fullKey })
-        armTimeout()
-        setIsComputing(true)
-        workerRef.current.postMessage({ reqId, items: workerItems, periodStart, rollups: rollupsRef.current, runtimes: runtimesRef.current })
-    }, [workerItems, periodStart, rollupsFingerprint, scope, resultKey])
+        ensureWorker()
+        postSnapshot(snapshot)
+        // rollups and runtimes ride the posted snapshot only; their fingerprints already gate reruns
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [workerItems, periodStart, rollupsFingerprint, scope, resultKey, dataKey])
 
     return { results, isComputing, isCurrent, scope }
 }

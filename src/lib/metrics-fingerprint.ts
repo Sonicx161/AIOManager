@@ -166,6 +166,31 @@ export function createItemsFingerprintMemo(
     periodStart: number | null | undefined,
     itemHashOf: (item: FingerprintItem) => number = hashMetricsWorkerItem,
 ): string {
+    return itemsFingerprintBody(sources, mapped, canonical, periodStart, itemHashCache, itemHashOf)
+}
+
+export interface IsolatedItemsFingerprintMemo {
+    (sources: ReadonlyArray<object>, mapped: ReadonlyArray<FingerprintItem>, canonical: unknown, periodStart: number | null | undefined): string
+}
+
+/**
+ * Memo with its own private cache. Every cache entry is produced by one hash
+ * contract (one itemHashOf over one mapped representation), so a second caller
+ * with a different representation can never poison another caller's entries.
+ */
+export function createIsolatedItemsFingerprintMemo(itemHashOf: (item: FingerprintItem) => number = hashMetricsWorkerItem): IsolatedItemsFingerprintMemo {
+    const cache = new WeakMap<object, ItemHashMemo>()
+    return (sources, mapped, canonical, periodStart) => itemsFingerprintBody(sources, mapped, canonical, periodStart, cache, itemHashOf)
+}
+
+function itemsFingerprintBody(
+    sources: ReadonlyArray<object>,
+    mapped: ReadonlyArray<FingerprintItem>,
+    canonical: unknown,
+    periodStart: number | null | undefined,
+    cache: WeakMap<object, ItemHashMemo>,
+    itemHashOf: (item: FingerprintItem) => number,
+): string {
     let hash = FNV_OFFSET
     const mix = (word: number) => {
         hash ^= word
@@ -176,11 +201,11 @@ export function createItemsFingerprintMemo(
         const source = sources[i]
         let itemHash: number
         if (source !== null && typeof source === 'object') {
-            const cached = itemHashCache.get(source)
+            const cached = cache.get(source)
             if (cached && cached.canonical === canonical) itemHash = cached.hash
             else {
                 itemHash = itemHashOf(mapped[i])
-                itemHashCache.set(source, { canonical, hash: itemHash })
+                cache.set(source, { canonical, hash: itemHash })
             }
         } else {
             itemHash = itemHashOf(mapped[i])
@@ -189,4 +214,16 @@ export function createItemsFingerprintMemo(
         mix(periodStart == null || timestampMs(mapped[i].timestamp) >= periodStart ? 1 : 0)
     }
     return `${mapped.length}-${hash >>> 0}`
+}
+
+export type WorkerSupersedeAction = 'terminate' | 'queue'
+
+/**
+ * A request whose underlying data differs from the one still computing must
+ * supersede it: the stale run's full-history clone would only stack up behind
+ * the new one (the sync-churn path that OOMs WebKit tabs). A selection-only
+ * change (same data) keeps queueing, so the in-flight result still lands.
+ */
+export function workerSupersedeAction(hasWorker: boolean, pendingCount: number, previousDataKey: string, nextDataKey: string): WorkerSupersedeAction {
+    return hasWorker && pendingCount > 0 && nextDataKey !== previousDataKey ? 'terminate' : 'queue'
 }

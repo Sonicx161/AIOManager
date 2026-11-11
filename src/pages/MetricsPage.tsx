@@ -10,7 +10,7 @@ import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
-import { useMetricsWorker, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
+import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
 import { useSettledSignal } from '@/hooks/useSettledSignal'
 import { useAccountStore } from '@/store/accountStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
@@ -225,7 +225,14 @@ export function MetricsPage() {
         return { byMonth, daysByAccount: days ? { [selectedAccountId]: days } : {} }
     }, [rollups, selectedAccountId, selectedPeriod])
 
-    const workerOptions = useMemo(() => ({ filterKey: `${selectedAccountId}|${selectedPeriod}`, periodStart, runtimeSource: history }), [selectedAccountId, selectedPeriod, periodStart, history])
+    // Selection-independent identity of the source data: full history (before any
+    // viewer/period selection), canonical attribution and all rollup days.
+    const metricsSourceIdentity = useMemo(
+        () => createMetricsSourceIdentity(history, rollups, canonicalConnections),
+        [history, rollups, canonicalConnections]
+    )
+
+    const workerOptions = useMemo(() => ({ filterKey: `${selectedAccountId}|${selectedPeriod}`, periodStart, runtimeSource: history, sourceIdentity: metricsSourceIdentity }), [selectedAccountId, selectedPeriod, periodStart, history, metricsSourceIdentity])
     const { results: latest, isComputing: workerLoading, isCurrent, scope } = useMetricsWorker(accountFilteredHistory, scopedRollups, canonicalConnections, workerOptions)
 
     // A result is shown only once it was computed for the CURRENT filter on settled data.

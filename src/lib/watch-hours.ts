@@ -232,3 +232,22 @@ export function hoursRowFromItem(item: HoursItemLike, counterKey: string): Watch
         excluded: !!item.backfill || !!item.importedSavedState,
     }
 }
+
+// Stable fingerprint of the full runtime index, so a runtime change in any
+// viewer's history is visible to identity checks without enumerating rows.
+export function runtimeIndexFingerprint(index: RuntimeIndex): string {
+    let hash = 2166136261
+    const mix = (text: string) => {
+        for (let i = 0; i < text.length; i++) {
+            hash ^= text.charCodeAt(i)
+            hash = Math.imul(hash, 16777619)
+        }
+    }
+    for (const [itemId, typical] of index.typical) {
+        mix(`${itemId}:${typical}:${index.longest.get(itemId) ?? ''};`)
+    }
+    for (const [itemId, longest] of index.longest) {
+        if (!index.typical.has(itemId)) mix(`${itemId}::${longest};`)
+    }
+    return `${index.typical.size}-${hash >>> 0}`
+}
