@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { defaultRangeExtractor, useWindowVirtualizer, type Range } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer, useWindowVirtualizer, type Range } from '@tanstack/react-virtual'
 import { Activity, Bookmark } from 'lucide-react'
 import { StatusChip } from '@/components/ui/status-chip'
 import { cn } from '@/lib/utils'
@@ -12,11 +12,23 @@ import { estimateRowHeight, SAVED_GROUP_DATE, type FeedRow, type FeedViewMode } 
 // bounded mounted rows with overscan, the focused row stays mounted while it
 // holds focus, and reading position survives fresh records prepending to the
 // head. Row geometry comes from feed-rows.ts; @tanstack/react-virtual supplies
-// the window scroller machinery.
+// the scroller machinery.
 
 const OVERSCAN_ROWS = 6
 /** Rows of extra runway kept mounted on both sides of the viewport. */
 const GRID_CLASSES = 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
+
+// The compact app shell clips the page and scrolls #main-content, while wide
+// screens scroll the document (Layout.tsx). The windowed list must observe
+// whichever element actually scrolls: a window virtualizer on the compact
+// shell never sees a scroll event, so the mounted range stays pinned to the
+// list head and the reader travels through unrendered list space.
+function resolveFeedScroller(): HTMLElement | null {
+    const main = document.getElementById('main-content')
+    if (!main) return null
+    const overflowY = getComputedStyle(main).overflowY
+    return (overflowY === 'auto' || overflowY === 'scroll') && main.scrollHeight > main.clientHeight + 1 ? main : null
+}
 
 export interface ActivityCardSlotProps {
     nowStatuses: Map<string, ActivityNowStatus>
@@ -102,6 +114,9 @@ export function VirtualActivityList({
     const listRef = useRef<HTMLDivElement | null>(null)
     const [listOffset, setListOffset] = useState(0)
     const [containerWidth, setContainerWidth] = useState(0)
+    const [mainScroller, setMainScroller] = useState<HTMLElement | null>(null)
+    const activeScrollerRef = useRef<HTMLElement | null>(null)
+    const pendingAnchorMoveRef = useRef(false)
 
     const estimateSize = useCallback(
         (index: number) => estimateRowHeight(rows[index], { viewMode: slot.viewMode, columns, containerWidth }),
@@ -122,22 +137,54 @@ export function VirtualActivityList({
         [focusedRowIndex, rows.length],
     )
 
-    const virtualizer = useWindowVirtualizer({
+    const elementVirtualizer = useVirtualizer({
         count: rows.length,
         estimateSize,
         overscan: OVERSCAN_ROWS,
         scrollMargin: listOffset,
         getItemKey: (index) => rows[index].key,
         rangeExtractor,
+        getScrollElement: () => mainScroller,
+        enabled: mainScroller != null,
     })
+    const windowVirtualizer = useWindowVirtualizer({
+        count: rows.length,
+        estimateSize,
+        overscan: OVERSCAN_ROWS,
+        scrollMargin: listOffset,
+        getItemKey: (index) => rows[index].key,
+        rangeExtractor,
+        enabled: mainScroller == null,
+    })
+    const virtualizer = mainScroller != null ? elementVirtualizer : windowVirtualizer
 
     useEffect(() => {
-        bindScrollToRow((rowIndex: number) => virtualizer.scrollToIndex(rowIndex, { align: 'center' }))
+        bindScrollToRow((rowIndex: number) => {
+            programmaticUntilRef.current = performance.now() + 120
+            virtualizer.scrollToIndex(rowIndex, { align: 'center' })
+        })
         return () => bindScrollToRow(null)
     }, [bindScrollToRow, virtualizer])
 
-    // The list's document offset (scrollMargin) and width drive offsets/estimates;
-    // re-measure on mount, layout-affecting changes, and viewport resizes.
+    // Pick the real scroller once layout exists and re-check on resizes that
+    // can cross the shell's compact/wide breakpoint. A flip is a reading
+    // position hand-off: the current item anchor moves to the new scroller.
+    useLayoutEffect(() => {
+        const update = () => {
+            const next = resolveFeedScroller()
+            if (activeScrollerRef.current === next) return
+            activeScrollerRef.current = next
+            if (anchorRef.current?.itemId) pendingAnchorMoveRef.current = true
+            setMainScroller(next)
+        }
+        update()
+        window.addEventListener('resize', update)
+        return () => window.removeEventListener('resize', update)
+    }, [])
+
+    // The list's offset inside the scroller's content (scrollMargin) and width
+    // drive offsets/estimates; re-measure on mount, layout-affecting changes,
+    // scroller flips, and viewport resizes.
     useEffect(() => {
         let raf = 0
         const remeasure = () => {
@@ -146,7 +193,12 @@ export function VirtualActivityList({
                 const el = listRef.current
                 if (!el) return
                 const rect = el.getBoundingClientRect()
-                setListOffset(rect.top + window.scrollY)
+                if (mainScroller) {
+                    const scrollerTop = mainScroller.getBoundingClientRect().top
+                    setListOffset(rect.top - scrollerTop + mainScroller.scrollTop)
+                } else {
+                    setListOffset(rect.top + window.scrollY)
+                }
                 setContainerWidth(rect.width)
             })
         }
@@ -156,7 +208,7 @@ export function VirtualActivityList({
             window.removeEventListener('resize', remeasure)
             cancelAnimationFrame(raf)
         }
-    }, [slot.viewMode, columns])
+    }, [slot.viewMode, columns, mainScroller])
 
     // Reading anchor: the first mounted card crossing the viewport top, plus its
     // offset from the viewport top. Captured continuously while the page scrolls.
@@ -164,18 +216,49 @@ export function VirtualActivityList({
     // exact even when rows above the reader were never measured and only have
     // size estimates — prepended head rows shift estimate-based starts by the
     // wrong amount and would drift the reading position.
-    const anchorRef = useRef<{ itemId: string; viewportTop: number } | null>(null)
+    const anchorRef = useRef<{ itemId: string; viewportTop: number; rowIndex?: number; scrollerTop?: number } | null>(null)
+    const userScrollLatchRef = useRef(false)
+    const correctionActiveRef = useRef(false)
+    const programmaticUntilRef = useRef(0)
+
+    // Reader-initiated scroll (trusted wheel, touch, page keys, or a scroll that
+    // is not one of this list's own corrections) cancels the outstanding anchor
+    // restore until the next rebuild re-arms it: user scroll always wins.
+    useEffect(() => {
+        const latch = () => { userScrollLatchRef.current = true }
+        const onWheel = (event: WheelEvent) => { if (event.isTrusted) latch() }
+        const onTouchStart = (event: TouchEvent) => { if (event.isTrusted) latch() }
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.isTrusted && ['PageDown', 'PageUp', 'Home', 'End', ' '].includes(event.key)) latch()
+        }
+        const onScroll = () => {
+            if (correctionActiveRef.current && performance.now() >= programmaticUntilRef.current) latch()
+        }
+        window.addEventListener('wheel', onWheel, { passive: true, capture: true })
+        window.addEventListener('touchstart', onTouchStart, { passive: true, capture: true })
+        window.addEventListener('touchmove', onTouchStart, { passive: true, capture: true })
+        window.addEventListener('keydown', onKeyDown, { passive: true, capture: true })
+        window.addEventListener('scroll', onScroll, { passive: true, capture: true })
+        return () => {
+            window.removeEventListener('wheel', onWheel, { capture: true })
+            window.removeEventListener('touchstart', onTouchStart, { capture: true })
+            window.removeEventListener('touchmove', onTouchStart, { capture: true })
+            window.removeEventListener('keydown', onKeyDown, { capture: true })
+            window.removeEventListener('scroll', onScroll, { capture: true })
+        }
+    }, [])
     useEffect(() => {
         let raf = 0
         const capture = () => {
             cancelAnimationFrame(raf)
             raf = requestAnimationFrame(() => {
+                if (pendingAnchorMoveRef.current) return
                 // Mounted rows are ordered; rows clearly above the viewport top are
                 // skipped arithmetically, borderline rows are confirmed with one row
                 // read, and only the crossing row's cards are measured. Falls back
                 // to scanning every mounted card when no row matches, so the anchor
                 // stays exact.
-                const scrollY = window.scrollY
+                const scrollY = mainScroller ? mainScroller.scrollTop : window.scrollY
                 const items = virtualizer.getVirtualItems()
                 let start = 0
                 while (start < items.length && items[start].start - scrollY + items[start].size < -200) start++
@@ -188,7 +271,8 @@ export function VirtualActivityList({
                     for (const el of holders) {
                         const rect = (el as HTMLElement).getBoundingClientRect()
                         if (rect.bottom > 1) {
-                            anchorRef.current = { itemId: el.getAttribute('data-activity-item') ?? '', viewportTop: rect.top }
+                            const itemId = el.getAttribute('data-activity-item') ?? ''
+                            anchorRef.current = { itemId, viewportTop: rect.top, rowIndex: itemIdToRowIndex.get(itemId), scrollerTop: scrollY }
                             found = true
                             break
                         }
@@ -200,55 +284,122 @@ export function VirtualActivityList({
                 for (const el of holders) {
                     const rect = (el as HTMLElement).getBoundingClientRect()
                     if (rect.bottom > 1) {
-                        anchorRef.current = { itemId: el.getAttribute('data-activity-item') ?? '', viewportTop: rect.top }
+                        const itemId = el.getAttribute('data-activity-item') ?? ''
+                        anchorRef.current = { itemId, viewportTop: rect.top, rowIndex: itemIdToRowIndex.get(itemId), scrollerTop: scrollY }
                         break
                     }
                 }
             })
         }
         capture()
-        window.addEventListener('scroll', capture, { passive: true })
+        const scrollTarget: HTMLElement | Window = mainScroller ?? window
+        scrollTarget.addEventListener('scroll', capture, { passive: true })
         return () => {
-            window.removeEventListener('scroll', capture)
+            scrollTarget.removeEventListener('scroll', capture)
             cancelAnimationFrame(raf)
         }
-    }, [virtualizer])
+    }, [virtualizer, mainScroller, itemIdToRowIndex])
 
     // Anchor restore: when fresh records prepend rows above the reader (or any
-    // rebuild shifts the anchor card), put it back at the same viewport position
-    // using its current rendered position. Near the feed top we do nothing so
-    // new head content shows up naturally.
+    // rebuild shifts the anchor card), put it back at the same viewport position.
+    // Both the saved position and the current position are viewport coordinates,
+    // so the correction is the plain on-screen delta: no scroll offset is baked
+    // in and every pass reads the live position, which keeps a scroller flip
+    // from being misread as content drift. Reader-initiated scrolling cancels
+    // the outstanding restore: user scroll always wins until the next rebuild
+    // re-arms it. Near the feed top ordinary rebuilds do nothing so new head
+    // content shows up naturally; a scroller hand-off (compact <-> wide)
+    // restores regardless, and when the saved item no longer exists it lands on
+    // the nearest surviving neighbor of the saved row, or the saved offset,
+    // never the head.
     useLayoutEffect(() => {
         const anchor = anchorRef.current
         if (!anchor?.itemId) return
-        if (window.scrollY < listOffset + 64) return
+        userScrollLatchRef.current = false
+        const pendingMove = pendingAnchorMoveRef.current
+        const scroller = mainScroller
+        if (!pendingMove && (scroller ? scroller.scrollTop : window.scrollY) < listOffset + 64) return
         const selector = `[data-activity-item="${anchor.itemId.replace(/[\\"]/g, '\\$&')}"]`
+        correctionActiveRef.current = true
 
-        const apply = () => {
-            const el = listRef.current?.querySelector(selector)
-            if (!el) return false
-            const docTop = el.getBoundingClientRect().top + window.scrollY
-            const target = Math.max(0, docTop - anchor.viewportTop)
-            if (Math.abs(target - window.scrollY) >= 1) {
-                window.scrollTo({ top: target, behavior: 'auto' })
-                return true
+        const markProgrammatic = () => { programmaticUntilRef.current = performance.now() + 120 }
+        // Nearest surviving row at or around the anchor's saved row index.
+        const nearestSurvivingRowIndex = (savedIndex: number | undefined): number | null => {
+            if (savedIndex == null) return null
+            const max = rows.length - 1
+            const center = Math.min(Math.max(0, savedIndex), Math.max(0, max))
+            const survives = (index: number) => {
+                const row = rows[index]
+                return index >= 0 && index <= max && row != null && row.kind !== 'header' && row.items.some(item => itemIdToRowIndex.has(item.id))
             }
-            return false
+            for (let step = 0; center + step <= max || center - step >= 0; step++) {
+                const upper = center + step
+                const lower = center - step
+                if (survives(upper)) return upper
+                if (lower !== upper && survives(lower)) return lower
+            }
+            return null
         }
 
-        apply()
-        // Post-measurement passes absorb lazy row measurement settling: rows
-        // above the viewport can still be size estimates, so their measured
-        // sizes keep shifting everything below for a few frames.
         let passes = 0
+        let settled = 0
         let raf = 0
-        const correct = () => {
-            apply()
-            if (++passes < 6) raf = requestAnimationFrame(correct)
+        const budget = pendingMove ? 48 : 6
+        const converge = () => {
+            if (userScrollLatchRef.current) {
+                // The reader scrolled: cancel the outstanding restore and let the
+                // ordinary capture rebase the anchor to their new position.
+                pendingAnchorMoveRef.current = false
+                correctionActiveRef.current = false
+                return
+            }
+            const el = listRef.current?.querySelector(selector)
+            if (!el) {
+                if (pendingMove && passes % 8 === 0) {
+                    const rowIndex = itemIdToRowIndex.get(anchor.itemId)
+                        ?? nearestSurvivingRowIndex(anchor.rowIndex)
+                    if (rowIndex != null) {
+                        markProgrammatic()
+                        virtualizer.scrollToIndex(rowIndex, { align: 'start' })
+                    } else {
+                        markProgrammatic()
+                        virtualizer.scrollToOffset(Math.max(0, Math.min(anchor.scrollerTop ?? 0, virtualizer.getTotalSize() - 200)))
+                        anchorRef.current = null
+                        pendingAnchorMoveRef.current = false
+                        correctionActiveRef.current = false
+                        return
+                    }
+                }
+            } else {
+                const nowTop = el.getBoundingClientRect().top
+                const delta = nowTop - anchor.viewportTop
+                if (Math.abs(delta) >= 1) {
+                    markProgrammatic()
+                    if (scroller) scroller.scrollTop += delta
+                    else window.scrollBy(0, delta)
+                    settled = 0
+                } else {
+                    anchorRef.current = { itemId: anchor.itemId, viewportTop: nowTop, rowIndex: anchor.rowIndex, scrollerTop: anchor.scrollerTop }
+                    settled++
+                    if (pendingMove && settled >= 2) {
+                        pendingAnchorMoveRef.current = false
+                        correctionActiveRef.current = false
+                        return
+                    }
+                }
+            }
+            if (++passes < budget) raf = requestAnimationFrame(converge)
+            else {
+                pendingAnchorMoveRef.current = false
+                correctionActiveRef.current = false
+            }
         }
-        raf = requestAnimationFrame(correct)
-        return () => cancelAnimationFrame(raf)
-    }, [rows, listOffset, virtualizer])
+        converge()
+        return () => {
+            cancelAnimationFrame(raf)
+            correctionActiveRef.current = false
+        }
+    }, [rows, listOffset, virtualizer, mainScroller, itemIdToRowIndex])
 
     const virtualItems = virtualizer.getVirtualItems()
     const scrollMargin = virtualizer.options.scrollMargin

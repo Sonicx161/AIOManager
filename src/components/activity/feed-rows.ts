@@ -280,8 +280,12 @@ function groupSortedByDate(sorted: ActivityItem[], zone: string): DateGroup[] {
 export function buildFeedRows(items: ActivityItem[], visibleCount: number, options: BuildFeedRowsOptions): FeedRowsResult {
     const columns = options.viewMode === 'list' ? 1 : Math.max(1, Math.round(options.columns))
     const smallGroupRows = options.smallGroupRows ?? 3
-    const virtualizeThreshold = options.virtualizeThreshold ?? 60
-    const virtualizeItemThreshold = options.virtualizeItemThreshold ?? 120
+    // Window early: the plain-rendered path mounts every revealed card at once,
+    // and on DPR-3 phones each card decodes its poster at intrinsic size, so a
+    // 60-to-120-card reveal burst is the feed's worst memory moment. Windowed
+    // rendering produces the same section markup with a bounded mounted range.
+    const virtualizeThreshold = options.virtualizeThreshold ?? 24
+    const virtualizeItemThreshold = options.virtualizeItemThreshold ?? 48
 
     const nowStatuses = options.nowStatuses
     const sorted = sortFeedItems(items, nowStatuses)
