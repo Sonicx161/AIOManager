@@ -1247,7 +1247,7 @@ export const AddonCard = React.memo(function AddonCard({
                   size="sm"
                   onClick={openSaveModal}
                   disabled={saving || removing}
-                  className="font-semibold text-xs gap-1.5 bg-primary/12 text-primary border border-primary/25 hover:bg-primary/20 shadow-none"
+                  className="font-semibold text-xs gap-1.5 bg-muted/40 text-foreground/70 border border-border/40 hover:bg-muted/70 shadow-none"
                 >
                   <AnimatedHeartIcon className="h-3.5 w-3.5" isAnimating={saving} />
                   Save to Library

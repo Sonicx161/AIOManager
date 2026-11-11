@@ -501,7 +501,7 @@ export function DemoAddonCard({
                         <Pencil className="h-3.5 w-3.5" /> Customize
                     </Button>
                     {canSave ? (
-                        <Button variant="outline" size="sm" className="h-8 text-xs font-semibold gap-1.5 border-primary/20 bg-primary/10 text-primary hover:bg-primary/20">
+                        <Button variant="outline" size="sm" className="h-8 text-xs font-semibold gap-1.5">
                             <Heart className="h-3.5 w-3.5" /> Save to Library
                         </Button>
                     ) : (
