@@ -35,6 +35,20 @@ export interface JellyfinSignIn {
     serverId?: string
 }
 
+/**
+ * Raw Quick Connect envelope from Initiate and Connect. Secret and Code are
+ * validated by the client before the envelope is handed to callers;
+ * Authenticated only turns true after the user approved the code in their own
+ * Jellyfin app. The Secret is a one-time value the server consumes on
+ * AuthenticateWithQuickConnect.
+ */
+export interface JellyfinQuickConnectResult {
+    Secret?: string
+    Code?: string
+    Authenticated?: boolean
+    [key: string]: unknown
+}
+
 /** Shape of GET /System/Info/Public (and the common subset of /System/Info). */
 export interface JellyfinSystemInfo {
     ServerName?: string
@@ -225,6 +239,14 @@ export interface JellyfinClient {
     listPublicUsers(signal?: AbortSignal): Promise<JellyfinUser[]>
     signIn(username: string, password: string, signal?: AbortSignal): Promise<JellyfinSignIn>
     connectToken(accessToken: string, userId?: string, signal?: AbortSignal): Promise<JellyfinSignIn>
+    /** GET /QuickConnect/Enabled. False when the server lacks or refuses the endpoint; transport failures throw. */
+    quickConnectEnabled(signal?: AbortSignal): Promise<boolean>
+    /** POST /QuickConnect/Initiate. Returns the pending code shown to the user and its one-time secret. */
+    quickConnectInitiate(signal?: AbortSignal): Promise<JellyfinQuickConnectResult>
+    /** GET /QuickConnect/Connect?secret=…. A 404 means the secret is unknown, expired or consumed. */
+    quickConnectState(secret: string, signal?: AbortSignal): Promise<JellyfinQuickConnectResult>
+    /** POST /Users/AuthenticateWithQuickConnect. Consumes the approved secret and returns the session. */
+    authenticateWithQuickConnect(secret: string, signal?: AbortSignal): Promise<JellyfinSignIn>
     listUsers(accessToken: string, signal?: AbortSignal): Promise<JellyfinUser[]>
     getUser(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinUser>
     inspect(accessToken: string, user: JellyfinUser, signal?: AbortSignal): Promise<JellyfinServerDetails>

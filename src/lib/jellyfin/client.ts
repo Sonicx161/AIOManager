@@ -25,6 +25,7 @@ import type {
     JellyfinItemResult,
     JellyfinPagedReadOptions,
     JellyfinProduct,
+    JellyfinQuickConnectResult,
     JellyfinServerDetails,
     JellyfinSession,
     JellyfinSignIn,
@@ -155,6 +156,10 @@ function sanitizedCause(err: unknown, baseUrl: string): Error | undefined {
     if (!(err instanceof Error)) return undefined
     let message = err.message.split(baseUrl).join('[redacted]')
     message = message.replace(/https?:\/\/\S+/g, '[redacted-url]')
+    // Query values are never diagnostics: once the base URL is gone the
+    // remaining relative path can still carry a secret in its query string,
+    // so every remaining key=value pair loses its value.
+    message = message.replace(/([?&][^=&\s]+)=([^&\s]*)/g, '$1=[redacted]')
     const safe = new Error(message)
     safe.name = err.name
     return safe
@@ -475,6 +480,64 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             return { accessToken, user: parseUser(res, 'Users/Me') }
         }
         return { accessToken, user: await fetchUser(accessToken, userId, signal) }
+    }
+
+    /**
+     * Quick Connect feature probe. A server that lacks the endpoint, refuses it
+     * or answers with a non-boolean simply does not offer Quick Connect, so
+     * those all report false. Transport trouble and aborts are real failures
+     * and propagate so the caller can show its reachability error.
+     */
+    async function quickConnectEnabled(signal?: AbortSignal): Promise<boolean> {
+        try {
+            return await request({ label: 'QuickConnect/Enabled', path: '/QuickConnect/Enabled', signal }) === true
+        } catch (err) {
+            if (err instanceof JellyfinError
+                && (err.kind === 'unsupported' || err.kind === 'auth' || err.kind === 'server' || err.kind === 'invalid-response')) {
+                return false
+            }
+            throw err
+        }
+    }
+
+    async function quickConnectInitiate(signal?: AbortSignal): Promise<JellyfinQuickConnectResult> {
+        const res = await request({ label: 'QuickConnect/Initiate', path: '/QuickConnect/Initiate', method: 'POST', signal })
+        const record = expectRecord(res, 'QuickConnect/Initiate')
+        if (typeof record.Code !== 'string' || record.Code === '' || typeof record.Secret !== 'string' || record.Secret === '') {
+            throw new JellyfinError('invalid-response', 'QuickConnect/Initiate returned an unexpected shape')
+        }
+        return record
+    }
+
+    async function quickConnectState(secret: string, signal?: AbortSignal): Promise<JellyfinQuickConnectResult> {
+        // The protocol puts the pending secret in the query string. After
+        // approval that secret is a credential (it signs in exactly once), so
+        // it must never survive in errors, causes or logs.
+        const res = await request({
+            label: 'QuickConnect/Connect',
+            path: `/QuickConnect/Connect?secret=${encodeURIComponent(secret)}`,
+            signal,
+        })
+        return expectRecord(res, 'QuickConnect/Connect')
+    }
+
+    async function authenticateWithQuickConnect(secret: string, signal?: AbortSignal): Promise<JellyfinSignIn> {
+        const res = await request({
+            label: 'Users/AuthenticateWithQuickConnect',
+            path: '/Users/AuthenticateWithQuickConnect',
+            method: 'POST',
+            body: { Secret: secret },
+            signal,
+        })
+        const record = expectRecord(res, 'Quick Connect sign-in response')
+        if (typeof record.AccessToken !== 'string' || record.AccessToken === '') {
+            throw new JellyfinError('invalid-response', 'Quick Connect sign-in response did not include an access token')
+        }
+        return {
+            accessToken: record.AccessToken,
+            user: parseUser(record.User, 'Quick Connect sign-in response'),
+            serverId: optionalString(record.ServerId),
+        }
     }
 
     async function listUsers(accessToken: string, signal?: AbortSignal): Promise<JellyfinUser[]> {
@@ -1409,6 +1472,10 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         listPublicUsers,
         signIn,
         connectToken,
+        quickConnectEnabled,
+        quickConnectInitiate,
+        quickConnectState,
+        authenticateWithQuickConnect,
         listUsers,
         getUser: fetchUser,
         inspect,

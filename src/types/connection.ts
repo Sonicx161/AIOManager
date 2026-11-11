@@ -12,7 +12,7 @@ export interface MediaServerIdentity {
     packageName?: string
     userId: string
     userName: string
-    authMethod: 'password' | 'token'
+    authMethod: 'password' | 'token' | 'quickconnect'
     lastCheckedAt: number
 }
 

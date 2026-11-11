@@ -6,11 +6,13 @@ export { normalizeJellyfinUrl } from './client.ts'
 
 export interface JellyfinLogin {
     baseUrl: string
-    method: 'password' | 'token'
+    method: 'password' | 'token' | 'quickconnect'
     username?: string
     password?: string
     accessToken?: string
     userId?: string
+    /** One-time Quick Connect approval secret. Consumed by this sign-in; never stored. */
+    quickConnectSecret?: string
 }
 
 export interface JellyfinSession {
@@ -24,6 +26,9 @@ export function jellyfinSignInErrorMessage(error: unknown, login: Pick<JellyfinL
         return 'Could not reach the media server. Check the full server address, HTTPS and browser access (CORS), then retry.'
     }
     if (error.kind === 'auth') {
+        if (login.method === 'quickconnect') {
+            return 'Quick Connect sign-in was rejected. The code may have expired or been used already; start again to get a new one.'
+        }
         if (login.method === 'token' && !login.userId?.trim() && (error.status === 400 || error.status === 404)) {
             return 'Enter the Remote user ID for this API key, then verify sign-in again.'
         }
@@ -56,11 +61,21 @@ export class JellyfinClient {
         return this.client.listPublicUsers(signal)
     }
 
+    // Quick Connect probing and polling only; the secret is spent exclusively
+    // inside signIn(method: 'quickconnect') so it can never be used twice.
+    quickConnectEnabled(signal?: AbortSignal) { return this.client.quickConnectEnabled(signal) }
+    quickConnectInitiate(signal?: AbortSignal) { return this.client.quickConnectInitiate(signal) }
+    quickConnectState(secret: string, signal?: AbortSignal) { return this.client.quickConnectState(secret, signal) }
+
     async signIn(login: JellyfinLogin, signal?: AbortSignal): Promise<JellyfinSession> {
         let signedIn
         if (login.method === 'password') {
             if (!login.username?.trim()) throw new Error('Enter your server username')
             signedIn = await this.client.signIn(login.username.trim(), login.password || '', signal)
+            signedIn.user = await this.client.getUser(signedIn.accessToken, signedIn.user.Id, signal)
+        } else if (login.method === 'quickconnect') {
+            if (!login.quickConnectSecret) throw new Error('The Quick Connect code has not been approved yet')
+            signedIn = await this.client.authenticateWithQuickConnect(login.quickConnectSecret, signal)
             signedIn.user = await this.client.getUser(signedIn.accessToken, signedIn.user.Id, signal)
         } else {
             const token = login.accessToken?.trim()

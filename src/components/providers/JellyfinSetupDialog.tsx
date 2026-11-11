@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { Check, ChevronDown, Loader2, MonitorSmartphone } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -7,6 +7,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { cn, maskNameLevel } from '@/lib/utils'
 import { maskIds } from '@/lib/mask-ids'
 import { JellyfinClient, jellyfinSignInErrorMessage, normalizeJellyfinUrl, type JellyfinSession } from '@/lib/jellyfin/session'
+import { JellyfinError } from '@/lib/jellyfin/client'
+import { runQuickConnect, quickConnectAttemptCurrent } from '@/lib/jellyfin/quick-connect'
 import { parseJellyfinSecret } from '@/lib/jellyfin/connection-data'
 import { decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
@@ -81,7 +83,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const encryptionKey = useAuthStore(state => state.encryptionKey)
     const [baseUrl, setBaseUrl] = useState(initialBaseUrl)
     const [loadingAddress, setLoadingAddress] = useState(!!reconnectCredentials)
-    const [method, setMethod] = useState<'password' | 'token'>('password')
+    const [method, setMethod] = useState<'password' | 'token' | 'quickconnect'>('password')
     const [username, setUsername] = useState(initialUsername)
     const [password, setPassword] = useState('')
     const [accessToken, setAccessToken] = useState('')
@@ -96,6 +98,13 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const [discoveryNonce, setDiscoveryNonce] = useState(0)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState('')
+    const [quickConnectPhase, setQuickConnectPhase] = useState<'idle' | 'pending' | 'expired'>('idle')
+    const [quickConnectCode, setQuickConnectCode] = useState('')
+    const [quickConnectDeadline, setQuickConnectDeadline] = useState(0)
+    const [quickConnectRemaining, setQuickConnectRemaining] = useState('')
+    const [quickConnectUnavailable, setQuickConnectUnavailable] = useState(false)
+    const quickConnectRequest = useRef<AbortController | null>(null)
+    const quickConnectGeneration = useRef(0)
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
     const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
     const namePrivacyLevel = isPrivacyModeEnabled ? privacyLevelNames : 0
@@ -103,7 +112,9 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const request = useRef<AbortController | null>(null)
     const discoveryRequest = useRef<AbortController | null>(null)
     const discoveryGeneration = useRef(0)
-    useEffect(() => () => { request.current?.abort(); discoveryRequest.current?.abort() }, [])
+    const baseUrlRef = useRef(initialBaseUrl)
+    useEffect(() => { baseUrlRef.current = baseUrl }, [baseUrl])
+    useEffect(() => () => { request.current?.abort(); discoveryRequest.current?.abort(); quickConnectRequest.current?.abort() }, [])
     // Addon discovery is explicitly retried after the optional AIOM password is entered.
     useEffect(() => {
         if (!open || !account || !accountId) return
@@ -178,11 +189,19 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         return () => { cancelled = true }
     }, [reconnectCredentials, encryptionKey])
 
+    const resetQuickConnect = () => {
+        quickConnectGeneration.current++
+        quickConnectRequest.current?.abort()
+        quickConnectRequest.current = null
+        setQuickConnectPhase('idle'); setQuickConnectCode(''); setQuickConnectDeadline(0); setQuickConnectRemaining(''); setQuickConnectUnavailable(false)
+    }
+
     const close = (value: boolean) => {
         if (running.current) return
         if (!value) {
             discoveryGeneration.current++
             discoveryRequest.current?.abort()
+            resetQuickConnect()
             setBaseUrl(''); setUsername(''); setPassword(''); setAccessToken(''); setUserId('')
             setSession(null); setError(''); setMethod('password'); setDiscoveredUsers([]); setDiscoveryMessage(''); setAddonSuggestions([]); setAIOMAddonPassword(''); setAIOMNeedsAddonPassword(false); setDiscoveryNonce(0)
         }
@@ -190,6 +209,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     }
     const submit = async () => {
         if (running.current || loadingAddress || (reconnectCredentials && !encryptionKey)) return
+        if (!session && method === 'quickconnect') return
         running.current = true; setBusy(true); setError('')
         const controller = new AbortController()
         request.current = controller
@@ -234,10 +254,96 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         }
     }
 
+    const startQuickConnect = async () => {
+        if (!baseUrl.trim() || quickConnectPhase === 'pending') return
+        const targetBaseUrl = baseUrl
+        let normalizedBaseUrl: string
+        try {
+            normalizedBaseUrl = normalizeJellyfinUrl(targetBaseUrl)
+        } catch (err) {
+            setError(jellyfinSignInErrorMessage(err, { method: 'quickconnect' }))
+            return
+        }
+        const generation = ++quickConnectGeneration.current
+        // Attempt identity: attempt id plus server. Rechecked after every
+        // await so a late approval can never land on another selection.
+        const attempt = { generation, baseUrl: normalizedBaseUrl }
+        const stale = () => !quickConnectAttemptCurrent(attempt, quickConnectGeneration.current, baseUrlRef.current)
+        const controller = new AbortController()
+        quickConnectRequest.current = controller
+        setError(''); setQuickConnectUnavailable(false); setQuickConnectCode(''); setQuickConnectRemaining(''); setQuickConnectDeadline(0)
+        setMethod('quickconnect')
+        setQuickConnectPhase('pending')
+        try {
+            const client = new JellyfinClient(targetBaseUrl, crypto.randomUUID())
+            const outcome = await runQuickConnect(client, {
+                signal: controller.signal,
+                onCode: (code, expiresAt) => {
+                    if (stale()) return
+                    setQuickConnectCode(code); setQuickConnectDeadline(expiresAt)
+                },
+            })
+            if (stale()) return
+            if (outcome.kind === 'unavailable') {
+                setQuickConnectUnavailable(true)
+                setQuickConnectPhase('idle')
+                setMethod('password')
+                return
+            }
+            if (outcome.kind === 'expired') { setQuickConnectPhase('expired'); return }
+            // The secret flows from the approval straight into the sign-in that
+            // consumes it; it is never kept in component state or storage.
+            const result = await client.signIn({ baseUrl: targetBaseUrl, method: 'quickconnect', quickConnectSecret: outcome.secret }, controller.signal)
+            controller.signal.throwIfAborted()
+            if (stale()) return
+            if (result.secret.baseUrl !== attempt.baseUrl) return
+            setSession(result)
+            setQuickConnectPhase('idle'); setQuickConnectCode(''); setQuickConnectDeadline(0)
+        } catch (err) {
+            if (controller.signal.aborted || stale()) return
+            if (err instanceof JellyfinError && err.kind === 'aborted') return
+            setQuickConnectPhase('idle')
+            setError(jellyfinSignInErrorMessage(err, { method: 'quickconnect' }))
+        } finally {
+            if (quickConnectRequest.current === controller) quickConnectRequest.current = null
+        }
+    }
+
+    useEffect(() => {
+        if (quickConnectPhase !== 'pending' || !quickConnectDeadline) return
+        const tick = () => {
+            const totalSeconds = Math.max(0, Math.floor((quickConnectDeadline - Date.now()) / 1000))
+            setQuickConnectRemaining(`${Math.floor(totalSeconds / 60)}:${totalSeconds % 60 < 10 ? '0' : ''}${totalSeconds % 60}`)
+            if (quickConnectDeadline <= Date.now()) {
+                quickConnectGeneration.current++
+                quickConnectRequest.current?.abort()
+                quickConnectRequest.current = null
+                setQuickConnectPhase('expired')
+                setQuickConnectCode(''); setQuickConnectDeadline(0)
+            }
+        }
+        tick()
+        const timer = setInterval(tick, 1000)
+        return () => clearInterval(timer)
+    }, [quickConnectPhase, quickConnectDeadline])
+
+    const selectMethod = (next: 'password' | 'token') => {
+        if (method === 'quickconnect') resetQuickConnect()
+        setMethod(next)
+    }
+
+    const backFromSession = () => {
+        const wasQuickConnect = session?.identity.authMethod === 'quickconnect'
+        setSession(null)
+        if (wasQuickConnect) { resetQuickConnect(); setMethod('password') }
+    }
+
+    const quickConnectSubmitting = !session && method === 'quickconnect' && quickConnectPhase === 'pending'
     const verifiedServerName = session?.identity.serverName?.trim()
     const distinctVerifiedServerName = verifiedServerName && verifiedServerName !== session?.identity.productName ? verifiedServerName : ''
     let submitLabel = session ? 'Save connection' : 'Verify sign-in'
     if (busy) submitLabel = session ? 'Saving…' : 'Connecting…'
+    if (quickConnectSubmitting) submitLabel = 'Waiting…'
     if (loadingAddress) submitLabel = 'Loading address…'
 
     return <Dialog open={open} onOpenChange={close}>
@@ -253,32 +359,52 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                     <p>Remote user: {maskNameLevel(session.identity.userName, namePrivacyLevel)}</p>
                     {!isPrivacyModeEnabled && <p className="break-all font-mono text-xs text-muted-foreground">User ID: {maskIds(session.identity.userId)}</p>}
                     <p className="text-muted-foreground">Confirm this is the user whose media you want to read. The server address and token are saved encrypted. Your password is never saved.</p>
+                    {session.identity.authMethod === 'quickconnect' && <p className="flex items-center gap-1.5 text-xs text-success"><Check className="h-3.5 w-3.5" />Approved with Quick Connect in your Jellyfin app.</p>}
                 </div> : <fieldset disabled={busy || loadingAddress} className="min-w-0 space-y-3">
-                    {hasProviderAddons && <div className="min-w-0 space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-3"><p className="text-sm font-medium">From the installed AIOS / AIOM addons on this account</p>{addonSuggestions.length > 0 ? <><p className="text-xs leading-relaxed text-muted-foreground">Choose a user from the AIOStreams and AIOMetadata addons already installed on this AIOManager account.</p><div className="grid min-w-0 gap-2 sm:grid-cols-2">{addonSuggestions.map(suggestion => <button type="button" key={suggestion.id} className="min-w-0 w-full rounded-lg border border-border/40 bg-card/70 px-3 py-2 text-left hover:border-primary/50" onClick={() => { discoveryGeneration.current++; discoveryRequest.current?.abort(); setDiscoveringUsers(false); setBaseUrl(suggestion.baseUrl); setUsername(suggestion.username); setPassword(suggestion.password); setMethod('password'); setDiscoveredUsers([]); setDiscoveryMessage(`${suggestion.provider} user selected. Verify sign-in to continue.`) }}><span className="block truncate text-sm font-medium">{suggestion.name}</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{suggestion.provider} · {maskIds(suggestion.username)}</span></button>)}</div></> : <><p className="rounded-lg border border-dashed border-border/50 px-3 py-3 text-xs leading-relaxed text-muted-foreground">{aiomNeedsAddonPassword ? 'AIOMetadata needs its separate addon password before its users can be listed.' : 'AIOS/AIOM addons are installed, but no users could be loaded yet.'}</p><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" type="password" aria-label="AIOMetadata addon password" placeholder="AIOMetadata addon password (if required)" value={aiomAddonPassword} onChange={event => setAIOMAddonPassword(event.target.value)} /><Button type="button" variant="outline" className="shrink-0" onClick={() => { setDiscoveryMessage(RETRY_MESSAGE); setDiscoveryNonce(value => value + 1) }}>Retry</Button></div></>}</div>}
-                    <div className="space-y-1"><Label htmlFor="jf-address">Full server address</Label><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" id="jf-address" type="url" required value={baseUrl} onChange={e => { discoveryGeneration.current++; discoveryRequest.current?.abort(); setBaseUrl(e.target.value); setDiscoveredUsers([]); setDiscoveryMessage(''); setDiscoveringUsers(false) }} placeholder="https://server.example/jellyfin" autoComplete="off" /><Button className="shrink-0" type="button" variant="outline" disabled={busy || discoveringUsers || !baseUrl.trim()} onClick={() => void discoverUsers()}>{discoveringUsers ? 'Finding…' : 'Find users'}</Button></div></div>
+                    {hasProviderAddons && <div className="min-w-0 space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-3"><p className="text-sm font-medium">From the installed AIOS / AIOM addons on this account</p>{addonSuggestions.length > 0 ? <><p className="text-xs leading-relaxed text-muted-foreground">Choose a user from the AIOStreams and AIOMetadata addons already installed on this AIOManager account.</p><div className="grid min-w-0 gap-2 sm:grid-cols-2">{addonSuggestions.map(suggestion => <button type="button" key={suggestion.id} className="min-w-0 w-full rounded-lg border border-border/40 bg-card/70 px-3 py-2 text-left hover:border-primary/50" onClick={() => { discoveryGeneration.current++; discoveryRequest.current?.abort(); resetQuickConnect(); setDiscoveringUsers(false); setBaseUrl(suggestion.baseUrl); setUsername(suggestion.username); setPassword(suggestion.password); setMethod('password'); setQuickConnectUnavailable(false); setDiscoveredUsers([]); setDiscoveryMessage(`${suggestion.provider} user selected. Verify sign-in to continue.`) }}><span className="block truncate text-sm font-medium">{suggestion.name}</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{suggestion.provider} · {maskIds(suggestion.username)}</span></button>)}</div></> : <><p className="rounded-lg border border-dashed border-border/50 px-3 py-3 text-xs leading-relaxed text-muted-foreground">{aiomNeedsAddonPassword ? 'AIOMetadata needs its separate addon password before its users can be listed.' : 'AIOS/AIOM addons are installed, but no users could be loaded yet.'}</p><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" type="password" aria-label="AIOMetadata addon password" placeholder="AIOMetadata addon password (if required)" value={aiomAddonPassword} onChange={event => setAIOMAddonPassword(event.target.value)} /><Button type="button" variant="outline" className="shrink-0" onClick={() => { setDiscoveryMessage(RETRY_MESSAGE); setDiscoveryNonce(value => value + 1) }}>Retry</Button></div></>}</div>}
+                    <div className="space-y-1"><Label htmlFor="jf-address">Full server address</Label><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" id="jf-address" type="url" required value={baseUrl} disabled={method === 'quickconnect'} onChange={e => { discoveryGeneration.current++; discoveryRequest.current?.abort(); setBaseUrl(e.target.value); setDiscoveredUsers([]); setDiscoveryMessage(''); setDiscoveringUsers(false); setQuickConnectUnavailable(false) }} placeholder="https://server.example/jellyfin" autoComplete="off" /><Button className="shrink-0" type="button" variant="outline" disabled={busy || discoveringUsers || !baseUrl.trim() || method === 'quickconnect'} onClick={() => void discoverUsers()}>{discoveringUsers ? 'Finding…' : 'Find users'}</Button></div></div>
                     <p className="text-xs text-muted-foreground">Keep the complete configuration path supplied by your server. Sign-in runs directly in your browser.</p>
                     {discoveredUsers.length > 0 && <div className="space-y-1"><Label htmlFor="jf-discovered-user">Choose a discovered user</Label><select id="jf-discovered-user" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={username} onChange={event => setUsername(event.target.value)}><option value="">Select a user…</option>{discoveredUsers.map(user => <option key={user.Id} value={user.Name}>{user.Name}</option>)}</select></div>}
                     {discoveryMessage && <p className="text-xs text-muted-foreground" role="status">{discoveryMessage}</p>}
                     {!expectedSignIn && <div className="flex flex-wrap gap-2" role="group" aria-label="Sign-in method">
-                        <Button type="button" variant={method === 'password' ? 'default' : 'outline'} onClick={() => setMethod('password')}>Username &amp; password</Button>
-                        <Button type="button" variant={method === 'token' ? 'default' : 'outline'} onClick={() => setMethod('token')}>Token / API key</Button>
+                        <Button type="button" variant={method === 'password' ? 'default' : 'outline'} onClick={() => selectMethod('password')}>Username &amp; password</Button>
+                        <Button type="button" variant={method === 'quickconnect' ? 'default' : 'outline'} disabled={quickConnectUnavailable} onClick={() => void startQuickConnect()}>Quick Connect</Button>
+                        <Button type="button" variant={method === 'token' ? 'default' : 'outline'} onClick={() => selectMethod('token')}>Token / API key</Button>
                     </div>}
-                    {method === 'password' ? <>
+                    {quickConnectUnavailable && <p className="text-xs text-muted-foreground" role="status">This server doesn't offer Quick Connect. Password sign-in still works.</p>}
+                    {method === 'quickconnect' ? <>
+                        {quickConnectPhase === 'pending' && quickConnectCode && <div className="space-y-2">
+                            <p className="text-xs leading-relaxed text-muted-foreground">Approve this code in your Jellyfin app; AIOManager connects on its own.</p>
+                            <div className="rounded-xl border border-border/40 bg-muted/20 px-4 py-3" data-theme-part="panel">
+                                <div className="flex items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
+                                    <span>Enter this code in your Jellyfin app</span>
+                                    <span className="font-mono text-[11px]">{quickConnectRemaining}</span>
+                                </div>
+                                <p className="py-3 text-center font-mono text-3xl font-bold tracking-[0.14em]">{quickConnectCode}</p>
+                                <p className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" />Waiting for approval…</p>
+                                <p className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-muted-foreground"><MonitorSmartphone className="mt-0.5 h-4 w-4 shrink-0" /><span>Works from <strong className="font-medium text-foreground">Odin</strong>, <strong className="font-medium text-foreground">Swiftfin</strong>, the <strong className="font-medium text-foreground">Jellyfin web dashboard</strong>, and the <strong className="font-medium text-foreground">AIOStreams / AIOMetadata</strong> apps.</span></p>
+                            </div>
+                        </div>}
+                        {quickConnectPhase === 'expired' && <p role="alert" className="text-sm text-destructive">This code expired. Start again to get a new one.</p>}
+                    </> : method === 'password' ? <>
                         <div className="space-y-1"><Label htmlFor="jf-username">Server username</Label><Input id="jf-username" required value={username} onChange={e => setUsername(e.target.value)} placeholder="e.g. sonic, media-room or media-room/sonic" autoComplete="username" /></div>
                         <div className="space-y-1"><Label htmlFor="jf-password">Password</Label><Input id="jf-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Blank if this user has none" autoComplete="current-password" /></div>
+                        {!expectedSignIn && !quickConnectUnavailable && <p className="text-xs leading-relaxed text-muted-foreground">Quick Connect signs you in without typing your password here.</p>}
                     </> : <>
                         <div className="space-y-1"><Label htmlFor="jf-token">Session token or API key</Label><Input id="jf-token" type="password" required value={accessToken} onChange={e => setAccessToken(e.target.value)} autoComplete="off" /></div>
                         <div className="space-y-1"><Label htmlFor="jf-userid">Remote user ID (required for API keys)</Label><Input id="jf-userid" value={userId} onChange={e => setUserId(e.target.value)} autoComplete="off" /></div>
                         <p className="text-xs text-muted-foreground">Session tokens can identify their user automatically. For an API key, select a specific user by ID; AIOManager verifies that user before saving.</p>
                     </>}
                 </fieldset>}
-                {!session && <CredentialHelp />}
+                {!session && method !== 'quickconnect' && <CredentialHelp />}
                 {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
                 <DialogFooter>
                     {onBackToPicker && !session && <Button type="button" variant="outline" disabled={busy || discoveringUsers} onClick={() => { close(false); onBackToPicker() }}>Back to connection picker</Button>}
                     <Button type="button" variant="subtle" disabled={busy} onClick={() => close(false)}>Cancel</Button>
-                    {session && <Button type="button" variant="outline" disabled={busy} onClick={() => setSession(null)}>Back</Button>}
-                    <Button type="submit" disabled={busy || discoveringUsers || loadingAddress || (!!reconnectCredentials && !encryptionKey)}>{submitLabel}</Button>
+                    {session && <Button type="button" variant="outline" disabled={busy} onClick={backFromSession}>Back</Button>}
+                    {method === 'quickconnect' && quickConnectPhase === 'expired'
+                        ? <Button type="button" disabled={!baseUrl.trim()} onClick={() => void startQuickConnect()}>Try again</Button>
+                        : <Button type="submit" disabled={busy || discoveringUsers || loadingAddress || quickConnectSubmitting || (!!reconnectCredentials && !encryptionKey)}>{submitLabel}</Button>}
                 </DialogFooter>
             </form>
         </DialogContent>

@@ -195,7 +195,7 @@ export function JellyfinConnectionPanel({ accountId, connection, onBack, onRecon
                 </WorkspaceNotice>
             ) : !encryptionKey ? <VaultLockedNotice>Unlock your vault to test this server or view its address.</VaultLockedNotice> : undefined}
             stats={[
-                { label: 'Remote user', value: maskedUser || 'Sign-in required', tone: maskedUser ? undefined : 'muted', sub: identity?.authMethod === 'password' ? 'Password sign-in' : identity?.authMethod === 'token' ? 'Token sign-in' : undefined },
+                { label: 'Remote user', value: maskedUser || 'Sign-in required', tone: maskedUser ? undefined : 'muted', sub: identity?.authMethod === 'password' ? 'Password sign-in' : identity?.authMethod === 'token' ? 'Token sign-in' : identity?.authMethod === 'quickconnect' ? 'Quick Connect sign-in' : undefined },
                 { label: 'Version', value: identity?.version || 'Not reported', tone: identity?.version ? undefined : 'muted', sub: identity?.productName },
                 { label: 'Last verified', value: verified, title: identity?.lastCheckedAt ? new Date(identity.lastCheckedAt).toLocaleString() : undefined, sub: identity?.lastCheckedAt ? new Date(identity.lastCheckedAt).toLocaleDateString() : undefined },
                 { label: 'Last error', value: !showLive ? 'Not checked' : friendlyConnectionError(connection.lastError) || 'None', tone: showLive && connection.lastError ? 'destructive' : 'muted', title: connection.lastError },
@@ -237,7 +237,7 @@ export function JellyfinConnectionPanel({ accountId, connection, onBack, onRecon
                             <SectionRow label="Product" value={identity?.productName || 'Not recorded yet'} aside={identity?.product !== 'jellyfin' ? <StatusChip size="sm" className="h-6 text-xs">Jellyfin API</StatusChip> : undefined} />
                             {distinctServerName && <SectionRow label="Server name" value={distinctServerName} />}
                             {identity?.packageName && <SectionRow label="Package" value={identity.packageName} mono />}
-                            <SectionRow label="Sign-in" value={identity?.authMethod === 'password' ? 'Username & password (token saved)' : identity?.authMethod === 'token' ? 'Saved token or API key' : 'Not recorded'} />
+                            <SectionRow label="Sign-in" value={identity?.authMethod === 'password' ? 'Username & password (token saved)' : identity?.authMethod === 'token' ? 'Saved token or API key' : identity?.authMethod === 'quickconnect' ? 'Quick Connect (token saved)' : 'Not recorded'} />
                             {identity?.version && <SectionRow label="API version" value={identity.version} />}
                             <SectionRow label="Server ID" value={identity?.serverId ? maskIds(identity.serverId) : 'Unavailable'} mono />
                         </SectionRows>
