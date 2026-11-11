@@ -4,7 +4,10 @@
  * and mode payload the screen already holds: no extra fetches, no addresses,
  * no secrets, no hostnames. Each fact appears at most once; the node version
  * lives on the Runtime line only, matching the Version and mode panel.
+ * The version is bounded to numeric major.minor like the support block.
  */
+
+import { boundMajorMinor } from './support-info.ts'
 
 /** Display strings for the System environment cards; null rows are omitted everywhere. */
 export interface SystemEnvironment {
@@ -29,7 +32,7 @@ export interface DiagnosticsTextInput {
 export function formatDiagnosticsText({ version, mode, runtime, environment }: DiagnosticsTextInput): string {
     const lines = [
         'AIOManager system diagnostics',
-        `Version: ${version}`,
+        `Version: ${boundMajorMinor(version)}`,
         `Mode: ${mode}`,
         `Runtime: ${runtime}`,
     ]

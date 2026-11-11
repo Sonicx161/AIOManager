@@ -1,6 +1,9 @@
 import { Component, ErrorInfo, ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
-import { AlertTriangle, RefreshCw, Home, Copy, Check } from 'lucide-react'
+import { AlertTriangle, RefreshCw, Home, LifeBuoy } from 'lucide-react'
+import { toast } from '@/hooks/use-toast'
+import { copyTextToClipboard } from '@/components/ui/copy-button'
+import { buildSupportCopyText } from '@/lib/support-info-gather'
 import pkg from '../../../package.json'
 
 interface Props {
@@ -11,7 +14,6 @@ interface State {
     hasError: boolean
     error: Error | null
     errorInfo: ErrorInfo | null
-    copied: boolean
 }
 
 export class ErrorBoundary extends Component<Props, State> {
@@ -19,7 +21,6 @@ export class ErrorBoundary extends Component<Props, State> {
         hasError: false,
         error: null,
         errorInfo: null,
-        copied: false,
     }
 
     public static getDerivedStateFromError(error: Error): Partial<State> {
@@ -31,28 +32,31 @@ export class ErrorBoundary extends Component<Props, State> {
         this.setState({ errorInfo })
     }
 
-    private handleCopyError = () => {
-        const { error, errorInfo } = this.state
-        const text = [
-            `AIOManager v${pkg.version}`,
-            `URL: ${window.location.href}`,
-            `UA: ${navigator.userAgent}`,
-            ``,
-            `Error: ${error?.message}`,
-            ``,
-            `Stack:`,
-            error?.stack || '(no stack)',
-            ``,
-            `Component Stack:`,
-            errorInfo?.componentStack || '(none)',
-        ].join('\n')
-
-        navigator.clipboard.writeText(text).then(() => {
-            this.setState({ copied: true })
-            setTimeout(() => this.setState({ copied: false }), 2000)
-        }).catch((copyError) => {
-            if (import.meta.env.DEV) console.error('[ErrorBoundary] Failed to copy error report:', copyError)
-        })
+    private handleCopySupport = () => {
+        void (async () => {
+            try {
+                const { error, errorInfo } = this.state
+                const componentNames = typeof errorInfo?.componentStack === 'string'
+                    ? [...new Set([...errorInfo.componentStack.matchAll(/\bat\s+([A-Za-z][A-Za-z0-9_$]*)/g)].map(m => m[1]))]
+                    : []
+                const text = await buildSupportCopyText({
+                    errorName: error?.name || 'Error',
+                    message: error?.message || null,
+                    stack: error?.stack || null,
+                    components: componentNames,
+                    route: window.location.pathname,
+                })
+                const ok = await copyTextToClipboard(text)
+                if (ok) {
+                    toast({ title: 'Support info copied', description: 'One redacted summary is on your clipboard. Check before sharing.' })
+                } else {
+                    toast({ variant: 'destructive', title: 'Copy unavailable', description: 'The clipboard is blocked on this connection (http). Select the text and copy it manually.' })
+                }
+            } catch (e) {
+                if (import.meta.env.DEV) console.error('[ErrorBoundary] support info failed:', e)
+                toast({ variant: 'destructive', title: 'Could not build support info', description: 'Try Reload app, then copy again.' })
+            }
+        })()
     }
 
     private handleReset = () => {
@@ -91,28 +95,25 @@ export class ErrorBoundary extends Component<Props, State> {
 
                         {this.state.error && (
                             <div data-theme-part="field" className="mt-6 space-y-3 overflow-hidden rounded-lg border border-border/40 bg-muted/20 p-4 text-left">
-                                <div className="flex items-center justify-between gap-2">
-                                    <p className="text-xs font-medium text-muted-foreground uppercase">Error detail</p>
-                                    <Button
-                                        onClick={this.handleCopyError}
-                                        variant="outline"
-                                        size="sm"
-                                        className="rounded-full"
-                                    >
-                                        {this.state.copied
-                                            ? <><Check className="h-3 w-3 text-success" /> Copied</>
-                                            : <><Copy className="h-3 w-3" /> Copy for support</>
-                                        }
-                                    </Button>
-                                </div>
+                                <p className="text-xs font-medium text-muted-foreground uppercase">Error detail</p>
                                 <p className="break-all font-mono text-xs leading-relaxed text-destructive">
                                     {this.state.error.message}
                                 </p>
                                 <p className="text-xs text-muted-foreground">
-                                    Copy this error and share it on GitHub - it helps us fix issues faster.
+                                    The copy below includes this crash, sanitized, plus versions, device, recent sync errors and storage.
                                 </p>
                             </div>
                         )}
+
+                        <div className="mt-4 space-y-2">
+                            <Button onClick={this.handleCopySupport} variant="outline" className="w-full h-11 rounded-full gap-2">
+                                <LifeBuoy className="h-4 w-4" />
+                                Copy support info
+                            </Button>
+                            <p className="text-xs text-muted-foreground">
+                                One cleaned-up summary: app and server versions, browser and device, recent sync errors, unfinished uploads, storage. No ids, tokens or links.
+                            </p>
+                        </div>
 
                         <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-center">
                             <Button

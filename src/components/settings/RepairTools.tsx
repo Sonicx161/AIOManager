@@ -1,24 +1,37 @@
 import { useState } from 'react'
-import { Wrench, KeyRound, PlugZap, ClipboardCopy, Loader2 } from 'lucide-react'
+import { Wrench, KeyRound, PlugZap, ClipboardCopy, Loader2, LifeBuoy } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { toast } from '@/hooks/use-toast'
-import { maskEmail, normalizeAddonUrl } from '@/lib/utils'
+import { copyTextToClipboard } from '@/components/ui/copy-button'
+import { normalizeAddonUrl } from '@/lib/utils'
+import { redactCopyText } from '@/lib/redact-copy'
+import { boundCount, boundMajorMinor, boundVersion, classifySyncError, knownValue, ACCOUNT_STATUS_VALUES, CONNECTION_STATUS_VALUES, CONNECTION_PLATFORM_VALUES } from '@/lib/support-info'
+import { buildSupportCopyText, describeBrowser } from '@/lib/support-info-gather'
 import { useAccountStore } from '@/store/accountStore'
 import { useAddonStore } from '@/store/addonStore'
 import { useConnectionStore } from '@/store/connectionStore'
 import { useSyncStore } from '@/store/syncStore'
 
-type ActionKey = 'repair' | 'reauth' | 'connections' | 'diagnostics'
+type ActionKey = 'repair' | 'reauth' | 'connections' | 'diagnostics' | 'support'
 
-function urlFingerprint(url: string): string {
-    const s = normalizeAddonUrl(url)
-    let h = 0x811c9dc5
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i)
-        h = Math.imul(h, 0x01000193)
+// Report-local URL aliases: assigned once per normalized URL within a single
+// diagnostics report, so identical URLs share an alias but nothing links back
+// to the real URL or across reports.
+function buildUrlAliasAssigner() {
+    const byNormalized = new Map<string, string>()
+    let counter = 0
+    return (url: string): string => {
+        const key = normalizeAddonUrl(url)
+        if (!key) return 'URL ?'
+        let alias = byNormalized.get(key)
+        if (!alias) {
+            counter++
+            alias = `URL ${counter}`
+            byNormalized.set(key, alias)
+        }
+        return alias
     }
-    return (h >>> 0).toString(16).padStart(8, '0')
 }
 
 function ActionRow({
@@ -142,54 +155,76 @@ export function RepairTools() {
         toast({ title: 'Connections Re-checked', description: `Refreshed status for ${targets.length} account${targets.length !== 1 ? 's' : ''}.` })
     }
 
+    const handleCopySupportInfo = async () => {
+        setRunning('support')
+        try {
+            const text = await buildSupportCopyText()
+            const ok = await copyTextToClipboard(text)
+            if (ok) {
+                toast({ title: 'Support info copied', description: 'One redacted summary is on your clipboard. Check before sharing.' })
+            } else {
+                toast({ variant: 'destructive', title: 'Copy unavailable', description: 'The clipboard is blocked on this connection (http). Select the text and copy it manually.' })
+            }
+        } catch (e) {
+            if (import.meta.env.DEV) console.error('[RepairTools] support info failed:', e)
+            toast({ variant: 'destructive', title: 'Copy Failed', description: 'Could not build the support summary.' })
+        } finally {
+            setRunning(null)
+        }
+    }
+
     const handleCopyDiagnostics = async () => {
         setRunning('diagnostics')
         try {
             const sync = useSyncStore.getState()
             const library = useAddonStore.getState().library
+            const urlAliasFor = buildUrlAliasAssigner()
             const L: string[] = []
             L.push('AIOManager Diagnostics')
             L.push(`Generated: ${new Date().toISOString()}`)
-            L.push(`Version (last seen): ${sync.lastSeenVersion || 'unknown'}`)
+            L.push(`Version (last seen): ${boundMajorMinor(sync.lastSeenVersion)}`)
             L.push(`Display: ${window.matchMedia('(display-mode: standalone)').matches ? 'installed (standalone)' : 'browser tab'} | Online: ${navigator.onLine}`)
             L.push(`Cloud sync: ${sync.auth.isAuthenticated ? 'linked' : 'off'} | initialPullDone: ${sync.isInitialSyncCompleted} | lastSave: ${sync.lastSyncedAt || 'never'}`)
-            L.push(`Saved library entries: ${Object.keys(library).length}`)
-            L.push(`Accounts: ${accounts.length}`)
+            L.push(`Saved library entries: ${boundCount(Object.keys(library).length)}`)
+            L.push(`Accounts: ${boundCount(accounts.length)}`)
 
-            for (const a of accounts) {
-                const addons = a.addons || []
+            for (let accountIndex = 0; accountIndex < accounts.length; accountIndex++) {
+                const account = accounts[accountIndex]
+                const addons = account.addons || []
                 const enabled = addons.filter(x => x.flags?.enabled !== false).length
                 const protectedCount = addons.filter(x => x.flags?.protected).length
-                const profiles = a.profiles || []
+                const profiles = account.profiles || []
+                const profileAlias = new Map<string, string>()
+                profiles.forEach((p, pi) => { if (p?.id) profileAlias.set(p.id, `Profile ${String.fromCharCode(65 + (pi % 26))}`) })
                 const defaultCount = profiles.filter(p => p?.id === 'default').length
-                const label = a.name || (a.email ? maskEmail(a.email) : a.id)
+                const activeAlias = profileAlias.get(account.activeProfileId || '') || 'unknown'
+                const statusValue = knownValue(account.status, ACCOUNT_STATUS_VALUES, 'unknown')
                 L.push('')
-                L.push(`- ${label}: status=${a.status || 'unknown'}`)
-                L.push(`    addons: ${addons.length} (enabled ${enabled}, disabled ${addons.length - enabled}, protected ${protectedCount}), deletionMarkers: ${Object.keys(a.deletedAddons || {}).length}`)
-                L.push(`    profiles: ${profiles.length} [${profiles.map(p => p?.id).join(', ') || 'none'}], active: ${a.activeProfileId ?? 'default'}, duplicateDefault: ${defaultCount > 1 ? `YES (${defaultCount})` : 'no'}`)
-                const conns = a.connections || []
+                L.push(`- Account ${accountIndex + 1}: status=${statusValue}`)
+                L.push(`    addons: ${boundCount(addons.length)} (enabled ${boundCount(enabled)}, disabled ${boundCount(addons.length - enabled)}, protected ${boundCount(protectedCount)}), deletionMarkers: ${boundCount(Object.keys(account.deletedAddons || {}).length)}`)
+                const profileList = profiles.map((p, pi) => profileAlias.get(p?.id || '') || `Profile ${String.fromCharCode(65 + (pi % 26))}`).join(', ')
+                L.push(`    profiles: ${boundCount(profiles.length)} [${profileList || 'none'}], active: ${activeAlias}, duplicateDefault: ${defaultCount > 1 ? `YES (${defaultCount})` : 'no'}`)
+                const conns = account.connections || []
                 if (conns.length) {
-                    L.push(`    connections: ${conns.map(c => `${c.platform}{${c.enabled ? 'on' : 'off'},${c.status || '?'},fails=${c.consecutiveFailures ?? 0}}`).join(', ')}`)
+                    L.push(`    connections: ${conns.map(c => `${knownValue(c.platform, CONNECTION_PLATFORM_VALUES, 'other')}{${c.enabled ? 'on' : 'off'},${knownValue(c.status, CONNECTION_STATUS_VALUES, 'unknown')},fails=${boundCount(c.consecutiveFailures ?? 0)}}`).join(', ')}`)
                 }
-                for (const ad of addons) {
-                    const id = ad.manifest?.id || '?'
-                    const name = ad.manifest?.name || '?'
-                    const ver = ad.manifest?.version || '?'
-                    let host = '?'
-                    try { host = new URL(ad.transportUrl).host } catch {}
-                    L.push(`      * ${host} id=${id} "${name}" v${ver} ${ad.flags?.enabled === false ? 'disabled' : 'enabled'} url#${urlFingerprint(ad.transportUrl)}`)
+                for (let addonIndex = 0; addonIndex < addons.length; addonIndex++) {
+                    const ad = addons[addonIndex]
+                    const ver = boundVersion(ad.manifest?.version)
+                    L.push(`      * Addon ${addonIndex + 1} ${ver === 'unknown' ? 'version unknown' : `v${ver}`} ${ad.flags?.enabled === false ? 'disabled' : 'enabled'} ${urlAliasFor(ad.transportUrl)}`)
                 }
             }
 
             L.push('')
             L.push('Recent sync log:')
             for (const entry of sync.history.slice(0, 20)) {
-                L.push(`  [${entry.status}] ${entry.type}${entry.isAuto ? ' (auto)' : ''} - ${entry.message} @ ${entry.timestamp}`)
+                const { category, httpStatus } = classifySyncError(entry.message)
+                L.push(`  [${entry.status}] ${entry.type}${entry.isAuto ? ' (auto)' : ''} - ${category}${httpStatus !== null ? ` (HTTP ${httpStatus})` : ''} at ${entry.timestamp}`)
             }
-            L.push(`UserAgent: ${navigator.userAgent}`)
+            L.push(`Browser: ${describeBrowser(navigator.userAgent)}`)
 
-            await navigator.clipboard.writeText(L.join('\n'))
-            toast({ title: 'Diagnostics Copied', description: 'A debug summary is on your clipboard. No credentials or URLs are included.' })
+            await navigator.clipboard.writeText(redactCopyText(L.join('\n')))
+            toast({ title: 'Diagnostics Copied', description: 'A debug summary is on your clipboard. It uses report-local aliases (Account 1, Profile A, Addon 3, URL 1); no names, ids, hosts, emails or raw agents.' })
         } catch {
             toast({ variant: 'destructive', title: 'Copy Failed', description: 'Could not access the clipboard.' })
         } finally {
@@ -213,6 +248,15 @@ export function RepairTools() {
             </div>
 
             <div className="space-y-2 border-t border-border/40 p-4">
+                <ActionRow
+                    icon={<LifeBuoy className="h-4 w-4" />}
+                    title="Copy support info"
+                    description="One cleaned-up block for bug reports: versions, browser and device, recent sync errors, unfinished uploads, storage and platforms in use. No names, ids, tokens or links."
+                    cta="Copy"
+                    busy={running === 'support'}
+                    disabled={running !== null}
+                    onClick={handleCopySupportInfo}
+                />
                 <ActionRow
                     icon={<Wrench className="h-4 w-4" />}
                     title="Repair All Accounts"
@@ -246,7 +290,7 @@ export function RepairTools() {
                 <ActionRow
                     icon={<ClipboardCopy className="h-4 w-4" />}
                     title="Copy Diagnostics"
-                    description="Copy a detailed debug summary (per-account addon/profile/connection state, URL fingerprints, recent sync log) to your clipboard. No credentials or URLs included."
+                    description="Copy a detailed debug summary (per-account addon/profile/connection state, URL fingerprints, recent sync log) using report-local aliases like Account 1, Profile A and Addon 3. No names, ids, hosts or emails included."
                     cta="Copy"
                     busy={running === 'diagnostics'}
                     disabled={running !== null}

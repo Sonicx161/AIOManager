@@ -6,6 +6,7 @@ import { formatDiagnosticsText } from '@/lib/admin-diagnostics'
 import { adminRetry } from '@/lib/admin-queries'
 import { toast } from '@/hooks/use-toast'
 import { copyTextToClipboard } from '@/components/ui/copy-button'
+import { redactCopyText } from '@/lib/redact-copy'
 import { Button } from '@/components/ui/button'
 import {
   HBar, Kpi, LegendNote, MetricCards, MetricsPane, MetricsRequestsPanel, MetricsUnavailableNote,
@@ -49,7 +50,7 @@ export function SystemScreen({ data, notice, metrics }: { data: SystemInfo; noti
   ])
   const copyDiagnostics = () => {
     if (!env) return
-    const text = formatDiagnosticsText({ version: data.version, mode: data.mode, runtime: data.runtime, environment: env })
+    const text = redactCopyText(formatDiagnosticsText({ version: data.version, mode: data.mode, runtime: data.runtime, environment: env }))
     void copyTextToClipboard(text).then(copied => {
       if (copied) {
         toast({ title: 'Diagnostics copied', description: 'Plain text with version, host, runtime and build facts. No addresses, names or secrets.' })
