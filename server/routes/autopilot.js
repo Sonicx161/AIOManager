@@ -20,6 +20,36 @@ import { autopilotWorkerEnabled } from '../lib/autopilot-worker.js'
 
 const AUTOPILOT_BODY_LIMIT = 1024 * 1024 * 5
 
+// A replayed URL-less Nuvio bundle must not erase the sealed custom destination: with the
+// last baseUrl gone, every later server-side push targets the public api.nuvio.tv. Carry
+// the sealed destination (and its publishable key) forward, scoped to owner + account +
+// type + the same connection (NULL connection_id for legacy rows), considering readable
+// duplicates so a newer URL-less row cannot hide the last URL. Destination fields only:
+// an older duplicate's tokens are never revived, and a request URL is never evidence.
+// Same policy as preserveExistingNuvioBaseUrl in routes/providers.js.
+export async function preserveNuvioSealedDestination(conn, owner, accountId, connectionId, encryptedAuthKey) {
+    if (!owner || !accountId) return encryptedAuthKey
+    let incoming = null
+    try { incoming = JSON.parse(decrypt(encryptedAuthKey, FALLBACK_KEYS)) } catch { return encryptedAuthKey }
+    if (!incoming || typeof incoming !== 'object' || incoming.baseUrl) return encryptedAuthKey
+    const rows = await conn.query(
+        `SELECT auth_key FROM server_credentials WHERE sync_user = $1 AND account_id = $2 AND credential_type = 'nuvio' AND ${connectionId ? 'connection_id = $3' : 'connection_id IS NULL'} ORDER BY updated_at DESC`,
+        connectionId ? [owner, accountId, connectionId] : [owner, accountId]
+    )
+    for (const row of rows || []) {
+        if (!row?.auth_key) continue
+        let bundle = null
+        try { bundle = JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) } catch { continue }
+        if (!bundle || typeof bundle !== 'object') continue
+        if (bundle.baseUrl) {
+            incoming.baseUrl = bundle.baseUrl
+            if (!incoming.publishableKey && bundle.publishableKey) incoming.publishableKey = bundle.publishableKey
+            return encrypt(JSON.stringify(incoming), PRIMARY_KEY)
+        }
+    }
+    return encryptedAuthKey
+}
+
 export function registerAutopilotRoutes(fastify, autopilotEngine) {
     // Client-minted incarnation token of a connection (SOL-R1-BETA-04): rows bound to a
     // connection carry the generation of the incarnation that wrote them, so a delayed
@@ -46,6 +76,12 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         try {
             const credId = connectionId ? `${owner}:${connectionId}` : `${owner}:${accountId}`
             const now = Date.now()
+            // Replay protection runs inside the caller's account write lock, through the
+            // supplied conn, so a carried-forward destination is written in the same
+            // transaction that upserts the replayed bundle.
+            if (credentialType === 'nuvio') {
+                encryptedAuthKey = await preserveNuvioSealedDestination(conn, owner, accountId, connectionId, encryptedAuthKey)
+            }
             const previous = !connectionId ? await conn.get(
                 'SELECT auth_key, canonical_connection_id FROM server_credentials WHERE id = $1 AND sync_user = $2',
                 [credId, owner]

@@ -413,6 +413,13 @@ export function registerActivityRoutes(fastify, activityEngine) {
                     if (!acc.authKey) continue
                     const accountName = acc.accountName || ''
                     const existing = existingById.get(credId)
+                    // This endpoint syncs Stremio activity credentials; it must never
+                    // overwrite a native-provider credential row (a Nuvio login with a
+                    // sealed custom backend would lose its destination).
+                    if (existing && existing.credential_type && existing.credential_type !== 'stremio') {
+                        skipped++
+                        continue
+                    }
                     if (existing) {
                         let existingAuthKey = null
                         try {
@@ -494,13 +501,20 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                 account_name = EXCLUDED.account_name,
                                 auth_key = EXCLUDED.auth_key,
                                 updated_at = EXCLUDED.updated_at,
-                                canonical_connection_id = EXCLUDED.canonical_connection_id`,
+                                canonical_connection_id = EXCLUDED.canonical_connection_id
+                             WHERE server_credentials.credential_type IS NULL OR server_credentials.credential_type = 'stremio'`,
                             [credId, syncUser, acc.accountId, accountName, encryptedAuthKey, now, acc.connectionId || null]
                         )
                     } else {
                         await tx.run(
-                            `INSERT OR REPLACE INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, canonical_connection_id)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                            `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, canonical_connection_id)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7)
+                             ON CONFLICT (id) DO UPDATE SET
+                                account_name = excluded.account_name,
+                                auth_key = excluded.auth_key,
+                                updated_at = excluded.updated_at,
+                                canonical_connection_id = excluded.canonical_connection_id
+                             WHERE credential_type IS NULL OR credential_type = 'stremio'`,
                             [credId, syncUser, acc.accountId, accountName, encryptedAuthKey, now, acc.connectionId || null]
                         )
                     }
@@ -520,6 +534,12 @@ export function registerActivityRoutes(fastify, activityEngine) {
                         continue
                     }
                     const existing = existingById.get(credId)
+                    // Same type guard as the account-level writer: never overwrite a
+                    // native-provider credential row from the Stremio activity sync.
+                    if (existing && existing.credential_type && existing.credential_type !== 'stremio') {
+                        skipped++
+                        continue
+                    }
                     if (existing) {
                         let existingAuthKey = null
                         try {
@@ -548,7 +568,8 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                 auth_key = EXCLUDED.auth_key,
                                 updated_at = EXCLUDED.updated_at,
                                 connection_generation = COALESCE(EXCLUDED.connection_generation, server_credentials.connection_generation)
-                             WHERE server_credentials.sync_user = EXCLUDED.sync_user`,
+                             WHERE server_credentials.sync_user = EXCLUDED.sync_user
+                                 AND (server_credentials.credential_type IS NULL OR server_credentials.credential_type = 'stremio')`,
                             [credId, syncUser, conn.accountId, encryptedAuthKey, conn.connectionId, now, generationToken]
                         )
                     } else {
@@ -559,7 +580,8 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                 auth_key = excluded.auth_key,
                                 updated_at = excluded.updated_at,
                                 connection_generation = COALESCE(excluded.connection_generation, connection_generation)
-                             WHERE sync_user = excluded.sync_user`,
+                             WHERE sync_user = excluded.sync_user
+                                 AND (credential_type IS NULL OR credential_type = 'stremio')`,
                             [credId, syncUser, conn.accountId, encryptedAuthKey, conn.connectionId, now, generationToken]
                         )
                     }

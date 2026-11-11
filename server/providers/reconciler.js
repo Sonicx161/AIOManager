@@ -3,7 +3,7 @@ import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
 import { trace, traceEnabled } from '../utils/trace.js'
 import { connectionEffectiveAddons, connectionExcludedUrls, chainGuardFailureWithExclusions } from '../utils/addon-destinations.js'
-import { REFRESH_BUFFER_MS } from './token-refresh.js'
+import { REFRESH_BUFFER_MS, baseUrlOutranks, readNuvioSealedBundles } from './token-refresh.js'
 import { invalidateCredentialBundleCache } from './credential-bundle-cache.js'
 import { isLocalHostname } from '../hydra/client.js'
 import { invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
@@ -82,10 +82,9 @@ function normalizeUrl(url) {
     return normalized
 }
 
-// preferBaseUrled, scoped to ONE connection: a baseUrl-less bundle pushes to the public
-// api.nuvio.tv, so a baseUrl-bearing dupe of the SAME connection always outranks a newer
-// row that lost the instance URL. Distinct connection ids are distinct logins and are
-// never compared.
+// The Nuvio duplicate-row policy (baseUrlOutranks) and the shared sealed-row access
+// (readNuvioSealedBundles) live in token-refresh.js next to the refresh path, so the
+// resolver, this loader and every refresh caller cannot drift apart.
 function buildNativeConnection(type, row, accountId, bundle) {
     return {
         id: row.connection_id || `${accountId}:${type}`,
@@ -168,7 +167,7 @@ async function resolveConnections(accountId, syncUser = null) {
             const existingIdx = platformRowIndexes.get(mapKey)
             if (existingIdx !== undefined) {
                 const incumbent = connections[existingIdx]
-                if (!incumbent.credentials?.baseUrl && bundle.baseUrl) {
+                if (baseUrlOutranks(bundle, incumbent.credentials)) {
                     connections[existingIdx] = buildNativeConnection(type, row, accountId, bundle)
                 }
                 continue
@@ -236,18 +235,38 @@ const isHydraOutbound = (c) =>
     c?.driverType === 'hydra' || c?.driverType === 'hydra-outbound' ||
     c?.connectionType === 'hydra-outbound'
 
+// The destination and tokens for a Nuvio connection always come from its sealed
+// server_credentials rows (readNuvioSealedBundles); caller-supplied credentials are
+// ignored entirely (the client strips them on the wire and the sync route strips them
+// again, so anything that still arrives is untrusted). Tokens come from the newest
+// readable token-bearing row only, while the URL (and its publishable key) may be
+// recovered from any sealed duplicate of the same connection. A connection with no
+// usable sealed row fails closed instead of guessing the public default.
+function nuvioSealedBundleMissing() {
+    const err = new Error('Nuvio credentials not found for this connection, re-authenticate it')
+    err.isAuthError = true
+    return err
+}
+
+async function loadNuvioSealedBundle(connection) {
+    if (!connection?.id || !connection.accountId || !connection.syncUser) throw nuvioSealedBundleMissing()
+    const { entries, urlBundle } = await readNuvioSealedBundles(connection.id, connection.accountId, connection.syncUser)
+    const tokenBundle = entries.find(e => e.bundle.accessToken)?.bundle || null
+    if (!tokenBundle) throw nuvioSealedBundleMissing()
+    const bundle = { ...tokenBundle }
+    if (!bundle.baseUrl && urlBundle?.baseUrl) {
+        bundle.baseUrl = urlBundle.baseUrl
+        if (!bundle.publishableKey && urlBundle.publishableKey) bundle.publishableKey = urlBundle.publishableKey
+    }
+    return bundle
+}
+
 async function loadDriver(platform, credentials, connection) {
     if (platform === 'stremio' && !isHydraOutbound(connection)) {
         const { createStremioDriver } = await import('./stremio-driver.js')
         return createStremioDriver()
     }
     if (platform === 'nuvio') {
-        const { createNuvioDriver } = await import('./nuvio-driver.js')
-        const driver = createNuvioDriver({
-            baseUrl: credentials.baseUrl,
-            publishableKey: credentials.publishableKey
-        })
-
         // client-marked expired: skip refresh (cooldown handles repeated auth failures)
         if (connection?.status === 'expired') {
             const err = new Error('Nuvio credentials expired, re-authenticate this connection')
@@ -255,19 +274,29 @@ async function loadDriver(platform, credentials, connection) {
             throw err
         }
 
+        // Destination and tokens always come from the sealed rows; the caller's
+        // credentials argument is ignored, and a resolver object whose row changed after
+        // resolution is re-read here instead of trusted.
+        credentials = await loadNuvioSealedBundle(connection)
+        connection.credentials = credentials
+
         if (connection?.id) {
-            const expiresAt = connection.credentials?.expiresAt
+            const expiresAt = credentials.expiresAt
             if (storedConnections.get(connection) !== connectionCacheGeneration || !expiresAt || expiresAt - Date.now() <= REFRESH_BUFFER_MS) {
                 try {
                     const { refreshNuvioToken } = await import('./token-refresh.js')
-                    const fresh = await refreshNuvioToken(connection.id, connection.accountId, undefined, connection.syncUser)
+                    // Destination selection and the sealed-URL heal live inside the shared
+                    // refresh path, so this call and the token endpoint use one policy.
+                    const fresh = await refreshNuvioToken(connection.id, connection.accountId, connection.syncUser)
                     if (fresh) {
-                        connection.credentials = {
-                            ...connection.credentials,
+                        credentials = connection.credentials = {
+                            ...credentials,
                             accessToken: fresh.accessToken,
                             refreshToken: fresh.refreshToken,
                             expiresAt: fresh.expiresAt,
-                            profileId: fresh.profileId ?? connection.credentials?.profileId,
+                            profileId: fresh.profileId ?? credentials.profileId,
+                            baseUrl: fresh.baseUrl ?? credentials.baseUrl,
+                            publishableKey: fresh.publishableKey ?? credentials.publishableKey,
                         }
                     }
                 } catch (err) {
@@ -278,7 +307,13 @@ async function loadDriver(platform, credentials, connection) {
             }
         }
 
-        return driver
+        // Built only now, from the final authoritative bundle: a driver created before
+        // the refresh would keep the pre-refresh destination for every later call.
+        const { createNuvioDriver } = await import('./nuvio-driver.js')
+        return createNuvioDriver({
+            baseUrl: credentials.baseUrl,
+            publishableKey: credentials.publishableKey
+        })
     }
     if (platform === 'realstream') {
         const { createRealStreamDriver } = await import('./realstream-driver.js')

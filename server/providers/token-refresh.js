@@ -32,6 +32,45 @@ async function loadCredentialBundle(credentialType, connectionId, accountId, syn
     return { bundle, reason: null }
 }
 
+// Duplicate-row policy for ONE sealed Nuvio login, shared by resolveConnections,
+// loadNuvioSealedBundle and the refresh path below so the three cannot drift: a
+// baseUrl-less bundle pushes to the public api.nuvio.tv, so a baseUrl-bearing dupe of
+// the SAME connection always outranks a newer row that lost the instance URL. Distinct
+// connection ids are distinct logins and are never compared.
+export function baseUrlOutranks(challenger, incumbent) {
+    return Boolean(challenger?.baseUrl) && !incumbent?.baseUrl
+}
+
+// Shared sealed-row access for one Nuvio login, newest first, under the
+// owner+account+type+connection scope (account_id alone is not an authorization
+// boundary). Legacy rows without a connection_id are matched through the synthetic
+// `${accountId}:nuvio` id the same way resolveConnections resolves them. Returns each
+// readable bundle WITH ITS SEALED ROW ID, newest first, plus the URL-bearing bundle
+// chosen by baseUrlOutranks: tokens must always come from the newest readable row only
+// (an older row's refresh token may already be consumed by rotation), while the URL and
+// its publishable key may be recovered from any sealed duplicate of the same connection.
+export async function readNuvioSealedBundles(connectionId, accountId, syncUser) {
+    if (!connectionId || !accountId || !syncUser) return { entries: [], urlBundle: null }
+    const legacy = connectionId === `${accountId}:nuvio`
+    const rows = await db.query(
+        legacy
+            ? "SELECT id, auth_key FROM server_credentials WHERE credential_type = 'nuvio' AND sync_user = $1 AND account_id = $2 AND connection_id IS NULL ORDER BY updated_at DESC"
+            : "SELECT id, auth_key FROM server_credentials WHERE credential_type = 'nuvio' AND sync_user = $1 AND account_id = $2 AND connection_id = $3 ORDER BY updated_at DESC",
+        legacy ? [syncUser, accountId] : [syncUser, accountId, connectionId]
+    )
+    const entries = []
+    let urlBundle = null
+    for (const row of rows || []) {
+        if (!row.auth_key) continue
+        let bundle = null
+        try { bundle = JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) } catch { bundle = null }
+        if (!bundle || typeof bundle !== 'object') continue
+        entries.push({ rowId: row.id, bundle })
+        if (baseUrlOutranks(bundle, urlBundle)) urlBundle = bundle
+    }
+    return { entries, urlBundle }
+}
+
 const refreshInFlight = new Map()
 function singleFlight(key, fn) {
     const existing = refreshInFlight.get(key)
@@ -100,17 +139,25 @@ export function resetForceCooldownsForTest() {
     failedRenewals.clear()
 }
 
-async function persistRotatedToken(connectionId, credentialType, newBundle, accountId, syncUser, previousBundle) {
+// rowId targets the exact sealed row the bundle was read from (needed for legacy rows,
+// whose NULL connection_id cannot be addressed by connection id); the owner/account/type
+// predicates are retained so a row id alone never reaches outside the scoped login.
+async function persistRotatedToken(connectionId, credentialType, newBundle, accountId, syncUser, previousBundle, rowId = null) {
     if (!accountId || !syncUser) {
         throw new Error(`Refusing unscoped persist of rotated ${credentialType} token for ${connectionId}: account and owner are both required`)
     }
     let lastErr = null
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            const row = await db.get(
-                'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
-                [connectionId, credentialType, accountId, syncUser]
-            )
+            const row = rowId
+                ? await db.get(
+                    'SELECT auth_key FROM server_credentials WHERE id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4',
+                    [rowId, credentialType, accountId, syncUser]
+                )
+                : await db.get(
+                    'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
+                    [connectionId, credentialType, accountId, syncUser]
+                )
             const latest = row?.auth_key ? JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) : null
             const tokenField = credentialType === 'nuvio' ? 'refreshToken' : 'accessToken'
             if (!latest || latest[tokenField] !== previousBundle[tokenField] || latest.baseUrl !== previousBundle.baseUrl) {
@@ -121,10 +168,15 @@ async function persistRotatedToken(connectionId, credentialType, newBundle, acco
             // Preserve concurrent profile edits; replace only fields this operation changed.
             const updated = { ...latest, ...Object.fromEntries(Object.entries(newBundle).filter(([key, value]) => value !== previousBundle[key])) }
             const encrypted = encrypt(JSON.stringify(updated), PRIMARY_KEY)
-            const result = await db.run(
-                'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE connection_id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
-                [encrypted, Date.now(), connectionId, credentialType, accountId, syncUser, row.auth_key]
-            )
+            const result = rowId
+                ? await db.run(
+                    'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
+                    [encrypted, Date.now(), rowId, credentialType, accountId, syncUser, row.auth_key]
+                )
+                : await db.run(
+                    'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE connection_id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
+                    [encrypted, Date.now(), connectionId, credentialType, accountId, syncUser, row.auth_key]
+                )
             if (result.changes === 0) throw new Error('Connection credential changed before persistence')
             const { invalidateConnectionCache } = await import('./reconciler.js')
             invalidateConnectionCache(syncUser)
@@ -141,13 +193,13 @@ async function persistRotatedToken(connectionId, credentialType, newBundle, acco
     throw e
 }
 
-export function refreshNuvioToken(connectionId, accountId, heal, syncUser, options = {}) {
+export function refreshNuvioToken(connectionId, accountId, syncUser, options = {}) {
     const key = JSON.stringify(['nuvio', connectionId, accountId ?? null, syncUser ?? null])
     const rejectedTokenHash = normalizeRejectedTokenHash(options.rejectedTokenHash)
-    return singleFlightAfter(key, () => refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, key, rejectedTokenHash), !!rejectedTokenHash)
+    return singleFlightAfter(key, () => refreshNuvioTokenInner(connectionId, accountId, syncUser, key, rejectedTokenHash), !!rejectedTokenHash)
 }
 
-async function refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, key, rejectedTokenHash) {
+async function refreshNuvioTokenInner(connectionId, accountId, syncUser, key, rejectedTokenHash) {
     const start = Date.now()
     trace('tokenRefresh', 'nuvio.start', { connectionId, accountId })
     // Connection IDs alone do not authorize credential access.
@@ -167,18 +219,34 @@ async function refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, k
         }
         throw stateErr
     }
-    const loaded = await loadCredentialBundle('nuvio', connectionId, accountId, syncUser)
-    if (loaded.reason) {
-        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: loaded.reason })
+    // Destination and token selection are authoritative here, so every caller (the token
+    // route, the reconciler, anything else) shares one sealed duplicate policy: tokens
+    // rotate from the newest readable row only, and a URL (with its key) may only be
+    // recovered from a sealed duplicate of the same connection. A caller-supplied URL is
+    // never consulted: it cannot move existing stored tokens to another backend and is
+    // never persisted here. Establishing a custom backend is the sign-in/registration
+    // flow's job, which issues and seals tokens for that backend. When the sealed rows
+    // carry no URL at all, the connection is a deliberate default and its destination is
+    // the public default.
+    const { entries, urlBundle } = await readNuvioSealedBundles(connectionId, accountId, syncUser)
+    const newest = entries[0] || null
+    let bundle = newest?.bundle || null
+    if (!bundle) {
+        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'no-credential' })
         return null
     }
-    let bundle = loaded.bundle
 
-    // A bundle without baseUrl pushes to the public api.nuvio.tv; persist the heal before
-    // refreshing so the refresh itself targets the client's real backend. The owner is
-    // re-asserted immediately before this UPDATE: a block that lands while the credential
-    // is being read performs no heal write (addendum A3).
-    if (heal?.baseUrl && !bundle.baseUrl) {
+    if (!bundle.refreshToken) {
+        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'no-refresh-token' })
+        return null
+    }
+
+    if (!bundle.baseUrl && urlBundle?.baseUrl) {
+        // A newest bundle without baseUrl pushes to the public api.nuvio.tv while an
+        // older sealed duplicate still carries the connection's real backend; persist the
+        // sealed URL before refreshing so the refresh itself targets it. The owner is
+        // re-asserted immediately before this UPDATE: a block that lands while the
+        // credential is being read performs no heal write (addendum A3).
         try {
             await assertAccountActive(syncUser)
         } catch (stateErr) {
@@ -188,15 +256,20 @@ async function refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, k
             }
             throw stateErr
         }
-        const healed = { ...bundle, baseUrl: heal.baseUrl }
-        if (heal.publishableKey && !bundle.publishableKey) healed.publishableKey = heal.publishableKey
-        bundle = await persistRotatedToken(connectionId, 'nuvio', healed, accountId, syncUser, bundle)
-        trace('tokenRefresh', 'nuvio.baseUrlHealed', { connectionId, accountId })
+        const healed = { ...bundle, baseUrl: urlBundle.baseUrl }
+        if (urlBundle.publishableKey && !bundle.publishableKey) healed.publishableKey = urlBundle.publishableKey
+        bundle = await persistRotatedToken(connectionId, 'nuvio', healed, accountId, syncUser, bundle, newest.rowId)
+        trace('tokenRefresh', 'nuvio.baseUrlHealed', { connectionId, accountId, fromSealedRow: true })
     }
 
-    if (!bundle.refreshToken) {
-        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'no-refresh-token' })
-        return null
+    if (!bundle.baseUrl && connectionId === `${accountId}:nuvio`) {
+        // A legacy row with no readable sealed URL cannot prove which backend issued its
+        // tokens. Beta never rotated these rows, and refreshing them would hand the
+        // rotating refresh token to the public default on guesswork alone, so keep beta's
+        // behaviour: no rotation, the stored access token is used as-is. Legacy rows that
+        // do carry a sealed URL refresh at their own server above.
+        trace('tokenRefresh', 'nuvio.skip', { connectionId, accountId, reason: 'legacy-no-sealed-url' })
+        return bundle
     }
 
     const plan = forcedRefreshPlan(key, bundle, rejectedTokenHash)
@@ -226,7 +299,7 @@ async function refreshNuvioTokenInner(connectionId, accountId, heal, syncUser, k
             expiresAt: refreshed.expiresAt,
         }
 
-        const persisted = await persistRotatedToken(connectionId, 'nuvio', newBundle, accountId, syncUser, bundle)
+        const persisted = await persistRotatedToken(connectionId, 'nuvio', newBundle, accountId, syncUser, bundle, newest.rowId)
         trace('tokenRefresh', 'nuvio.success', { connectionId, accountId, timing: Date.now() - start })
         return persisted
     } catch (err) {

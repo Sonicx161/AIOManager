@@ -136,8 +136,11 @@ export function registerProviderRoutes(fastify, reconciler) {
         const ownerCanWriteState = () => ownerCanWriteOrFail(authUser)
 
         try {
+            // Credentials are never taken from the caller: the reconciler takes Nuvio
+            // destinations and tokens only from the sealed rows, so strip the field the
+            // same way the client does before the connection reaches any driver.
             const clientConnections = Array.isArray(connections)
-                ? connections.filter(c => c && c.id && c.platform !== 'jellyfin').map(c => ({ ...c, accountId, syncUser: authUser }))
+                ? connections.filter(c => c && c.id && c.platform !== 'jellyfin').map(({ credentials: _stripped, ...rest }) => ({ ...rest, accountId, syncUser: authUser }))
                 : null
             const resolvedConnections = (clientConnections && clientConnections.length > 0)
                 ? clientConnections
@@ -487,12 +490,9 @@ export function registerProviderRoutes(fastify, reconciler) {
         assertWritablePrimary()
 
         const { connectionId } = request.params
-        const { accountId, platform, baseUrl, rejectedTokenHash } = request.body || {}
+        const { accountId, platform, rejectedTokenHash } = request.body || {}
         if (!accountId || !['nuvio', 'realstream'].includes(platform)) { reply.code(400); return { error: 'Missing accountId or unsupported platform' } }
         const refreshOptions = typeof rejectedTokenHash === 'string' ? { rejectedTokenHash } : {}
-        if (baseUrl && typeof baseUrl === 'string' && !(await isSafeUrlResolved(baseUrl))) {
-            reply.code(400); return { error: 'Invalid or unsafe baseUrl' }
-        }
 
         if (platform === 'nuvio') {
             try {
@@ -502,8 +502,11 @@ export function registerProviderRoutes(fastify, reconciler) {
                 )
                 if (!owned) { reply.code(404); return { error: 'Connection not found' } }
 
+                // A caller-supplied baseUrl is deliberately not accepted here: it must never
+                // move existing stored tokens to another backend. Establishing a custom
+                // backend happens at sign-in/registration, which seals tokens for it.
                 const { refreshNuvioToken } = await import('../providers/token-refresh.js')
-                const bundle = await refreshNuvioToken(connectionId, accountId, { baseUrl: typeof baseUrl === 'string' && baseUrl ? baseUrl : undefined }, authUser, refreshOptions)
+                const bundle = await refreshNuvioToken(connectionId, accountId, authUser, refreshOptions)
                 if (!bundle?.accessToken) { reply.code(401); return { error: 'Nuvio session expired, re-authenticate' } }
                 return { accessToken: bundle.accessToken, expiresAt: bundle.expiresAt, profileId: bundle.profileId ?? null }
             } catch (err) {
@@ -598,7 +601,7 @@ export function registerProviderRoutes(fastify, reconciler) {
 
         try {
             const { refreshNuvioToken } = await import('../providers/token-refresh.js')
-            const bundle = await refreshNuvioToken(connectionId, accountId, undefined, authUser)
+            const bundle = await refreshNuvioToken(connectionId, accountId, authUser)
             if (!bundle?.accessToken) { reply.code(401); return { error: 'Nuvio session expired, re-authenticate' } }
 
             // Security: exports read a stored credential, so the driver comes from the stored bundle only — client baseUrl/publishableKey would let the caller steer the exfil target.
