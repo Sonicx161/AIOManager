@@ -140,6 +140,8 @@ export interface HistoryEntry {
 export interface WatchHistoryResult {
     refreshMedia: () => void
     mediaIssues: MediaReadIssue[]
+    /** True while Jellyfin media reads (head, archive, sessions) or their identity enrichment are in flight. */
+    mediaSettling: boolean
     history: HistoryEntry[]
     // Items currently in progress (timeOffset > 0, progress < 90) from live state
     inProgress: ActivityItem[]
@@ -575,5 +577,5 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         }
         return orderContinueWatching(mergeMediaItems(inProgress, media.inProgress.filter(notDeleted)))
     }, [inProgress, media.inProgress, deletedEventKeys, ctxOf])
-    return { history: combinedHistory, inProgress: combinedInProgress, hasEventLog, loading: loading || media.initialLoading, refreshMedia: media.refresh, mediaIssues: media.readIssues }
+    return { history: combinedHistory, inProgress: combinedInProgress, hasEventLog, loading: loading || media.initialLoading, mediaSettling: media.mediaSettling, refreshMedia: media.refresh, mediaIssues: media.readIssues }
 }

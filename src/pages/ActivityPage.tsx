@@ -276,7 +276,7 @@ export function ActivityPage() {
     const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
     const { dismissedItems: dismissedContinueWatching } = useDiscoveryPrefs(CONTINUE_WATCHING_CONTEXT)
 
-    const { history: watchHistory, inProgress, refreshMedia, mediaIssues } = useWatchHistory()
+    const { history: watchHistory, inProgress, refreshMedia, mediaIssues, mediaSettling } = useWatchHistory()
 
     const [activeView, setActiveView] = useState<'feed' | 'foryou'>('feed')
     const [forYouAccountId, setForYouAccountId] = useState<string | null>(null)
@@ -959,7 +959,7 @@ export function ActivityPage() {
 
     const isSelecting = selectedItems.size > 0 || isBulkMode
     const isLoading = loading || isRefreshingFromCloud
-    const historySettled = useSettledOnce(watchHistory, isLoading || !watchEventsInitialized)
+    const historySettled = useSettledOnce(watchHistory, isLoading || mediaSettling || !watchEventsInitialized, { maxWaitMs: 20000 })
     // Refresh the current feed in place. These are the live, scoped hook
     // results, so removals and account changes still take effect immediately.
     const showFeedSkeleton = isLoading && history.length === 0 && inProgress.length === 0

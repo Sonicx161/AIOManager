@@ -47,7 +47,7 @@ export function useJellyfinActivity(accountId?: string, enabled = true, options:
         .flatMap(account => (account.connections || []).filter(connection => connection.platform === 'jellyfin').map(connection => ({ accountId: account.id, connection }))), [accounts, accountId])
     // Cards may idle back their /Sessions cadence; page-scope consumers
     // (accountId undefined: Activity and the other full pages) always keep 15s.
-    const { results, refresh, busy, initialLoading } = useJellyfinMediaConnections(
+    const { results, refresh, busy, initialLoading, mediaSettling } = useJellyfinMediaConnections(
         scopes,
         accountId ? { ...options, sessionsBackoff: true } : options,
     )
@@ -141,5 +141,5 @@ export function useJellyfinActivity(accountId?: string, enabled = true, options:
         }
         return issues
     }), [results])
-    return { ...activity, readIssues, refresh, busy, initialLoading }
+    return { ...activity, readIssues, refresh, busy, initialLoading, mediaSettling }
 }
