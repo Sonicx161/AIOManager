@@ -49,9 +49,11 @@ export function hasSavedWatchState(record: WatchStateRecord): boolean {
     return record.unmodified !== true || record.watched !== false || record.positionMs !== 0 || record.playedAt !== null || record.playCount !== 0
 }
 
-export function matchesWatchPatch(record: WatchStateRecord, patch: { watched?: true; positionMs?: number }): boolean {
+export function matchesWatchPatch(record: WatchStateRecord, patch: { watched?: true; positionMs?: number; rating?: number; favorite?: true }): boolean {
     return (patch.watched === undefined || record.watched === patch.watched)
         && (patch.positionMs === undefined || record.positionMs === patch.positionMs)
+        && (patch.rating === undefined || record.rating === patch.rating)
+        && (patch.favorite === undefined || record.favorite === true)
 }
 
 export function formatWatchPosition(value: number): string {

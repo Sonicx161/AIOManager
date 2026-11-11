@@ -98,6 +98,11 @@ function watchPlayCount(userData: Record<string, unknown>): number | undefined {
     return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
+/** A user rating is 0-10; a present rating is greater than zero and finite. */
+export function watchRating(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 10 ? value : undefined
+}
+
 export function seriesKeyOf(item: JellyfinItem): string | undefined {
     if (item.Type !== 'Episode' || typeof item.SeriesId !== 'string' || item.SeriesId === '') return undefined
     return /^tt\d+$/.test(item.SeriesId) ? undefined : item.SeriesId
@@ -115,6 +120,8 @@ export function watchStateFields(record: Omit<WatchStateRecord, 'fingerprint'>):
         durationMs: record.durationMs,
         playedAt: record.playedAt,
         playCount: record.playCount,
+        rating: record.rating,
+        favorite: record.favorite,
         unmodified: record.unmodified,
     }
 }
@@ -153,6 +160,8 @@ export async function watchRecordFromItem(item: JellyfinItem, seriesProviders?: 
         durationMs: ticksToMs(item.RunTimeTicks),
         playedAt: userData === undefined ? null : sourceTime(userData.LastPlayedDate),
         playCount: userData === undefined ? undefined : watchPlayCount(userData),
+        rating: userData === undefined ? undefined : watchRating(userData.Rating),
+        favorite: userData?.IsFavorite === true ? true : undefined,
         unmodified: userData !== undefined && explicitlyBlankUserData(userData) ? true : undefined,
         notes,
     }

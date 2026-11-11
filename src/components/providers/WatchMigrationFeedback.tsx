@@ -3,20 +3,22 @@ import { ArrowRight, CheckCircle2, CircleAlert, Download, Info, Loader2 } from '
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatWatchPosition, watchRecordSubtitle, watchRecordTitle } from '@/lib/watch-state/records'
-import { isStaleKeptResult, migrationResultCounts, resultExplanation } from '@/lib/watch-state/result-counts'
+import { isStaleKeptResult, migrationResultCounts, ratingFavoriteCounts, ratingFavoriteSummary, resultExplanation } from '@/lib/watch-state/result-counts'
 import type { MigrationResult, WatchMigrationPlan, WatchStateRecord } from '@/lib/watch-state/types'
 import { MigrationArtwork } from './MigrationArtwork'
 
 export type MigrationOutcome = 'complete' | 'stopped' | 'failed'
 export interface ImportProgress { completed: number; total: number }
 
-export function migrationStateLabel(record: Pick<WatchStateRecord, 'watched' | 'positionMs'> & Partial<Pick<WatchStateRecord, 'playedAt' | 'playCount'>>): string {
+export function migrationStateLabel(record: Pick<WatchStateRecord, 'watched' | 'positionMs'> & Partial<Pick<WatchStateRecord, 'playedAt' | 'playCount' | 'rating' | 'favorite'>>): string {
     const values = []
     if (record.watched === true) values.push('Watched')
     else if (record.watched === false) values.push('Not watched')
     if (record.positionMs !== undefined && record.positionMs > 0) values.push(`Continue at ${formatWatchPosition(record.positionMs)}`)
     if (record.playedAt !== undefined && record.playedAt !== null) values.push(`Last played ${new Date(record.playedAt).toLocaleString()}`)
     if (record.playCount !== undefined && record.playCount > 0) values.push(`${record.playCount.toLocaleString()} ${record.playCount === 1 ? 'play' : 'plays'}`)
+    if (record.rating !== undefined) values.push(`Rated ${Number.isInteger(record.rating) ? record.rating.toLocaleString() : record.rating.toLocaleString(undefined, { maximumFractionDigits: 1 })}/10`)
+    if (record.favorite === true) values.push('Favorite')
     return values.join(' · ') || 'No saved watch information'
 }
 
@@ -86,6 +88,7 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
     const previewKept = plan.rows.filter(row => row.status === 'conflict').length
     const unmatched = plan.rows.filter(row => row.status === 'skipped' || row.status === 'unsupported').length
     const undated = results.filter(result => result.status === 'applied' && rows.get(result.rowId)?.undated === true).length
+    const { ratings, favorites } = ratingFavoriteSummary(ratingFavoriteCounts(plan, results))
     const datesNotCopied = results.some(result => result.status === 'applied' && rows.get(result.rowId)?.notes.includes('Original watch dates cannot be preserved by this destination.'))
     const visible = results.filter(result => filter === 'all' || (filter === 'attention' ? result.status === 'failed' : filter === 'kept' ? (result.status === 'unchanged' || result.status === 'conflict') && !isStaleKeptResult(result) : result.status === 'applied'))
     const pageCount = Math.max(1, Math.ceil(visible.length / 50))
@@ -146,6 +149,8 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
             <div className="space-y-2 border-t border-border/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
                 {outcome === 'stopped' && <p>Confirmed titles stay saved. Titles that weren’t reached can be reviewed and retried after a fresh preview.</p>}
                 {undated > 0 && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{undated.toLocaleString()} {undated === 1 ? 'title had' : 'titles had'} no exact watch time and {undated === 1 ? 'was' : 'were'} sent without a date.</span></p>}
+                {ratings && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{ratings}</span></p>}
+                {favorites && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{favorites}</span></p>}
                 {datesNotCopied && <p className="flex items-start gap-2"><Info aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>Original watch dates weren’t copied. This server may show when the import ran instead.</span></p>}
                 {!plan.source.complete && <p className="flex items-start gap-2"><CircleAlert aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>The source returned an incomplete history. Only titles found in this preview were considered.</span></p>}
                 {(otherReady > 0 || alreadySaved > 0 || unmatched > 0 || previewKept > 0) && <div className="space-y-1 border-l-2 border-border pl-3">

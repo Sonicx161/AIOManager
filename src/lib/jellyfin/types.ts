@@ -80,6 +80,9 @@ export interface JellyfinUserData {
     PlaybackPositionTicks?: number
     LastPlayedDate?: string
     PlayCount?: number
+    /** The user's 0-10 rating; null or absent when unrated. */
+    Rating?: number | null
+    IsFavorite?: boolean
     [key: string]: unknown
 }
 
@@ -170,6 +173,9 @@ export interface JellyfinUserDataUpdate {
     PlaybackPositionTicks?: number
     LastPlayedDate?: string
     PlayCount?: number
+    /** 0-10 user rating. */
+    Rating?: number
+    IsFavorite?: boolean
 }
 
 /** Backward-compatible alias for the played-history result. */
@@ -259,6 +265,8 @@ export interface JellyfinClient {
     readAllPlayed(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     readAllResume(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     readAllLibrary(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
+    /** Full favorites walk over Movies and Episodes at the library page window. */
+    readAllFavorites(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     queryUserItems(accessToken: string, userId: string, query: JellyfinItemQuery, signal?: AbortSignal): Promise<JellyfinItem[]>
     readSessions(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinSession[]>
 }

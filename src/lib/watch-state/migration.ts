@@ -1,5 +1,6 @@
 import { hasSavedWatchState, matchesWatchPatch, sameWatchTitle, undatedRowCount } from './records.ts'
 import { migrationFailure, migrationFailureMessage, WatchMigrationError } from './failures.ts'
+import { ratingFavoriteCounts } from './result-counts.ts'
 import { StaleChecksError } from './prewrite-fresh.ts'
 import type { MigrationOptions, MigrationProgress, MigrationResult, MigrationRow, MigrationWriteResult, WatchMigrationPlan, WatchStateDestination, WatchStateRecord, WatchStateSnapshot, WatchStateSource } from './types.ts'
 
@@ -67,6 +68,14 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
                 }
                 else row.notes.push('The destination cannot import resume points without reporting playback.')
             }
+            if (record.favorite === true) {
+                if (destination.capabilities.favorites) patch.favorite = true
+                else row.notes.push('Favorites cannot be preserved by this destination.')
+            }
+            if (record.rating !== undefined) {
+                if (destination.capabilities.ratings) patch.rating = record.rating
+                else row.notes.push('Ratings cannot be preserved by this destination.')
+            }
             if (!Object.keys(patch).length) {
                 row.status = row.notes.length ? 'unsupported' : 'skipped'
                 row.reason = row.notes.length ? 'The selected saved state is unsupported by this destination.' : 'No positive watched flag or resume point was selected.'
@@ -111,6 +120,16 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
             }
             row.target = verified[0]
             row.patch = patch
+            if (patch.rating !== undefined && row.target.rating !== undefined && row.target.rating !== patch.rating) {
+                delete patch.rating
+                row.notes.push('The destination already has a different rating for this title. Its rating was kept and the source rating was not copied.')
+                if (!patch.watched && patch.positionMs === undefined && !patch.favorite) {
+                    row.status = 'skipped'
+                    row.reason = 'This destination already has a different rating for this title, which was kept.'
+                    finish()
+                    continue
+                }
+            }
             if (matchesWatchPatch(row.target, patch)) {
                 row.status = 'unchanged'
                 row.reason = 'The destination already has the selected state. Dates and counts will be kept.'
@@ -164,6 +183,7 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
         progress?.(`Importing and verifying: ${(index + 1).toLocaleString()} of ${rows.length.toLocaleString()}`)
         const records = byId.get(row.source.id)
         let result: MigrationResult
+        let rowAuthExpired = false
         if (records?.length !== 1 || records[0].fingerprint !== row.source.fingerprint || !sameWatchTitle(row.source, records[0])) {
             result = { rowId: row.id, status: 'conflict', message: 'The source record changed or could not be verified. Preview again.', completedAt: Date.now() }
         } else {
@@ -188,11 +208,12 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
                     }
                 }
                 result = written
-                    ? { rowId: row.id, status: written.status, message: written.message, completedAt: Date.now(), ...(written.stale === true ? { stale: true } : {}) }
+                    ? { rowId: row.id, status: written.status, message: written.message, completedAt: Date.now(), ...(written.stale === true ? { stale: true } : {}), ...(written.dispatched === true ? { dispatched: true } : {}), ...(written.keptExisting === true ? { keptExisting: true } : {}), ...(written.ratingNotStored === true ? { ratingNotStored: true } : {}), ...(written.favoriteNotStored === true ? { favoriteNotStored: true } : {}) }
                     : { rowId: row.id, status: 'failed', message: STALE_PARTIAL_MESSAGE, failure: { stage: 'write', reason: 'unknown' }, completedAt: Date.now() }
+                rowAuthExpired = written?.authExpired === true
                 if (written?.record && written.status !== 'conflict') {
-                    const { watched, positionMs, playedAt, playCount } = written.record
-                    result.verified = { watched, positionMs, playedAt, playCount }
+                    const { watched, positionMs, playedAt, playCount, rating, favorite } = written.record
+                    result.verified = { watched, positionMs, playedAt, playCount, rating, favorite }
                 }
             } catch (error) {
                 if (signal.aborted) {
@@ -207,17 +228,21 @@ export async function executeWatchMigration(plan: WatchMigrationPlan, source: Wa
             }
         }
         onResult(result)
+        // An optional rating/favorite write hit an expired sign-in after this row's
+        // watched state was saved and verified. The result above stands; stop the run.
+        if (rowAuthExpired) throw new Error('The destination sign-in expired. Reconnect and preview again.')
     }
 }
 
 export function migrationReport(plan: WatchMigrationPlan, results: MigrationResult[]) {
     const byId = new Map(results.map(result => [result.rowId, result]))
     const undated = undatedRowCount(plan.rows)
+    const ratingFavorites = ratingFavoriteCounts(plan, results)
     return {
         version: 1, createdAt: new Date(plan.createdAt).toISOString(), exportedAt: new Date().toISOString(),
         source: { label: plan.source.label, subject: plan.source.subject, complete: plan.source.complete, count: plan.source.records.length },
         destination: { label: plan.destination.label, subject: plan.destination.subject }, options: plan.options, notes: plan.notes,
-        summary: { undated },
+        summary: { undated, ratings: ratingFavorites.ratings.copied, favorites: ratingFavorites.favorites.copied },
         rows: plan.rows.map(row => ({
             title: row.source.title, seriesTitle: row.source.seriesTitle, episodeTitle: row.source.episodeTitle, type: row.source.type, season: row.source.season, episode: row.source.episode, identities: row.source.identities,
             sourceItemId: row.source.id, destinationItemId: row.target?.id, sourceWatchDate: row.source.playedAt === null ? null : new Date(row.source.playedAt).toISOString(), dateConfidence: row.source.playedAt === null ? null : row.source.dateConfidence ?? 'exact', undated: row.undated === true,

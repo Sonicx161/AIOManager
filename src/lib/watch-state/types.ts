@@ -19,6 +19,10 @@ export interface WatchStateRecord {
     /** The one resume episode of a series whose item-level date is exact for this episode. */
     resumeSlot?: true
     playCount?: number
+    /** The source item's 0-10 rating; present only when the item is rated. */
+    rating?: number
+    /** Present only when the source item is favorited. */
+    favorite?: true
     unmodified?: boolean
     notes?: string[]
     fingerprint: string
@@ -51,6 +55,8 @@ export interface WatchStatePatch {
     resumePlayedAt?: number | null
     resumeSlot?: true
     playCount?: number
+    rating?: number
+    favorite?: true
 }
 
 export interface MigrationWriteResult {
@@ -59,10 +65,24 @@ export interface MigrationWriteResult {
     record?: WatchStateRecord
     /** The pre-write checks went stale, so nothing was written; the row needs a fresh preview. */
     stale?: true
+    /**
+     * An optional rating/favorite write hit an authentication failure after the
+     * watched state was already saved and verified. The row's result stands;
+     * the engine stops the run without erasing it.
+     */
+    authExpired?: true
+    /** A dispatch went out and came back unverified: the destination holds an unreviewed value. */
+    dispatched?: true
+    /** A differing destination rating was observed and preserved; no rating write was sent. */
+    keptExisting?: true
+    /** The destination refused the rating write outright; nothing was stored. */
+    ratingNotStored?: true
+    /** The destination refused the favorite write outright; nothing was stored. */
+    favoriteNotStored?: true
 }
 
 export interface WatchStateDestination extends WatchStateEndpoint {
-    capabilities: { watched: boolean; resume: boolean; dates: boolean; counts?: boolean; combined?: boolean; requiresDates?: boolean; requiresDuration?: boolean; notes: string[] }
+    capabilities: { watched: boolean; resume: boolean; dates: boolean; counts?: boolean; combined?: boolean; requiresDates?: boolean; requiresDuration?: boolean; ratings?: boolean; favorites?: boolean; notes: string[] }
     resolve(record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]>
     apply(expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult>
     /** Called once before the first write of an import run: drops per-run caches and re-verifies the session. */
@@ -108,7 +128,15 @@ export interface MigrationResult {
     message: string
     completedAt: number
     failure?: MigrationFailure
-    verified?: Pick<WatchStateRecord, 'watched' | 'positionMs' | 'playedAt' | 'playCount'>
+    verified?: Pick<WatchStateRecord, 'watched' | 'positionMs' | 'playedAt' | 'playCount' | 'rating' | 'favorite'>
+    /** A preference mutation was dispatched for this row; a kept outcome still needs review. */
+    dispatched?: true
+    /** A differing destination rating was observed and preserved; no rating write was sent. */
+    keptExisting?: true
+    /** The destination refused the rating write outright; nothing was stored. */
+    ratingNotStored?: true
+    /** The destination refused the favorite write outright; nothing was stored. */
+    favoriteNotStored?: true
     /** The row was kept only because its checks went stale; it was never written and counts as not attempted. */
     stale?: true
 }

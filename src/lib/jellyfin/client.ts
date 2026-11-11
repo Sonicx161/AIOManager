@@ -1,5 +1,6 @@
-// Browser-direct Jellyfin protocol client, read-only except for two scoped
-// watched-state mutations.
+// Browser-direct Jellyfin protocol client, read-only except for three scoped
+// user-data mutations: watched-state writes, the watched-state clear and the
+// favorite mark.
 //
 // Speaks the Jellyfin HTTP API against genuine Jellyfin servers and the
 // AIOStreams / AIOMetadata Jellyfin facades. Key invariants:
@@ -9,8 +10,9 @@
 //   - error messages never echo the base URL, request bodies or response bodies
 //     and error causes are sanitized so logged causes cannot leak them either
 //   - no retries, no token refresh; watched/progress state is mutated only by
-//     the scoped clearWatchState and writeUserData operations. Callers must
-//     verify writeUserData with an explicit readback; clearWatchState verifies
+//     the scoped clearWatchState and writeUserData operations, and the favorite
+//     mark only by writeFavorite. Callers must verify writeUserData and
+//     writeFavorite with an explicit readback; clearWatchState verifies
 //     its own readback. Acknowledgements alone prove nothing.
 //   - fetch is injectable; globalThis.fetch is resolved per call, never captured
 //     at module load
@@ -60,6 +62,7 @@ const RESUME_ALL_MAX_ITEMS = 10_000
 const RESUME_ALL_PAGE_SIZE = 50
 const LIBRARY_ALL_MAX_ITEMS = 100_000
 const LIBRARY_PAGE_SIZE = 500
+const FAVORITES_ALL_MAX_ITEMS = 10_000
 
 /**
  * Typed failure for every client operation. `kind` classifies the failure so
@@ -285,6 +288,8 @@ export interface JellyfinWatchClient extends JellyfinClient {
      * beforeDispatch runs immediately before each mutation request, including the fallback.
      */
     writeUserData(accessToken: string, userId: string, itemId: string, update: JellyfinUserDataUpdate, signal?: AbortSignal, beforeDispatch?: () => void): Promise<{ via: 'userdata' | 'played-items' } | void>
+    /** Marks or unmarks one user/item pair as favorite; callers verify with an item readback. */
+    writeFavorite(accessToken: string, userId: string, itemId: string, favorite: boolean, signal?: AbortSignal, beforeDispatch?: () => void): Promise<void>
     /**
      * Sets the user's Primary profile picture. The body must be the base64
      * TEXT of the image bytes (Jellyfin base64-decodes it), never raw bytes.
@@ -829,6 +834,42 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                 params: {
                     IncludeItemTypes: 'Movie,Episode,Series',
                     Recursive: 'true',
+                    Fields: 'UserData,ProviderIds',
+                    EnableImages: 'false',
+                },
+            },
+            signal
+        )
+    }
+
+    /**
+     * Full favorites read: pages every favorited movie and episode at the same
+     * window as readAllLibrary. The 500-row window stays at or below every
+     * verified facade cap (AIOMetadata clamps Items Limit to 500; AIOStreams
+     * clamps its browse limit to 500), and the walk's raw-offset tiling handles
+     * sparse or clamped pages honestly. The per-item UserData remains the truth:
+     * a server that ignored the filter would list unfavorited items here, and
+     * those carry no favorite in their UserData, so callers skip them naturally.
+     */
+    async function readAllFavorites(
+        accessToken: string,
+        userId: string,
+        options?: JellyfinPagedReadOptions,
+        signal?: AbortSignal
+    ): Promise<JellyfinItemResult> {
+        return readItemPages(
+            accessToken,
+            {
+                label: 'Users/{userId}/Items',
+                basePath: `/Users/${encodeURIComponent(userId)}/Items`,
+                pageSize: options?.pageSize ?? LIBRARY_PAGE_SIZE,
+                maxItems: options?.maxItems ?? FAVORITES_ALL_MAX_ITEMS,
+                sorted: false,
+                stopOnTotal: false,
+                params: {
+                    IncludeItemTypes: 'Movie,Episode',
+                    Recursive: 'true',
+                    Filters: 'IsFavorite',
                     Fields: 'UserData,ProviderIds',
                     EnableImages: 'false',
                 },
@@ -1430,6 +1471,23 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         return { via: 'userdata' }
     }
 
+    async function writeFavorite(accessToken: string, userId: string, itemId: string, favorite: boolean, signal?: AbortSignal, beforeDispatch?: () => void): Promise<void> {
+        if (typeof userId !== 'string' || userId === '') {
+            throw new JellyfinError('invalid-response', 'writeFavorite requires a non-empty userId')
+        }
+        if (typeof itemId !== 'string' || itemId === '') {
+            throw new JellyfinError('invalid-response', 'writeFavorite requires a non-empty itemId')
+        }
+        beforeDispatch?.()
+        await request({
+            label: 'Users/{userId}/FavoriteItems/{itemId}',
+            path: `/Users/${encodeURIComponent(userId)}/FavoriteItems/${encodeURIComponent(itemId)}`,
+            method: favorite ? 'POST' : 'DELETE',
+            token: accessToken,
+            signal,
+        })
+    }
+
     async function setUserImage(accessToken: string, userId: string, image: { base64: string; contentType: string }, route: 'user-image' | 'legacy', signal?: AbortSignal): Promise<void> {
         if (!userId) throw new JellyfinError('invalid-response', 'setUserImage requires a non-empty userId')
         const path = route === 'user-image'
@@ -1487,10 +1545,12 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         readAllPlayed,
         readAllResume,
         readAllLibrary,
+        readAllFavorites,
         queryUserItems,
         readSessions,
         clearWatchState,
         writeUserData,
+        writeFavorite,
         setUserImage,
         deleteUserImage,
     }
