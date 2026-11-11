@@ -11,7 +11,7 @@ import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js
 import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash, prepareLegacyPasswordUpgrade, applyLegacyPasswordUpgrade } from '../lib/sync-password.js'
 import { isRegistrationsClosed } from '../config.js'
 import { assertAccountActive, assertWritablePrimary, refreshAccountAdminState } from '../admin/account-state.js'
-import { invalidateSyncResponseCache, getSyncResponseCache, getSyncResponseCacheVariant, setSyncResponseCache, negotiateSyncResponseEncoding, syncResponseCacheStats } from '../lib/sync-response-cache.js'
+import { invalidateSyncResponseCache, getSyncResponseCache, getSyncResponseCacheVariant, setSyncResponseCache, negotiateSyncResponseEncoding, syncResponseCacheStats, peekSyncResponseCacheHash } from '../lib/sync-response-cache.js'
 import { decodeCanonicalAddonsV2 } from '../lib/canonical-addons-v2.js'
 import { noteSyncWrite } from '../lib/wal-checkpoint.js'
 import { trace } from '../utils/trace.js'
@@ -216,11 +216,13 @@ export function registerSyncRoutes(fastify) {
         }
 
         try {
-            // A conditional refresh only needs the encrypted blob when its revision changed.
-            // Keep password and revision in the same read; authentication still precedes 304.
-            const row = await db.get(
-                'SELECT CASE WHEN content_hash = $1 THEN NULL ELSE value END AS value, password, content_hash FROM kv_store WHERE key = $2',
-                [request.headers['if-none-match'] || null, id]
+            // One statement decides auth, revision and body from a single snapshot; the blob
+            // column is suppressed only when the request etag or the warm cache can answer
+            // without it, so a cached or 304 pull never reads the stored value.
+            const ifNoneMatch = request.headers['if-none-match'] || null
+            let row = await db.get(
+                'SELECT password, content_hash, CASE WHEN content_hash = $1 OR content_hash = $2 THEN NULL ELSE value END AS value FROM kv_store WHERE key = $3',
+                [ifNoneMatch, peekSyncResponseCacheHash(id), id]
             )
 
             if (!row) {
@@ -247,17 +249,32 @@ export function registerSyncRoutes(fastify) {
                 setCachedAuth('sync:' + id, password, row.password)
             }
 
-            if (row.content_hash && request.headers['if-none-match'] === row.content_hash) {
+            if (row.content_hash && ifNoneMatch === row.content_hash) {
                 trace('syncRoute', 'pull.not_modified', { accountId: id, timing: Date.now() - start })
                 reply.status(304)
                 reply.header('ETag', row.content_hash)
                 return reply.send()
             }
 
-            // Response cache: content_hash exactly identifies the stored blob, so a
-            // hit can serve the previously serialized (already canonicalAddons-stripped)
-            // bytes without decrypt/parse. Auth above already gated this request.
-            const cachedResponse = row.content_hash ? getSyncResponseCache(id, row.content_hash) : null
+            let cachedResponse = row.content_hash ? getSyncResponseCache(id, row.content_hash) : null
+            if (!cachedResponse && row.value == null) {
+                // Suppressed blob with no cache entry (evicted mid-request): refetch plain,
+                // still bound to the authenticated credential and this request's etag.
+                const fresh = await db.get('SELECT value, password, content_hash FROM kv_store WHERE key = $1', [id])
+                if (!fresh || fresh.password !== row.password) {
+                    trace('syncRoute', 'pull.error', { accountId: id, error: 'not-found' })
+                    reply.status(401);
+                    return { error: 'Unauthorized: Invalid credentials' }
+                }
+                row = fresh
+                if (row.content_hash && ifNoneMatch === row.content_hash) {
+                    trace('syncRoute', 'pull.not_modified', { accountId: id, timing: Date.now() - start })
+                    reply.status(304)
+                    reply.header('ETag', row.content_hash)
+                    return reply.send()
+                }
+                cachedResponse = row.content_hash ? getSyncResponseCache(id, row.content_hash) : null
+            }
             if (cachedResponse) {
                 const encoding = negotiateSyncResponseEncoding(request)
                 const variantBytes = encoding ? getSyncResponseCacheVariant(id, row.content_hash, encoding) : null

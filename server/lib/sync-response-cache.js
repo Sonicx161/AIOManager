@@ -174,6 +174,13 @@ export function peekSyncResponseCache(accountId) {
     return entries.has(accountId)
 }
 
+// Entry hash for pull read scoping: no LRU movement, no stats.
+export function peekSyncResponseCacheHash(accountId) {
+    if (!syncResponseCacheEnabled() || !accountId) return null
+    const entry = entries.get(accountId)
+    return entry ? entry.contentHash : null
+}
+
 export function syncResponseCacheStats() {
     return { ...stats, entries: entries.size, totalBytes, maxTotalBytes: MAX_TOTAL_BYTES, maxItemBytes: MAX_ITEM_BYTES }
 }

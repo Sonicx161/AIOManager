@@ -152,8 +152,9 @@ export function registerDeviceCredentialRoutes(fastify) {
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
 
         try {
+            // Only the columns publicDeviceRecord reads; never pulls token_hash material.
             const rows = await db.query(
-                'SELECT * FROM device_credentials WHERE account_uuid = $1 ORDER BY created_at DESC',
+                'SELECT id, device_id, tier, label, created_at, expires_at, revoked, last_used_at, credential_epoch FROM device_credentials WHERE account_uuid = $1 ORDER BY created_at DESC',
                 [authUser]
             )
             return { devices: (rows || []).map(publicDeviceRecord) }
