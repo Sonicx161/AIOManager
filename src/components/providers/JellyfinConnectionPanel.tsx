@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Copy, History, Import, Info, Loader2, Power, RefreshCw, Trash2, Wrench, Zap } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, Copy, History, Import, Info, Loader2, Minus, Power, RefreshCw, Trash2, Wrench, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatusChip } from '@/components/ui/status-chip'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -13,8 +13,9 @@ import { decrypt } from '@/lib/crypto'
 import { JellyfinClient, jellyfinSignInErrorMessage, validateJellyfinReconnect } from '@/lib/jellyfin/session'
 import { JellyfinError } from '@/lib/jellyfin/client'
 import { openJellyfinSecret } from '@/lib/jellyfin/connection-data'
+import { JELLYFIN_CAPABILITIES, JELLYFIN_CAPABILITY_NOTE_FOOTER, JELLYFIN_CAPABILITY_NOTE_SUBTITLE } from '@/lib/jellyfin/capabilities'
 import { displayStatus, friendlyConnectionError, timeAgo, tokenExpiry } from '@/lib/connection-format'
-import { maskNameLevel, maskUrlLevel } from '@/lib/utils'
+import { cn, maskNameLevel, maskUrlLevel } from '@/lib/utils'
 import { maskIds } from '@/lib/mask-ids'
 import { toast } from '@/hooks/use-toast'
 import type { Connection } from '@/types/connection'
@@ -50,6 +51,7 @@ export function JellyfinConnectionPanel({ accountId, connection, onBack, onRecon
     const [migrationOpen, setMigrationOpen] = useState(false)
     const [savedSecret, setSavedSecret] = useState<{ baseUrl: string; userId: string } | null>(null)
     const [workspaceTab, setWorkspaceTab] = useState('overview')
+    const [noteOpen, setNoteOpen] = useState(false)
     const request = useRef<AbortController | null>(null)
     const encryptionKey = useAuthStore(state => state.encryptionKey)
     const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
@@ -117,6 +119,9 @@ export function JellyfinConnectionPanel({ accountId, connection, onBack, onRecon
     const toggleEnabled = () => void mutate(() => useConnectionStore.getState().toggleConnection(accountId, connection.id))
 
     const identity = connection.mediaServer
+    // Capability rows follow the product recorded at verify time; without a
+    // detected product there is nothing honest to show, so no card at all.
+    const capabilityTable = identity && connection.platform === 'jellyfin' ? JELLYFIN_CAPABILITIES[identity.product] : undefined
     const name = connectionLabel(connection)
     const display = displayStatus(connection.status, tokenExpiry(connection))
     const { pill, showLive } = connectionPresentation(connection.enabled !== false, display)
@@ -220,6 +225,28 @@ export function JellyfinConnectionPanel({ accountId, connection, onBack, onRecon
         >
             <TabsContent value="overview">
                 <div className="grid gap-4 lg:grid-cols-2">
+                    {capabilityTable && <SectionCard
+                        className="lg:col-span-2"
+                        title="What this server supports"
+                        description={JELLYFIN_CAPABILITY_NOTE_SUBTITLE}
+                        action={capabilityTable.rows.length > 0 ? <button type="button" data-theme-part="button" aria-expanded={noteOpen} aria-label="What this server supports" onClick={() => setNoteOpen(value => !value)} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+                            {!noteOpen && <span className="max-w-[220px] truncate">{capabilityTable.summary}</span>}
+                            <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', noteOpen && 'rotate-180')} />
+                        </button> : undefined}
+                    >
+                        {capabilityTable.rows.length === 0 ? <p className="text-xs leading-relaxed text-muted-foreground">{capabilityTable.summary}</p>
+                        : noteOpen && <>
+                            <ul className="divide-y divide-border/30">
+                                {capabilityTable.rows.map(row => <li key={row.feature} className="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
+                                    <span className="min-w-0 flex-1 text-xs leading-relaxed"><span className="font-medium">{row.feature}</span>{row.note && <span className="mt-0.5 block text-muted-foreground">{row.note}</span>}</span>
+                                    {row.status === 'works'
+                                        ? <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-success"><Check className="h-3.5 w-3.5" />Works</span>
+                                        : <span className="inline-flex min-w-0 max-w-[55%] items-start justify-end gap-1.5 text-right text-xs leading-relaxed text-muted-foreground"><Minus className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 break-words">{row.reason}</span></span>}
+                                </li>)}
+                            </ul>
+                            <p className="border-t border-border/30 pt-2.5 text-xs leading-relaxed text-muted-foreground">{JELLYFIN_CAPABILITY_NOTE_FOOTER}</p>
+                        </>}
+                    </SectionCard>}
                     <SectionCard
                         title="Connection health"
                         description="Verify this server is reachable and your saved sign-in still works."
