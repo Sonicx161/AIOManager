@@ -20,6 +20,7 @@ const KronoriumDocsLayout = lazyChunk(() => import('@/components/kronorium/Krono
 const ReplayPage = lazyChunk(() => import('@/pages/ReplayPage').then(m => ({ default: m.ReplayPage })))
 const ReplaySharePage = lazyChunk(() => import('@/pages/ReplaySharePage').then(m => ({ default: m.ReplaySharePage })))
 const ActivityPage = lazyChunk(() => import('@/pages/ActivityPage').then(m => ({ default: m.ActivityPage })))
+const FailoverOverviewPage = lazyChunk(() => import('@/pages/FailoverOverviewPage').then(m => ({ default: m.FailoverOverviewPage })))
 const MetricsPage = lazyChunk(() => import('@/pages/MetricsPage').then(m => ({ default: m.MetricsPage })))
 const SettingsPage = lazyChunk(() => import('@/pages/SettingsPage').then(m => ({ default: m.SettingsPage })))
 const NotesPage = lazyChunk(() => import('@/pages/NotesPage').then(m => ({ default: m.NotesPage })))
@@ -43,6 +44,7 @@ export function preloadRouteChunk(pathname: string): Promise<unknown> | undefine
     }
     if (path === '/activity') return ActivityPage.preload()
     if (path === '/metrics') return MetricsPage.preload()
+    if (path === '/failover') return FailoverOverviewPage.preload()
     if (path.startsWith('/replay/share/')) return ReplaySharePage.preload()
     if (path === '/replay') return ReplayPage.preload()
     if (path === '/settings') return SettingsPage.preload()
@@ -71,6 +73,7 @@ export function AppRoutes() {
 
       <Route path="/activity" element={<ErrorBoundary><Suspense fallback={fallback}><ActivityPage /></Suspense></ErrorBoundary>} />
       <Route path="/metrics" element={<ErrorBoundary><Suspense fallback={fallback}><MetricsPage /></Suspense></ErrorBoundary>} />
+      <Route path="/failover" element={<ErrorBoundary><Suspense fallback={fallback}><FailoverOverviewPage /></Suspense></ErrorBoundary>} />
       <Route path="/replay" element={<ErrorBoundary><Suspense fallback={fallback}><ReplayPage /></Suspense></ErrorBoundary>} />
       <Route path="/replay/share/:token" element={<ErrorBoundary><Suspense fallback={fallback}><ReplaySharePage /></Suspense></ErrorBoundary>} />
       <Route path="/settings" element={<ErrorBoundary><Suspense fallback={fallback}><SettingsPage /></Suspense></ErrorBoundary>} />

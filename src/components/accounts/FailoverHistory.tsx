@@ -1,13 +1,15 @@
-import { memo, useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Activity, AlertTriangle, ArrowRight, Check } from "lucide-react"
 import { formatDistanceToNow } from "date-fns"
 import { Button } from "@/components/ui/button"
-import { StatusChip } from "@/components/ui/status-chip"
+import { AddonIcon } from "@/components/ui/addon-icon"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
-import { Tooltip } from "@/components/ui/tooltip"
 import { FailoverEmptyState } from "@/components/common/PageEmptyStates"
 import { useHistoryStore } from "@/store/historyStore"
 import { useFailoverStore } from "@/store/failoverStore"
+import { useAccountStore } from "@/store/accountStore"
+import { getPlatformEntry } from "@/lib/platform-registry"
+import { eventTimeText, missedNote, notificationText, readHistoryDetail, reasonSentence, type PlatformResult } from "@/lib/failover-history-detail"
 import { toast } from "@/hooks/use-toast"
 import type { AddonDescriptor } from "@/types/addon"
 import { identifyAddon } from "@/lib/addon-identifier"
@@ -15,35 +17,36 @@ import { normalizeAddonUrl } from "@/lib/utils"
 
 export type FailoverAddon = AddonDescriptor & { manifestUrl?: string }
 
-const ChainPill = memo(({ url, status, addons }: { url: string; status: 'active' | 'failed' | 'idle'; addons: FailoverAddon[] }) => {
+const findAddon = (url: string, addons: FailoverAddon[]) => {
     const normUrl = normalizeAddonUrl(url).toLowerCase()
-    const addon = addons.find(a => {
-        const aNorm = normalizeAddonUrl(a.transportUrl || '').toLowerCase()
-        return aNorm === normUrl || (a.manifestUrl && normalizeAddonUrl(a.manifestUrl).toLowerCase() === normUrl)
-    })
-    const displayName = addon?.metadata?.customName || addon?.manifest?.name || identifyAddon(url).name
-    const logo = addon?.metadata?.customLogo || addon?.manifest?.logo || identifyAddon(url).logo
+    return addons.find(a => normalizeAddonUrl(a.transportUrl || '').toLowerCase() === normUrl || (a.manifestUrl && normalizeAddonUrl(a.manifestUrl).toLowerCase() === normUrl))
+}
 
-    const styles: Record<string, { wrapper: string; dot: string }> = {
-        active: { wrapper: 'border-success/30 bg-success/10 text-success', dot: 'bg-success shadow-sm shadow-success/30' },
-        failed: { wrapper: 'border-destructive/30 bg-destructive/10 text-destructive', dot: 'bg-destructive shadow-sm shadow-destructive/30' },
-        idle: { wrapper: 'border-border/30 bg-muted/20 text-muted-foreground', dot: 'bg-muted-foreground/25' },
+const addonName = (url: string, addons: FailoverAddon[]) => {
+    const addon = findAddon(url, addons)
+    return addon?.metadata?.customName || addon?.manifest?.name || identifyAddon(url).name
+}
+
+const addonDisplay = (url: string, addons: FailoverAddon[]) => {
+    const addon = findAddon(url, addons)
+    return {
+        name: addon?.metadata?.customName || addon?.manifest?.name || identifyAddon(url).name,
+        logo: addon?.metadata?.customLogo || addon?.manifest?.logo || identifyAddon(url).logo,
     }
-    const s = styles[status]
+}
 
+const PlatformResultItem = ({ result, label }: { result: PlatformResult; label: string }) => {
+    const entry = getPlatformEntry(result.platform)
     return (
-        <span data-theme-part="badge" className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold ${s.wrapper}`}>
-            <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-            {logo ? (
-                <img src={logo} alt="" className="h-4 w-4 rounded-sm object-contain" loading="lazy" />
-            ) : null}
-            <Tooltip content={url}>
-            <span className="truncate max-w-[120px]">{displayName}</span>
-        </Tooltip>
+        <span className="inline-flex max-w-full items-center gap-1.5 text-xs text-muted-foreground">
+            {entry
+                ? <img data-theme-part="image-tile" src={entry.logo} alt="" loading="lazy" className="h-3.5 w-3.5 shrink-0 rounded-full object-contain" />
+                : <span data-theme-part="image-tile" className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-bold text-muted-foreground">{result.platform[0]?.toUpperCase() || '?'}</span>}
+            <span className="min-w-0 truncate">{label}</span>
+            {result.ok ? <Check className="h-3 w-3 shrink-0 text-success" aria-label="Updated" /> : <AlertTriangle className="h-3 w-3 shrink-0 text-warning" aria-label="Not updated" />}
         </span>
     )
-})
-ChainPill.displayName = 'ChainPill'
+}
 
 export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]; accountId: string }) {
     const allLogs = useHistoryStore(s => s.logs)
@@ -51,6 +54,7 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
     const clearLogs = useHistoryStore(s => s.clearLogs)
     const rulesCount = useFailoverStore(s => s.rules.filter(rule => rule.accountId === accountId).length)
     const logs = useMemo(() => allLogs.filter(l => l.accountId === accountId), [allLogs, accountId])
+    const connections = useAccountStore(s => s.accounts.find(a => a.id === accountId)?.connections)
 
     // Collapse consecutive same-type events from one primary: flapping would otherwise flood the log.
     const groupedLogs = useMemo(() => {
@@ -80,6 +84,13 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
         } finally {
             setIsClearing(false)
         }
+    }
+
+    const platformLabel = (result: PlatformResult, all: PlatformResult[]) => {
+        const name = getPlatformEntry(result.platform)?.name || result.platform
+        if (all.filter(p => p.platform === result.platform).length < 2) return name
+        const custom = connections?.find(c => c.id === result.id)?.displayName
+        return custom ? `${name} (${custom})` : name
     }
 
     const resolveUrlToName = (url: string) => {
@@ -130,80 +141,92 @@ export function FailoverHistory({ addons, accountId }: { addons: FailoverAddon[]
                     const logDate = log.timestamp ? new Date(log.timestamp) : null;
                     const isValidLogDate = logDate && !isNaN(logDate.getTime());
 
-                    let Icon = Activity;
-                    let typeColor = 'text-muted-foreground';
-                    let typeVariant: 'muted' | 'primary' | 'success' | 'destructive' = 'muted';
-                    let iconBg = 'bg-muted/40';
-
-                    if (log.type === 'failover') {
-                        Icon = AlertTriangle;
-                        typeColor = 'text-destructive';
-                        typeVariant = 'destructive';
-                        iconBg = 'bg-destructive/15';
-                    } else if (log.type === 'recovery') {
-                        Icon = Check;
-                        typeColor = 'text-success';
-                        typeVariant = 'success';
-                        iconBg = 'bg-success/15';
-                    } else if (log.type === 'self-healing') {
-                        Icon = Activity;
-                        typeColor = 'text-primary';
-                        typeVariant = 'primary';
-                        iconBg = 'bg-primary/15';
-                    }
+                    const typeLabel = log.type === 'failover' ? 'Failover' : log.type === 'recovery' ? 'Recovery' : 'Self-healing'
+                    const TypeIcon = log.type === 'failover' ? AlertTriangle : log.type === 'recovery' ? Check : Activity
 
                     const chain = (log.metadata?.chain as string[] | undefined)
                     const activeUrl = log.metadata?.activeUrl as string | undefined
-                    const latencyMs = log.metadata?.latencyMs as number | undefined
+                    const detail = readHistoryDetail(log.metadata)
+                    const targetName = activeUrl ? addonName(activeUrl, addons) : ''
+                    const why = detail ? reasonSentence(log.type, detail.reason, detail.reason ? addonName(detail.reason.addon, addons) : '', targetName) : null
+                    const platforms = detail?.platforms ?? []
+                    const missed = platforms.filter(p => !p.ok)
+                    const toUrl = activeUrl || (chain && chain.length > 0 ? chain[chain.length - 1] : null) || null
+                    const sameAddon = (a: string, b: string) => normalizeAddonUrl(a).toLowerCase() === normalizeAddonUrl(b).toLowerCase()
+                    const fromUrl = detail?.from || (chain && toUrl ? chain.find(u => !sameAddon(u, toUrl)) : null) || null
+                    const to = toUrl ? addonDisplay(toUrl, addons) : null
+                    const from = fromUrl ? addonDisplay(fromUrl, addons) : null
+                    const showPair = !!(fromUrl && toUrl && !sameAddon(fromUrl, toUrl))
 
                     return (
-                        <div key={log.id} data-theme-part="panel" className="rounded-xl border border-border/30 bg-muted/20 p-4">
-                            <div className="flex items-start gap-3">
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${iconBg}`}>
-                                    <Icon className={`w-4 h-4 ${typeColor}`} />
+                        <div key={log.id} data-theme-part="panel" className="flex items-start gap-3.5 rounded-2xl border border-border/40 bg-card/70 p-4">
+                            {to ? (
+                                <AddonIcon name={to.name} logo={to.logo} className="h-10 w-10 rounded-lg bg-muted/40" />
+                            ) : (
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted/40">
+                                    <TypeIcon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                                 </div>
-                                <div className="flex-1 min-w-0 space-y-2.5">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <div className="flex items-center gap-2">
-                                            <StatusChip variant={typeVariant} size="sm">
-                                                {log.type}{repeats > 1 ? ` ×${repeats}` : ''}
-                                            </StatusChip>
-                                            {latencyMs != null && (
-                                                <span data-theme-part="badge" className="text-xs font-mono text-muted-foreground/50 bg-muted/30 rounded px-1.5 py-0.5">
-                                                    {latencyMs < 1000 ? `${Math.round(latencyMs)}ms` : `${(latencyMs / 1000).toFixed(1)}s`}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <span className="font-mono text-[11px] text-muted-foreground/50 shrink-0">
-                                            {isValidLogDate && logDate ? formatDistanceToNow(logDate, { addSuffix: true }) : 'Unknown time'}
+                            )}
+                            <div className="min-w-0 flex-1 space-y-2">
+                                <div className="flex items-baseline justify-between gap-2">
+                                    <span className="text-xs font-medium text-muted-foreground">
+                                        {typeLabel}{repeats > 1 ? ` ×${repeats}` : ''}
+                                    </span>
+                                    <span className="shrink-0 text-xs text-muted-foreground">
+                                        {isValidLogDate && logDate ? formatDistanceToNow(logDate, { addSuffix: true }) : 'Unknown time'}
+                                    </span>
+                                </div>
+                                {to && from && showPair ? (
+                                    <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-sm">
+                                        <span className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground">
+                                            {from.logo ? <img src={from.logo} alt="" loading="lazy" className="h-4 w-4 shrink-0 rounded-sm object-contain" /> : null}
+                                            <span className="max-w-[170px] truncate" title={from.name}>{from.name}</span>
+                                        </span>
+                                        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/35" aria-hidden="true" />
+                                        <span className="inline-flex min-w-0 items-center gap-1.5 font-semibold">
+                                            {to.logo ? <img src={to.logo} alt="" loading="lazy" className="h-4 w-4 shrink-0 rounded-sm object-contain" /> : null}
+                                            <span className="max-w-[220px] truncate" title={to.name}>{to.name}</span>
                                         </span>
                                     </div>
-                                    {chain && chain.length > 0 ? (
-                                        <div className="flex flex-wrap items-center gap-1.5">
-                                            {chain.map((url, i) => {
-                                                const isActive = activeUrl && normalizeAddonUrl(url).toLowerCase() === normalizeAddonUrl(activeUrl).toLowerCase()
-                                                const isPrimary = i === 0
-                                                const isFailed = log.type === 'failover' && isPrimary
-                                                const status = isActive ? 'active' : isFailed ? 'failed' : 'idle'
-                                                return (
-                                                    <span key={i} className="flex items-center gap-1.5">
-                                                        <ChainPill url={url} status={status} addons={addons} />
-                                                        {i < chain.length - 1 && (
-                                                            <ArrowRight className="w-3.5 h-3.5 text-muted-foreground/25 shrink-0" />
-                                                        )}
-                                                    </span>
-                                                )
-                                            })}
-                                        </div>
-                                    ) : (
-                                        <div className="text-sm font-medium truncate">
-                                            {resolveUrlToName(log.primaryName || 'System')}
-                                        </div>
-                                    )}
-                                    <div className="text-[11px] text-foreground/40 leading-relaxed">
-                                        {log.message.split(' ').map(word => word.startsWith('http') ? resolveUrlToName(word) : word).join(' ')}
+                                ) : to ? (
+                                    <div className="flex min-w-0 items-center gap-1.5 text-sm font-semibold">
+                                        {to.logo ? <img src={to.logo} alt="" loading="lazy" className="h-4 w-4 shrink-0 rounded-sm object-contain" /> : null}
+                                        <span className="max-w-[220px] truncate" title={to.name}>{to.name}</span>
                                     </div>
-                                </div>
+                                ) : (
+                                    <div className="truncate text-sm font-medium">
+                                        {resolveUrlToName(log.primaryName || 'System')}
+                                    </div>
+                                )}
+                                {detail ? (
+                                    <>
+                                        <p className="break-words text-sm text-foreground/90">
+                                            {why ?? log.message}
+                                        </p>
+                                        {platforms.length > 0 && (
+                                            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
+                                                {platforms.map(p => <PlatformResultItem key={p.id} result={p} label={platformLabel(p, platforms)} />)}
+                                            </div>
+                                        )}
+                                        {missed.map(p => (
+                                            <p key={p.id} className="flex min-w-0 items-start gap-2 text-sm text-foreground/85">
+                                                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />
+                                                <span className="break-words">
+                                                    {missedNote(platformLabel(p, platforms), p.error, detail.from ? addonName(detail.from, addons) : null, detail.retryAt, Date.now())}
+                                                </span>
+                                            </p>
+                                        ))}
+                                        {isValidLogDate && logDate && (
+                                            <p className="text-xs tabular-nums text-muted-foreground">
+                                                {eventTimeText(logDate)} · {notificationText(detail.notified, detail.notifiedOk)}.
+                                            </p>
+                                        )}
+                                    </>
+                                ) : (
+                                    <p className="break-words text-sm text-foreground/75">
+                                        {log.message.split(' ').map(word => word.startsWith('http') ? resolveUrlToName(word) : word).join(' ')}
+                                    </p>
+                                )}
                             </div>
                         </div>
                     )

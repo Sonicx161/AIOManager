@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils"
 
 const Popover = PopoverPrimitive.Root
 
+const PopoverClose = PopoverPrimitive.Close
+
 const PopoverTrigger = React.forwardRef<
     React.ElementRef<typeof PopoverPrimitive.Trigger>,
     React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Trigger>
@@ -32,4 +34,4 @@ const PopoverContent = React.forwardRef<
 </PopoverPrimitive.Portal>))
 PopoverContent.displayName = PopoverPrimitive.Content.displayName
 
-export { Popover, PopoverTrigger, PopoverContent }
+export { Popover, PopoverClose, PopoverTrigger, PopoverContent }

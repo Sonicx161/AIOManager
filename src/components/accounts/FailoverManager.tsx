@@ -829,6 +829,7 @@ export function FailoverManager({
                                             lastCycle={lastCycle}
                                             activeAddonName={activeAddonName}
                                             primaryAddonName={primaryAddonName}
+                                            resolveAddon={url => ({ name: getAddonNameForUrl(url), logo: getAddonForUrl(url)?.metadata?.customLogo || getAddonForUrl(url)?.manifest.logo })}
                                         />
 
                                         {simulatingRuleId === rule.id && (

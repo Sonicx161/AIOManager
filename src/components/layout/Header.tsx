@@ -14,7 +14,7 @@ import { useUIStore } from '@/store/uiStore'
 import { useAddonStore } from '@/store/addonStore'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover, PopoverClose, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { formatDistanceToNow } from '@/lib/format-distance-to-now'
 import { cn, maskNameLevel, maskedInitial } from '@/lib/utils'
 import { VaultKeysMenu, useHeaderVaultRows } from '@/components/layout/VaultKeysMenu'
@@ -378,7 +378,7 @@ function AutopilotAttentionList({ rows }: { rows: readonly AutopilotAttentionRow
   )
 }
 
-function AutopilotStatusDetails({ status, activeCount, staleCount = 0, uncheckedCount = 0, errorCount = 0, notMonitoredCount = 0, safeMode = null, checkedAt, onRefresh, attention = [], pullFailed = false, pullPartial = false, workerEnabled = true }: { status: AutopilotChipStatus; activeCount: number; staleCount?: number; uncheckedCount?: number; errorCount?: number; notMonitoredCount?: number; safeMode?: AutopilotSafeMode | null; checkedAt: number | null; onRefresh: () => Promise<void>; attention?: readonly AutopilotAttentionRow[]; pullFailed?: boolean; pullPartial?: boolean; workerEnabled?: boolean }) {
+function AutopilotStatusDetails({ status, activeCount, staleCount = 0, uncheckedCount = 0, errorCount = 0, notMonitoredCount = 0, safeMode = null, checkedAt, onRefresh, attention = [], pullFailed = false, pullPartial = false, workerEnabled = true, hasRules = false }: { status: AutopilotChipStatus; activeCount: number; staleCount?: number; uncheckedCount?: number; errorCount?: number; notMonitoredCount?: number; safeMode?: AutopilotSafeMode | null; checkedAt: number | null; onRefresh: () => Promise<void>; attention?: readonly AutopilotAttentionRow[]; pullFailed?: boolean; pullPartial?: boolean; workerEnabled?: boolean; hasRules?: boolean }) {
   const [busy, setBusy] = useState(false)
   const refresh = async () => {
     if (busy) return
@@ -438,6 +438,13 @@ function AutopilotStatusDetails({ status, activeCount, staleCount = 0, unchecked
         </div>
       </dl>
       <AutopilotAttentionList rows={attention} />
+      {hasRules && (
+        <PopoverClose asChild>
+          <Button asChild size="sm" className="w-full">
+            <Link to="/failover">Open Failover overview</Link>
+          </Button>
+        </PopoverClose>
+      )}
       <Button size="sm" variant="outline" className="w-full" disabled={busy} onClick={refresh}>
         <RefreshCw className={cn('h-3.5 w-3.5', busy && 'animate-spin')} />
         {busy ? 'Refreshing...' : 'Refresh status'}
@@ -846,7 +853,7 @@ export function Header() {
                   </button>
                 </PopoverTrigger>
                 <PopoverContent align="end" sideOffset={8} collisionPadding={8} className="w-72 p-4">
-                  <AutopilotStatusDetails status={autopilotStatus} activeCount={activeRulesCount} staleCount={autopilotStaleCount} uncheckedCount={autopilotUncheckedCount} errorCount={autopilotErrorCount} notMonitoredCount={autopilotNotMonitoredCount} safeMode={activeSafeMode} checkedAt={autopilotCheckedAt} onRefresh={pullServerState} attention={autopilotAttentionRows} pullFailed={statePullFailed || pulseUnreachable} pullPartial={statePullPartial} workerEnabled={autopilotWorkerEnabled} />
+                  <AutopilotStatusDetails status={autopilotStatus} activeCount={activeRulesCount} staleCount={autopilotStaleCount} uncheckedCount={autopilotUncheckedCount} errorCount={autopilotErrorCount} notMonitoredCount={autopilotNotMonitoredCount} safeMode={activeSafeMode} checkedAt={autopilotCheckedAt} onRefresh={pullServerState} attention={autopilotAttentionRows} pullFailed={statePullFailed || pulseUnreachable} pullPartial={statePullPartial} workerEnabled={autopilotWorkerEnabled} hasRules={hasRules} />
                 </PopoverContent>
               </Popover>
 
@@ -939,7 +946,7 @@ export function Header() {
             </button>
           </PopoverTrigger>
           <PopoverContent align="center" sideOffset={4} collisionPadding={8} className="w-72 p-4">
-            <AutopilotStatusDetails status={autopilotStatus} activeCount={activeRulesCount} staleCount={autopilotStaleCount} uncheckedCount={autopilotUncheckedCount} errorCount={autopilotErrorCount} notMonitoredCount={autopilotNotMonitoredCount} safeMode={activeSafeMode} checkedAt={autopilotCheckedAt} onRefresh={pullServerState} attention={autopilotAttentionRows} pullFailed={statePullFailed || pulseUnreachable} pullPartial={statePullPartial} workerEnabled={autopilotWorkerEnabled} />
+            <AutopilotStatusDetails status={autopilotStatus} activeCount={activeRulesCount} staleCount={autopilotStaleCount} uncheckedCount={autopilotUncheckedCount} errorCount={autopilotErrorCount} notMonitoredCount={autopilotNotMonitoredCount} safeMode={activeSafeMode} checkedAt={autopilotCheckedAt} onRefresh={pullServerState} attention={autopilotAttentionRows} pullFailed={statePullFailed || pulseUnreachable} pullPartial={statePullPartial} workerEnabled={autopilotWorkerEnabled} hasRules={hasRules} />
           </PopoverContent>
         </Popover>
         <Popover>

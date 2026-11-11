@@ -2,6 +2,9 @@ import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Activity, AlertTriangle, ArrowRight, Check, ChevronDown, CloudOff, Pause, RefreshCw, Shield, XCircle, type LucideIcon } from 'lucide-react'
 import { StatusChip } from '@/components/ui/status-chip'
+import { PlainStatusPanel, WatchingLine } from '@/components/accounts/FailoverStatusParts'
+import { RehearseSheet, type RehearsalAddon } from '@/components/accounts/RehearseSheet'
+import { agoLabel, failoverTiming } from '@/lib/failover-rehearsal'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { isQuietRuleState, quietRuleLine, ruleDotTone, staleHeartbeatRuleState, type RuleConfidenceLabel } from '@/components/accounts/autopilot-rule-card'
@@ -24,6 +27,7 @@ interface RuleConfidenceLayerProps {
     lastCycle?: AutopilotCycleStats
     activeAddonName: string
     primaryAddonName: string
+    resolveAddon?: (url: string) => RehearsalAddon
 }
 
 interface ConfidenceState {
@@ -312,7 +316,21 @@ export function RuleHealthDot({ rule, isAutopilotLive, lastCycle }: { rule: Fail
     )
 }
 
-export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName }: RuleConfidenceLayerProps) {
+function plainStatusSentence(label: RuleConfidenceLabel, rule: FailoverRule, primaryName: string, activeName: string, checkedAt: Date | null): string {
+    if (label === 'Backup active') {
+        const entry = readStabilizationEntry(rule, rule.priorityChain[0])
+        const good = failoverTiming.goodChecks
+        if ((entry.failures || 0) > 0) return `${primaryName} missed ${entry.failures} checks in a row. ${activeName} is on until ${primaryName} passes ${good} checks in a row.`
+        if ((entry.successes || 0) > 0) return `${primaryName} is passing again (${entry.successes} of ${good} checks). ${activeName} stays on until it passes ${good} in a row.`
+        return `${activeName} is on while ${primaryName} is down. It switches back after ${good} good checks in a row.`
+    }
+    const since = checkedAt ? checkedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(checkedAt.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' as const } : {}) }) : null
+    return `The server has not checked this rule${since ? ` since ${since}` : ''}, so it cannot switch right now. Checks resume when the server runs again.`
+}
+
+export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAddonName, primaryAddonName, resolveAddon }: RuleConfidenceLayerProps) {
+    const [rehearseOpen, setRehearseOpen] = useState(false)
+    const now = useNow()
     const account = useAccountStore(s => s.accounts.find(a => a.id === rule.accountId))
     const rules = useFailoverStore(s => s.rules)
     const privacyNameLevel = useUIStore(s => s.isPrivacyModeEnabled ? s.privacyLevelNames : 0)
@@ -363,11 +381,44 @@ export function RuleConfidenceLayer({ rule, isAutopilotLive, lastCycle, activeAd
         )
     }
 
+    const rehearse = resolveAddon ? () => setRehearseOpen(true) : undefined
+    const rehearseSheet = resolveAddon && rehearseOpen ? <RehearseSheet open onOpenChange={setRehearseOpen} rule={rule} resolveAddon={resolveAddon} /> : null
+
     if (isQuietRuleState(confidence.label, { fix, hasError: !!errorLabel })) {
+        if (confidence.label !== 'No action needed') {
+            return (
+                <p className="mx-2 text-right text-xs tabular-nums text-muted-foreground" data-testid="rule-quiet-status">
+                    {quietRuleLine(confidence.label, { checkedLabel: checkedRelative, latencyMs })}
+                </p>
+            )
+        }
+        const watchingAgo = checkedAt ? agoLabel(now - checkedAt.getTime()) : null
         return (
-            <p className="mx-2 text-right text-xs tabular-nums text-muted-foreground" data-testid="rule-quiet-status">
-                {quietRuleLine(confidence.label, { checkedLabel: checkedRelative, latencyMs })}
-            </p>
+            <>
+                <WatchingLine line={quietRuleLine(confidence.label, { checkedLabel: watchingAgo, latencyMs })} rule={rule} onRehearse={rehearse} />
+                {rehearseSheet}
+            </>
+        )
+    }
+
+    if ((confidence.label === 'Backup active' || confidence.label === 'Standby' || confidence.label === 'Stale') && fix !== 'safe-mode') {
+        const kind = confidence.label === 'Backup active' ? 'backup' : 'stale'
+        return (
+            <>
+                <PlainStatusPanel
+                    kind={kind}
+                    sentence={plainStatusSentence(confidence.label, rule, primaryAddonName, activeAddonName, checkedAt)}
+                    action={kind === 'stale' ? <AutopilotRuleFixAction rule={rule} fix={fix ?? 'refresh'} /> : fix ? <AutopilotRuleFixAction rule={rule} fix={fix} /> : undefined}
+                    errorLine={errorLabel ? (
+                        <p className="mt-1 flex items-center gap-1 text-xs text-warning" data-testid="rule-last-error">
+                            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                            <span className="min-w-0 break-words">{errorLabel}</span>
+                        </p>
+                    ) : undefined}
+                    onRehearse={rehearse}
+                />
+                {rehearseSheet}
+            </>
         )
     }
 

@@ -41,7 +41,7 @@ export function quietRuleLine(label: RuleConfidenceLabel, { checkedLabel, latenc
     if (label === 'Manual') return 'Manual mode'
     if (label === 'Pending' || !checkedLabel) return 'Waiting for first check'
     if (label === 'Queued') return `Queued, checked ${checkedLabel}`
-    return latencyMs === null ? `Checked ${checkedLabel}` : `Checked ${checkedLabel}, ${Math.round(latencyMs)}ms`
+    return latencyMs === null ? `Watching on the server, checked ${checkedLabel}` : `Watching on the server, checked ${checkedLabel}, ${Math.round(latencyMs)} ms`
 }
 
 export type RuleDotTone = 'warning' | 'destructive' | null

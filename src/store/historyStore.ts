@@ -26,7 +26,7 @@ export interface HistoryLog {
 interface HistoryStore {
     logs: HistoryLog[]
     loading: boolean
-    initialize: () => Promise<void>
+    initialize: (accountIds?: string[]) => Promise<void>
     addLog: (log: Omit<HistoryLog, 'id' | 'timestamp'>) => Promise<void>
     clearLogs: (accountId: string) => Promise<void>
 }
@@ -36,7 +36,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     logs: [],
     loading: false,
 
-    initialize: async () => {
+    initialize: async (accountIds) => {
         try {
             const { useSyncStore } = await import('@/store/syncStore')
             const { auth, serverUrl } = useSyncStore.getState()
@@ -57,7 +57,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
                     const accountStore = (await import('@/store/accountStore')).useAccountStore.getState()
                     const syncToken = await getSyncPasswordHeader(auth)
                     const promiseResults = await Promise.allSettled(
-                        accountStore.accounts.map(account =>
+                        accountStore.accounts.filter(account => !accountIds || accountIds.includes(account.id)).map(account =>
                             resilientFetch(`${apiPath}/autopilot/history/${account.id}`, {
                                 headers: { 'x-sync-password': syncToken, 'x-sync-user': auth.id }
                             }).then(r => r.ok ? r.json() : null).catch(() => null)
