@@ -53,7 +53,7 @@ import {
 } from '@/lib/jellyfin/media-cache'
 import { captureMediaRead, retryOnceOnTransient, type JellyfinMediaReads, type MediaRead } from '@/lib/jellyfin/reads'
 import { applyKnownParents, createParentSeriesLookup, resolveJellyfinSeries, SERIES_LOOKUPS_PER_PASS, type SeriesBatchReader } from '@/lib/jellyfin/metadata'
-import { clearMediaEnrichment, pendingMediaEnrichment, subscribeMediaEnrichment, trackMediaEnrichment } from '@/lib/jellyfin/enrichment-pending'
+import { clearMediaEnrichment, mediaEnrichmentKey, pendingMediaEnrichment, subscribeMediaEnrichment, trackMediaEnrichment } from '@/lib/jellyfin/enrichment-pending'
 import { canApplyMediaReadFailure, jellyfinConnectionReadFailure } from '@/lib/jellyfin/connection-health'
 import type { JellyfinItem, JellyfinItemResult, JellyfinSession, JellyfinPagedReadOptions } from '@/lib/jellyfin/types'
 import type { Connection } from '@/types/connection'
@@ -368,11 +368,6 @@ function headScopeKey(job: { accountId: string; connection: Connection }): strin
     return `${job.accountId}|${job.connection.id}`
 }
 
-/** Tracker key for a connection's enrichment chains: workspace + account + connection. */
-function enrichmentKey(job: { workspaceId?: string; accountId: string; connection: Connection }): string {
-    return `${job.workspaceId || ''}|${job.accountId}|${job.connection.id}`
-}
-
 function headSignatureKey(scope: MediaCacheScope): string {
     return `${mediaCacheStorageKey(scope)}|${scope.credentials}|${scope.userId}|${scope.serverId}`
 }
@@ -394,7 +389,7 @@ function pruneDeadMediaScopes(): void {
             goodKeys.add(restorationKeyForJob({ accountId: account.id, connection, encryptionKey }))
             connectionIds.add(connection.id)
             scopeKeys.add(headScopeKey({ accountId: account.id, connection }))
-            enrichmentKeys.add(`${workspaceId}|${account.id}|${connection.id}`)
+            enrichmentKeys.add(mediaEnrichmentKey({ workspaceId, accountId: account.id, connection }))
             const scope = mediaScopeFor({ accountId: account.id, connection })
             if (scope) headKeys.add(headSignatureKey(scope))
         }
@@ -861,7 +856,7 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
             // The head is valid playback data on its own. Resolve parent-series
             // provider IDs after publishing it so Activity can render immediately;
             // the enrichment only changes canonical identity/poster fields.
-            trackMediaEnrichment(enrichmentKey(job), resolveSeries().then(items => {
+            trackMediaEnrichment(mediaEnrichmentKey(job), resolveSeries().then(items => {
                 if (signal.aborted || !persistScope || !cacheJobIsCurrent(job, persistScope)) return
                 if (items === rawItems) return
                 const latest = mediaQueries.getQueryData<LibraryReads>([...job.queryKey, 'library'])
@@ -1025,7 +1020,7 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
                 const archiveItems = read.data.items
                 const { readItem: readParentItem, batch: seriesBatch } = seriesResolutionFor(job, secret, client)
                 const keyOf = parentSeriesKeys(job, secret.userId)
-                void trackMediaEnrichment(enrichmentKey(job), resolveJellyfinSeries(archiveItems, readParentItem, signal, [
+                void trackMediaEnrichment(mediaEnrichmentKey(job), resolveJellyfinSeries(archiveItems, readParentItem, signal, [
                     ...libraryItems(libraryNow),
                     ...(priorArchive?.status === 'success' ? priorArchive.data.items : []),
                 ], SERIES_LOOKUPS_PER_PASS, id => parentSeries.has(keyOf(id)), seriesBatch).then(resolved => {
@@ -1235,7 +1230,7 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
     // consumers can gate on it instead of flashing another platform's title.
     const hydrationPending = jobs.some(job => hydration.epoch !== vaultEpoch || !hydration.completed.has(restorationKeyForJob(job)))
     const initialLoading = jobs.some((_, i) => (library.pending[i] && library.fetching[i]) || (sessions.pending[i] && sessions.fetching[i])) || hydrationPending
-    const enrichmentKeys = useMemo(() => jobs.map(job => enrichmentKey(job)), [jobs])
+    const enrichmentKeys = useMemo(() => jobs.map(job => mediaEnrichmentKey(job)), [jobs])
     const enrichmentPending = useSyncExternalStore(subscribeMediaEnrichment, () => pendingMediaEnrichment(enrichmentKeys), () => 0)
     return { results, refresh, busy, initialLoading, mediaSettling: busy || enrichmentPending > 0 }
 }

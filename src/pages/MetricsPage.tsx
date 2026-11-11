@@ -10,8 +10,8 @@ import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
-import { useMetricsWorker, createMetricsSourceIdentity, metricsCommitGate, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
-import { useSettledSignal } from '@/hooks/useSettledSignal'
+import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState } from '@/hooks/useMetricsWorker'
+import { useMetricsFirstReveal } from '@/hooks/useMetricsFirstReveal'
 import { useAccountStore } from '@/store/accountStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import type { Account } from '@/types/account'
@@ -140,7 +140,7 @@ export function MetricsPage() {
     const cacheLoading = useLibraryCache(s => s.loading)
     const ensureLoaded = useLibraryCache(s => s.ensureLoaded)
     const loadingProgress = useLibraryCache(s => s.loadingProgress)
-    const { history: watchHistory } = useWatchHistory(undefined, true, METRICS_HISTORY_OPTIONS)
+    const { history: watchHistory, mediaSettling } = useWatchHistory(undefined, true, METRICS_HISTORY_OPTIONS)
     // Exclude backfilled episodes (synthetic timestamps) from time-based metrics; Replay keeps them in totals.
     const history = useMemo(() => watchHistory.map(historyEntryToActivityItem).filter(item => !item.backfill), [watchHistory])
     const rollups = useWatchEventStore(s => s.rollups)
@@ -233,16 +233,14 @@ export function MetricsPage() {
     // settled data. Under sustained churn a result whose key is no longer current
     // still commits (marked refreshing below) so the page always shows visible
     // progress; final numbers are those whose key is current (isCurrent).
-    const dataSettled = useSettledSignal(history, cacheLoading)
-    const [committed, setCommitted] = useState<{ scope: string; value: MetricsResult } | null>(null)
+    const { committed, dataSettled, provisional } = useMetricsFirstReveal({ history, cacheLoading, mediaSettling, latest, isCurrent, scope })
     const [entrance, setEntrance] = useState<{ totalItems: number; binge: number; hours: number; profiles: number; loyalty: number } | null>(null)
-    useEffect(() => {
-        if (!latest || !metricsCommitGate(latest, dataSettled)) return
-        setCommitted(prev => (prev && prev.scope === scope && prev.value === latest ? prev : { scope, value: latest }))
-    }, [latest, dataSettled, scope])
+    const [entranceSkipped, setEntranceSkipped] = useState(false)
     const stats = committed && committed.scope === scope ? committed.value : null
-    if (stats && !stats._error && entrance === null) {
-        setEntrance({
+    if (stats && !stats._error && entrance === null && !entranceSkipped) {
+        // A capped provisional reveal shows plainly and never becomes the ticker target.
+        if (provisional) setEntranceSkipped(true)
+        else setEntrance({
             totalItems: stats.totalItems,
             binge: stats.bingeMasters?.[0]?.bingeDuration || 0,
             hours: stats.totalHours,
@@ -260,7 +258,7 @@ export function MetricsPage() {
     }, [accounts, ensureLoaded])
 
     const viewState = metricsViewState(stats, workerLoading)
-    const isRefreshing = viewState === 'ready' && (workerLoading || !isCurrent || !dataSettled)
+    const isRefreshing = viewState === 'ready' && (workerLoading || !isCurrent || !dataSettled || provisional)
     const selectedPeriodLabel = METRIC_PERIODS.find(option => option.id === selectedPeriod)?.label || 'All Time'
 
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)

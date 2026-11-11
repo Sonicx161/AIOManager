@@ -13,6 +13,16 @@ function publish(): void {
     for (const listener of listeners) listener()
 }
 
+/** Tracker key for one connection's enrichment chains: workspace + account + connection + the exact remote subject. */
+export function mediaEnrichmentKey(job: {
+    workspaceId?: string
+    accountId: string
+    connection: { id: string; credentials?: { jellyfin?: string }; mediaServer?: { userId?: string; serverId?: string } }
+}): string {
+    const media = job.connection.mediaServer
+    return `${job.workspaceId || ''}|${job.accountId}|${job.connection.id}|${job.connection.credentials?.jellyfin ?? ''}|${media?.userId ?? ''}|${media?.serverId ?? ''}`
+}
+
 /** Registers one detached enrichment pass as pending until its whole chain settles. */
 export function trackMediaEnrichment<T>(scopeKey: string, chain: Promise<T>): Promise<T> {
     let set = pending.get(scopeKey)

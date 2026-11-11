@@ -443,16 +443,6 @@ export function pickScopedResult(scoped: ScopedResult | null, scope: string): Me
     return scoped && scoped.scope === scope ? scoped.value : null
 }
 
-/**
- * Whether a freshly settled worker result may be committed to the screen. A result
- * computed for the current session/workspace commits even when its key is no longer
- * current — the page marks it refreshing while newer data is queued — so sustained
- * live churn always shows visible progress instead of an empty view. A result from
- * another scope never commits (the caller only sees results of the current scope).
- */
-export function metricsCommitGate(latest: MetricsResult | null | undefined, dataSettled: boolean): boolean {
-    return !!latest && dataSettled
-}
 interface PendingJob { reqId: number; scope: string; key: string; fullKey: string }
 
 /** A whole request as one coherent unit: identity plus the exact payload to compute. */
