@@ -3,7 +3,7 @@ import type { ActivityItem } from '@/types/activity'
 import type { EventRollups } from '@/lib/watch-event-rollups'
 import { cumulativeWatchKey } from '@/lib/activity-utils'
 import { buildRuntimeIndex, mediaResumePositionMs, runtimeIndexFingerprint, type RuntimeIndex } from '@/lib/watch-hours'
-import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo, workerSupersedeAction } from '@/lib/metrics-fingerprint'
+import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo } from '@/lib/metrics-fingerprint'
 import { useSyncStore } from '@/store/syncStore'
 import { useAuthStore } from '@/store/authStore'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
@@ -442,6 +442,17 @@ export function subsetRuntimeIndex(index: RuntimeIndex, itemIds: Iterable<string
 export function pickScopedResult(scoped: ScopedResult | null, scope: string): MetricsResult | null {
     return scoped && scoped.scope === scope ? scoped.value : null
 }
+
+/**
+ * Whether a freshly settled worker result may be committed to the screen. A result
+ * computed for the current session/workspace commits even when its key is no longer
+ * current — the page marks it refreshing while newer data is queued — so sustained
+ * live churn always shows visible progress instead of an empty view. A result from
+ * another scope never commits (the caller only sees results of the current scope).
+ */
+export function metricsCommitGate(latest: MetricsResult | null | undefined, dataSettled: boolean): boolean {
+    return !!latest && dataSettled
+}
 interface PendingJob { reqId: number; scope: string; key: string; fullKey: string }
 
 /** A whole request as one coherent unit: identity plus the exact payload to compute. */
@@ -508,7 +519,11 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
     const deferredRef = useRef<PendingRequestSnapshot | null>(null)
     const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const lastKeyRef = useRef('')
-    const lastDataKeyRef = useRef('')
+    // The scope the reply handler publishes for. Idle workers survive scope
+    // transitions (they are reused across mounts), so the handler must read the
+    // CURRENT scope from committed state instead of the closure it was created
+    // in — otherwise a new scope's results are rejected forever.
+    const scopeRef = useRef(scope)
 
     // A result from another session is never returned, even for the render in which the scope changed.
     const results = pickScopedResult(scoped, scope)
@@ -517,11 +532,15 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
 
     useEffect(() => {
         bindMetricsCacheInvalidation()
+        // Unmount cleanup lives here and only here: terminating an in-flight run
+        // belongs to unmount (and to scope switches, worker errors and the
+        // timeout — all handled in the request effect below). The request effect
+        // itself must not clean up on dependency changes: a dep change while a
+        // run is in flight is exactly the live-churn case, and a cleanup here
+        // would terminate the busy worker per publication (the treadmill).
         return () => {
             if (timeoutRef.current) clearTimeout(timeoutRef.current)
             timeoutRef.current = null
-            // In-flight unmount: terminate, never park (a parked straggler reply
-            // would be mis-matched by the next mount's request).
             if (workerRef.current) {
                 if (releaseWorkerAction(pendingRef.current.length) === 'terminate') workerRef.current.terminate()
                 else parkMetricsWorker(workerRef.current)
@@ -530,11 +549,12 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
             pendingRef.current = []
             deferredRef.current = null
             lastKeyRef.current = ''
-            lastDataKeyRef.current = ''
         }
     }, [])
 
     useEffect(() => {
+        // Committed scope for the reply handler (see scopeRef above).
+        scopeRef.current = scope
         const dropWorker = () => {
             if (timeoutRef.current) clearTimeout(timeoutRef.current)
             timeoutRef.current = null
@@ -545,12 +565,19 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
             workerRef.current = null
             pendingRef.current = []
         }
+        // NOTE: no cleanup on this effect, and none has ever existed here — the
+        // treadmill on beta 479a9bd0 and 1cf94767 was the supersede path itself:
+        // a data change while a run is in flight terminated the busy worker
+        // (beta: immediately per publication; 1cf94767: after a 2.5 s stability
+        // window), so live churn restarted the full compute per change. With no
+        // cleanup, a dependency change now only reaches the hold path below.
+        // Unmount termination lives in the mount effect above; scope switches,
+        // errors and the timeout terminate below, explicitly.
 
         if (workerItems.length === 0) {
             dropWorker()
             deferredRef.current = null
             lastKeyRef.current = ''
-            lastDataKeyRef.current = ''
             setScoped({ scope, key: resultKey, value: createEmptyMetricsResult() })
             setIsComputing(false)
             return
@@ -560,10 +587,41 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
         if (fullKey === lastKeyRef.current) return
         lastKeyRef.current = fullKey
 
+        // One coherent request snapshot: key, scope, data identity and payload are
+        // captured together from committed render state, so a drained held
+        // selection can never pair its key with a newer render's payload.
+        const snapshot: PendingRequestSnapshot = { scope, key: resultKey, fullKey, dataKey, items: workerItems, periodStart, rollups, runtimes: runtimeSubset.runtimes }
+
+        // A run in flight is never terminated because newer data arrived: killing
+        // it restarted the full compute each time (terminate + fresh full-history
+        // clone + worker rebuild per publication — the live-churn path that left
+        // iOS holding dead worker memory until it jetsammed the tab, and that
+        // could starve the page of any finished result forever). The newest
+        // snapshot is held instead — at most one in-flight run plus one held
+        // snapshot exist, intermediate snapshots never reach postMessage — and
+        // when the run finishes its result is published for the current scope
+        // (marked refreshing by the page) before the held snapshot starts.
+        // Termination is kept only for a scope switch (another workspace/session
+        // must never inherit in-flight work), unmount, worker errors and the
+        // existing timeout.
+        const busyJob = pendingRef.current[0]
+        if (workerRef.current && busyJob && busyJob.scope !== scope) {
+            // The session/workspace switched: the in-flight run belongs to the
+            // previous scope and can never be shown again, and neither can the
+            // held snapshot from that scope — discard both, or the new scope
+            // would end up running the old scope's work.
+            dropWorker()
+            deferredRef.current = null
+        } else if (workerRef.current && busyJob) {
+            deferredRef.current = snapshot
+            return
+        }
+
         const cached = metricsResultCache.get(scope, resultKey)
         if (cached) {
-            // Responses still in flight belong to other keys; drop them with the worker.
-            dropWorker()
+            // Idle cached switch: show the stored result without a post. (A cached
+            // result behind an in-flight run takes the hold path above; the drain
+            // serves it without recompute.)
             deferredRef.current = null
             setScoped({ scope, key: resultKey, value: cached })
             setIsComputing(false)
@@ -577,53 +635,29 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 if (import.meta.env.DEV) console.error('[useMetricsWorker] Worker timeout - terminating and restarting')
                 dropWorker()
                 lastKeyRef.current = ''
-                lastDataKeyRef.current = ''
                 const held = deferredRef.current
                 deferredRef.current = null
-                if (held) {
-                    // The newest selection never ran: restart it with its own
+                if (held && held.scope === scopeRef.current) {
+                    // The newest request never ran: restart it with its own
                     // snapshot so the current view keeps computing. If it fails
                     // again, deferredRef is already cleared and the error then
-                    // publishes under that held key.
+                    // publishes under that held key. A held snapshot from another
+                    // scope (a session switched mid-flight) is discarded here —
+                    // the failing run was this scope's, so this scope gets its
+                    // own error instead of another scope's stale work.
                     ensureWorker()
                     lastKeyRef.current = held.fullKey
                     postSnapshot(held)
                 } else {
                     setIsComputing(false)
-                    if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: `Metrics calculation timed out after ${METRICS_WORKER_TIMEOUT_MS / 1000}s.` } as MetricsResult })
+                    if (failed && failed.scope === scopeRef.current) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: `Metrics calculation timed out after ${METRICS_WORKER_TIMEOUT_MS / 1000}s.` } as MetricsResult })
                 }
             }, METRICS_WORKER_TIMEOUT_MS)
-        }
-
-        // One coherent request snapshot: key, scope, data identity and payload are
-        // captured together from committed render state, so a drained held
-        // selection can never pair its key with a newer render's payload.
-        const snapshot: PendingRequestSnapshot = { scope, key: resultKey, fullKey, dataKey, items: workerItems, periodStart, rollups, runtimes: runtimeSubset.runtimes }
-
-        // A request whose underlying data differs from the one still computing
-        // supersedes it: terminating the busy worker frees the stale computation
-        // and its queued full-history clone at once instead of stacking runs
-        // (the sync-churn path that OOMs WebKit tabs). A selection-only change
-        // holds the newest selection in deferredRef instead of queueing clones:
-        // at most one in-flight computation plus one pending selection exist,
-        // and intermediate selections never reach postMessage.
-        if (workerSupersedeAction(!!workerRef.current, pendingRef.current.length, lastDataKeyRef.current, dataKey) === 'terminate') {
-            workerRef.current?.terminate()
-            workerRef.current = null
-            pendingRef.current = []
-            deferredRef.current = null
-        } else if (workerRef.current && pendingRef.current.length > 0) {
-            deferredRef.current = snapshot
-            return
-        } else {
-            deferredRef.current = null
         }
 
         const postSnapshot = (snap: PendingRequestSnapshot) => {
             const reqId = ++metricsRequestSeq
             pendingRef.current.push({ reqId, scope: snap.scope, key: snap.key, fullKey: snap.fullKey })
-            // Record the identity of the payload actually posted, never a newer render's.
-            lastDataKeyRef.current = snap.dataKey
             armTimeout()
             setIsComputing(true)
             workerRef.current?.postMessage({ reqId, items: snap.items, periodStart: snap.periodStart, rollups: snap.rollups, runtimes: snap.runtimes })
@@ -641,22 +675,39 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 const jobIndex = findPendingReplyIndex(pendingRef.current, (e.data as { reqId?: unknown } | null)?.reqId)
                 if (jobIndex === -1) return
                 const job = pendingRef.current.splice(jobIndex, 1)[0]
-                // The worker is free: post the newest held selection snapshot, if any.
-                const deferred = deferredRef.current
-                if (pendingRef.current.length === 0 && deferred) {
-                    deferredRef.current = null
-                    postSnapshot(deferred)
-                } else {
-                    armTimeout()
-                }
                 // A null result (empty in-period rows) flows to the cache/screen
                 // exactly as before; it keeps the skeleton edge behavior unchanged.
                 const result = ((e.data as { result?: MetricsResult | null }).result ?? null) as MetricsResult
                 metricsResultCache.put(job.scope, job.key, result)
-                // Only the newest request may reach the screen; older responses just warm the cache.
-                if (job.fullKey !== lastKeyRef.current) return
-                setScoped({ scope: job.scope, key: job.key, value: result })
-                setIsComputing(false)
+                // Publish first for visible progress: a result computed for the
+                // CURRENT session/workspace is shown even when newer data is
+                // already queued (the page marks it refreshing while its key is
+                // not the current one). A result from another scope is never shown.
+                if (job.scope === scopeRef.current) {
+                    setScoped({ scope: job.scope, key: job.key, value: result })
+                    setIsComputing(false)
+                }
+                // Then start the newest held snapshot, if any — but only if it
+                // belongs to the current scope (a scope switch discards held
+                // work, so a stale-scope snapshot never runs here). A held
+                // snapshot that is already cached is served without a recompute.
+                const deferred = deferredRef.current
+                if (pendingRef.current.length === 0 && deferred) {
+                    deferredRef.current = null
+                    if (deferred.scope !== scopeRef.current) {
+                        setIsComputing(false)
+                    } else {
+                        const hit = metricsResultCache.get(deferred.scope, deferred.key)
+                        if (hit) {
+                            setScoped({ scope: deferred.scope, key: deferred.key, value: hit })
+                            setIsComputing(false)
+                        } else {
+                            postSnapshot(deferred)
+                        }
+                    }
+                } else {
+                    armTimeout()
+                }
             }
             worker.onerror = (e) => {
                 if (workerRef.current !== worker) return
@@ -664,19 +715,20 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
                 const failed = pendingRef.current[pendingRef.current.length - 1]
                 dropWorker()
                 lastKeyRef.current = ''
-                lastDataKeyRef.current = ''
                 const held = deferredRef.current
                 deferredRef.current = null
-                if (held) {
-                    // Resume the newest selection with its own snapshot; if it
-                    // errors again, deferredRef is already cleared and the next
-                    // failure publishes under that held key.
+                if (held && held.scope === scopeRef.current) {
+                    // Resume the newest request of the CURRENT scope with its own
+                    // snapshot; if it errors again, deferredRef is already cleared
+                    // and the next failure publishes under that held key. A held
+                    // snapshot from another scope is discarded — this scope gets
+                    // its own error instead of another scope's stale work.
                     ensureWorker()
                     lastKeyRef.current = held.fullKey
                     postSnapshot(held)
                 } else {
                     setIsComputing(false)
-                    if (failed) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: 'Metrics worker crashed.' } as MetricsResult })
+                    if (failed && failed.scope === scopeRef.current) setScoped({ scope: failed.scope, key: failed.key, value: { _error: true, _message: 'Metrics worker crashed.' } as MetricsResult })
                 }
             }
         }

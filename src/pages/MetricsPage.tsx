@@ -10,7 +10,7 @@ import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
-import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
+import { useMetricsWorker, createMetricsSourceIdentity, metricsCommitGate, metricsViewState, type MetricsResult } from '@/hooks/useMetricsWorker'
 import { useSettledSignal } from '@/hooks/useSettledSignal'
 import { useAccountStore } from '@/store/accountStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
@@ -235,15 +235,17 @@ export function MetricsPage() {
     const workerOptions = useMemo(() => ({ filterKey: `${selectedAccountId}|${selectedPeriod}`, periodStart, runtimeSource: history, sourceIdentity: metricsSourceIdentity }), [selectedAccountId, selectedPeriod, periodStart, history, metricsSourceIdentity])
     const { results: latest, isComputing: workerLoading, isCurrent, scope } = useMetricsWorker(accountFilteredHistory, scopedRollups, canonicalConnections, workerOptions)
 
-    // A result is shown only once it was computed for the CURRENT filter on settled data.
-    // Until then the previous stable result stays on screen under the updating bar.
+    // A result is shown once it was computed for the current session/workspace on
+    // settled data. Under sustained churn a result whose key is no longer current
+    // still commits (marked refreshing below) so the page always shows visible
+    // progress; final numbers are those whose key is current (isCurrent).
     const dataSettled = useSettledSignal(history, cacheLoading)
     const [committed, setCommitted] = useState<{ scope: string; value: MetricsResult } | null>(null)
     const [entrance, setEntrance] = useState<MetricsResult | null>(null)
     useEffect(() => {
-        if (!latest || !isCurrent || !dataSettled) return
+        if (!latest || !metricsCommitGate(latest, dataSettled)) return
         setCommitted(prev => (prev && prev.scope === scope && prev.value === latest ? prev : { scope, value: latest }))
-    }, [latest, isCurrent, dataSettled, scope])
+    }, [latest, dataSettled, scope])
     const stats = committed && committed.scope === scope ? committed.value : null
     useEffect(() => {
         if (stats && !stats._error) setEntrance(prev => prev ?? stats)
