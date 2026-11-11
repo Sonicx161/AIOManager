@@ -1,6 +1,6 @@
-import { trace } from '@/lib/trace'
-import { base64ToBytes, bytesToBase64 } from './base64'
-export { bytesToBase64 } from './base64'
+import { trace } from './trace.ts'
+import { base64ToBytes, bytesToBase64 } from './base64.ts'
+export { bytesToBase64 } from './base64.ts'
 
 const PBKDF2_ITERATIONS = 600000
 const SALT_LENGTH = 16

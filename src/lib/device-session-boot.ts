@@ -34,6 +34,7 @@ export type BootReactivationOutcome =
           reason:
               | 'not-authenticated'
               | 'password-session'
+              | 'session-credential'
               | 'vault-locked'
               | 'store-unavailable'
               | 'no-record'
@@ -45,6 +46,7 @@ export type BootReactivationOutcome =
 export interface ReactivationOptions {
     /** How long to wait for persist hydration before proceeding with the current snapshot. */
     hydrationTimeoutMs?: number
+    hasSessionCredential?: (accountId: string) => boolean
 }
 
 /**
@@ -107,6 +109,7 @@ export async function resolveBootReactivation(
     // Password sessions are never gated by the remembered layer (hard invariant): they
     // carry their own credential and must not adopt a remembered device token.
     if (auth.password) return { activated: false, reason: 'password-session' }
+    if (options?.hasSessionCredential?.(auth.id)) return { activated: false, reason: 'session-credential' }
     // The vault must be restorable for the session to be usable at all; initialize() is
     // idempotent and also runs from App.tsx, so awaiting it here only closes the module-
     // load race where reactivation resolves before authStore has restored the vault key.

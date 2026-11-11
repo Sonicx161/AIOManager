@@ -16,7 +16,6 @@ import {
 import {
     deleteRecord,
     getAnyRecord,
-    getRecord,
     isRecordExpired,
     isTerminalAuthReason,
     saveRecord,
@@ -38,6 +37,7 @@ import { getSyncPasswordHeader } from '@/lib/sync-auth'
 import { hasSessionSyncCredential } from '@/lib/session-sync-token'
 import { trace } from '@/lib/trace'
 import { resolveBootReactivation, type BootReactivationOutcome } from '@/lib/device-session-boot'
+import { resolveDeviceAuthFailureOutcome } from '@/lib/device-auth-failure'
 import { useAuthStore } from '@/store/authStore'
 import { getSyncApiPath, readIdentityProfile, useSyncStore } from '@/store/syncStore'
 
@@ -146,16 +146,28 @@ async function maybeWipeOnDeviceAuthFailure(res: Response): Promise<void> {
         return
     }
     if (!isTerminalAuthReason(reason)) return
+    const { auth } = useSyncStore.getState()
+    const passwordBacked = !!auth.password || hasSessionSyncCredential(auth.id)
+    const outcome = resolveDeviceAuthFailureOutcome({ hasPasswordCredential: passwordBacked, reason })
+    if (outcome === 'ignore') return
     deviceSessionRuntime.wipeRedirectInFlight = true
     try {
-        await forgetRememberedDevice()
-        const profile = readIdentityProfile()
-        useSyncStore.setState({
-            auth: { id: '', password: '', name: profile.name, avatar: profile.avatar, isAuthenticated: false },
-            isInitialSyncCompleted: false,
-        })
+        if (outcome === 'discard-record') {
+            const deviceId = deviceSessionRuntime.activeDeviceAuth?.deviceId ?? ''
+            deactivateDeviceAuth()
+            await wipeDeviceRecords()
+            clearSyncKeyCache()
+            trace('auth', 'deviceSession.staleDiscard', { account: auth.id, deviceId })
+        } else {
+            await forgetRememberedDevice()
+            const profile = readIdentityProfile()
+            useSyncStore.setState({
+                auth: { id: '', password: '', name: profile.name, avatar: profile.avatar, isAuthenticated: false },
+                isInitialSyncCompleted: false,
+            })
+        }
     } catch {}
-    window.location.reload()
+    if (outcome === 'wipe-session') window.location.reload()
 }
 
 export async function forgetRememberedDevice(): Promise<void> {
@@ -249,9 +261,6 @@ export async function enrollRememberedDevice(options?: { label?: string }): Prom
     if (!auth.isAuthenticated || !auth.id || !auth.password || !encryptionKey) return false
     const salt = loadSalt()
     if (!salt) return false
-
-    const existingForAccount = await getRecord(auth.id).catch(() => null)
-    if (existingForAccount && !isRecordExpired(existingForAccount)) return true
 
     const vaultKeyRaw = new Uint8Array(await crypto.subtle.exportKey('raw', encryptionKey))
     const syncSalt = syncState.syncSaltB64 ? Uint8Array.from(atob(syncState.syncSaltB64), (c) => c.charCodeAt(0)) : undefined
@@ -551,7 +560,9 @@ export async function reactivateDeviceSessionIfNeeded(): Promise<void> {
     // the boot race is unit-tested; this wrapper owns module state and the follow-up pull.
     let outcome: BootReactivationOutcome
     try {
-        outcome = await resolveBootReactivation(useSyncStore, useAuthStore)
+        outcome = await resolveBootReactivation(useSyncStore, useAuthStore, {
+            hasSessionCredential: (accountId) => hasSessionSyncCredential(accountId),
+        })
     } catch {
         return
     }

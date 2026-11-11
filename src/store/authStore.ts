@@ -13,6 +13,7 @@ import {
   clearSyncKeyCache,
 } from '@/lib/crypto'
 import { findVaultRestorableDeviceRecord } from '@/lib/boot-session-restore'
+import { saveSessionCredentialForPassword } from '@/lib/session-credential'
 import { wipeAllData } from '@/lib/storage-reset'
 import { resetAllStores } from '@/lib/store-coordinator'
 
@@ -115,6 +116,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (!key) {
       return false
     }
+
+    // The wire credential must exist before the reload-restorable vault key, or a reload in between adopts a stale device token.
+    try {
+      const { useSyncStore } = await import('@/store/syncStore')
+      const { auth, syncSaltB64 } = useSyncStore.getState()
+      await saveSessionCredentialForPassword(auth.id, String(password), syncSaltB64)
+    } catch {}
 
     await saveSessionKey(key)
 
