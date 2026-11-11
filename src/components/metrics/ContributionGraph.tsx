@@ -34,8 +34,18 @@ export function ContributionGraph({ dailyActivity, loading }: ContributionGraphP
         const entries = Object.entries(dailyActivity)
         if (entries.length === 0) return { weeks: [] as { date: string; count: number }[][], monthBorders: [] as { label: string; weekIndex: number }[], maxVal: 0, total: 0 }
 
-        const dates = entries.map(([d]) => new Date(d))
-        const minDate = new Date(Math.min(...dates.map(d => d.getTime())))
+        // Span from well-formed local day keys only: a corrupt year-0 import yields a
+        // "0-12-31" key that legacy Date parsing turns into year 0 (WebKit) or 2000 (Blink),
+        // which once built ~740k cells and froze WebKit phones. Zero-padded keys sort chronologically.
+        let minKey: string | null = null
+        for (const [d] of entries) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue
+            const year = Number(d.slice(0, 4))
+            if (year < 1900 || year > 2200) continue
+            if (minKey === null || d < minKey) minKey = d
+        }
+        if (minKey === null) return { weeks: [] as { date: string; count: number }[][], monthBorders: [] as { label: string; weekIndex: number }[], maxVal: 0, total: 0 }
+        const minDate = new Date(Number(minKey.slice(0, 4)), Number(minKey.slice(5, 7)) - 1, Number(minKey.slice(8, 10)))
         const maxDate = new Date()
 
         const startSunday = new Date(minDate)
