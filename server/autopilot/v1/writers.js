@@ -141,6 +141,8 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             synced: result.synced,
             syncedIds: result.syncedIds || targets.filter(c => result.synced.includes(c.platform) && !unpushedConnectionIds(targets, result).includes(c.id)).map(c => c.id),
             failedIds: unpushedConnectionIds(targets, result),
+            targets: targets.map(c => ({ id: c.id, platform: c.platform, enabled: c.enabled })),
+            connectionStates: result.connectionStates || null,
             chainGuardSkipped: result.chainGuardSkipped === true,
             recoveredAddons: result.recoveredAddons || [],
         }

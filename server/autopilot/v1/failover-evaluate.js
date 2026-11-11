@@ -1,9 +1,8 @@
 import { normalizeAddonUrl } from '../../utils/addon-url.js'
 import { isSafeUrl } from '../../utils/ssrf.js'
 
-// Mirrors the target state machine (host-health-table.js): DOWN after 2 bad cycles, UP again after 4 good.
-export const FAILOVER_THRESHOLD = 2
-export const RECOVERY_THRESHOLD = 4
+export { FAILOVER_THRESHOLD, RECOVERY_THRESHOLD, decideTarget } from './failover-decision.js'
+import { FAILOVER_THRESHOLD, RECOVERY_THRESHOLD } from './failover-decision.js'
 
 export const RULE_SKIP_REASONS = Object.freeze({
     NO_VALID_CHAIN: 'no_valid_chain',
@@ -32,29 +31,6 @@ export function customCheckUrlsFor(customChecks, normUrl) {
         c.appliesTo.some(au => normalizeAddonUrl(au).toLowerCase() === normUrl)
     )
     return [...new Set(applicable.map(c => c.url))]
-}
-
-// Pure rule decision from the members' target states ({ state, goodStreak }, see host-health-table.js).
-// The active member DOWN: move to the first member that is UP, else the first RECOVERING one, else stay.
-// A member ranked above the active one that is UP with a full good streak: swap back to it. Otherwise stay.
-// An active URL outside the chain ranks below every member.
-export function decideTarget(members, activeIndex) {
-    if (activeIndex !== -1 && members[activeIndex]?.state === 'DOWN') {
-        const up = members.findIndex((m, i) => i !== activeIndex && m.state === 'UP')
-        if (up !== -1) return { targetIndex: up, reason: 'active-dead' }
-        // A RECOVERING member is only worth a switch once the active one has failed FAILOVER_THRESHOLD cycles in
-        // a row, so two alternating flappers cannot cause a switch every cycle.
-        const recovering = members[activeIndex].badStreak >= FAILOVER_THRESHOLD
-            ? members.findIndex((m, i) => i !== activeIndex && m.state === 'RECOVERING')
-            : -1
-        if (recovering !== -1) return { targetIndex: recovering, reason: 'active-dead' }
-        return { targetIndex: -1, reason: 'outage' }
-    }
-    const above = activeIndex === -1 ? members.length : activeIndex
-    for (let i = 0; i < above; i++) {
-        if (members[i].state === 'UP' && members[i].goodStreak >= RECOVERY_THRESHOLD) return { targetIndex: i, reason: 'recovered' }
-    }
-    return activeIndex === -1 ? { targetIndex: -1, reason: null } : { targetIndex: activeIndex, reason: 'active' }
 }
 
 // The stored and displayed per-member shape, derived from the target streaks and clamped like before.

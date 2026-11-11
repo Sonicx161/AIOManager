@@ -9,9 +9,12 @@ import { applyOneActiveFlags, applyAccountChainFlags, chainMemberStates, violati
 import { withCurrentDestinations } from './destinations.js'
 import { unpushedConnectionIds } from './writers.js'
 import { evaluateRuleSkip, customCheckUrlsFor, decideTarget, stabilizationFrom } from './failover-evaluate.js'
+import { TRANSITION_MESSAGES } from './failover-decision.js'
 import { stableStringify } from './commit.js'
 import { ownerPredicate } from './owner-scope.js'
 import { urlRef, scrubUrls } from './url-ref.js'
+import { switchReason, platformResults } from './history-detail.js'
+import { PROBE_TIMEOUT_MS } from '../health-checks.js'
 import { assertAccountActive, ownerCanWrite, accountBlockedInSnapshot, gateCode, AuthStateError, StateUnavailableError } from '../../admin/account-state.js'
 
 // Reconcile outcomes that mean the push did not happen and should be retried.
@@ -406,6 +409,7 @@ export function createProcessRule({
         // Native connections a swap did not reach; null means all of them (the target list itself failed).
         let unpushedConnections = []
         let confirmedScopes = []
+        let pushedPlatforms = null
         if (needsSync) await ensureUpdatedAddonList()
         if (skipContestedTarget(targetActiveUrl)) { showConflict(); return conflictHeartbeat({ stabilization, lastDeepAudit: lastDeepAuditToSave }) }
         if (needsSync) {
@@ -429,6 +433,7 @@ export function createProcessRule({
                     : {}
             fastify.log.info({ category: 'Autopilot', ...ringFields }, `[${maskContext(rule.account_id)}] [Enforcement] ${statusMsg} (Swap: ${hasChanged}, Multi-Enabled: ${violationDetected})`)
 
+            const pushStartedAt = Date.now()
             try {
                 if (!decryptedAuthKey) {
                     const result = await enforceConnectionOnly(rule, updatedAddonList, chain, targetActiveUrl, siblingPlans, mirrorChainUrls)
@@ -458,6 +463,7 @@ export function createProcessRule({
                             reconciledList = updatedAddonList
                         }
                         syncSucceeded = true
+                        pushedPlatforms = result.targets ? platformResults(result.targets, { okIds: result.syncedIds, states: result.connectionStates, since: pushStartedAt }) : null
                         confirmedScopes = result.syncedIds || (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user) || []).filter(c => c.enabled && (!rule.connection_id || c.id === rule.connection_id) && result.synced.includes(c.platform) && !(result.failedIds || []).includes(c.id)).map(c => c.id)
                         fastify.log.info({ category: 'Autopilot', fmt: 'ap.push', n: reconciledList?.length ?? updatedAddonList?.length, acct: rule.account_id, ref: urlRef(normalizedTarget), platforms: synced }, `[${maskContext(rule.account_id)}] Synced ${urlRef(normalizedTarget)} to ${synced.join(', ')}.`)
                     }
@@ -488,6 +494,7 @@ export function createProcessRule({
                     const unreached = new Set(unpushedConnectionIds(connectionTargets, result))
                     unpushedConnections = [...unreached]
                     confirmedScopes = ['stremio', ...connectionTargets.filter(c => c.enabled && !unreached.has(c.id)).map(c => c.id)]
+                    pushedPlatforms = platformResults([stremioConn, ...connectionTargets], { okIds: confirmedScopes.map(id => (id === 'stremio' ? stremioConn.id : id)), states: result.connectionStates, since: pushStartedAt })
                     const failedPlatforms = connectionTargets.filter(c => unreached.has(c.id)).map(c => c.platform)
                     const failedNote = failedPlatforms.length > 0 ? ` (push failed: ${failedPlatforms.join(', ')})` : ''
                     fastify.log.info({ category: 'Autopilot', fmt: 'ap.push', n: built.canonical.length, acct: rule.account_id, ref: urlRef(normalizedTarget), platforms: result.synced, failnote: failedPlatforms.length > 0 ? failedPlatforms : null }, `[${maskContext(rule.account_id)}] Synced ${urlRef(normalizedTarget)} to ${syncedPlatforms.join(', ')}.${failedNote}`)
@@ -498,10 +505,14 @@ export function createProcessRule({
 
                     const syncedPlatforms = ['Stremio']
                     const failedPlatforms = []
+                    const stremioTarget = { id: `${rule.account_id}:stremio`, platform: 'stremio', enabled: true }
+                    pushedPlatforms = [{ id: stremioTarget.id, platform: 'stremio', ok: true }]
                     if (hasChanged && reconciler) {
+                        let connTargets = []
                         try {
                             const conns = await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)
                             const targets = conns.filter(c => c.enabled && c.platform !== 'stremio')
+                            connTargets = targets
                             if (targets.length > 0) {
                                 const outcome = preserveUrls.length > 0
                                     ? await reconciler.enforceAccount(rule.account_id, targets, reconciledList ?? updatedAddonList, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, preserveUrls, canWrite: () => canWrite(rule) })
@@ -510,6 +521,7 @@ export function createProcessRule({
                                 const unreached = targets.filter(c => c.enabled && (unreachedIds ? unreachedIds.has(c.id) : RETRYABLE_RECONCILE.has(reconcileOutcomeKey(outcome?.outcomes?.[c.id]))))
                                 confirmedScopes.push(...targets.filter(c => c.enabled && (outcome?.outcomes?.[c.id] ? ['written', 'unchanged'].includes(outcome.outcomes[c.id].outcome) : !unreached.includes(c))).map(c => c.id))
                                 unpushedConnections = unreached.map(c => c.id)
+                                pushedPlatforms = platformResults([stremioTarget, ...targets], { okIds: [stremioTarget.id, ...targets.filter(c => !unreached.includes(c)).map(c => c.id)], states: outcome?.connectionStates ?? reconciler.getConnectionStates?.(rule.account_id), outcomes: outcome?.outcomes, since: pushStartedAt })
                                 syncedPlatforms.push(...targets.filter(c => !unreached.includes(c)).map(c => c.platform))
                                 failedPlatforms.push(...unreached.map(c => c.platform))
                             }
@@ -518,6 +530,7 @@ export function createProcessRule({
                             if (connErr instanceof AuthStateError || connErr instanceof StateUnavailableError) throw connErr
                             unpushedConnections = null
                             failedPlatforms.push('connection sync')
+                            pushedPlatforms = [pushedPlatforms[0], ...platformResults(connTargets, { okIds: [], failure: connErr.message })]
                             fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Connection sync failed: ${scrubUrls(connErr.message)}`)
                         }
                     }
@@ -544,14 +557,30 @@ export function createProcessRule({
                 if (!ownerBlockedAfterWrite && hasChanged && syncSucceeded) {
                     const primaryUrl = chain[0]
                     const type = normalizedTarget === normalizeAddonUrl(primaryUrl).toLowerCase() ? 'recovery' : 'failover'
-                    const msg = type === 'failover' ? `Primary offline. Switched to backup.` : `Primary recovered. Restored original priority.`
+                    const msg = TRANSITION_MESSAGES[type]
 
+                    // Notify first so the one insert can record delivery; a worker crash during a slow webhook then loses this row.
+                    const notified = {}
+                    let notifyError = null
+                    try {
+                        if (await notifyTransition(rule, { type, msg, chain, targetActiveUrl }, notified)) shouldUpdateNotificationTime = true
+                    } catch (err) {
+                        notifyError = err
+                    }
+
+                    const reason = switchReason({ type, decision, members, activeIndex, targetIndex: normalizedChainUrls.indexOf(normalizedTarget), chain, timeoutMs: PROBE_TIMEOUT_MS })
+                    const retryAt = pushedPlatforms?.some(p => !p.ok) ? connectionRetry?.get?.(rule.id)?.nextAt ?? null : null
                     await recordFailoverHistory(rule, type, msg, primaryUrl, targetActiveUrl, {
                         chain: normalizedChain,
-                        activeUrl: normalizedTarget
+                        activeUrl: normalizedTarget,
+                        from: currentActiveNorm,
+                        ...(reason ? { reason } : {}),
+                        ...(pushedPlatforms ? { platforms: pushedPlatforms } : {}),
+                        notified: notified.channel ?? null,
+                        ...(notified.channel ? { notifiedOk: notified.sent === true } : {}),
+                        ...(retryAt ? { retryAt } : {}),
                     }, getHealthLatency(targetActiveUrl))
-
-                    if (await notifyTransition(rule, { type, msg, chain, targetActiveUrl })) shouldUpdateNotificationTime = true
+                    if (notifyError) throw notifyError
                 }
                 if (ownerBlockedAfterWrite) {
                     fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Post-write effects skipped: the account owner is blocked.`)

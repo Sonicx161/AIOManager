@@ -162,6 +162,8 @@ const combineStatuses = ([host, ...custom]) => {
         goodStreak: Math.min(...statuses.map(s => s.goodStreak)),
         badStreak: Math.max(...statuses.map(s => s.badStreak)),
         latencyMs: statuses[0].latencyMs,
+        row: worst.row ?? null,
+        status: worst.status ?? null,
     }
 }
 

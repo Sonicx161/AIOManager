@@ -2,6 +2,7 @@ import { autopilotDb as db, autopilotTripwire } from '../write-tripwire.js'
 import { globalHealthCache, serverState } from '../../state.js'
 import { HEALTH_CACHE_TTL_MS } from '../health-checks.js'
 import { scrubUrls } from './url-ref.js'
+import { CHECK_INTERVAL_MS } from './failover-decision.js'
 import { accountBlockedInSnapshot } from '../../admin/account-state.js'
 
 export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shouldSkipRuleCheck, prefetchSiblingRows, siblingKey, processAutopilotRule, flushUpdates, AUTOPILOT_SCAN_CHUNK_SIZE, AUTOPILOT_MAX_RULES_PER_CYCLE, AUTOPILOT_CYCLE_BUDGET_MS, RULE_RECHECK_MS, AUTOPILOT_CYCLE_WATCHDOG_MS = Math.max(3 * AUTOPILOT_CYCLE_BUDGET_MS, 300000), AUTOPILOT_RULE_CONCURRENCY = 32, probeCycle = null }) {
@@ -281,7 +282,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
 
         serverState.autopilotInterval = setInterval(() => {
             runAutopilot().catch(err => fastify.log.error({ category: 'Autopilot' }, `Worker Error: ${err.message}`))
-        }, 60 * 1000)
+        }, CHECK_INTERVAL_MS)
     }
 
     const stopAutopilotWorker = () => {

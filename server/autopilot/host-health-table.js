@@ -659,6 +659,7 @@ export function createHostHealthTable({
         badStreak: entry.badStreak,
         verdict: entry.last?.verdict ?? null,
         row: entry.last?.row ?? null,
+        status: entry.last?.status ?? null,
         strength: entry.last?.strength ?? null,
         transport: !!entry.last?.transport,
         latencyMs: entry.lastGood?.latencyMs ?? null,

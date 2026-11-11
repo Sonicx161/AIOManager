@@ -4,6 +4,7 @@ import { isSafeUrl } from '../../utils/ssrf.js'
 import { guardedFetch } from '../../utils/safe-fetch.js'
 import { maskContext } from '../../utils/log-helpers.js'
 import { getGlobalWebhook } from '../global-webhook.js'
+import { resolveMessageTemplate } from './failover-decision.js'
 import { urlRef, scrubUrls } from './url-ref.js'
 import { assertAccountActive, gateCode } from '../../admin/account-state.js'
 
@@ -12,29 +13,12 @@ export const guardedWebhookFetch = (url, { method = 'POST', headers, body, signa
     guardedFetch(String(url), { method, headers, body, signal, redirect: 'manual', maxHops: 0, discardBody: true, connectTimeoutMs: 5000, totalTimeoutMs: 10000 })
 
 export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, decryptRuleField }) {
-    const resolveMessageTemplate = (template, payload) => {
-        if (!template) return payload.message
-        const values = {
-            account: payload.accountName || payload.accountId || 'Unknown',
-            rule: payload.ruleName || 'Unnamed Rule',
-            primary: payload.fromName || payload.fromUrl || 'Unknown',
-            backup: payload.activeName || payload.activeUrl || 'Unknown',
-            addon: payload.activeName || 'Unknown',
-            from: payload.fromName || payload.fromUrl || 'Unknown',
-            to: payload.activeName || payload.activeUrl || 'Unknown',
-            status: payload.type === 'failover' ? 'Failed Over' : payload.type === 'recovery' ? 'Recovered' : payload.type,
-            provider: payload.provider || 'Unknown',
-        }
-        return template.replace(/\{{1,2}\s*(account|rule|primary|backup|addon|from|to|status|provider)\s*\}{1,2}/gi, (match, key) => {
-            const value = values[key.toLowerCase()]
-            return value !== undefined ? value : match
-        })
-    }
-
-    // Returns true when the notification was enqueued, false when it was refused.
-    // Every caller must name the owner: a webhook without an owner would skip the
+    // Returns true only when the webhook got a 2xx; refusals and failed
+    // deliveries return false. outcome.dispatched records that the call reached
+    // the queue, so callers can tell a refusal from a failed delivery. Every
+    // caller must name the owner: a webhook without an owner would skip the
     // account-state gate entirely, so it is refused instead of sent unguarded.
-    const sendNotification = async (webhookUrl, payload) => {
+    const sendNotification = async (webhookUrl, payload, outcome = null) => {
         if (!webhookUrl || !webhookUrl.startsWith('http')) return false
         if (!payload?.owner) return false
         if (!isSafeUrl(webhookUrl)) return false
@@ -47,6 +31,7 @@ export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, 
             throw stateErr
         }
 
+        let delivered = false
         await enqueueProxyRequest(webhookUrl, async () => {
             try {
                 const message = resolveMessageTemplate(payload.messageTemplate, payload)
@@ -106,12 +91,15 @@ export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, 
                 })
                 if (!webhookRes.ok) {
                     fastify.log.warn({ category: 'Autopilot' }, `Webhook ${urlRef(webhookUrl, 'wh')} returned status ${webhookRes.status}`)
+                } else {
+                    delivered = true
                 }
             } catch (err) {
                 fastify.log.error({ category: 'Autopilot' }, `Webhook failed for ${urlRef(webhookUrl, 'wh')}: ${scrubUrls(err?.message)}`)
             }
         })
-        return true
+        if (outcome) outcome.dispatched = true
+        return delivered
     }
 
     // Only a firing notification needs the name; scoped by the rule's owner like every credential read.
@@ -130,8 +118,10 @@ export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, 
         }
     }
 
-    // Cooldown gate and rule -> global webhook resolution; true when a notification was sent.
-    const notifyTransition = async (rule, { type, msg, chain, targetActiveUrl }) => {
+    // Cooldown gate and rule -> global webhook resolution; true only when a
+    // webhook was actually enqueued, so refusals never start the cooldown.
+    // report.sent carries whether it was really delivered.
+    const notifyTransition = async (rule, { type, msg, chain, targetActiveUrl }, report = null) => {
         let sent = false
         const now = nowMs()
         const lastNotification = rule.last_notification || 0
@@ -162,7 +152,8 @@ export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, 
             if (!webhookUrl) {
                 fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] No webhook configured (rule + global). Skipping notification.`)
             } else {
-                sent = (await sendNotification(webhookUrl, {
+                const outcome = {}
+                const delivered = (await sendNotification(webhookUrl, {
                     type,
                     message: msg,
                     messageTemplate: rule.message_template || null,
@@ -173,8 +164,13 @@ export function createNotify({ fastify, nowMs, fetchImpl = guardedWebhookFetch, 
                     fromName: chain[0],
                     fromUrl: chain[0],
                     owner: rule.owner_sync_user,
-                })) === true
-                if (sent) fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Webhook sent (${webhookSource}): ${type}`)
+                }, outcome)) === true
+                sent = outcome.dispatched === true
+                if (sent) {
+                    if (report) Object.assign(report, { channel: webhookSource, sent: delivered })
+                    const result = delivered ? 'sent' : 'delivery failed'
+                    fastify.log[delivered ? 'info' : 'warn']({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Webhook ${result} (${webhookSource}): ${type}`)
+                }
             }
         } else {
             fastify.log.debug({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Webhook skipped (cooldown: ${Math.round((cooldownMs - (now - lastNotification)) / 1000)}s remaining)`)
