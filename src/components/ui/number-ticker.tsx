@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useMemo } from 'react'
-import { useInView, useMotionValue, useReducedMotion, useSpring } from 'framer-motion'
+import { animate, useInView, useMotionValue, useReducedMotion } from 'framer-motion'
 import { cn } from '@/lib/utils'
 
 interface NumberTickerProps {
@@ -25,10 +25,6 @@ export function NumberTicker({
   const prefersReducedMotion = useReducedMotion()
   const initialValue = useMemo(() => direction === 'down' ? value : startValue, []) // eslint-disable-line react-hooks/exhaustive-deps
   const motionValue = useMotionValue(initialValue)
-  // A physics spring only rests within 0.5 of its target, so large values creep for seconds.
-  const springValue = useSpring(motionValue, prefersReducedMotion
-    ? { duration: 0.01, bounce: 0 }
-    : { duration: 1, bounce: 0 })
   const isInView = useInView(ref, { once: true, margin: '0px' })
   const formatter = useMemo(() => Intl.NumberFormat('en-US', {
     minimumFractionDigits: decimalPlaces,
@@ -36,13 +32,14 @@ export function NumberTicker({
   }), [decimalPlaces])
 
   useEffect(() => {
-    if (isInView) {
-      const timer = setTimeout(() => {
-        motionValue.set(direction === 'down' ? startValue : value)
-      }, delay * 1000)
-      return () => clearTimeout(timer)
-    }
-  }, [motionValue, isInView, delay, value, direction, startValue])
+    if (!isInView) return
+    const controls = animate(motionValue, direction === 'down' ? startValue : value, {
+      delay: delay * 1000,
+      duration: prefersReducedMotion ? 0 : 1,
+      ease: 'easeOut',
+    })
+    return () => controls.stop()
+  }, [motionValue, isInView, delay, value, direction, startValue, prefersReducedMotion])
 
   useEffect(() => {
     const update = (latest: number) => {
@@ -51,9 +48,9 @@ export function NumberTicker({
         if (ref.current.textContent !== text) ref.current.textContent = text
       }
     }
-    update(springValue.get())
-    return springValue.on('change', update)
-  }, [springValue, decimalPlaces, formatter])
+    update(motionValue.get())
+    return motionValue.on('change', update)
+  }, [motionValue, decimalPlaces, formatter])
 
   return (
     <span
@@ -66,4 +63,9 @@ export function NumberTicker({
       {formatter.format(initialValue)}
     </span>
   )
+}
+
+// Ticks on first reveal only; later changes render the settled number outright.
+export function StatNumber({ value, animate: tick }: { value: number; animate: boolean }) {
+  return tick ? <NumberTicker value={value} /> : <>{value.toLocaleString()}</>
 }

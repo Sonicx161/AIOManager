@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { TabsTrigger } from '@/components/ui/tabs'
 import { WorkspaceTabs } from '@/components/ui/workspace-tabs'
 import { ActivityEmptyState } from '@/components/common/PageEmptyStates'
+import { StatNumber } from '@/components/ui/number-ticker'
 import { activityNowStatuses } from '@/lib/jellyfin/activity'
 import { buildRuntimeIndex, msToHours } from '@/lib/watch-hours'
 import { activityHeaderHoursCached } from '@/lib/activity-hours'
@@ -244,6 +245,10 @@ export function ActivityFeed({
         frozenStatsRef.current = { key: statsKey, stats: liveStats }
     }
     const stats = frozenStatsRef.current.stats
+    const [reveal, setReveal] = useState<{ showing: number; total: number; hours: number } | null>(null)
+    if (!settling && reveal === null) setReveal({ showing: stats.showing, total: stats.total, hours: stats.hours })
+    // Header numbers tick once on the first settled reveal; any later change swaps instantly.
+    const tickCounts = reveal !== null && stats.showing === reveal.showing && stats.total === reveal.total && stats.hours === reveal.hours
 
     const formatDateHeader = useCallback((dateStr: string) => {
         if (dateStr === 'Unknown Date' || dateStr === SAVED_GROUP_DATE) return dateStr
@@ -422,11 +427,11 @@ export function ActivityFeed({
                         ) : (
                             <>
                                 <span className="opacity-70">Showing</span>
-                                <span className="font-semibold tabular-nums text-foreground">{stats.showing.toLocaleString()}</span>
+                                <span className="font-semibold tabular-nums text-foreground"><StatNumber value={stats.showing} animate={tickCounts} /></span>
                                 <span className="opacity-50">of</span>
-                                <span className="font-semibold tabular-nums text-foreground">{stats.total.toLocaleString()}</span>
+                                <span className="font-semibold tabular-nums text-foreground"><StatNumber value={stats.total} animate={tickCounts} /></span>
                                 <span className="h-3.5 w-px bg-border/60" />
-                                <span className="tabular-nums text-foreground">{stats.hours.toLocaleString()}h total</span>
+                                <span className="tabular-nums text-foreground"><StatNumber value={stats.hours} animate={tickCounts} />h total</span>
                             </>
                         )}
                         {todayHours > 0 && (

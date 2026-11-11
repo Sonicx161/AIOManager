@@ -44,7 +44,7 @@ import { useUIStore } from '@/store/uiStore'
 import { Poster } from '@/components/common/Poster'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { NumberTicker } from '@/components/ui/number-ticker'
+import { StatNumber } from '@/components/ui/number-ticker'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
 import { StatusChip } from '@/components/ui/status-chip'
@@ -96,12 +96,6 @@ type MetricPeriodId = typeof METRIC_PERIODS[number]['id']
 
 // Metrics never renders genres (the worker items omit them), so skip the Cinemeta genre crawl.
 const METRICS_HISTORY_OPTIONS = { genres: false, sessions: false } as const
-
-// Counts up only for the first reveal. Later filter changes swap the number outright so
-// no intermediate value is ever shown.
-function StatNumber({ value, animate }: { value: number; animate: boolean }) {
-    return animate ? <NumberTicker value={value} /> : <>{value.toLocaleString()}</>
-}
 
 function formatMetricHour(hour: number) {
     const normalizedHour = Number.isFinite(hour) ? ((Math.round(hour) % 24) + 24) % 24 : 0
@@ -241,16 +235,23 @@ export function MetricsPage() {
     // progress; final numbers are those whose key is current (isCurrent).
     const dataSettled = useSettledSignal(history, cacheLoading)
     const [committed, setCommitted] = useState<{ scope: string; value: MetricsResult } | null>(null)
-    const [entrance, setEntrance] = useState<MetricsResult | null>(null)
+    const [entrance, setEntrance] = useState<{ totalItems: number; binge: number; hours: number; profiles: number; loyalty: number } | null>(null)
     useEffect(() => {
         if (!latest || !metricsCommitGate(latest, dataSettled)) return
         setCommitted(prev => (prev && prev.scope === scope && prev.value === latest ? prev : { scope, value: latest }))
     }, [latest, dataSettled, scope])
     const stats = committed && committed.scope === scope ? committed.value : null
-    useEffect(() => {
-        if (stats && !stats._error) setEntrance(prev => prev ?? stats)
-    }, [stats])
-    const animateNumbers = !!stats && stats === entrance
+    if (stats && !stats._error && entrance === null) {
+        setEntrance({
+            totalItems: stats.totalItems,
+            binge: stats.bingeMasters?.[0]?.bingeDuration || 0,
+            hours: stats.totalHours,
+            profiles: stats.leaderboard?.length || 0,
+            loyalty: Math.round(stats.seriesLoyalty),
+        })
+    }
+    // Numbers tick only while they still equal their first-revealed values; any later change swaps instantly.
+    const ticked = (value: number, first: number | undefined) => entrance !== null && first !== undefined && value === first
 
     useEffect(() => {
         if (accounts.length > 0) {
@@ -414,10 +415,10 @@ export function MetricsPage() {
                     {/* KEY METRICS GRID */}
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                         {[
-                            { icon: Activity, label: 'Total Plays', value: stats.totalItems, color: 'text-primary', bg: 'bg-primary/12', border: 'border-primary/15', tooltip: 'Total items watched in period' },
-                            { icon: Zap, label: 'Max Binge Session', value: stats.bingeMasters?.[0]?.bingeDuration || 0, color: 'text-warning', bg: 'bg-warning/10', border: 'border-warning/15', tooltip: 'Most titles in one session' },
-                            { icon: Clock, label: 'Hours Watched', value: stats.totalHours, palette: 'cyan', tooltip: `Total hours of content watched (${formatHoursAsDays(stats.totalHours)})` },
-                            { icon: Users, label: 'Active Profiles', value: stats.leaderboard?.length || 0, color: 'text-success', bg: 'bg-success/10', border: 'border-success/15', tooltip: 'Accounts with watch activity' },
+                            { icon: Activity, label: 'Total Plays', value: stats.totalItems, enter: entrance?.totalItems, color: 'text-primary', bg: 'bg-primary/12', border: 'border-primary/15', tooltip: 'Total items watched in period' },
+                            { icon: Zap, label: 'Max Binge Session', value: stats.bingeMasters?.[0]?.bingeDuration || 0, enter: entrance?.binge, color: 'text-warning', bg: 'bg-warning/10', border: 'border-warning/15', tooltip: 'Most titles in one session' },
+                            { icon: Clock, label: 'Hours Watched', value: stats.totalHours, enter: entrance?.hours, palette: 'cyan', tooltip: `Total hours of content watched (${formatHoursAsDays(stats.totalHours)})` },
+                            { icon: Users, label: 'Active Profiles', value: stats.leaderboard?.length || 0, enter: entrance?.profiles, color: 'text-success', bg: 'bg-success/10', border: 'border-success/15', tooltip: 'Accounts with watch activity' },
                         ].map((card) => {
                             const { icon: Icon, label, value } = card
                             const palette = card.palette ? CHART_PALETTE[card.palette] : null
@@ -429,7 +430,7 @@ export function MetricsPage() {
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
                                                 <div className="text-3xl font-bold tabular-nums tracking-tight" style={{ color: label === 'Hours Watched' ? 'hsl(var(--foreground))' : palette.text }}>
-                                                    <StatNumber value={value} animate={animateNumbers} />
+                                                    <StatNumber value={value} animate={ticked(value, card.enter)} />
                                                 </div>
                                                 <Tooltip content={card.tooltip} side="top">
                                                     <div className="text-xs font-medium text-muted-foreground mt-1 leading-tight cursor-help">{label}</div>
@@ -447,7 +448,7 @@ export function MetricsPage() {
                                         <div className="flex items-start justify-between gap-2">
                                             <div className="min-w-0 flex-1">
                                                 <div className={`text-3xl font-bold tabular-nums tracking-tight ${color}`}>
-                                                    <StatNumber value={value} animate={animateNumbers} />
+                                                    <StatNumber value={value} animate={ticked(value, card.enter)} />
                                                 </div>
                                                 <Tooltip content={card.tooltip} side="top">
                                                     <div className="text-xs font-medium text-muted-foreground mt-1 leading-tight cursor-help">{label}</div>
@@ -513,7 +514,7 @@ export function MetricsPage() {
                             </CardHeader>
                             <CardContent className="flex flex-col md:flex-row items-center gap-8">
                                 <div className="text-center md:text-left flex-1">
-                                    <div className="text-4xl font-bold"><StatNumber value={stats.bingeMasters?.[0]?.bingeDuration || 0} animate={animateNumbers} /></div>
+                                    <div className="text-4xl font-bold"><StatNumber value={stats.bingeMasters?.[0]?.bingeDuration || 0} animate={ticked(stats.bingeMasters?.[0]?.bingeDuration || 0, entrance?.binge)} /></div>
                                     <div className="text-xs font-medium text-muted-foreground uppercase">Titles in one session</div>
                                     <p className="text-sm mt-3 text-muted-foreground">
                                         <span className="font-bold text-primary">{maskAccountName(stats.bingeMasters?.[0]?.name || '')}</span> is currently holding the crown for the most intense watch session.
@@ -716,7 +717,7 @@ export function MetricsPage() {
                                             Series loyalty
                                         </div>
                                         <div className="mt-3 text-2xl font-bold tracking-tight">
-                                            <StatNumber value={Math.round(stats.seriesLoyalty)} animate={animateNumbers} />%
+                                            <StatNumber value={Math.round(stats.seriesLoyalty)} animate={ticked(Math.round(stats.seriesLoyalty), entrance?.loyalty)} />%
                                         </div>
                                         <p className="mt-1 text-xs text-muted-foreground">Top shows' share of series plays.</p>
                                     </div>
@@ -977,7 +978,7 @@ export function MetricsPage() {
                                     <Tooltip content="Your content mix across movies, series, and other formats" side="top">
                                         <span className="cursor-help">Format DNA</span>
                                     </Tooltip>
-                                    <StatusChip variant="muted"><StatNumber value={stats.totalItems} animate={animateNumbers} /> titles</StatusChip>
+                                    <StatusChip variant="muted"><StatNumber value={stats.totalItems} animate={ticked(stats.totalItems, entrance?.totalItems)} /> titles</StatusChip>
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
