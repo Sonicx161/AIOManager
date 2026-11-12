@@ -9,11 +9,25 @@ import { dispatchAltNav, hostOwnsKeyEvent, type DialogNavEntry } from '@/lib/dia
 
 if (typeof document !== 'undefined') trackActivations(document)
 
-// Open sheets in open order; the last entry is the topmost dialog. Used to keep
-// a nested dialog's keys from also reaching the dialog it was opened over.
-const openNavHosts: Array<{ rootRef: React.RefObject<HTMLDivElement | null> }> = []
+// Open layers in open order; only the last (topmost) may dismiss itself.
+const openNavHosts: Array<{ rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void }> = []
 
-const DialogContext = React.createContext<{ onOpenChange?: (open: boolean) => void; titleId?: string; backStack?: React.MutableRefObject<Array<() => void>>; navStack?: React.MutableRefObject<DialogNavEntry[]> }>({})
+// Lets sheet content (an embedded wizard) count as a layer above its parent dialog.
+function useDialogEscapeLayer(active: boolean, onEscape?: () => void) {
+  const latest = React.useRef(onEscape)
+  latest.current = onEscape
+  React.useEffect(() => {
+    if (!active) return
+    const host: { rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void } = { rootRef: { current: null }, onEscape: () => latest.current?.() }
+    openNavHosts.push(host)
+    return () => {
+      const at = openNavHosts.indexOf(host)
+      if (at >= 0) openNavHosts.splice(at, 1)
+    }
+  }, [active])
+}
+
+const DialogContext = React.createContext<{ onOpenChange?: (open: boolean) => void; titleId?: string; backStack?: React.MutableRefObject<Array<() => void>>; navStack?: React.MutableRefObject<DialogNavEntry[]>; isTopmost?: () => boolean }>({})
 
 /**
  * While active (a sheet showing a sub-page), Escape calls onBack instead of closing the dialog.
@@ -120,12 +134,14 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
   const returnFocusRef = React.useRef<HTMLElement | null>(null)
   const backStack = React.useRef<Array<() => void>>([])
   const navStack = React.useRef<DialogNavEntry[]>([])
+  const navHostRef = React.useRef<{ rootRef: React.RefObject<HTMLDivElement | null>; onEscape?: () => void } | null>(null)
 
   // Alt+Left/Right goes to the deepest history owner of the topmost dialog holding the target.
   React.useEffect(() => {
     if (!open) return
     navStack.current.length = 0
     const host = { rootRef: dialogRef }
+    navHostRef.current = host
     openNavHosts.push(host)
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.altKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
@@ -140,10 +156,16 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
       document.removeEventListener('keydown', onKeyDown, true)
+      navHostRef.current = null
       const at = openNavHosts.indexOf(host)
       if (at >= 0) openNavHosts.splice(at, 1)
     }
   }, [open])
+
+  const isTopmost = React.useCallback(() => {
+    const host = navHostRef.current
+    return openNavHosts.length > 0 && openNavHosts[openNavHosts.length - 1] === host
+  }, [])
 
   React.useEffect(() => {
     if (open) {
@@ -192,6 +214,15 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
     if (e.key === 'Escape') {
       // A menu or popover inside the dialog already handled this Escape.
       if (e.defaultPrevented) return
+      // A layer above owns the dismissal; an embedded layer with onEscape receives it.
+      if (!isTopmost()) {
+        const top = openNavHosts[openNavHosts.length - 1]
+        if (top && top !== navHostRef.current) {
+          top.onEscape?.()
+          requestAnimationFrame(() => navHostRef.current?.rootRef.current?.focus())
+        }
+        return
+      }
       const back = backStack.current[backStack.current.length - 1]
       if (back) {
         back()
@@ -199,7 +230,7 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
       }
       onOpenChange?.(false)
     }
-  }, [onOpenChange])
+  }, [onOpenChange, isTopmost])
 
   // Capture phase, so a control that stops key propagation cannot let Tab leave the modal.
   const handleTabCapture = React.useCallback((e: React.KeyboardEvent) => {
@@ -236,7 +267,7 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
   if (!mounted) return null
 
   return createPortal(
-    <DialogContext.Provider value={{ onOpenChange, titleId, backStack, navStack }}>
+    <DialogContext.Provider value={{ onOpenChange, titleId, backStack, navStack, isTopmost }}>
       <div 
         ref={dialogRef}
         className="fixed inset-0 z-50 overflow-hidden"
@@ -259,6 +290,8 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
           )}
           onClick={(e) => {
             e.stopPropagation()
+            // A layer opened above this dialog owns the dismissal.
+            if (!isTopmost()) return
             onOpenChange?.(false)
           }}
         />
@@ -277,7 +310,7 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
 
 const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement> & { 'data-state'?: string; hideClose?: boolean }>(
   ({ className, children, hideClose = false, ...props }, ref) => {
-    const { onOpenChange, titleId } = React.useContext(DialogContext)
+    const { onOpenChange, titleId, isTopmost } = React.useContext(DialogContext)
     const state = props['data-state'] || 'open'
     const touchStartY = React.useRef<number | null>(null)
     const dismissEligible = React.useRef(false)
@@ -332,6 +365,11 @@ const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTML
         const dismiss = dragOffset > 80
         touchStartY.current = null
         if (dismiss) {
+            // A layer opened above this dialog owns the dismissal.
+            if (isTopmost && !isTopmost()) {
+                setDragOffset(0)
+                return
+            }
             onOpenChange?.(false)
             return
         }
@@ -383,7 +421,11 @@ const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTML
             data-theme-part="button"
             data-variant="ghost"
             type="button"
-            onClick={() => onOpenChange?.(false)}
+            onClick={() => {
+              // A layer opened above this dialog owns the dismissal.
+              if (isTopmost && !isTopmost()) return
+              onOpenChange?.(false)
+            }}
             aria-label="Close dialog"
             className="absolute right-2 top-2 flex h-11 w-11 items-center justify-center rounded-full bg-muted/30 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:right-3 sm:top-3 sm:h-8 sm:w-8"
           >
@@ -429,4 +471,4 @@ const DialogDescription = React.forwardRef<HTMLDivElement, React.HTMLAttributes<
 )
 DialogDescription.displayName = 'DialogDescription'
 
-export { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription, DialogBack, DialogAltHistory, useDialogBack, useDrillHistory, useAltArrowHistory }
+export { Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription, DialogBack, DialogAltHistory, useDialogBack, useDialogEscapeLayer, useDrillHistory, useAltArrowHistory }

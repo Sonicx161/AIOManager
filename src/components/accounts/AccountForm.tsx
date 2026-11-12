@@ -157,8 +157,6 @@ export function AccountForm() {
   const avatarFileInputRef = useRef<HTMLInputElement>(null)
   const [signInAgainTarget, setSignInAgainTarget] = useState<{ id: string; nonce: number } | null>(null)
   const maskedAccountLabel = useMaskedAccountLabel()
-  const connectionSubDialogRef = useRef(false)
-  const subDialogClosedAtRef = useRef(0)
 
   // Draft-aware dashboard card preview: the same read-only activity sources the real
   // AccountCard reads, hoisted here so the add flow never polls them.
@@ -1375,7 +1373,14 @@ export function AccountForm() {
   const renderEditingView = () => {
     const previewAccount = liveAccount ?? editTarget
     return (
-    <form onSubmit={handleSubmit} className="mt-4 min-w-0">
+    <form
+      onSubmit={(e) => {
+        // Submits from portaled setup dialogs still bubble here through the React tree.
+        if (e.target !== e.currentTarget) return
+        handleSubmit(e)
+      }}
+      className="mt-4 min-w-0"
+    >
       <div className="flex items-center gap-2 pb-4">
         {editPage === 'connections' ? (
           <>
@@ -1837,7 +1842,6 @@ export function AccountForm() {
               accountId={editTarget.id}
               connections={liveAccount?.connections ?? editTarget.connections}
               focusEditConnection={signInAgainTarget}
-              onSubDialogChange={(open) => { connectionSubDialogRef.current = open; if (!open) subDialogClosedAtRef.current = Date.now() }}
             />
             </Suspense>
           )}
@@ -1849,7 +1853,7 @@ export function AccountForm() {
 
   if (isEditing) {
     return (
-      <Dialog open={isOpen} onOpenChange={(open) => { if (open) return; if (jellyfinDialogOpen || connectionSubDialogRef.current) return; if (Date.now() - subDialogClosedAtRef.current < 250) return; handleClose() }}>
+      <Dialog open={isOpen} onOpenChange={(open) => { if (!open) handleClose() }}>
         <DialogContent ref={editSheetRef} tabIndex={-1} className="outline-none sm:max-w-2xl" hideClose>
           <DialogBack active={editPage === 'connections' && editCanBack} onBack={editPageBack} />
           {/* Registered before the Connections content so its panel history stays deeper in the shared Alt stack. */}
@@ -2013,7 +2017,7 @@ export function AccountForm() {
 
     {jellyfinDialogOpen && <JellyfinSetupDialog
       open={jellyfinDialogOpen}
-      onOpenChange={open => { setJellyfinDialogOpen(open); if (!open) subDialogClosedAtRef.current = Date.now() }}
+      onOpenChange={setJellyfinDialogOpen}
       onComplete={handleJellyfinAccountComplete}
     />}
 

@@ -621,6 +621,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                          // R2-06: legacy connections gain an incarnation token once, at load.
                          const generationMint = await mintMissingConnectionGenerations(migratedAccounts)
+                         // A sign-out or workspace switch during the await makes this hydration stale.
+                         ownership.assert()
                          migratedAccounts = generationMint.accounts
 
                         set({ accounts: migratedAccounts })

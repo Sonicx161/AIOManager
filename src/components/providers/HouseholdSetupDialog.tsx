@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, ChevronRight, Eye, EyeOff, KeyRound, Loader2, Users } from 'lucide-react'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, useDialogEscapeLayer } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -159,6 +159,8 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
     const generation = useRef(0)
     useEffect(() => () => { generation.current++ }, [])
     const close = (value: boolean) => { if (!writing.current) { generation.current++; onOpenChange(value) } }
+    // Registering as a layer keeps the parent sheet from dismissing under the embedded wizard.
+    useDialogEscapeLayer(embedded && open, () => close(false))
 
     const load = async () => {
         if (running.current) return

@@ -110,6 +110,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const namePrivacyLevel = isPrivacyModeEnabled ? privacyLevelNames : 0
     const running = useRef(false)
     const request = useRef<AbortController | null>(null)
+    const dialogRef = useRef<HTMLDivElement>(null)
     const discoveryRequest = useRef<AbortController | null>(null)
     const discoveryGeneration = useRef(0)
     const baseUrlRef = useRef(initialBaseUrl)
@@ -226,6 +227,8 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                 const result = await new JellyfinClient(baseUrl, crypto.randomUUID()).signIn({ baseUrl, method, username, password, accessToken, userId }, controller.signal)
                 controller.signal.throwIfAborted()
                 setPassword(''); setAccessToken(''); setSession(result)
+                // Disabling the fieldset drops focus to <body>; restore it so Escape still works.
+                requestAnimationFrame(() => dialogRef.current?.focus())
             }
         } catch (err) { if (!controller.signal.aborted) setError(jellyfinSignInErrorMessage(err, { method, userId })) }
         finally { request.current = null; running.current = false; if (!controller.signal.aborted) setBusy(false) }
@@ -347,7 +350,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     if (loadingAddress) submitLabel = 'Loading address…'
 
     return <Dialog open={open} onOpenChange={close}>
-        <DialogContent>
+        <DialogContent ref={dialogRef} tabIndex={-1}>
             <DialogHeader>
                 <DialogTitle>Connect Jellyfin</DialogTitle>
                 <DialogDescription>Works with Jellyfin, AIOStreams (AIOS) and AIOMetadata (AIOM). Features depend on the server.</DialogDescription>

@@ -57,13 +57,12 @@ interface ConnectionManagerProps {
     connections?: Connection[]
     /** 'sheet' renders the compact in-sheet tabs without the workspace panel; default 'panel'. */
     variant?: 'sheet' | 'panel'
-    onSubDialogChange?: (open: boolean) => void
     onShowInstalledAddons?: () => void
     /** Open the edit panel for this connection on next change (nonce lets the same id re-open). */
     focusEditConnection?: { id: string; nonce: number } | null
 }
 
-export function ConnectionManager({ accountId, account, connections = [], onSubDialogChange, onShowInstalledAddons, focusEditConnection, variant = 'panel' }: ConnectionManagerProps) {
+export function ConnectionManager({ accountId, account, connections = [], onShowInstalledAddons, focusEditConnection, variant = 'panel' }: ConnectionManagerProps) {
     const { syncConnections, isSyncing, connectionStates, addConnection, refreshConnectionStates } = useConnectionStore(
         useShallow(s => ({
             syncConnections: s.syncConnections,
@@ -226,8 +225,6 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
         }
     }, [accountId])
 
-    const notifySubDialog = (open: boolean) => onSubDialogChange?.(open)
-
     const resolvedConnections = connections
     const activeCount = countActiveConnections(resolvedConnections, id => accountStates[id]?.status)
 
@@ -252,24 +249,19 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
             setAddDialogOpen(false)
             setJellyfinReconnectId(null)
             setJellyfinDialogOpen(true)
-            notifySubDialog(true)
         } else if (platform === 'stremio') {
             // Verified sign-in only: a placeholder "needs sign-in" Stremio connection can
             // no longer be created, and several Stremio logins may be bound to one account.
             setAddDialogOpen(false)
-            notifySubDialog(true)
             setStremioDialogOpen(true)
         } else if (platform === 'nuvio') {
             setAddDialogOpen(false)
-            notifySubDialog(true)
             setNuvioDialogOpen(true)
         } else if (platform === 'realstream') {
             setAddDialogOpen(false)
-            notifySubDialog(true)
             setRealstreamDialogOpen(true)
         } else if (platform === 'hydra-outbound') {
             setAddDialogOpen(false)
-            notifySubDialog(true)
             setHydraDialogOpen(true)
         } else {
             handleAddNative(platform)
@@ -439,7 +431,6 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
     const backToPicker = (closeDialog: (open: boolean) => void) => () => {
         closeDialog(false)
         setAddDialogOpen(true)
-        notifySubDialog(true)
     }
 
     const renderSetupDialogs = () => (
@@ -449,25 +440,25 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                 onBackToPicker={jellyfinReconnectId ? undefined : backToPicker(setJellyfinDialogOpen)}
                 open={jellyfinDialogOpen}
                 reconnectCredentials={jellyfinReconnectId ? resolvedConnections.find(c => c.id === jellyfinReconnectId)?.credentials?.jellyfin : undefined}
-                onOpenChange={open => { setJellyfinDialogOpen(open); notifySubDialog(open); if (!open) setJellyfinReconnectId(null) }}
+                onOpenChange={open => { setJellyfinDialogOpen(open); if (!open) setJellyfinReconnectId(null) }}
                 onComplete={handleJellyfinComplete}
             />}
             {stremioDialogOpen && <StremioSetupDialog
                 accountId={accountId}
                 open={stremioDialogOpen}
-                onOpenChange={open => { setStremioDialogOpen(open); notifySubDialog(open) }}
+                onOpenChange={open => { setStremioDialogOpen(open) }}
                 onComplete={handleStremioComplete}
                 onBackToPicker={backToPicker(setStremioDialogOpen)}
             />}
             <ProviderSetupDialog
                 open={hydraDialogOpen}
-                onOpenChange={(open) => { setHydraDialogOpen(open); notifySubDialog(open) }}
+                onOpenChange={(open) => { setHydraDialogOpen(open) }}
                 onComplete={handleHydraComplete}
                 onBackToPicker={backToPicker(setHydraDialogOpen)}
             />
             <NuvioSetupDialog
                 open={nuvioDialogOpen}
-                onOpenChange={(open) => { setNuvioDialogOpen(open); notifySubDialog(open) }}
+                onOpenChange={(open) => { setNuvioDialogOpen(open) }}
                 onComplete={handleNuvioComplete}
                 onBackToPicker={backToPicker(setNuvioDialogOpen)}
                 initialBackend={(() => {
@@ -477,7 +468,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
             />
             <RealStreamSetupDialog
                 open={realstreamDialogOpen}
-                onOpenChange={(open) => { setRealstreamDialogOpen(open); notifySubDialog(open) }}
+                onOpenChange={(open) => { setRealstreamDialogOpen(open) }}
                 onComplete={handleRealStreamComplete}
                 onBackToPicker={backToPicker(setRealstreamDialogOpen)}
             />
@@ -575,7 +566,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                     <Button
                         size="sm"
                         className="gap-1.5 h-8 text-xs font-medium"
-                        onClick={() => { notifySubDialog(true); setAddDialogOpen(true) }}
+                        onClick={() => setAddDialogOpen(true)}
                     >
                         <Plus className="h-3.5 w-3.5" />
                         Add Connection
@@ -600,7 +591,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                     <Button
                         size="sm"
                         className="gap-1.5 h-8 text-xs font-medium"
-                        onClick={() => { notifySubDialog(true); setAddDialogOpen(true) }}
+                        onClick={() => setAddDialogOpen(true)}
                     >
                         <Plus className="h-3.5 w-3.5" />
                         Add Connection
@@ -618,7 +609,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                     title="No connections yet"
                     description="Connect an addon platform or a media server."
                     action={
-                        <Button size="sm" className="gap-1.5" onClick={() => { notifySubDialog(true); setAddDialogOpen(true) }}>
+                        <Button size="sm" className="gap-1.5" onClick={() => setAddDialogOpen(true)}>
                             <Plus className="h-3.5 w-3.5" />
                             Add Connection
                         </Button>
@@ -753,7 +744,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                     if (workspaceKind(editing) === 'jellyfin') return <JellyfinConnectionPanel
                         key={editing.id} accountId={accountId} connection={editing}
                         onBack={panelBack}
-                        onReconnect={() => { setJellyfinReconnectId(editing.id); setJellyfinDialogOpen(true); notifySubDialog(true) }}
+                        onReconnect={() => { setJellyfinReconnectId(editing.id); setJellyfinDialogOpen(true) }}
                     />
                     // Same authority rule as the cards: the live state entry wins as a
                     // whole; the stored connection fields only serve when it is absent.
@@ -801,7 +792,7 @@ export function ConnectionManager({ accountId, account, connections = [], onSubD
                 </div>
             )}
 
-            <Dialog open={addDialogOpen} onOpenChange={(open) => { setAddDialogOpen(open); notifySubDialog(open) }}>
+            <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
                 <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl sm:p-7">
                     <DialogHeader>
                         <DialogTitle>Add Connection</DialogTitle>

@@ -26,6 +26,8 @@ import { AddonIcon } from "@/components/ui/addon-icon"
 import { SecretUrlInput } from "@/components/ui/secret-url-input"
 import { SortableDialogTier } from "@/components/accounts/SortableFailoverTiers"
 import { customWebhookError, parseCooldownMinutes } from "@/components/accounts/rule-dialog-fields"
+import { nextCheckRowId, UrlTestBoard } from "@/components/accounts/url-test-board"
+import type { UrlTestResults } from "@/components/accounts/url-test-board"
 import { testWebhook } from "@/components/accounts/WebhooksPanel"
 import { identifyAddon } from "@/lib/addon-identifier"
 import { toast } from "@/hooks/use-toast"
@@ -40,6 +42,8 @@ import { findClosestChainAddon, findStaleScopeEntries, getUrlHostname, isSameChe
 import type { ScopeValidationError } from "@/lib/failover-scope"
 
 export type CustomCheckEntry = { url: string; appliesTo: string[] }
+
+type CustomCheckRow = CustomCheckEntry & { rowId: string }
 
 const normalizeCustomChecks = (raw: unknown): CustomCheckEntry[] => {
     if (!Array.isArray(raw)) return []
@@ -103,8 +107,8 @@ export function RuleDialog({
     const [ruleWebhookUrl, setRuleWebhookUrl] = useState("")
     const [ruleNotifyMode, setRuleNotifyMode] = useState<'default' | 'custom' | 'off'>('default')
     const [ruleMessageTemplate, setRuleMessageTemplate] = useState("")
-    const [customChecks, setCustomChecks] = useState<Array<{ url: string; appliesTo: string[] }>>([])
-    const [urlTestResults, setUrlTestResults] = useState<Record<number, { status: 'ok' | 'fail' | 'checking'; code?: number; error?: string }>>({})
+    const [customChecks, setCustomChecks] = useState<CustomCheckRow[]>([])
+    const [urlTestResults, setUrlTestResults] = useState<UrlTestResults>({})
     const [expandedChecks, setExpandedChecks] = useState<Set<number>>(new Set())
     const [scopeError, setScopeError] = useState<ScopeValidationError | null>(null)
     const [replacementPicker, setReplacementPicker] = useState<{ checkIndex: number; unmatchedUrl: string; closestUrl?: string } | null>(null)
@@ -117,6 +121,26 @@ export function RuleDialog({
     const chainErrorRef = useRef<HTMLParagraphElement>(null)
     const checkRowRefs = useRef<Map<number, HTMLDivElement>>(new Map())
     const webhookInputRef = useRef<HTMLInputElement>(null)
+    const customChecksRef = useRef(customChecks)
+    customChecksRef.current = customChecks
+    const urlTestBoardRef = useRef<UrlTestBoard<CustomCheckRow> | null>(null)
+    if (!urlTestBoardRef.current) {
+        urlTestBoardRef.current = new UrlTestBoard<CustomCheckRow>(
+            () => customChecksRef.current,
+            async (url) => {
+                const { useSyncStore } = await import('@/store/syncStore')
+                const { serverUrl } = useSyncStore.getState()
+                const baseUrl = serverUrl || ''
+                return apiFetch<{ ok?: boolean; status?: number; error?: string }>('/autopilot/test-url', {
+                    method: 'POST',
+                    baseUrl: baseUrl.startsWith('http') ? baseUrl : undefined,
+                    body: { url },
+                })
+            },
+            (update) => setUrlTestResults(update),
+        )
+    }
+    const urlTestBoard = urlTestBoardRef.current
 
     useEffect(() => {
         if (!open) return
@@ -128,17 +152,18 @@ export function RuleDialog({
         setRuleWebhookUrl(rule?.webhookUrl || "")
         setRuleMessageTemplate(rule?.messageTemplate || "")
         const normalized = normalizeCustomChecks(rule?.customCheckUrls)
-        setCustomChecks(normalized)
+        setCustomChecks(normalized.map(entry => ({ ...entry, rowId: nextCheckRowId() })))
         const initialExpanded = new Set<number>()
         normalized.forEach((c, i) => { if (c.appliesTo.length > 0) initialExpanded.add(i) })
         setExpandedChecks(initialExpanded)
         setUrlTestResults({})
+        urlTestBoard.releaseAll()
         setScopeError(null)
         setReplacementPicker(null)
         setWebhookError(null)
         setSaveError(null)
         setEditingRuleId(rule?.id ?? null)
-    }, [open, editingRule, globalWebhookConfigured])
+    }, [open, editingRule, globalWebhookConfigured, urlTestBoard])
 
     useEffect(() => {
         if (!open || !editingRuleId) return
@@ -253,10 +278,11 @@ export function RuleDialog({
 
     const addCustomCheck = () => {
         if (customChecks.length < 5) {
-            setCustomChecks([...customChecks, { url: '', appliesTo: [] }])
+            setCustomChecks([...customChecks, { rowId: nextCheckRowId(), url: '', appliesTo: [] }])
         }
     }
     const removeCustomCheck = (index: number) => {
+        urlTestBoard.forget(customChecks[index].rowId)
         setCustomChecks(customChecks.filter((_, i) => i !== index))
         setExpandedChecks(prev => {
             const next = new Set<number>()
@@ -266,20 +292,12 @@ export function RuleDialog({
             })
             return next
         })
-        setUrlTestResults(prev => {
-            const next: Record<number, { status: 'ok' | 'fail' | 'checking'; code?: number; error?: string }> = {}
-            Object.entries(prev).forEach(([key, value]) => {
-                const i = Number(key)
-                if (i < index) next[i] = value
-                else if (i > index) next[i - 1] = value
-            })
-            return next
-        })
     }
     const updateCustomCheckUrl = (index: number, url: string) => {
         const next = [...customChecks]
         next[index] = { ...next[index], url }
         setCustomChecks(next)
+        urlTestBoard.release(next[index].rowId)
     }
     const toggleAddonForCheck = (checkIndex: number, addonUrl: string) => {
         const current = customChecks[checkIndex].appliesTo
@@ -346,11 +364,11 @@ export function RuleDialog({
         }
         if (choice === 'restore') {
             const restored = restoreScopedChecks(customChecks, restorableBackupChecks)
-            setCustomChecks(restored)
+            setCustomChecks(customChecks.map((row, i) => ({ ...row, appliesTo: restored[i].appliesTo })))
             const initialExpanded = new Set<number>()
             restored.forEach((c, i) => { if (c.appliesTo.length > 0) initialExpanded.add(i) })
             setExpandedChecks(initialExpanded)
-            await updateRule(ruleId, { customCheckUrls: restored })
+            await updateRule(ruleId, { customCheckUrls: restored.map(({ url, appliesTo }) => ({ url, appliesTo })) })
             await clearScopeBackup(ruleId)
             setScopeBackups(prev => {
                 const next = { ...prev }
@@ -363,30 +381,6 @@ export function RuleDialog({
         setScopeDecidedRuleIds(prev => prev.includes(ruleId) ? prev : [...prev, ruleId])
         setDismissedBackupRuleIds(prev => prev.filter(id => id !== ruleId))
     }
-    const testCustomCheckUrl = async (index: number) => {
-        const url = customChecks[index]?.url.trim()
-        if (!url) return
-        setUrlTestResults(prev => ({ ...prev, [index]: { status: 'checking' } }))
-        try {
-            const { useSyncStore } = await import('@/store/syncStore')
-            const { serverUrl } = useSyncStore.getState()
-            const baseUrl = serverUrl || ''
-            const result = await apiFetch<{ ok?: boolean; status?: number; error?: string }>('/autopilot/test-url', {
-                method: 'POST',
-                baseUrl: baseUrl.startsWith('http') ? baseUrl : undefined,
-                body: { url },
-            })
-            if (!result.ok) {
-                setUrlTestResults(prev => ({ ...prev, [index]: { status: 'fail', error: result.error || `Server error (${result.status})` } }))
-                return
-            }
-            const data = result.data
-            setUrlTestResults(prev => ({ ...prev, [index]: { status: data?.ok ? 'ok' : 'fail', code: data?.status, error: data?.error } }))
-        } catch {
-            setUrlTestResults(prev => ({ ...prev, [index]: { status: 'fail', error: 'Request failed' } }))
-        }
-    }
-
     const handleDialogChainDragEnd = useCallback((event: DragEndEvent) => {
         const { active, over } = event
         if (!over || active.id === over.id) return
@@ -546,13 +540,13 @@ export function RuleDialog({
                                 })()}
 
                                 {customChecks.map((check, index) => {
-                                    const result = urlTestResults[index]
+                                    const result = urlTestResults[check.rowId]
                                     const isExpanded = expandedChecks.has(index)
                                     const unassigned = getUnassignedAddons(index)
                                     const staleUrls = staleUrlsByCheck[index] || []
                                     return (
                                         <div
-                                            key={index}
+                                            key={check.rowId}
                                             ref={(el) => {
                                                 if (el) checkRowRefs.current.set(index, el)
                                                 else checkRowRefs.current.delete(index)
@@ -571,7 +565,7 @@ export function RuleDialog({
                                                 <Button
                                                     size="sm"
                                                     className="shrink-0 bg-muted/40 text-foreground/70 border border-border/40 hover:bg-muted/70 shadow-none"
-                                                    onClick={() => testCustomCheckUrl(index)}
+                                                    onClick={() => void urlTestBoard.start(check.rowId)}
                                                     disabled={!check.url.trim() || result?.status === 'checking'}
                                                 >
                                                     {result?.status === 'checking' ? (
