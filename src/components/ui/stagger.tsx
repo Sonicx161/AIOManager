@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, createContext, useContext } from 'react'
 import { cn } from '@/lib/utils'
-import { observeIntersection } from '@/lib/shared-in-view'
-import { useOffscreenGate } from '@/hooks/use-offscreen-gate'
+
+// Rows beyond this band start visible so a fast scroll never reaches a dim row.
+const REVEAL_MARGIN_PX = 800
 
 interface StaggerContainerProps {
   children: React.ReactNode
@@ -38,25 +39,23 @@ function StaggerContainer({
 function StaggerItem({
   children,
   className,
-  contentAutoClass,
   'data-theme-part': themePart,
 }: {
   children: React.ReactNode
   className?: string
-  contentAutoClass?: string
   'data-theme-part'?: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [visible, setVisible] = useState(() => !appBootSettled)
   const [settled, setSettled] = useState(() => !appBootSettled)
-  const gatedContentAutoClass = useOffscreenGate(ref, contentAutoClass)
   const { delay, nextIndex } = useContext(StaggerContext)
   const indexRef = useRef<number | null>(null)
   if (indexRef.current === null) {
     indexRef.current = nextIndex()
   }
   const index = indexRef.current
-  const animDelay = index * delay
+  const cascadeRef = useRef<boolean | undefined>(appBootSettled ? undefined : true)
+  const animDelay = cascadeRef.current === false ? 0 : index * delay
 
   useEffect(() => {
     const el = ref.current
@@ -64,15 +63,11 @@ function StaggerItem({
 
     if (!appBootSettled) return
 
-    if (typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
-
     const rect = el.getBoundingClientRect()
-    const inViewport = rect.top < window.innerHeight + 100 && rect.bottom > -100
+    const inViewport = rect.top < window.innerHeight + REVEAL_MARGIN_PX && rect.bottom > -REVEAL_MARGIN_PX
 
     if (inViewport) {
+      cascadeRef.current = true
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           setVisible(true)
@@ -81,13 +76,8 @@ function StaggerItem({
       return
     }
 
-    const disposeObserver = observeIntersection(el, { rootMargin: '100px', threshold: 0 }, entry => {
-      if (entry.isIntersecting) {
-        setVisible(true)
-        disposeObserver()
-      }
-    })
-    return disposeObserver
+    cascadeRef.current = false
+    setVisible(true)
   }, [])
 
   useEffect(() => {
@@ -106,7 +96,7 @@ function StaggerItem({
     <div
       ref={ref}
       data-theme-part={themePart}
-      className={cn('h-full', className, gatedContentAutoClass)}
+      className={cn('h-full', className)}
       style={style}
     >
       {children}

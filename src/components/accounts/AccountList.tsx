@@ -12,7 +12,6 @@ import { useSearchParams } from 'react-router-dom'
 import { useShallow } from 'zustand/react/shallow'
 import { AccountCard } from './AccountCard'
 import { StaggerContainer, StaggerItem } from '@/components/ui/stagger'
-import { OffscreenGate } from '@/components/ui/offscreen-gate'
 const BatchOperationsDialog = lazy(() => import('./BatchOperationsDialog').then(m => ({ default: m.BatchOperationsDialog })))
 import { BULK_ACTION_OPTIONS, type BulkAction } from './bulk-actions/registry'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
@@ -695,16 +694,15 @@ export function AccountList() {
             />
           ) : (
             filteredAccounts.map((account) => (
-              <OffscreenGate key={account.id} className="content-auto-account-row">
-                <AccountListRow
-                  account={account}
-                  isPrivacyMode={isPrivacyModeEnabled}
-                  isSelected={selectedAccountIds.has(account.id)}
-                  isSelectionMode={isSelectionActive}
-                  onToggleSelect={toggleAccountSelection}
-                  onDelete={handleDeleteSingle}
-                />
-              </OffscreenGate>
+              <AccountListRow
+                key={account.id}
+                account={account}
+                isPrivacyMode={isPrivacyModeEnabled}
+                isSelected={selectedAccountIds.has(account.id)}
+                isSelectionMode={isSelectionActive}
+                onToggleSelect={toggleAccountSelection}
+                onDelete={handleDeleteSingle}
+              />
             ))
           )}
         </div>
@@ -725,7 +723,7 @@ export function AccountList() {
           ) : (
             <>
               {filteredAccounts.map((account) => (
-                <StaggerItem key={account.id} contentAutoClass="content-auto-account-card">
+                <StaggerItem key={account.id}>
                   <AccountCard
                     account={account}
                     isSelected={selectedAccountIds.has(account.id)}
