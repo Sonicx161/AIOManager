@@ -288,7 +288,7 @@ export function DangerZone() {
                         />
                         <DangerRow
                             title="Wipe notes"
-                            description="Removes all notes, including anything in deleted"
+                            description="Removes all notes, including anything in the Deleted folder"
                             count={notesTotalCount}
                             disabled={notesTotalCount === 0 || !unsafeMode || isRunning}
                             onClick={() => requestDangerAction({
