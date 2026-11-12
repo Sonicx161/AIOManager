@@ -215,10 +215,8 @@ export function AddonMetadataDialog({
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            {/* flex column keeps the footer below a scrolling body; the sticky
-                footer needs a containing block taller than itself, which grid
-                rows (sized to the footer alone) would not give it. */}
-            <DialogContent className="flex max-h-[90dvh] flex-col overflow-y-auto sm:max-w-4xl">
+            <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-4xl">
+                <div className="-mx-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-3 sm:-mx-6 sm:px-6">
                 <DialogHeader>
                     <DialogTitle>Edit Addon Details</DialogTitle>
                     <DialogDescription>
@@ -456,19 +454,21 @@ export function AddonMetadataDialog({
                 </Tabs>
 
                 {error && <p role="alert" className="text-sm text-destructive font-medium">{error}</p>}
+                </div>
 
-                {/* Pinned footer: stays visible while the dialog body scrolls. */}
-                <div className="sticky bottom-0 -mx-4 -mb-4 mt-4 flex flex-col gap-2 border-t border-border/40 bg-card px-4 pb-4 pt-3 sm:-mx-6 sm:-mb-6 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-6 sm:pb-6 [&_button]:rounded-full [&_button]:px-5">
-                    <Button type="button" variant="subtle" className="order-last h-9 w-full sm:order-none sm:h-11 sm:w-auto" onClick={handleReset} disabled={saving}>
-                        Reset to Defaults
-                    </Button>
-                    <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-3 [&_button]:h-11">
-                        <Button variant="subtle" onClick={() => onOpenChange(false)} disabled={saving}>
-                            Cancel
+                <div className="relative -mx-4 -mb-4 shrink-0 border-t border-border/40 bg-card px-4 pb-4 pt-3 sm:-mx-6 sm:-mb-6 sm:px-6 sm:pb-6 [&_button]:rounded-full [&_button]:px-5">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                        <Button type="button" variant="subtle" className="order-last h-9 w-full sm:order-none sm:h-11 sm:w-auto" onClick={handleReset} disabled={saving}>
+                            Reset to Defaults
                         </Button>
-                        <Button onClick={handleSave} disabled={saving || !hasChanges}>
-                            {saving ? 'Syncing...' : 'Save & Sync'}
-                        </Button>
+                        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-3 [&_button]:h-11">
+                            <Button variant="subtle" onClick={() => onOpenChange(false)} disabled={saving}>
+                                Cancel
+                            </Button>
+                            <Button onClick={handleSave} disabled={saving || !hasChanges}>
+                                {saving ? 'Syncing...' : 'Save & Sync'}
+                            </Button>
+                        </div>
                     </div>
                 </div>
             </DialogContent>
