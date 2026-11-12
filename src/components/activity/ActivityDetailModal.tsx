@@ -2667,7 +2667,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
                                             </Tooltip>
                                         </div>
                                         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                                            <span className="truncate max-w-sm text-muted-foreground/70">
+                                            <span className="min-w-0 text-muted-foreground/70">
                                                 Having trouble? Private or unavailable videos can be searched directly on YouTube.
                                             </span>
                                             <div className="flex items-center gap-2 shrink-0">
