@@ -38,11 +38,11 @@ function DangerRow({ title, description, count, icon: Icon, disabled, onClick }:
             type="button"
             onClick={onClick}
             disabled={disabled}
-            className="flex min-h-[56px] w-full items-center gap-3 py-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 enabled:hover:bg-destructive/5"
+            className="flex min-h-[56px] w-full items-center gap-3 py-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 enabled:hover:bg-muted/25"
         >
             {Icon && (
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-destructive/25 bg-destructive/10">
-                    <Icon className="h-4 w-4 text-destructive" />
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/40 bg-muted/35">
+                    <Icon className="h-4 w-4 text-muted-foreground" />
                 </span>
             )}
             <span className="min-w-0 flex-1">
@@ -221,10 +221,10 @@ export function DangerZone() {
     return (
         <>
             <div className="space-y-3 sm:space-y-4">
-                <div data-theme-part="panel" data-theme-tone="status" className="rounded-[1.75rem] border border-destructive/30 bg-destructive/10 p-1">
-                    <div className="flex items-center gap-3 rounded-[1.55rem] bg-card/90 px-4 py-3.5">
+                <div data-theme-part="panel" className="rounded-[1.75rem] border border-border/45 bg-card/80 px-4 py-3.5 shadow-sm">
+                    <div className="flex items-center gap-3">
                         <div className="min-w-0 flex-1">
-                            <p className="text-sm font-semibold text-destructive">Unlock actions</p>
+                            <p className="text-sm font-semibold">Unlock actions</p>
                             <p className="text-xs text-muted-foreground">Wipe buttons stay disabled until this is on</p>
                         </div>
                         <Switch
@@ -236,8 +236,7 @@ export function DangerZone() {
                     </div>
                 </div>
 
-                <div data-theme-part="panel" data-theme-tone="status" className="rounded-[1.75rem] border border-destructive/30 bg-destructive/10 p-1">
-                    <div className="divide-y divide-border/25 rounded-[1.55rem] bg-card/90 px-4">
+                <div data-theme-part="panel" className="space-y-0.5 rounded-[1.75rem] border border-border/45 bg-card/80 px-4 shadow-sm">
                         <DangerRow
                             title="Wipe accounts"
                             description={`Removes ${accounts.length} local account${accounts.length !== 1 ? 's' : ''}, their installed addon state and autopilot rules`}
@@ -298,24 +297,21 @@ export function DangerZone() {
                                 action: executeWipeNotes,
                             })}
                         />
-                    </div>
                 </div>
 
-                <div data-theme-part="panel" data-theme-tone="status" className="rounded-[1.75rem] border border-destructive/30 bg-destructive/10 p-1">
-                    <div className="rounded-[1.55rem] bg-card/90 px-4">
-                        <DangerRow
-                            icon={ShieldAlert}
-                            title="Delete all AIOManager data"
-                            description="Clears this device and removes the sync account from the server, then reloads the app"
-                            disabled={!unsafeMode || isRunning}
-                            onClick={() => requestDangerAction({
-                                title: 'Delete all AIOManager data?',
-                                description: 'This clears local storage, IndexedDB, accounts, saved addons, vault keys, settings, and attempts to remove the sync account from the server before reloading the app.',
-                                confirmText: 'Delete All Data',
-                                action: executeResetAll,
-                            })}
-                        />
-                    </div>
+                <div data-theme-part="panel" className="rounded-[1.75rem] border border-border/45 bg-card/80 px-4 shadow-sm">
+                    <DangerRow
+                        icon={ShieldAlert}
+                        title="Delete all AIOManager data"
+                        description="Clears this device and removes the sync account from the server, then reloads the app"
+                        disabled={!unsafeMode || isRunning}
+                        onClick={() => requestDangerAction({
+                            title: 'Delete all AIOManager data?',
+                            description: 'This clears local storage, IndexedDB, accounts, saved addons, vault keys, settings, and attempts to remove the sync account from the server before reloading the app.',
+                            confirmText: 'Delete All Data',
+                            action: executeResetAll,
+                        })}
+                    />
                 </div>
 
                 <p className="px-1 text-xs leading-relaxed text-muted-foreground">
