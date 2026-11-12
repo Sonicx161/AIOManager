@@ -12,7 +12,9 @@
 const parts = (...names: string[]) => `:is(${names.map(name => `[data-theme-part="${name}"]`).join(', ')}):where(:not([data-theme-inset]))`
 const SURFACES = parts('card', 'addon-card', 'panel', 'toolbar', 'app-nav', 'mobile-nav', 'mobile-status', 'app-footer', 'footer-nav', 'header-status', 'tabs-list', 'dialog', 'menu', 'popover', 'select-content', 'tooltip', 'toast')
 const PAINTED_SURFACES = `${SURFACES}:not([data-theme-tone])`
-const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status')
+// Phone chrome parts (tab bar items, status strip pills) read as one band, so skins leave them unboxed.
+const EXCLUDE_PHONE_CHROME = ':where(:not([data-theme-part="mobile-nav"] [data-theme-part="nav-item"], [data-theme-part="mobile-status"] [data-theme-part="button"]))'
+const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status') + EXCLUDE_PHONE_CHROME
 const FIELDS = parts('input', 'textarea', 'field')
 const ITEMS = parts('menu-item', 'select-item')
 const IMAGE_PARTS = parts('account-avatar', 'account-accent', 'image-tile')
@@ -63,6 +65,19 @@ const STATE_DETAILS = `
 `
 const FOCUS_RING = `:is(button, input, textarea, select, a):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }`
 const MOTION_GUARD = '@media (prefers-reduced-motion: no-preference) {'
+// On phones the header, status strip and tab bar read as one flat band.
+// The tab bar row keeps a small inline inset so edge marks and their offset shadows stay on screen.
+const PHONE_CHROME = `
+[data-theme-part="mobile-nav"] { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; box-shadow: none; padding-inline: 6px; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] { min-width: 0; overflow: hidden; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: calc(100% + 0.25rem); }
+[data-theme-part="mobile-status"] { border-top: 0; border-right: 0; border-left: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 47.99rem) {
+  [data-theme-part="app-header"] { border: 0; border-radius: 0; box-shadow: none; }
+  [data-theme-part="app-header"] :where([data-theme-part="button"]) { border: 0; background: none; box-shadow: none; }
+}
+`
+const TAB_ACTIVE = '[data-theme-part="mobile-nav"] [data-theme-part="nav-item"]:is([data-state="active"], [aria-current="page"])'
 
 export const HOLO_LIQUID_CSS = `/* HOLOGRAPHIC LIQUID · Iridescent sheen rolling across pearl panels and buttons. */
 :root { --fx-duration: 7s; --fx-depth: 16px; }
@@ -71,8 +86,10 @@ export const HOLO_LIQUID_CSS = `/* HOLOGRAPHIC LIQUID · Iridescent sheen rollin
   background-color: hsl(var(--background));
   background-image: linear-gradient(150deg, hsl(260 40% 97%), hsl(200 50% 95%) 45%, hsl(320 35% 96%));
 }
+/* [data-theme-overlay] elements keep their own viewport anchoring; the skin chrome below still applies. */
+${SURFACES}:where(:not([data-theme-overlay])) { position: relative; }
 ${SURFACES} {
-  position: relative; overflow: hidden;
+  overflow: hidden;
   border: 1px solid hsl(265 30% 78% / .8); border-radius: 14px;
   box-shadow: 0 4px var(--fx-depth, 16px) hsl(265 40% 55% / .14), inset 0 1px 0 hsl(0 0% 100% / .9);
 }
@@ -113,6 +130,9 @@ ${MOTION_GUARD}
 }
 @keyframes holo-sheen { from { background-position: 280% 0; } to { background-position: -80% 0; } }
 @keyframes holo-flow { from { background-position: 0 0; } to { background-position: 200% 0; } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(265 40% 98% / .9); }
+${TAB_ACTIVE} { background: linear-gradient(120deg, hsl(265 60% 52%), hsl(300 55% 55%)); color: hsl(0 0% 100%); --foreground: 0 0% 100%; --muted-foreground: 0 0% 100%; border-radius: 9px; }
 `
 
 export const TIDAL_PULSE_CSS = `/* TIDAL PULSE · Two wave layers lap the bottom; progress bars surf. */
@@ -165,4 +185,7 @@ ${MOTION_GUARD}
 @keyframes tide-a { from { background-position: 0 0; } to { background-position: 340px 0; } }
 @keyframes tide-b { from { background-position: 0 0; } to { background-position: -340px 0; } }
 @keyframes tide-flow { from { background-position: 0 0; } to { background-position: 36px 0; } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(198 65% 97% / .9); }
+${TAB_ACTIVE} { background: linear-gradient(140deg, hsl(200 75% 44%), hsl(172 65% 44%)); color: hsl(0 0% 100%); --foreground: 0 0% 100%; --muted-foreground: 0 0% 100%; border-radius: 10px; }
 `

@@ -8,7 +8,9 @@
 const parts = (...names: string[]) => `:is(${names.map(name => `[data-theme-part="${name}"]`).join(', ')}):where(:not([data-theme-inset]))`
 const SURFACES = parts('card', 'addon-card', 'panel', 'toolbar', 'app-nav', 'mobile-nav', 'mobile-status', 'app-footer', 'footer-nav', 'header-status', 'tabs-list', 'dialog', 'menu', 'popover', 'select-content', 'tooltip', 'toast')
 const PAINTED_SURFACES = `${SURFACES}:not([data-theme-tone])`
-const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status')
+// Phone chrome parts (tab bar items, status strip pills) read as one band, so skins leave them unboxed.
+const EXCLUDE_PHONE_CHROME = ':where(:not([data-theme-part="mobile-nav"] [data-theme-part="nav-item"], [data-theme-part="mobile-status"] [data-theme-part="button"]))'
+const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status') + EXCLUDE_PHONE_CHROME
 const FIELDS = parts('input', 'textarea', 'field')
 const ITEMS = parts('menu-item', 'select-item')
 const IMAGE_PARTS = parts('account-avatar', 'account-accent', 'image-tile')
@@ -65,6 +67,19 @@ const STATE_DETAILS = `
 :is([data-theme-part="nav-item"], [data-theme-part="tab"])[data-state="active"] [data-theme-part="badge"] { background-color: transparent; color: inherit; }
 `
 const FOCUS_RING = `:is(button, input, textarea, select, a):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }`
+// On phones the header, status strip and tab bar read as one flat band.
+// The tab bar row keeps a small inline inset so edge marks and their offset shadows stay on screen.
+const PHONE_CHROME = `
+[data-theme-part="mobile-nav"] { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; box-shadow: none; padding-inline: 6px; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] { min-width: 0; overflow: hidden; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: calc(100% + 0.25rem); }
+[data-theme-part="mobile-status"] { border-top: 0; border-right: 0; border-left: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 47.99rem) {
+  [data-theme-part="app-header"] { border: 0; border-radius: 0; box-shadow: none; }
+  [data-theme-part="app-header"] :where([data-theme-part="button"]) { border: 0; background: none; box-shadow: none; }
+}
+`
+const TAB_ACTIVE = '[data-theme-part="mobile-nav"] [data-theme-part="nav-item"]:is([data-state="active"], [aria-current="page"])'
 
 export const DOT_MATRIX_CSS = `/* DOT MATRIX · Handheld olive LCD: pixel grid, ink frames and inverted selections. */
 body { font-family: 'Courier New', ui-monospace, monospace; }
@@ -90,6 +105,8 @@ h1, h2, h3 { font-family: inherit; font-weight: 700; text-transform: uppercase; 
 [data-theme-part="progress-indicator"] { background-image: none; background-color: hsl(75 35% 14%); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(75 35% 14%); color: hsl(75 25% 90%); --foreground: 75 25% 90%; --muted-foreground: 75 25% 90%; box-shadow: 2px 2px 0 hsl(75 35% 12% / .5); border-radius: 0; }
 `
 
 export const WASHI_CSS = `/* WASHI · Kozo paper fibers, deckle edges and a vermillion hanko seal. */
@@ -117,6 +134,8 @@ ${TOGGLES}, ${ITEMS} { border-radius: 4px; }
 [data-theme-part="app-header"] { background: hsl(var(--card) / .95); border-bottom: 2px solid hsl(355 45% 42% / .5); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(var(--card) / .95); }
 `
 
 export const CLAY_STUDIO_CSS = `/* CLAY STUDIO · Speckled artisan glaze over organic hand-thrown silhouettes. */
@@ -143,6 +162,8 @@ h1, h2, h3 { letter-spacing: .01em; }
 [data-theme-part="app-header"] { background: hsl(var(--card)); border-bottom: 1px solid hsl(16 45% 45% / .35); border-radius: 0 0 18px 18px; }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 14px 9px 14px 9px; }
 `
 
 export const DENIM_CSS = `/* DENIM · Indigo twill weave with golden contrast stitching and brass buttons. */
@@ -169,6 +190,8 @@ ${TOGGLES}, ${ITEMS} { border-radius: 6px; }
 [data-theme-part="app-header"] { background: hsl(var(--card)); border-bottom: 2px dashed hsl(38 85% 50% / .7); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border: 2px solid hsl(38 85% 45% / .8); border-radius: 8px; }
 `
 
 export const ARCTIC_GLASS_CSS = `/* ARCTIC GLASS · Frosted panes over an ice-sky gradient; nav opts back into blur. */
@@ -201,6 +224,9 @@ ${TOGGLES}, ${ITEMS} { border-radius: 8px; }
 [data-theme-part="app-header"] { background: hsl(205 60% 92% / .8); border-bottom: 1px solid hsl(0 0% 100% / .9); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(205 60% 92% / .8); }
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 10px; }
 `
 
 export const SHERBET_CSS = `/* SHERBET · Sorbet tri-gradient, generous rounding and candy-glow shadows. */
@@ -227,6 +253,9 @@ ${TOGGLES}, ${ITEMS} { border-radius: 10px; }
 [data-theme-part="app-header"] { background: hsl(30 55% 98% / .92); border-bottom: 1px solid hsl(280 35% 84%); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(30 55% 98% / .92); }
+${TAB_ACTIVE} { background: linear-gradient(135deg, hsl(330 60% 52%), hsl(280 60% 58%)); color: hsl(0 0% 100%); --foreground: 0 0% 100%; --muted-foreground: 0 0% 100%; box-shadow: 0 4px 12px hsl(310 60% 55% / .3); border-radius: 12px; }
 `
 
 export const COTTAGE_CSS = `/* COTTAGE · Gingham tablecloth checks, cream china cards and rose trim. */
@@ -254,6 +283,8 @@ ${TOGGLES}, ${ITEMS} { border-radius: 8px; }
 [data-theme-part="app-header"] { background: hsl(var(--card)); border-bottom: 2px dashed hsl(345 55% 50% / .5); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 9px; }
 `
 
 export const ZEN_GARDEN_CSS = `/* ZEN GARDEN · Raked sand lines, pebble controls and a calm moss accent. */
@@ -283,6 +314,7 @@ ${TOGGLES}, ${ITEMS} { border-radius: 999px; }
 [data-theme-part="app-header"] { background: hsl(var(--card)); border-bottom: 1px solid hsl(45 18% 55% / .5); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
 `
 
 export const ORIGAMI_CSS = `/* ORIGAMI · Creased paper gradient with folded-corner cards and crisp edges. */
@@ -291,8 +323,10 @@ export const ORIGAMI_CSS = `/* ORIGAMI · Creased paper gradient with folded-cor
   background-color: hsl(var(--background));
   background-image: linear-gradient(115deg, hsl(220 35% 96%), hsl(220 22% 93%) 30%, hsl(220 35% 96%) 50%, hsl(35 70% 92%) 76%, hsl(220 30% 95%));
 }
+/* [data-theme-overlay] elements keep their own viewport anchoring; the skin chrome below still applies. */
+${SURFACES}:where(:not([data-theme-overlay])) { position: relative; }
 ${SURFACES} {
-  position: relative; border: 1px solid hsl(225 30% 58% / .5); border-radius: 3px;
+  border: 1px solid hsl(225 30% 58% / .5); border-radius: 3px;
   box-shadow: 2px 3px 0 hsl(225 35% 35% / .14);
 }
 ${PAINTED_SURFACES} { background-color: hsl(var(--card)); }
@@ -315,6 +349,8 @@ ${TOGGLES}, ${ITEMS} { border-radius: 2px; }
 [data-theme-part="app-header"] { background: hsl(var(--card)); border-bottom: 1px solid hsl(225 30% 60% / .55); }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 3px; }
 `
 
 export const SONAR_CSS = `/* SONAR · Range rings and a slow sweep wedge over the abyssal plain. */
@@ -352,6 +388,9 @@ ${FOCUS_RING}
   [data-theme-part="app-shell"]::before { animation: sonar-sweep 12s linear infinite; }
 }
 @keyframes sonar-sweep { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(215 60% 6% / .97); }
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); box-shadow: 0 0 16px hsl(175 85% 55% / .3); border-radius: 4px; }
 `
 
 export const LAVA_LAMP_CSS = `/* LAVA LAMP · Two morphing wax blobs behind smoked-plum glass. */
@@ -406,4 +445,7 @@ ${FOCUS_RING}
   from { transform: translate(0, 0) scale(1) rotate(0deg); }
   to { transform: translate(-5vmin, 5vmin) scale(.9) rotate(-22deg); }
 }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(280 35% 9% / .95); }
+${TAB_ACTIVE} { background: linear-gradient(135deg, hsl(315 90% 65%), hsl(25 95% 58%)); color: hsl(280 40% 8%); --foreground: 280 40% 8%; --muted-foreground: 280 30% 20%; box-shadow: 0 0 18px hsl(315 90% 60% / .3); border-radius: 999px; }
 `

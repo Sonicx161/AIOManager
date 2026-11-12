@@ -91,9 +91,28 @@ export function MobileBottomNav() {
   const location = useLocation()
   const [moreOpen, setMoreOpen] = useState(false)
   const isMoreActive = MORE_NAV.some(item => item.match(location.pathname))
+  const barRef = useRef<HTMLDivElement>(null)
+
+  // The More sheet anchors to this bar's border-box height so taller themed bars and safe-area padding never overlap it.
+  useEffect(() => {
+    const el = barRef.current
+    if (!el) return
+    const root = document.documentElement
+    const syncBarHeight = () => {
+      const h = el.getBoundingClientRect().height
+      if (h > 0) root.style.setProperty('--aioman-tabbar-height', `${Math.ceil(h)}px`)
+    }
+    syncBarHeight()
+    const observer = new ResizeObserver(syncBarHeight)
+    observer.observe(el, { box: 'border-box' })
+    return () => {
+      observer.disconnect()
+      root.style.removeProperty('--aioman-tabbar-height')
+    }
+  }, [])
 
   return (
-    <div data-theme-part="mobile-nav" className="md:hidden flex-shrink-0 relative z-50 bg-card/95 backdrop-blur-lg border-t border-border/40 flex items-center justify-around min-h-[80px] pb-[calc(env(safe-area-inset-bottom,0px)+10px)] shadow-[0_-10px_40px_hsl(var(--background)/0.8)]">
+    <div ref={barRef} data-theme-part="mobile-nav" className="md:hidden flex-shrink-0 relative z-50 bg-card/95 backdrop-blur-lg border-t border-border/40 flex items-center justify-around min-h-[80px] pb-[calc(env(safe-area-inset-bottom,0px)+10px)] shadow-[0_-10px_40px_hsl(var(--background)/0.8)]">
       {PRIMARY_NAV.map((item) => {
         const isActive = item.match(location.pathname)
         const Icon = item.icon
@@ -134,6 +153,7 @@ export function MobileBottomNav() {
             <>
               <motion.div
                 data-theme-part="dialog-overlay"
+                data-theme-overlay=""
                 className="fixed inset-0 z-40 bg-black/20 backdrop-blur-sm"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -142,7 +162,9 @@ export function MobileBottomNav() {
               />
               <motion.div
                 data-theme-part="menu"
-                className="fixed bottom-[80px] left-0 right-0 z-40 bg-card/95 backdrop-blur-lg rounded-t-3xl border border-b-0 border-border/40 shadow-[0_-10px_40px_hsl(var(--background)/0.8)]"
+                data-theme-overlay=""
+                className="fixed left-0 right-0 z-40 bg-card/95 backdrop-blur-lg rounded-t-3xl border border-b-0 border-border/40 shadow-[0_-10px_40px_hsl(var(--background)/0.8)]"
+                style={{ bottom: 'var(--aioman-tabbar-height, 80px)' }}
                 initial={{ y: 420 }}
                 animate={{ y: 0 }}
                 exit={{ y: 420 }}

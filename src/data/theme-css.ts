@@ -5,7 +5,9 @@ const parts = (...names: string[]) => `:is(${names.map(name => `[data-theme-part
 const SURFACES = parts('card', 'addon-card', 'panel', 'toolbar', 'app-nav', 'mobile-nav', 'mobile-status', 'app-footer', 'footer-nav', 'header-status', 'tabs-list', 'dialog', 'menu', 'popover', 'select-content', 'tooltip', 'toast')
 // Status panels keep their semantic fill while receiving the skin's frame.
 const PAINTED_SURFACES = `${SURFACES}:not([data-theme-tone])`
-const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status')
+// Phone chrome parts (tab bar items, status strip pills) read as one band, so skins leave them unboxed.
+const EXCLUDE_PHONE_CHROME = ':where(:not([data-theme-part="mobile-nav"] [data-theme-part="nav-item"], [data-theme-part="mobile-status"] [data-theme-part="button"]))'
+const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status') + EXCLUDE_PHONE_CHROME
 const FIELDS = parts('input', 'textarea', 'field')
 const ITEMS = parts('menu-item', 'select-item')
 const IMAGE_PARTS = parts('account-avatar', 'account-accent', 'image-tile')
@@ -74,6 +76,20 @@ ${STATE_DETAILS}
 :is(button, input, textarea, select, a):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
 `
 
+// On phones the header, status strip and tab bar read as one flat band.
+// The tab bar row keeps a small inline inset so edge marks and their offset shadows stay on screen.
+const PHONE_CHROME = `
+[data-theme-part="mobile-nav"] { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; box-shadow: none; padding-inline: 6px; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] { min-width: 0; overflow: hidden; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: calc(100% + 0.25rem); }
+[data-theme-part="mobile-status"] { border-top: 0; border-right: 0; border-left: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 47.99rem) {
+  [data-theme-part="app-header"] { border: 0; border-radius: 0; box-shadow: none; }
+  [data-theme-part="app-header"] :where([data-theme-part="button"]) { border: 0; background: none; box-shadow: none; }
+}
+`
+const TAB_ACTIVE = '[data-theme-part="mobile-nav"] [data-theme-part="nav-item"]:is([data-state="active"], [aria-current="page"])'
+
 // A small repeating SVG is part of the CSS itself, so exports need no asset files.
 const MATRIX_GLYPHS = '01ZX7539A82K4'
 const matrixRainImage = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="336" height="480" viewBox="0 0 336 480"><g font-family="monospace" font-size="15" font-weight="600">${Array.from({ length: 12 }, (_, column) => {
@@ -127,6 +143,9 @@ ${STATE_DETAILS}
 }
 @keyframes matrix-rain-near { from { transform: translateY(0); } to { transform: translateY(480px); } }
 @keyframes matrix-rain-far { from { transform: translateY(0); } to { transform: translateY(720px); } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(var(--card) / .97); }
+${TAB_ACTIVE} { background-color: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 2px; }
 `
 
 export const PIP_BOY_CSS = `/* PIP-BOY · Fallout-inspired phosphor, instrument frames and a slow CRT sweep. */
@@ -171,6 +190,9 @@ ${STATE_DETAILS}
   [data-theme-part="app-shell"]::before { animation: pip-boy-sweep 9s linear infinite; }
 }
 @keyframes pip-boy-sweep { from { transform: translateY(0); } to { transform: translateY(112vh); } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(var(--card) / .97); }
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); box-shadow: 0 0 14px hsl(var(--primary) / .18); border-radius: 1px; }
 `
 
 
@@ -208,6 +230,8 @@ ${STATE_DETAILS}
   from { transform: translateY(0); }
   to { transform: translateY(48px); }
 }
+${PHONE_CHROME}
+${TAB_ACTIVE} { background-color: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); box-shadow: 0 0 16px hsl(var(--primary) / .22); border-radius: 3px; }
 `
 
 export const BLUEPRINT_LIVE_CSS = `/* BLUEPRINT LIVE · The header responds to the app's published sync state. */
@@ -235,6 +259,8 @@ ${ACTIONS} { border: 1px solid hsl(var(--primary) / .4); }
   }
 }
 @keyframes blueprint-live-scan { from { background-position: 200% 0; } to { background-position: 0 0; } }
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary) / .17); box-shadow: inset 0 -2px 0 hsl(var(--primary)); border-radius: 2px; }
 `
 
 export const LIQUID_CHROME_CSS = `/* LIQUID CHROME · Brushed metal, violet selections and a slow title-bar sheen. */
@@ -257,6 +283,12 @@ ${FIELDS} { background: hsl(0 0% 100%); box-shadow: inset 0 1px 3px hsl(220 20% 
   [data-theme-part="app-header"] { animation: liquid-chrome-sheen 9s ease-in-out infinite alternate; }
 }
 @keyframes liquid-chrome-sheen { from { background-position: 0% 0; } to { background-position: 100% 0; } }
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: linear-gradient(110deg, hsl(218 14% 88%) 10%, white 30%, hsl(218 10% 70%) 55%, white 75%, hsl(218 15% 88%) 95%); background-size: 220% 100%; }
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme-part="mobile-status"] { animation: liquid-chrome-sheen 9s ease-in-out infinite alternate; }
+}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border-radius: 9px; }
 `
 
 export const COMIC_BOOK_CLASSIC_CSS = `/* COMIC BOOK · Solid ink frames and offset shadows. */
@@ -273,6 +305,8 @@ ${TOGGLES}, ${ITEMS}, [data-theme-part="badge"] { border-radius: 2px; }
 ${ITEMS}:is(:hover, [data-highlighted]) { background-color: hsl(var(--primary) / .12); }
 ${STATE_DETAILS}
 :is(button, input, textarea, select, a):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border: 2px solid hsl(0 0% 10%); box-shadow: 2px 2px 0 hsl(0 0% 10%); border-radius: 4px; }
 `
 
 export const COMIC_BOOK_CSS = `/* COMIC BOOK+ · Change the ink, dot spacing and shadow offset to remix. */
@@ -310,6 +344,8 @@ h1, h2, h3 { font-weight: 900; letter-spacing: -.035em; }
 ${STATE_DETAILS}
 /* Keep focus indicators visible when adding your own hover/pressed effects. */
 :is(button, input, textarea, a):focus-visible { outline: 3px solid hsl(var(--ring)); outline-offset: 3px; }
+${PHONE_CHROME}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); border: 2px solid var(--comic-ink); box-shadow: 2px 2px 0 var(--comic-ink); border-radius: 5px; }
 `
 
 export const RETRO_DESKTOP_CSS = `/* RETRO DESKTOP · Bevels, title bars, system fonts and a teal desktop. */
@@ -364,6 +400,18 @@ ${ITEMS}:not([data-variant="destructive"]):is(:hover, [data-highlighted]) {
 }
 h1, h2, h3 { font-family: Tahoma, Verdana, sans-serif; letter-spacing: 0; }
 ${STATE_DETAILS}
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: linear-gradient(90deg, hsl(232 68% 28%), hsl(210 65% 45%)); color: white; --foreground: 0 0% 100%; --muted-foreground: 0 0% 90%; }
+@media (max-width: 47.99rem) {
+  [data-theme-part="app-header"] [data-theme-part="button"] {
+    --foreground: 0 0% 100%;
+    --muted-foreground: 0 0% 84%;
+    color: hsl(var(--foreground));
+    background: none;
+  }
+  [data-theme-part="app-header"] [data-theme-part="button"]:is(:hover, :active, [aria-pressed="true"]) { background-color: hsl(0 0% 100% / .16); }
+}
+${TAB_ACTIVE} { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); --foreground: var(--primary-foreground); --muted-foreground: var(--primary-foreground); box-shadow: inset 1px 1px 0 hsl(0 0% 0% / .45); border-radius: 2px; }
 `
 
 export const CRT_TERMINAL_CSS = `/* CRT TERMINAL · Static scanlines keep the phosphor look without flashing. */
@@ -401,4 +449,6 @@ h1, h2, h3 { font-family: inherit; text-shadow: 0 0 12px hsl(var(--primary) / .3
 }
 [data-theme-part="app-header"] { border-bottom: 1px solid hsl(var(--primary) / .4); }
 ${STATE_DETAILS}
+${PHONE_CHROME}
+${TAB_ACTIVE} { background-color: hsl(var(--primary) / .17); color: hsl(var(--primary)); box-shadow: inset 0 -2px 0 hsl(var(--primary)); border-radius: 2px; }
 `

@@ -283,6 +283,7 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
       >
         <div
           data-theme-part="dialog-overlay"
+          data-theme-overlay=""
           className={cn(
             'fixed inset-0 bg-black/50 motion-reduce:transition-none',
             '[transition:opacity_240ms_cubic-bezier(0.22,1,0.36,1)]',
@@ -379,6 +380,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTML
     return (
       <div
         data-theme-part="dialog"
+        data-theme-overlay=""
         ref={node => {
             sheetRef.current = node
             if (typeof ref === 'function') ref(node)

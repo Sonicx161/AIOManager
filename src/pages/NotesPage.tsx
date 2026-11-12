@@ -564,7 +564,7 @@ function TableContextMenu({
     }, [onClose])
 
     return (
-        <div ref={ref} data-theme-part="menu" className="fixed z-[100] min-w-[160px] bg-popover border border-border/40 rounded-lg shadow-xl overflow-hidden py-1" style={{ left: x, top: y }}>
+        <div ref={ref} data-theme-part="menu" data-theme-overlay="" className="fixed z-[100] min-w-[160px] bg-popover border border-border/40 rounded-lg shadow-xl overflow-hidden py-1" style={{ left: x, top: y }}>
             {!isHeader && (
                 <button data-theme-part="menu-item" className="w-full px-3 py-1.5 text-xs hover:bg-muted/50 text-left" onClick={() => onAction('add-row-above')}>Add row above</button>
             )}
@@ -1345,6 +1345,7 @@ function NoteEditor({ note, onClose, onNavigateToNote, allNotes }: NoteEditorPro
                         <div
                             ref={helpPopoverRef}
                             data-theme-part="popover"
+                            data-theme-overlay=""
                             className="fixed w-64 bg-popover border border-border/40 rounded-xl shadow-2xl z-[100] overflow-hidden animate-in fade-in zoom-in-95 duration-100"
                             style={{
                                 left: Math.max(8, Math.min(helpPos.left - 256, window.innerWidth - 264)),

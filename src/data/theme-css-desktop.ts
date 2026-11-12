@@ -7,9 +7,23 @@
 // and focus stays visible. Mostly static by design; any motion is guarded.
 const parts = (...names: string[]) => `:is(${names.map(name => `[data-theme-part="${name}"]`).join(', ')}):where(:not([data-theme-inset]))`
 const SURFACES = parts('card', 'addon-card', 'panel', 'toolbar', 'app-nav', 'mobile-nav', 'mobile-status', 'app-footer', 'footer-nav', 'header-status', 'tabs-list', 'dialog', 'menu', 'popover', 'select-content', 'tooltip', 'toast')
-const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status')
+// Phone chrome parts (tab bar items, status strip pills) read as one band, so skins leave them unboxed.
+const EXCLUDE_PHONE_CHROME = ':where(:not([data-theme-part="mobile-nav"] [data-theme-part="nav-item"], [data-theme-part="mobile-status"] [data-theme-part="button"]))'
+const ACTIONS = parts('button', 'nav-item', 'tab', 'select-trigger', 'sync-status', 'autopilot-status') + EXCLUDE_PHONE_CHROME
 const FIELDS = parts('input', 'textarea', 'field')
 const ITEMS = parts('menu-item', 'select-item')
+// On phones the header, status strip and tab bar read as one flat band.
+// The tab bar row keeps a small inline inset so edge marks and their offset shadows stay on screen.
+const PHONE_CHROME = `
+[data-theme-part="mobile-nav"] { border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; box-shadow: none; padding-inline: 6px; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] { min-width: 0; overflow: hidden; }
+[data-theme-part="mobile-nav"] [data-theme-part="nav-item"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: calc(100% + 0.25rem); }
+[data-theme-part="mobile-status"] { border-top: 0; border-right: 0; border-left: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 47.99rem) {
+  [data-theme-part="app-header"] { border: 0; border-radius: 0; box-shadow: none; }
+  [data-theme-part="app-header"] :where([data-theme-part="button"]) { border: 0; background: none; box-shadow: none; }
+}
+`
 const IMAGE_PARTS = parts('account-avatar', 'account-accent', 'image-tile')
 const TOGGLES = `${parts('checkbox', 'switch', 'switch-thumb', 'progress', 'progress-indicator', 'scroll-thumb', 'avatar', 'avatar-fallback', 'skeleton')}, ${IMAGE_PARTS}`
 const STATE_DETAILS = `
@@ -97,4 +111,6 @@ ${TOGGLES} { border-radius: 4px; }
 [data-theme-part="scroll-thumb"] { background: hsl(222 15% 70%); border-radius: 999px; }
 ${STATE_DETAILS}
 ${FOCUS_RING}
+${PHONE_CHROME}
+[data-theme-part="mobile-status"] { background: hsl(var(--card) / .88); }
 `
