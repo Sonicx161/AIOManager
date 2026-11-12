@@ -53,6 +53,12 @@ const fastify = Fastify({
 
 fastify.setErrorHandler(serverErrorHandler)
 
+// With request logging off and error-reply logging 5xx only, debug/trace is the only window on what answered >=400 in front of the app.
+fastify.addHook('onResponse', async (request, reply) => {
+    if (reply.statusCode < 400 || !fastify.log.isLevelEnabled('debug')) return
+    fastify.log.debug({ category: 'Server', method: request.method, route: request.routeOptions?.url, status: reply.statusCode, responseTime: reply.elapsedTime }, 'Rejected request')
+})
+
 ensureDataDirectory(fastify)
 initializeEncryptionKeys(fastify)
 

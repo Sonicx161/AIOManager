@@ -1,3 +1,4 @@
+import { readApiErrorMessage } from '@/api/error-message'
 import { resilientFetch } from '@/lib/api-resilience'
 import { useSyncStore, getSyncApiPath } from '@/store/syncStore'
 import { getDeviceAwareAuthHeaders } from '@/lib/device-session'
@@ -15,8 +16,7 @@ export async function downloadNuvioBackup(accountId: string, connectionId: strin
         timeout: 30000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Backup download failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
 
     const blob = await res.blob()

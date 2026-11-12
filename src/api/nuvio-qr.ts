@@ -1,3 +1,4 @@
+import { readApiErrorMessage } from '@/api/error-message'
 import type { QRSession, QRPollOutcome } from '@/lib/qr-device-link'
 import { mapNuvioPollErrorStatus, mapNuvioPollStatus, parseExpiry } from '@/lib/qr-device-link'
 import { useSyncStore, getSyncApiPath } from '@/store/syncStore'
@@ -35,8 +36,7 @@ async function postQr<T>(path: string, payload: Record<string, unknown>): Promis
         body: JSON.stringify(payload),
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' })) as { error?: string }
-        const err = new Error(body.error || `Nuvio QR request failed (${res.status})`) as Error & { status: number }
+        const err = new Error(await readApiErrorMessage(res)) as Error & { status: number }
         err.status = res.status
         throw err
     }

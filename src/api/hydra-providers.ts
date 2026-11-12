@@ -1,3 +1,4 @@
+import { readApiErrorMessage } from '@/api/error-message'
 import { resilientFetch } from '@/lib/api-resilience'
 import { useSyncStore, getSyncApiPath } from '@/store/syncStore'
 import { getSyncPasswordHeader } from '@/lib/sync-auth'
@@ -37,8 +38,7 @@ export async function testHydraEndpoint(
         timeout: 15000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Test failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
     return res.json()
 }
@@ -59,8 +59,7 @@ export async function storeConnectionCredential(
         timeout: 10000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || 'Failed to store credentials')
+        throw new Error(await readApiErrorMessage(res))
     }
 }
 
@@ -129,8 +128,7 @@ export async function nuvioAuth(
         timeout: 15000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw Object.assign(new Error(body.error || `Authentication failed (${res.status})`), { status: res.status })
+        throw Object.assign(new Error(await readApiErrorMessage(res)), { status: res.status })
     }
     return res.json()
 }
@@ -148,8 +146,7 @@ export async function realstreamAuth(
         timeout: 15000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Authentication failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
     return res.json()
 }
@@ -168,8 +165,7 @@ export async function nuvioSignup(
         timeout: 20000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Sign up failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
     return res.json()
 }
@@ -188,8 +184,7 @@ export async function realstreamSignup(
         timeout: 20000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Sign up failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
     return res.json()
 }
@@ -261,8 +256,7 @@ export async function deleteSubscriber(accountId: string, name: string): Promise
         timeout: 10000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Failed to remove subscriber (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
 }
 
@@ -277,8 +271,7 @@ export async function deleteConnectionCredential(
         timeout: 10000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || 'Failed to delete credentials')
+        throw new Error(await readApiErrorMessage(res))
     }
 }
 

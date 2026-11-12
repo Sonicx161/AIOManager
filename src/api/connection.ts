@@ -1,3 +1,4 @@
+import { readApiErrorMessage } from '@/api/error-message'
 import { resilientFetch } from '@/lib/api-resilience'
 import { useSyncStore, getSyncApiPath } from '@/store/syncStore'
 import { useAuthStore } from '@/store/authStore'
@@ -54,8 +55,7 @@ export async function triggerReconciliation(
         timeout: 30000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Sync failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
     return res.json()
 }
@@ -181,8 +181,7 @@ export async function setConnectionProfile(
         timeout: 15000,
     })
     if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Unknown error' }))
-        throw new Error(body.error || `Profile switch failed (${res.status})`)
+        throw new Error(await readApiErrorMessage(res))
     }
 }
 
