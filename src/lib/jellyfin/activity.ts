@@ -3,7 +3,7 @@ import type { Connection } from '../../types/connection.ts'
 import type { JellyfinMediaReads } from './reads.ts'
 import type { JellyfinItem, JellyfinNowPlayingItem, JellyfinSession } from './types.ts'
 import { metahubPosterUrl } from '../activity-artwork.ts'
-import { jellyfinCanonicalId, jellyfinTmdbId } from './metadata.ts'
+import { jellyfinCanonicalId, jellyfinImdbId, jellyfinTmdbId } from './metadata.ts'
 import { createWorkspaceResetSubscription } from '../workspace-reset-subscription.ts'
 
 export interface MediaAccount { id: string; name: string }
@@ -167,13 +167,44 @@ function libraryActivity(account: MediaAccount, colorIndex: number, connection: 
     return result
 }
 
+// Live-session ids matching the library rows; own ids win and IMDb is never traded for TMDB/TVDB.
+function liveSeriesProviderIds(nowPlaying: JellyfinNowPlayingItem | undefined, resume: JellyfinItem | undefined, reads: JellyfinMediaReads): Record<string, string> | undefined {
+    if (nowPlaying?.Type !== 'Episode' || typeof nowPlaying.SeriesId !== 'string' || !nowPlaying.SeriesId) return undefined
+    const own = nowPlaying.SeriesProviderIds
+    if (jellyfinImdbId(own)) return own
+    // The id readers take the first IMDb-case key they see, so an emptied variant must not survive beside the filled id.
+    const filled = (imdb: string): Record<string, string> => ({
+        ...Object.fromEntries(Object.entries(own ?? {}).filter(([key]) => key.toLowerCase() !== 'imdb')),
+        Imdb: imdb,
+    })
+    const candidates: Array<Record<string, string>> = []
+    if (resume?.SeriesProviderIds) candidates.push(resume.SeriesProviderIds)
+    for (const read of [reads.resume, reads.played]) {
+        if (read.status !== 'success') continue
+        for (const item of read.data.items) {
+            if (item.Type === 'Episode' && item.SeriesId === nowPlaying.SeriesId && item.SeriesProviderIds && item !== resume) candidates.push(item.SeriesProviderIds)
+        }
+    }
+    // Any candidate's IMDb id beats a nearer TMDB/TVDB-only form; otherwise the nearest canonical candidate is the fallback.
+    let fallback: Record<string, string> | undefined
+    for (const ids of candidates) {
+        if (!jellyfinCanonicalId(ids)) continue
+        const imdb = jellyfinImdbId(ids)
+        if (imdb) return filled(imdb)
+        fallback ??= ids
+    }
+    if (jellyfinCanonicalId(own)) return own
+    return fallback
+}
+
 function appendSessions(result: MediaActivity, account: MediaAccount, colorIndex: number, connection: Connection, reads: JellyfinMediaReads, now: number): void {
     if (!connection.mediaServer?.userId) return
     if (reads.sessions.status === 'success') {
         for (const session of reads.sessions.data) {
             if (!fresh(session, connection.mediaServer.userId, now)) continue
             const resume = reads.resume.status === 'success' ? reads.resume.data.items.find(item => item.Id === session.NowPlayingItem?.Id) : undefined
-            const item = activityItem(account, colorIndex, connection, { ...resume, ...session.NowPlayingItem }, 'live', reads.sessions.checkedAt, now, session.PlayState?.PositionTicks)
+            const seriesProviderIds = liveSeriesProviderIds(session.NowPlayingItem, resume, reads)
+            const item = activityItem(account, colorIndex, connection, { ...resume, ...session.NowPlayingItem, ...(seriesProviderIds ? { SeriesProviderIds: seriesProviderIds } : {}) }, 'live', reads.sessions.checkedAt, now, session.PlayState?.PositionTicks)
             if (!item) continue
             item.mediaObservation!.isPaused = session.PlayState?.IsPaused === true
             item.mediaObservation!.reportedAt = Date.parse(session.LastPlaybackCheckIn!)
@@ -357,8 +388,9 @@ export function mergeMediaHistory(existing: ActivityItem[], incoming: ActivityIt
         }
         const prior = history[match]
         const merged = mergeCurrentState(prior, item)
+        // The media row's poster is the current artwork for this identity; show it, not the older art the original row recorded.
         history[match] = prior.source !== 'jellyfin'
-            ? { ...prior, mediaSources: merged.mediaSources, mediaTargets: merged.mediaTargets }
+            ? { ...prior, poster: item.poster || prior.poster, mediaSources: merged.mediaSources, mediaTargets: merged.mediaTargets }
             : adoptResolved(merged, prior, item)
     }
     return history
@@ -466,7 +498,7 @@ export function collapseImportedCopies(items: ActivityItem[]): ActivityItem[] {
         const label = copy.mediaObservation?.productName || COPY_SOURCE_LABELS[sourceOf(copy)] || sourceOf(copy)
         const mediaSources = [...new Set([...(base.mediaSources || []), ...(copy.mediaSources || []), label])]
         const mediaTargets = [...new Map([...(base.mediaTargets || []), ...(copy.mediaTargets || [])].map(entry => [JSON.stringify([entry.connectionId, entry.itemId]), entry])).values()]
-        replaced.set(target, { ...base, mediaSources, ...(mediaTargets.length ? { mediaTargets } : {}) })
+        replaced.set(target, { ...base, poster: copy.poster || base.poster, mediaSources, ...(mediaTargets.length ? { mediaTargets } : {}) })
         dropped.add(copy)
     }
     if (dropped.size === 0) return settleBursts(items)

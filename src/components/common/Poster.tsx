@@ -4,7 +4,7 @@ import { cn, sanitizePosterUrl } from '@/lib/utils'
 import { isProxyableUrl, getCinemetaPosterUrl } from '@/lib/cinemeta-utils'
 import { fetchKitsuMeta, parseKitsuId } from '@/lib/kitsu-meta'
 import { imdbIdFromPosterUrl, pickUniqueTmdbTitleMatch, type TmdbTitleCandidate, type TmdbTitleMatch } from '@/lib/activity-artwork'
-import { clampProxyWidth, posterImageCandidates, proxyImageUrl, retargetImageUrl, sizeTmdbUrl } from '@/lib/image-proxy'
+import { clampProxyWidth, posterImageCandidates, proxyImageUrl, retargetImageUrl, sizeTmdbUrl, versionedProxyUrl } from '@/lib/image-proxy'
 import { artIdentity, artSnapshot, clearArtFailures, markArtFailed, markArtLoaded, orderArtCandidates, publishedArt, subscribeArt, type ArtCandidate } from '@/lib/poster-art'
 
 interface PosterProps extends React.ImgHTMLAttributes<HTMLImageElement> {
@@ -26,8 +26,8 @@ function proxyUrl(url: string | undefined, width?: number): string | undefined {
     }
     // Stored poster URLs can already be proxied pass-throughs; re-point them at the
     // displayed width the same way (never signed avatar URLs, whose w is part of the signature).
-    if (width && url.startsWith('/api/proxy-image') && !url.includes('kind=avatar')) {
-        return retargetImageUrl(url, width) ?? url
+    if (url.startsWith('/api/proxy-image') && !url.includes('kind=avatar')) {
+        return width ? retargetImageUrl(url, width) ?? url : versionedProxyUrl(url)
     }
     return width ? sizeTmdbUrl(url, width) : url
 }

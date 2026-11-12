@@ -562,9 +562,11 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         const merged = resolveUnrecordedEpisodes(collapseImportedCopies(mergeMediaHistory(history.map(historyEntryToActivityItem), media.history.filter(notDeleted))))
         const entries: HistoryEntry[] = merged.map(item => {
             const existing = byId.get(item.id)
-            return existing ? { ...existing, mediaSources: item.mediaSources, mediaTargets: item.mediaTargets } : {
-                ...item, video_id: item.uniqueItemId, isFromEventLog: false,
-            }
+            return existing
+                ? { ...existing, poster: item.poster || existing.poster, mediaSources: item.mediaSources, mediaTargets: item.mediaTargets }
+                : {
+                    ...item, video_id: item.uniqueItemId, isFromEventLog: false,
+                }
         })
         entries.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
         combinedHistoryCacheRef.current = { deps, value: entries }

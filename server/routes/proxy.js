@@ -13,7 +13,7 @@ import { trace, keyTag, traceEnabled, hostOf } from '../utils/trace.js'
 import { getAddonUrlKey } from '../utils/addon-url.js'
 import { invalidateCanonicalAddons, invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
 import { PRIMARY_KEY } from '../keys.js'
-import { AVATAR_ALLOWED_TYPES, AVATAR_BUDGET_BYTES, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_SIGN_BATCH_MAX, IMMUTABLE_CACHE_CONTROL, clampImageWidth, createByteBudget, declaredTypeConflicts, detectImageType, metahubVariantUrl, signAvatarUrl, verifyAvatarSignature } from '../utils/image-variants.js'
+import { AVATAR_ALLOWED_TYPES, AVATAR_BUDGET_BYTES, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_SIGN_BATCH_MAX, POSTER_CACHE_CONTROL, clampImageWidth, createByteBudget, declaredTypeConflicts, detectImageType, ifNoneMatchSatisfies, keepCachedArtifact, metahubVariantUrl, signAvatarUrl, verifyAvatarSignature } from '../utils/image-variants.js'
 
 export const briefAddons = (addons) => (Array.isArray(addons) ? addons.map(a => ({ id: a?.manifest?.id || a?.id || '?', host: a?.transportUrl ? hostOf(a.transportUrl) : '' })) : [])
 
@@ -121,7 +121,8 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             imageCache.delete(key)
             imageCacheBytes -= hit.bytes
             imageCacheStats.misses++
-            return null
+            // Expired entries stay flagged so a re-fetch can keep the newer bytes.
+            return { ...hit, expired: true }
         }
         imageCacheStats.hits++
         imageCache.delete(key)
@@ -129,11 +130,11 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         return hit
     }
 
-    const imageCacheSet = (key, buffer, contentType) => {
+    const imageCacheSet = (key, buffer, contentType, etag, lastModified, retained = 0) => {
         if (IMAGE_CACHE_MAX_BYTES <= 0 || buffer.length > IMAGE_CACHE_MAX_ITEM_BYTES) return
         const existing = imageCache.get(key)
         if (existing) { imageCache.delete(key); imageCacheBytes -= existing.bytes }
-        const entry = { buffer, contentType, expires: Date.now() + IMAGE_CACHE_TTL_MS, bytes: buffer.length }
+        const entry = { buffer, contentType, expires: Date.now() + IMAGE_CACHE_TTL_MS, bytes: buffer.length, etag, lastModified, retained }
         imageCache.set(key, entry)
         imageCacheBytes += entry.bytes
         while (imageCacheBytes > IMAGE_CACHE_MAX_BYTES && imageCache.size > 0) {
@@ -674,15 +675,18 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     return { error: 'Unsupported image type', status: 415 }
                 }
 
-                return { buffer, contentType: detected }
+                const lastModifiedHeader = response.headers.get('last-modified')
+                return { buffer, contentType: detected, ...(lastModifiedHeader ? { lastModified: lastModifiedHeader } : {}) }
             } finally {
                 if (timeout) clearTimeout(timeout)
             }
         }
 
         const cacheKey = (isAvatar ? 'avatar:' : '') + normalizeImageKey(rawUrl)
-        const sendImage = (contentType, buffer, cacheState) => {
-            reply.header('Cache-Control', isAvatar ? AVATAR_CACHE_CONTROL : IMMUTABLE_CACHE_CONTROL)
+        const etagFor = (buffer) => `"${createHash('sha256').update(buffer).digest('hex')}"`
+        const sendImage = (contentType, buffer, cacheState, etag) => {
+            reply.header('Cache-Control', isAvatar ? AVATAR_CACHE_CONTROL : POSTER_CACHE_CONTROL)
+            if (!isAvatar && etag) reply.header('ETag', etag)
             reply.header('X-Content-Type-Options', 'nosniff')
             reply.header('Content-Disposition', 'inline')
             reply.header('Content-Security-Policy', "default-src 'none'; sandbox")
@@ -690,9 +694,21 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
             reply.type(contentType)
             return buffer
         }
+        // Compare If-None-Match against the bytes this response would carry.
+        const notModified = (etag) => {
+            if (isAvatar || !ifNoneMatchSatisfies(request.headers['if-none-match'], etag)) return null
+            reply.header('Cache-Control', POSTER_CACHE_CONTROL)
+            reply.header('ETag', etag)
+            // A returned null would serialize as JSON on a 304.
+            return reply.code(304).send()
+        }
 
         const cached = imageCacheGet(cacheKey)
-        if (cached) return sendImage(cached.contentType, cached.buffer, 'HIT')
+        if (cached && !cached.expired) {
+            const fresh = notModified(cached.etag)
+            if (fresh) return fresh
+            return sendImage(cached.contentType, cached.buffer, 'HIT', cached.etag)
+        }
 
         let resolution = imageInflight.get(cacheKey)
         if (!resolution) {
@@ -715,8 +731,15 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                             continue
                         }
                         if (result.buffer) {
-                            imageCacheSet(cacheKey, result.buffer, result.contentType)
-                            return result
+                            const etag = etagFor(result.buffer)
+                            // Some artwork hosts serve older bytes for a stable URL; keep the newer copy for one extra TTL window.
+                            if (keepCachedArtifact({ isAvatar, staleLM: cached?.lastModified, freshLM: result.lastModified, retained: cached?.retained ?? 0 })) {
+                                const retained = (cached?.retained ?? 0) + 1
+                                imageCacheSet(cacheKey, cached.buffer, cached.contentType, cached.etag, cached.lastModified, retained)
+                                return { buffer: cached.buffer, contentType: cached.contentType, etag: cached.etag }
+                            }
+                            imageCacheSet(cacheKey, result.buffer, result.contentType, etag, result.lastModified)
+                            return { ...result, etag }
                         }
                         lastFailure = result
                     }
@@ -730,7 +753,11 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         }
 
         const result = await resolution
-        if (result.buffer) return sendImage(result.contentType, result.buffer, 'MISS')
+        if (result.buffer) {
+            const fresh = notModified(result.etag)
+            if (fresh) return fresh
+            return sendImage(result.contentType, result.buffer, 'MISS', result.etag)
+        }
 
         reply.status(result.status)
         return { error: result.error }

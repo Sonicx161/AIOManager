@@ -29,7 +29,6 @@ export const metahubVariantUrl = (rawUrl, width) => {
 }
 
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024
-export const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable'
 export const AVATAR_CACHE_CONTROL = 'public, max-age=604800, stale-while-revalidate=86400'
 
 export const AVATAR_ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif'])
@@ -38,6 +37,9 @@ export const AVATAR_SIGN_TTL_MS = 24 * 60 * 60 * 1000
 export const AVATAR_SIGN_BUCKET_MS = 60 * 60 * 1000
 export const AVATAR_BUDGET_BYTES = 50 * 1024 * 1024
 export const AVATAR_BUDGET_WINDOW_MS = 60 * 60 * 1000
+
+// Artwork behind a stable URL can change upstream, so it revalidates instead of being immutable.
+export const POSTER_CACHE_CONTROL = 'public, max-age=604800, must-revalidate'
 
 const ASCII = (buf, start, end) => buf.toString('latin1', start, end)
 const AVIF_BRANDS = new Set(['avif', 'avis'])
@@ -121,6 +123,31 @@ export const verifyAvatarSignature = (secret, { url, u, exp, sig, w }, now = Dat
     try { given = Buffer.from(String(sig), 'base64url') } catch { return null }
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null
     return normalized
+}
+
+export const ifNoneMatchSatisfies = (header, etag) => {
+    if (!header || !etag) return false
+    return String(header).split(',').map(tag => tag.trim()).some(tag => tag === etag || tag === `W/${etag}` || tag === '*')
+}
+
+// Beyond this skew a future Last-Modified is bogus and would pin stale bytes.
+const LAST_MODIFIED_SKEW_MS = 5 * 60_000
+
+export function parseLastModified(value, now = Date.now()) {
+    if (typeof value !== 'string' || !value) return null
+    const ms = Date.parse(value)
+    if (!Number.isFinite(ms) || ms > now + LAST_MODIFIED_SKEW_MS) return null
+    return ms
+}
+
+// Artwork only (avatars use signed URLs); retention is capped at one extra TTL window.
+export function keepCachedArtifact({ isAvatar, staleLM, freshLM, retained = 0, maxRetained = 1, now = Date.now() }) {
+    if (isAvatar) return false
+    if (retained >= maxRetained) return false
+    const stale = parseLastModified(staleLM, now)
+    const fresh = parseLastModified(freshLM, now)
+    if (stale === null || fresh === null) return false
+    return fresh < stale
 }
 
 // Fixed-window byte budget per key. reserve() holds the worst case up front so concurrent fetches cannot overshoot.

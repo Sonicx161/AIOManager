@@ -1,6 +1,8 @@
 export const IMAGE_PROXY_WIDTHS = [92, 154, 185, 342, 500, 780] as const
 
 const PROXY_PATH = '/api/proxy-image'
+// Busts artwork cached under the old year-long immutable policy.
+const POSTER_PROXY_VERSION = 2
 const TMDB_SIZE = /^(https:\/\/image\.tmdb\.org\/t\/p\/)(?:original|w\d+)(\/)/
 
 export function clampProxyWidth(px: number): number {
@@ -14,7 +16,7 @@ export function sizeTmdbUrl(url: string, px: number): string {
 
 export function proxyImageUrl(url: string, width?: number): string {
     const w = width ? `&w=${clampProxyWidth(width)}` : ''
-    return `${PROXY_PATH}?url=${encodeURIComponent(url)}${w}`
+    return `${PROXY_PATH}?v=${POSTER_PROXY_VERSION}&url=${encodeURIComponent(url)}${w}`
 }
 
 export const isRemoteAvatar = (avatar: string): boolean => /^https?:\/\//i.test(avatar)
@@ -84,11 +86,17 @@ async function postSignRequest(urls: string[]): Promise<Array<SignedAvatar | nul
 export const avatarSigner = createAvatarSigner(postSignRequest)
 export const getSignedAvatarSrc = (avatar: string): Promise<string | null> => avatarSigner.get(avatar)
 
+// Stored proxied artwork URLs predate the version param; reuse must present the busted shape or an old immutable entry sticks.
+export function versionedProxyUrl(url: string): string {
+    return /[?&]v=\d+/.test(url) ? url : `${url}&v=${POSTER_PROXY_VERSION}`
+}
+
 // Re-points an already built poster URL at another allowlisted width; undefined when it has no sized variant.
 export function retargetImageUrl(url: string, px: number): string | undefined {
     const w = clampProxyWidth(px)
     if (url.startsWith(PROXY_PATH)) {
-        return /[?&]w=\d+/.test(url) ? url.replace(/([?&])w=\d+/, `$1w=${w}`) : `${url}&w=${w}`
+        const versioned = versionedProxyUrl(url)
+        return /[?&]w=\d+/.test(versioned) ? versioned.replace(/([?&])w=\d+/, `$1w=${w}`) : `${versioned}&w=${w}`
     }
     const sized = sizeTmdbUrl(url, w)
     return sized === url && !TMDB_SIZE.test(url) ? undefined : sized
