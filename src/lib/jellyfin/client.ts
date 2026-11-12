@@ -1282,12 +1282,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         return item
     }
 
-    async function queryUserItems(
-        accessToken: string,
-        userId: string,
-        query: JellyfinItemQuery,
-        signal?: AbortSignal
-    ): Promise<JellyfinItem[]> {
+    async function buildItemsQuery(query: JellyfinItemQuery): Promise<URLSearchParams> {
         const params = new URLSearchParams({
             Fields: 'UserData,ProviderIds',
             EnableImages: 'false',
@@ -1295,9 +1290,21 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         if (query.ids?.length) params.set('Ids', query.ids.join(','))
         if (query.parentId !== undefined) params.set('ParentId', query.parentId)
         if (query.includeItemTypes !== undefined) params.set('IncludeItemTypes', query.includeItemTypes)
+        // Some servers ignore this filter and answer a wider space; callers verify client-side.
+        if (query.anyProviderIdEquals?.length) params.set('AnyProviderIdEquals', query.anyProviderIdEquals.join(','))
         if (query.recursive !== undefined) params.set('Recursive', String(query.recursive))
         if (query.startIndex !== undefined) params.set('StartIndex', String(query.startIndex))
         if (query.limit !== undefined) params.set('Limit', String(query.limit))
+        return params
+    }
+
+    async function queryUserItemsPage(
+        accessToken: string,
+        userId: string,
+        query: JellyfinItemQuery,
+        signal?: AbortSignal
+    ): Promise<{ items: JellyfinItem[]; total: number | null }> {
+        const params = await buildItemsQuery(query)
         const res = await request({
             label: 'Users/{userId}/Items',
             path: `/Users/${encodeURIComponent(userId)}/Items?${params.toString()}`,
@@ -1305,14 +1312,25 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             signal,
         })
         let page: unknown[]
+        let total: number | null = null
         if (Array.isArray(res)) {
             page = res
         } else if (isRecord(res) && Array.isArray(res.Items)) {
             page = res.Items
+            total = parseTotalRecordCount(res.TotalRecordCount)
         } else {
             throw new JellyfinError('invalid-response', 'Users/{userId}/Items returned an unexpected shape')
         }
-        return page.map(entry => parseItem(entry, 'Item lookup'))
+        return { items: page.map(entry => parseItem(entry, 'Item lookup')), total }
+    }
+
+    async function queryUserItems(
+        accessToken: string,
+        userId: string,
+        query: JellyfinItemQuery,
+        signal?: AbortSignal
+    ): Promise<JellyfinItem[]> {
+        return (await queryUserItemsPage(accessToken, userId, query, signal)).items
     }
 
     /**
@@ -1547,6 +1565,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         readAllLibrary,
         readAllFavorites,
         queryUserItems,
+        queryUserItemsPage,
         readSessions,
         clearWatchState,
         writeUserData,

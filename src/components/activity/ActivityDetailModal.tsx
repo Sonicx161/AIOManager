@@ -35,6 +35,8 @@ import { CastInitials } from '@/components/activity/detail/CastInitials'
 import { LightboxViewer } from '@/components/activity/detail/LightboxViewer'
 import { ReviewsSection } from '@/components/activity/detail/ReviewsSection'
 import { WatchlistPicker } from '@/components/activity/detail/WatchlistPicker'
+import { JellyfinFavoriteControl, type JellyfinFavoritePerson } from '@/components/activity/detail/JellyfinFavoriteControl'
+import { jellyfinFavoritesCapable } from '@/lib/jellyfin/favorites'
 import { FilmPosterCard } from '@/components/activity/detail/FilmPosterCard'
 import { CastSection } from '@/components/activity/detail/CastSection'
 import { SeasonBrowser } from '@/components/activity/detail/SeasonBrowser'
@@ -46,6 +48,7 @@ import type { RailWatcher } from '@/components/ui/content-rail'
 
 export type { DetailItem } from '@/components/activity/detail/types'
 import type { DetailItem, TmdbPersonSearchResponse, TmdbPersonCreditsResponse, FilmographyItem } from '@/components/activity/detail/types'
+import type { Connection } from '@/types/connection'
 
 export type { FilmographyItem } from '@/components/activity/detail/types'
 
@@ -1092,6 +1095,38 @@ export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: pr
             setWatchlistLoading(false)
         }
     }, [renderItem?.itemId, renderItem?.type, renderItem?.name, renderItem?.poster, watchlistTargets, watchlistLoading, accounts, maskedAccountLabel])
+
+    const jfFavoritePeople = useMemo(() => {
+        const seen = new Set<string>()
+        const out: JellyfinFavoritePerson[] = []
+        for (const account of accounts) {
+            const connections: Connection[] = []
+            for (const connection of account.connections ?? []) {
+                if (connection.platform !== 'jellyfin' || !connection.enabled) continue
+                if (!jellyfinFavoritesCapable(connection.mediaServer?.product)) continue
+                if (seen.has(connection.id)) continue
+                seen.add(connection.id)
+                connections.push(connection)
+            }
+            if (connections.length > 0) out.push({ account, connections })
+        }
+        return out
+    }, [accounts])
+
+    const jfFavoriteIds = useMemo(() => {
+        const ids: string[] = []
+        const push = (value: string | null | undefined) => {
+            if (!value) return
+            if (!/^(?:tt\d{5,}|(?:tmdb|tvdb):\d+)$/i.test(value)) return
+            if (!ids.includes(value)) ids.push(value)
+        }
+        push(renderItem?.itemId)
+        push(resolvedImdbId)
+        if (seriesTmdbId) push(`tmdb:${seriesTmdbId}`)
+        if (typeof renderItem?.tmdbId === 'number' && renderItem.tmdbId > 0) push(`tmdb:${renderItem.tmdbId}`)
+        return ids
+    }, [renderItem?.itemId, renderItem?.tmdbId, resolvedImdbId, seriesTmdbId])
+    const jfFavoriteSeries = renderItem?.type !== 'movie'
 
     // ── Back/forward history ─────────────────────────────────────────────────
     // The stack is bounded (12 like the sheet-history mockup); a back moves the
@@ -2358,6 +2393,13 @@ export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: pr
                                                     watchlistTargets={watchlistTargets}
                                                     onToggle={handleToggleWatchlistTarget}
                                                     loading={watchlistLoading}
+                                                />
+                                                <JellyfinFavoriteControl
+                                                    key={`${renderItem?.accountId ?? ''}:${renderItem?.itemId ?? ''}:${renderItem?.sourceConnectionId ?? ''}`}
+                                                    open={open}
+                                                    people={jfFavoritePeople}
+                                                    canonicalIds={jfFavoriteIds}
+                                                    series={jfFavoriteSeries}
                                                 />
                                             </div>
                                         </>

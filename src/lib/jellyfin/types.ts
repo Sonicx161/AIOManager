@@ -163,6 +163,7 @@ export interface JellyfinItemQuery {
     ids?: string[]
     parentId?: string
     includeItemTypes?: string
+    anyProviderIdEquals?: string[]
     recursive?: boolean
     startIndex?: number
     limit?: number
@@ -268,5 +269,7 @@ export interface JellyfinClient {
     /** Full favorites walk over Movies and Episodes at the library page window. */
     readAllFavorites(accessToken: string, userId: string, options?: JellyfinPagedReadOptions, signal?: AbortSignal): Promise<JellyfinItemResult>
     queryUserItems(accessToken: string, userId: string, query: JellyfinItemQuery, signal?: AbortSignal): Promise<JellyfinItem[]>
+
+    queryUserItemsPage(accessToken: string, userId: string, query: JellyfinItemQuery, signal?: AbortSignal): Promise<{ items: JellyfinItem[]; total: number | null }>
     readSessions(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinSession[]>
 }
