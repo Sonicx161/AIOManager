@@ -1,7 +1,7 @@
 import type { Account } from '@/types/account'
 import type { Connection } from '@/types/connection'
 import { getAccountEmail, getStremioConnection } from '@/store/accountStore'
-import { migrationConnectionLabel } from '@/lib/watch-state/sources'
+import { migrationConnectionLabel, type NuvioProfileSummary } from '@/lib/watch-state/sources'
 
 // Number siblings within one product, so AIOMetadata and AIOStreams never count against each other.
 function samePeers(connection: Connection, peers: readonly Connection[]): Connection[] {
@@ -16,8 +16,9 @@ export function watchConnectionLabel(
     account: Account | undefined,
     formatPrivate: (value: string) => string,
     formatProfile: (value: string) => string = formatPrivate,
+    profileNames?: (item: Connection) => readonly NuvioProfileSummary[] | undefined,
 ): string {
-    const label = migrationConnectionLabel(connection, samePeers(connection, peers), formatPrivate, formatProfile)
+    const label = migrationConnectionLabel(connection, samePeers(connection, peers), formatPrivate, formatProfile, profileNames)
     if (connection.platform !== 'stremio' || connection.credentials?.email || !account) return label
     const email = getStremioConnection(account)?.id === connection.id ? getAccountEmail(account) : undefined
     return email ? `${label} · ${formatPrivate(email)}` : label

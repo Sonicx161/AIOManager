@@ -53,17 +53,52 @@ export function migrationSourceLabel(connection: Connection, formatPrivate: (val
         ? `${platform} · ${formatPrivate(customLabel)}` : platform
 }
 
-export function migrationConnectionLabel(connection: Connection, peers: readonly Connection[], formatPrivate: (value: string) => string = value => value, formatProfile = formatPrivate): string {
+// A stored Nuvio target can be a UUID, which is never shown to users.
+export function nuvioProfileLabel(storedTarget: string | undefined, formatProfile: (value: string) => string = value => value, profileName?: string): string {
+    const id = storedTarget?.trim() || ''
+    if (!id) return 'Primary profile'
+    if (profileName) return formatProfile(profileName)
+    return /^\d+$/.test(id) ? `Profile ${formatProfile(id)}` : 'Saved profile'
+}
+
+export interface NuvioProfileSummary {
+    id: string
+    profile_index: number
+    name?: string
+}
+
+function migrationProfileContext(connection: Connection, formatProfile: (value: string) => string, profileNames?: (item: Connection) => readonly NuvioProfileSummary[] | undefined): string {
+    if (connection.platform !== 'nuvio') {
+        const name = connection.credentials?.stremioProfileName
+        return name ? formatProfile(name) : ''
+    }
+    const stored = connection.credentials?.profileIndex || connection.credentials?.profileId
+    const id = stored?.trim() || ''
+    const rows = id ? profileNames?.(connection) : undefined
+    const row = rows?.length
+        ? (/^\d+$/.test(id) ? rows.find(item => String(item.profile_index) === id) : rows.find(item => item.id === id))
+        : undefined
+    return nuvioProfileLabel(stored, formatProfile, row?.name || undefined)
+}
+
+export function migrationConnectionLabel(connection: Connection, peers: readonly Connection[], formatPrivate: (value: string) => string = value => value, formatProfile = formatPrivate, profileNames?: (item: Connection) => readonly NuvioProfileSummary[] | undefined): string {
     const siblings = peers.filter(item => item.platform === connection.platform)
     const index = siblings.findIndex(item => item.id === connection.id)
-    const identity = connection.mediaServer?.userName || connection.credentials?.email
-    const profile = connection.platform === 'nuvio'
-        ? connection.credentials?.profileIndex || connection.credentials?.profileId
-        : connection.credentials?.stremioProfileName
-    const context = connection.platform === 'nuvio'
-        ? profile ? `Profile ${formatProfile(profile)}` : 'Primary profile'
-        : profile ? formatProfile(profile) : ''
-    return `${migrationSourceLabel(connection, formatPrivate)}${identity && identity !== connection.displayName ? ` · ${formatPrivate(identity)}` : ''}${context ? ` · ${context}` : ''}${siblings.length > 1 && index >= 0 ? ` · Connection ${index + 1}` : ''}`
+    const parts = (item: Connection): { head: string; email: string } => {
+        const profile = migrationProfileContext(item, formatProfile, profileNames)
+        const owner = item.mediaServer?.userName || item.credentials?.email
+        return {
+            head: `${migrationSourceLabel(item, formatPrivate)}${profile ? ` · ${profile}` : ''}`,
+            email: owner && owner !== item.displayName ? formatPrivate(owner) : '',
+        }
+    }
+    const mine = parts(connection)
+    const withEmail = (part: { head: string; email: string }) => `${part.head}${part.email ? ` · ${part.email}` : ''}`
+    const label = withEmail(mine)
+    // The tiebreaker goes before the email so it survives truncation.
+    const duplicated = index >= 0 && siblings.filter(item => withEmail(parts(item)) === label).length > 1
+    if (!duplicated) return label
+    return `${mine.head} · Connection ${index + 1}${mine.email ? ` · ${mine.email}` : ''}`
 }
 
 function normalizedBaseUrl(value: string): string {

@@ -23,6 +23,7 @@ import { useUIStore } from '@/store/uiStore'
 import { useAuthStore } from '@/store/authStore'
 import { getAccountEmail, getAccountById, getStremioAuthKey, getStremioConnection, getCachedAuthKey, useAccountStore } from '@/store/accountStore'
 import { maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils'
+import { nuvioProfileLabel } from '@/lib/watch-state/sources'
 import { storedNuvioTargetId } from './nuvio-sync-target'
 import { parsePremiumExpire, type PremiumStatus } from '@/lib/stremio-premium'
 import { parseNuvioMemberAccess, type NuvioMemberStatus } from '@/lib/nuvio-tier'
@@ -649,10 +650,8 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
                             const customLabel = conn.displayName && conn.displayName !== connIdentityRaw
                                 && conn.displayName.toLowerCase() !== conn.platform.toLowerCase()
                                 ? maskNameLevel(conn.displayName, namePrivacyLevel) : undefined
-                            const nuvioTarget = kind === 'nuvio'
-                                ? storedNuvioTargetId({ ...conn, activeProfileId: statusAccount?.activeProfileId }) : undefined
                             const profileLabel = kind === 'nuvio'
-                                ? nuvioTarget ? `Profile ${maskProfileLevel(nuvioTarget, isPrivacyModeEnabled ? privacyLevelProfiles : 0)}` : 'Primary profile'
+                                ? nuvioProfileLabel(storedNuvioTargetId({ ...conn, activeProfileId: statusAccount?.activeProfileId }), value => maskProfileLevel(value, isPrivacyModeEnabled ? privacyLevelProfiles : 0))
                                 : conn.credentials?.stremioProfileName
                                     ? maskProfileLevel(conn.credentials.stremioProfileName, isPrivacyModeEnabled ? privacyLevelProfiles : 0) : undefined
                             const contextLabel = [customLabel, profileLabel].filter(Boolean).join(' · ') || undefined

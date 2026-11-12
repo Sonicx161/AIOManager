@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowRight, CheckCircle2, Download, Import, Info, ShieldCheck, Square, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -18,6 +18,7 @@ import { maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils'
 import { createWatchMigrationDestination } from '@/lib/watch-state/destinations'
 import { createWatchMigrationSource, migrationSourceLabel, watchMigrationSources } from '@/lib/watch-state/sources'
 import { watchConnectionLabel } from './watch-migration-labels'
+import { useNuvioProfileRows } from './use-nuvio-profile-rows'
 import { executeWatchMigration, migrationReport, planWatchMigration } from '@/lib/watch-state/migration'
 import { migrationErrorMessage } from '@/lib/watch-state/error-messages'
 import { isStaleKeptResult } from '@/lib/watch-state/result-counts'
@@ -155,6 +156,8 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
     const displayName = (value: string) => value.includes('@') ? maskEmailLevel(value, privacy ? emailLevel : 0) : maskNameLevel(value, privacy ? nameLevel : 0)
     const identifier = (value: string) => maskProfileLevel(value, privacy ? profileLevel : 0)
     const selectedSource = sources.find(source => source.id === sourceId)
+    const sourceProfileRows = useNuvioProfileRows(sourceAccount?.id, sources)
+    const sourceProfileNames = useCallback((item: Connection) => sourceProfileRows[item.id], [sourceProfileRows])
 
     useEffect(() => {
         if (busy) stopButton.current?.focus()
@@ -439,12 +442,15 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                                 <Label htmlFor="migration-source-connection">Source connection</Label>
                                 <Select value={sourceId} onValueChange={setSourceId} disabled={!!busy || !sources.length}>
                                     <SelectTrigger id="migration-source-connection"><SelectValue placeholder={sources.length ? 'Choose a connection' : 'No enabled source connections'} /></SelectTrigger>
-                                    <SelectContent>{sources.map(source => <SelectItem key={source.id} value={source.id} textValue={watchConnectionLabel(source, watchMigrationSources(sourceAccount!), sourceAccount, displayName, identifier)} className="py-2">
-                                        <span className="flex min-w-0 items-center gap-2">
-                                            <span aria-hidden="true"><PlatformLogo platform={source.platform} isHydra={source.connectionType === 'hydra-outbound'} className="h-6 w-6 shrink-0" /></span>
-                                            <span className="min-w-0 truncate">{watchConnectionLabel(source, watchMigrationSources(sourceAccount!), sourceAccount, displayName, identifier)}</span>
-                                        </span>
-                                    </SelectItem>)}</SelectContent>
+                                    <SelectContent>{sources.map(source => {
+                                        const label = watchConnectionLabel(source, watchMigrationSources(sourceAccount!), sourceAccount, displayName, identifier, sourceProfileNames)
+                                        return <SelectItem key={source.id} value={source.id} textValue={label} className="py-2">
+                                            <span className="flex min-w-0 items-center gap-2" title={label}>
+                                                <span aria-hidden="true"><PlatformLogo platform={source.platform} isHydra={source.connectionType === 'hydra-outbound'} className="h-6 w-6 shrink-0" /></span>
+                                                <span className="min-w-0 truncate">{label}</span>
+                                            </span>
+                                        </SelectItem>
+                                    })}</SelectContent>
                                 </Select>
                             </div>
                         </div>

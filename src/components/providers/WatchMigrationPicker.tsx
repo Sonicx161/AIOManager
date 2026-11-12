@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useMemo, useState } from 'react'
 import { Check, ChevronRight, Import, ShieldCheck } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -13,17 +13,20 @@ import { watchMigrationSources } from '@/lib/watch-state/sources'
 import { watchMigrationDestinations } from '@/lib/watch-state/destinations'
 import { PlatformLogo } from './ConnectionPrimitives'
 import { watchConnectionLabel } from './watch-migration-labels'
+import { useNuvioProfileRows } from './use-nuvio-profile-rows'
+import type { Connection } from '@/types/connection'
 
 const WatchMigrationDialog = lazy(() => import('./WatchMigrationDialog').then(module => ({ default: module.WatchMigrationDialog })))
 
-function StepPills({ label, steps, current }: { label: string; steps: string[]; current: number }) {
+function StepPills({ label, steps, shortSteps, current }: { label: string; steps: string[]; shortSteps?: string[]; current: number }) {
     return <ol aria-label={label} className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
-        {steps.map((step, index) => <li key={step} aria-current={index === current ? 'step' : undefined} className="flex items-center gap-1">
+        {steps.map((step, index) => { const short = shortSteps?.[index] ?? step; return <li key={step} aria-current={index === current ? 'step' : undefined} className="flex items-center gap-1">
             <span className={cn('inline-flex h-7 items-center gap-1.5 rounded-lg border px-2.5 text-xs', index === current ? 'border-primary/25 bg-primary/10 font-medium text-foreground' : 'border-border/40 bg-muted/30 text-muted-foreground')}>
-                <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] tabular-nums', index === current ? 'bg-primary text-primary-foreground' : 'bg-muted')}>{index + 1}</span>{step}
+                <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] tabular-nums', index === current ? 'bg-primary text-primary-foreground' : 'bg-muted')}>{index + 1}</span>
+                {short === step ? step : <><span className="hidden sm:inline">{step}</span><span className="sm:hidden">{short}</span></>}
             </span>
             {index < steps.length - 1 && <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />}
-        </li>)}
+        </li> })}
     </ol>
 }
 
@@ -43,6 +46,9 @@ export function WatchMigrationPicker({ accountId, embedded = false }: { accountI
     const destination = destinations.find(connection => connection.id === importId)
     const mask = (name: string) => name.includes('@') ? maskEmailLevel(name, privacy ? emails : 0) : maskNameLevel(name, privacy ? names : 0)
     const maskProfile = (name: string) => maskProfileLevel(name, privacy ? profiles : 0)
+    const profileRows = useNuvioProfileRows(account?.id, destinations)
+    const profileNames = useCallback((item: Connection) => profileRows[item.id], [profileRows])
+    const selectedLabel = selected ? watchConnectionLabel(selected, connections, account, mask, maskProfile, profileNames) : undefined
 
     if (!connections.length) return embedded ? <div data-theme-part="panel" className="flex items-start gap-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary"><Import aria-hidden="true" className="h-4 w-4" /></span><div className="min-w-0"><h3 className="text-sm font-semibold">Watch history</h3><p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">Add an enabled media connection in Linked accounts to import watched titles and playback positions.</p></div></div> : null
     const destinationPicker = <div className="@container w-full">
@@ -54,13 +60,16 @@ export function WatchMigrationPicker({ accountId, embedded = false }: { accountI
                     <p className="text-xs leading-relaxed text-muted-foreground">Choose the connection that receives the changes you approve.</p>
                 </div>
                 <Select value={destinationId} onValueChange={setDestinationId}>
-                    <SelectTrigger id="watch-import-destination"><SelectValue placeholder="Choose a destination connection" /></SelectTrigger>
-                    <SelectContent>{destinations.map(connection => <SelectItem key={connection.id} value={connection.id}>
-                        <span className="flex min-w-0 items-center gap-2"><PlatformLogo platform={connection.platform} className="h-6 w-6 shrink-0" /><span className="min-w-0 break-words">{watchConnectionLabel(connection, connections, account, mask, maskProfile)}</span></span>
-                    </SelectItem>)}</SelectContent>
+                    <SelectTrigger id="watch-import-destination" title={selectedLabel}><SelectValue placeholder="Choose a destination connection" /></SelectTrigger>
+                    <SelectContent>{destinations.map(connection => {
+                        const label = watchConnectionLabel(connection, connections, account, mask, maskProfile, profileNames)
+                        return <SelectItem key={connection.id} value={connection.id}>
+                            <span className="flex min-w-0 items-center gap-2" title={label}><PlatformLogo platform={connection.platform} className="h-6 w-6 shrink-0" /><span className="min-w-0 truncate">{label}</span></span>
+                        </SelectItem>
+                    })}</SelectContent>
                 </Select>
                 {selected
-                    ? <div className="flex min-w-0 items-start gap-2 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground"><PlatformLogo platform={selected.platform} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /><span className="min-w-0 flex-1">Selected: {watchConnectionLabel(selected, connections, account, mask, maskProfile)}. This connection receives the changes you approve.</span></div>
+                    ? <div className="flex min-w-0 items-start gap-2 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground"><PlatformLogo platform={selected.platform} className="mt-0.5 h-4 w-4 shrink-0 rounded-[5px]" /><span className="min-w-0 flex-1">Selected: {selectedLabel}. This connection receives the changes you approve.</span></div>
                     : destinations.length ? <div className="flex min-w-0 items-start gap-2 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground"><Import aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" /><span className="min-w-0 flex-1">No destination yet. You’ll choose the source and preview every change next.</span></div>
                     : <p className="text-xs leading-relaxed text-muted-foreground">Add a supported media connection as a destination to continue.</p>}
             </div>
@@ -89,7 +98,7 @@ export function WatchMigrationPicker({ accountId, embedded = false }: { accountI
                 <h3 className="sr-only">Move watch history between connections</h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">{destinations.length} {destinations.length === 1 ? 'destination' : 'destinations'}. Move watch history between connections. Copy selected watched titles and resume points: choose where they go, read a source, then preview the differences before saving.</p>
             </div>
-            <StepPills label="Watch history import steps" steps={['Choose destination', 'Read source & preview', 'Select changes & import']} current={0} />
+            <StepPills label="Watch history import steps" steps={['Choose destination', 'Read source & preview', 'Select changes & import']} shortSteps={['Destination', 'Preview', 'Import']} current={0} />
             <div>{destinationPicker}</div>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/40 pt-4"><p className="max-w-lg text-xs leading-relaxed text-muted-foreground">This is a manual import. Connecting accounts does not keep their histories synchronized. Available dates and play counts depend on the destination.</p><Button disabled={!key || !selected} onClick={() => setImportId(destinationId)}>Choose source &amp; preview</Button></div>
         </section> : <div data-theme-part="panel" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/40 bg-card/50 p-4">
