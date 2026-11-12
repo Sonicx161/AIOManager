@@ -72,6 +72,7 @@ function notifyHistoryFetchFailed(err: unknown, target: { accountId: string; pro
             ? {
                 actionHint: 'signin' as const,
                 actionTarget: { connectionId: target.connectionId, platform: target.platformId },
+                actionBelow: true,
                 action: {
                     label: notice.actionLabel,
                     onClick: () => {
