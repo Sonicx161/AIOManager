@@ -218,7 +218,7 @@ export function ContentRail({
             'rounded-2xl border border-border/40 bg-card/50 p-3 shadow-sm',
             className,
         )}>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-y-1">
                 <div className="flex min-w-0 items-center gap-2">
                     {icon && <div className="shrink-0 text-primary">{icon}</div>}
                     <div className="min-w-0">
@@ -293,7 +293,7 @@ export function ContentRailSkeleton({ count = 6 }: { count?: number }) {
             <div className="flex items-center gap-2.5">
                 <Skeleton className="h-5 w-44" />
             </div>
-            <div className="flex gap-4 pt-3">
+            <div className="flex gap-4 overflow-x-auto pt-3 scrollbar-hide">
                 {Array.from({ length: count }).map((_, i) => (
                     <div key={i} className="w-32 md:w-36 shrink-0 space-y-2">
                         <Skeleton className="h-48 md:h-56 w-full rounded-2xl" />

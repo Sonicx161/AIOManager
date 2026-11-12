@@ -233,7 +233,7 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
                         onClick={(e) => e.stopPropagation()}
                         onKeyDown={(e) => e.stopPropagation()}
                         className={cn(
-                            "relative inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40 max-sm:after:absolute max-sm:after:-inset-x-1 max-sm:after:-inset-y-3 max-sm:after:content-['']",
+                            "relative inline-flex h-5 min-w-0 cursor-pointer items-center gap-1 rounded-full border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-primary/40 max-sm:after:absolute max-sm:after:-inset-x-1 max-sm:after:-inset-y-3 max-sm:after:content-['']",
                             failing ? 'border-destructive/35 bg-destructive/10 hover:bg-destructive/15' : 'border-border/40 bg-muted/30 hover:bg-muted/60',
                             platforms.length === 1 && !partial ? 'pl-1 pr-1.5' : 'px-1.5',
                             className
@@ -242,18 +242,18 @@ export function PlatformSourceChip({ account, accounts, scope = 'account', addon
                         {platforms.length === 1 && !partial ? (
                             <>
                                 <TinyPlatformLogo platform={platforms[0]} />
-                                <span className={cn('text-[10px] font-semibold uppercase tracking-wide', failing ? 'text-destructive' : 'text-muted-foreground')}>{singleLabel}</span>
+                                <span className={cn('min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide', failing ? 'text-destructive' : 'text-muted-foreground')}>{singleLabel}</span>
                             </>
                         ) : (
                             <>
-                                <span className="flex -space-x-1">
+                                <span className="flex -space-x-1 shrink-0">
                                     {platforms.slice(0, 3).map(id => (
                                         <span key={id} className="rounded-full ring-1 ring-card">
                                             <TinyPlatformLogo platform={id} />
                                         </span>
                                     ))}
                                 </span>
-                                <span className={cn('text-[10px] font-semibold', failing ? 'text-destructive' : 'text-muted-foreground')}>{countLabel}</span>
+                                <span className={cn('min-w-0 truncate text-[10px] font-semibold', failing ? 'text-destructive' : 'text-muted-foreground')}>{countLabel}</span>
                             </>
                         )}
                         {failing && <AlertTriangle className="h-2.5 w-2.5 shrink-0 text-destructive" aria-hidden="true" />}

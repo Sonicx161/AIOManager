@@ -379,9 +379,9 @@ export const AccountCard = memo(function AccountCard({
                   </p>
                 )}
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs leading-tight text-muted-foreground">
-                  <span className="inline-flex items-center gap-2">
+                  <span className="inline-flex min-w-0 items-center gap-2">
                     {!account.hidePlatformLogos && hasPlatformSources && (
-                      <span className="inline-flex items-center border-r border-border/50 pr-2">
+                      <span className="inline-flex min-w-0 items-center border-r border-border/50 pr-2">
                         <PlatformSourceChip account={account} />
                       </span>
                     )}

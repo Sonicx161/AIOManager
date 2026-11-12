@@ -64,7 +64,8 @@ export function AddonChangelog({ accountId }: AddonChangelogProps) {
                     </Button>
                 )}
             </div>
-            <ScrollArea className="max-h-[calc(100vh-12rem)] min-h-[200px]">
+            {/* Radix renders the viewport content as display:table, which lets long rows widen past the card. */}
+            <ScrollArea className="max-h-[calc(100vh-12rem)] min-h-[200px] [&_[data-radix-scroll-area-viewport]>div]:block!">
                 {filteredChangelog.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-16 text-center gap-3 h-full">
                         <div style={{
@@ -122,12 +123,12 @@ export function AddonChangelog({ accountId }: AddonChangelogProps) {
                                             {!accountId && ` • ${getAccountName(entry.accountId)}`}
                                         </p>
                                         {entry.action === 'replaced' && entry.oldAddonUrl && entry.newAddonUrl && (
-                                            <p className="mt-0.5 max-w-[48rem] truncate font-mono text-[11px] text-muted-foreground/70">
+                                            <p className="mt-0.5 max-w-[48rem] font-mono text-[11px] text-muted-foreground/70 [overflow-wrap:anywhere]">
                                                 {maskSecretUrl(entry.oldAddonUrl)} {'->'} {maskSecretUrl(entry.newAddonUrl)}
                                             </p>
                                         )}
                                         {entry.addonUrl && (
-                                            <p className="mt-0.5 max-w-[48rem] truncate font-mono text-[11px] text-muted-foreground/70">
+                                            <p className="mt-0.5 max-w-[48rem] font-mono text-[11px] text-muted-foreground/70 [overflow-wrap:anywhere]">
                                                 {maskSecretUrl(entry.addonUrl)}
                                             </p>
                                         )}

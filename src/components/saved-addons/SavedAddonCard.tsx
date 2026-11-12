@@ -153,7 +153,7 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
 
               <div className="flex flex-col min-w-0 pr-2">
                 <div className="truncate leading-tight flex items-center gap-2 text-base font-semibold">
-                  <HighlightText text={savedAddon.name} highlight={highlight} />
+                  <HighlightText text={savedAddon.name} highlight={highlight} className="min-w-0 truncate" />
                 </div>
                 <div className="flex flex-wrap items-center gap-2 mt-0.5 overflow-hidden">
                   <div className="flex items-center gap-1.5">
