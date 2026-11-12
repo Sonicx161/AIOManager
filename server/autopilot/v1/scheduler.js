@@ -232,8 +232,11 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
 
                 // Dirty updates carry their owner: a block landing between processing
                 // and the flush drops the commit (snapshot check, zero DB reads).
-                const flushable = dirtyUpdates.filter((u) => !u.ownerSyncUser || !accountBlockedInSnapshot(u.ownerSyncUser))
-                await flushUpdates(flushable)
+                // An abandoned cycle (watchdog tripped) flushes nothing: its stale observations could overwrite the replacement cycle's newer commit.
+                if (live()) {
+                    const flushable = dirtyUpdates.filter((u) => !u.ownerSyncUser || !accountBlockedInSnapshot(u.ownerSyncUser))
+                    await flushUpdates(flushable)
+                }
 
                 if (totalProcessed >= AUTOPILOT_MAX_RULES_PER_CYCLE || nowMs() >= scanDeadline) break
             }

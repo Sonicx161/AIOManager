@@ -444,24 +444,6 @@ function manifestSignature(m) {
     })
 }
 
-// Stable fingerprint of a canonical list over the diff-compared fields (url, manifest
-// signature, custom name), sorted so list order never changes the hash. Consumed by
-// auditConnections' fresh-in-sync skip; order-swap re-reads are indistinguishable to
-// reconcileAccount's diff, so a skip armed under one is valid for the other.
-function canonicalFingerprint(canonical) {
-    return JSON.stringify(
-        canonical.map(a => [
-            normalizeUrl(a.transportUrl),
-            manifestSignature(a.manifest),
-            a?.metadata?.customName || ''
-        ]).sort()
-    )
-}
-
-// Minimum window in which a connection verifiably matching this exact canonical is not
-// re-read by the audit (in-memory only; restart re-reads, the conservative direction).
-const MIN_RECONCILE_INTERVAL_MS = 5 * 60 * 1000
-
 // Platform writes replace the full addon list, so two writes racing on one connection
 // land in nondeterministic order (route immediate-enforcement vs worker cycle vs client
 // reconcile). Serialize per connection; different connections still run in parallel.
@@ -874,8 +856,7 @@ export function createReconciler(fastify) {
         // disabling the chain and never demanding a backup be enabled to
         // compensate. The guard now runs PER CONNECTION on that connection's
         // projected list; a data problem must not back off the connection
-        // (skip means NO write, NO recordSuccess — arming the fresh-in-sync guard
-        // with an unwritten list would poison it — and NO recordFailure).
+        // (skip means NO write, NO recordSuccess, NO recordFailure).
         const configuredChains = Array.isArray(opts.managedChains) && opts.managedChains.length > 0
             ? opts.managedChains
             : (Array.isArray(requiredUrls) && requiredUrls.length > 0 ? [{ urls: requiredUrls, target: requiredActiveUrl }] : [])
@@ -1033,27 +1014,14 @@ export function createReconciler(fastify) {
 
     // Deep-audit read path for connection-only rules: returns each connection's live
     // collection via the same driver/read machinery as reconcileAccount, without
-    // writing. A connection in backoff or fresh-verified in-sync for this exact
-    // canonical (the #19 guard) is skipped, never fought. Read errors surface as
+    // writing. A connection in backoff is skipped, never fought. Read errors surface as
     // skipped entries with no recordFailure — the audit observes, it does not punish.
-    const auditConnections = async (accountId, connections, canonical) => {
-        const canon = (Array.isArray(canonical) ? canonical : []).filter(a => a?.flags?.enabled !== false)
-        const canonHash = canonicalFingerprint(canon)
+    const auditConnections = async (accountId, connections) => {
         const results = []
         for (const connection of (connections || []).filter(c => c.enabled)) {
             const connId = connection.id
             if (shouldSkip(accountId, connId)) {
                 results.push({ connectionId: connId, platform: connection.platform, skipped: 'backoff' })
-                continue
-            }
-            const state = getState(accountId, connId)
-            if (
-                state.lastInSync === true &&
-                state.lastCanonicalHash === canonHash &&
-                Date.now() - (state.lastSync || 0) < MIN_RECONCILE_INTERVAL_MS
-            ) {
-                trace('reconciler', 'audit-skip', { accountId, connectionId: connId, reason: 'fresh-in-sync' })
-                results.push({ connectionId: connId, platform: connection.platform, skipped: 'fresh-in-sync' })
                 continue
             }
             try {

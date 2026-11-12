@@ -74,7 +74,7 @@ export function createDeepAudit({ fastify, nowMs, rand, bootAt, reconciler, stre
     // Hourly drift audit of the native connections (Nuvio, RealStream, Hydra): catches platform-side changes and
     // failed pushes the echo and reconcile paths miss. A Stremio rule audits every native connection of the
     // account (its swaps push to all of them); a connection-only rule audits its own.
-    const auditConnections = async ({ rule, normalizedChainSet, normalizedTarget, updatedAddonList, ownConnectionOnly = true, preserveUrls = [] }) => {
+    const auditConnections = async ({ rule, normalizedChainSet, normalizedTarget, ownConnectionOnly = true, preserveUrls = [] }) => {
         let drift = false
         const driftedIds = []
         const observations = []
@@ -83,10 +83,7 @@ export function createDeepAudit({ fastify, nowMs, rand, bootAt, reconciler, stre
             const auditTargets = (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user) || [])
                 .filter(c => c.enabled && c.platform !== 'stremio' && (!ownConnectionOnly || !rule.connection_id || c.id === rule.connection_id))
             if (auditTargets.length > 0) {
-                // The canonical only arms the reconciler's fresh-in-sync skip; an unloaded list is never read for it.
-                const list = typeof updatedAddonList === 'function' ? await updatedAddonList() : (updatedAddonList || [])
-                const auditCanonical = list.filter(a => a?.flags?.enabled !== false)
-                const audits = await reconciler.auditConnections(rule.account_id, auditTargets, auditCanonical)
+                const audits = await reconciler.auditConnections(rule.account_id, auditTargets)
                 // R4: per-connection destination policy. A member this login
                 // deliberately excludes is intentionally absent there, and an
                 // excluded ACTIVE tier means the correct steady state is "no

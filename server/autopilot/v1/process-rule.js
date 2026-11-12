@@ -384,7 +384,6 @@ export function createProcessRule({
             customChecks,
             currentActiveNorm,
             normalizedTarget,
-            updatedAddonList: updatedAddonList ?? (addonList ? ensureUpdatedAddonList : null),
             preserveUrls,
         })
         const lastDeepAuditToSave = audit.lastDeepAudit

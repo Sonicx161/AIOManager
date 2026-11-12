@@ -139,56 +139,89 @@ export function resetForceCooldownsForTest() {
     failedRenewals.clear()
 }
 
+// The upstream refresh token is already consumed here, so retrying this save is the only recovery.
+const PERSIST_RETRY_WINDOW_MS = 30 * 1000
+const PERSIST_RETRY_FIRST_WAIT_MS = 250
+const PERSIST_RETRY_MAX_WAIT_MS = 5 * 1000
+
+// Raw exception text can carry identifiers; publish only a bounded error code.
+const persistFailureCode = (err) => {
+    const code = typeof err?.code === 'string' ? err.code : ''
+    return /^[A-Z0-9_]{1,40}$/.test(code) ? code : 'unknown'
+}
+
 // rowId targets the exact sealed row the bundle was read from (needed for legacy rows,
 // whose NULL connection_id cannot be addressed by connection id); the owner/account/type
 // predicates are retained so a row id alone never reaches outside the scoped login.
 async function persistRotatedToken(connectionId, credentialType, newBundle, accountId, syncUser, previousBundle, rowId = null) {
     if (!accountId || !syncUser) {
-        throw new Error(`Refusing unscoped persist of rotated ${credentialType} token for ${connectionId}: account and owner are both required`)
+        throw new Error(`Refusing unscoped persist of rotated ${credentialType} token: account and owner are both required`)
     }
+    const tokenField = credentialType === 'nuvio' ? 'refreshToken' : 'accessToken'
+    const { invalidateConnectionCache } = await import('./reconciler.js')
+    const deadline = Date.now() + PERSIST_RETRY_WINDOW_MS
+    let waitMs = PERSIST_RETRY_FIRST_WAIT_MS
     let lastErr = null
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (;;) {
         try {
-            const row = rowId
-                ? await db.get(
-                    'SELECT auth_key FROM server_credentials WHERE id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4',
-                    [rowId, credentialType, accountId, syncUser]
-                )
-                : await db.get(
-                    'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
-                    [connectionId, credentialType, accountId, syncUser]
-                )
-            const latest = row?.auth_key ? JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) : null
-            const tokenField = credentialType === 'nuvio' ? 'refreshToken' : 'accessToken'
-            if (!latest || latest[tokenField] !== previousBundle[tokenField] || latest.baseUrl !== previousBundle.baseUrl) {
-                const err = new Error('Connection credentials changed during token refresh')
-                err._credentialSuperseded = true
-                throw err
-            }
-            // Preserve concurrent profile edits; replace only fields this operation changed.
-            const updated = { ...latest, ...Object.fromEntries(Object.entries(newBundle).filter(([key, value]) => value !== previousBundle[key])) }
-            const encrypted = encrypt(JSON.stringify(updated), PRIMARY_KEY)
-            const result = rowId
-                ? await db.run(
-                    'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
-                    [encrypted, Date.now(), rowId, credentialType, accountId, syncUser, row.auth_key]
-                )
-                : await db.run(
-                    'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE connection_id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
-                    [encrypted, Date.now(), connectionId, credentialType, accountId, syncUser, row.auth_key]
-                )
-            if (result.changes === 0) throw new Error('Connection credential changed before persistence')
-            const { invalidateConnectionCache } = await import('./reconciler.js')
+            const persisted = await db.tx(async (conn) => {
+                const row = rowId
+                    ? await conn.get(
+                        'SELECT auth_key FROM server_credentials WHERE id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4',
+                        [rowId, credentialType, accountId, syncUser]
+                    )
+                    : await conn.get(
+                        'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
+                        [connectionId, credentialType, accountId, syncUser]
+                    )
+                let latest = null
+                if (row?.auth_key) {
+                    try { latest = JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) } catch { latest = null }
+                }
+                if (!latest || typeof latest !== 'object') {
+                    const err = new Error('Connection credential row disappeared during token refresh')
+                    err._credentialSuperseded = true
+                    throw err
+                }
+                if (latest[tokenField] !== previousBundle[tokenField]) {
+                    if (latest[tokenField]) {
+                        // A re-auth or another writer stored a usable token; it outranks ours.
+                        return latest
+                    }
+                    const err = new Error('Connection credentials changed during token refresh')
+                    err._credentialSuperseded = true
+                    throw err
+                }
+                // A non-token change alone is not supersession; the merge keeps it and lands the rotated token.
+                // Preserve concurrent profile edits; replace only fields this operation changed.
+                const updated = { ...latest, ...Object.fromEntries(Object.entries(newBundle).filter(([key, value]) => value !== previousBundle[key])) }
+                const encrypted = encrypt(JSON.stringify(updated), PRIMARY_KEY)
+                const result = rowId
+                    ? await conn.run(
+                        'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
+                        [encrypted, Date.now(), rowId, credentialType, accountId, syncUser, row.auth_key]
+                    )
+                    : await conn.run(
+                        'UPDATE server_credentials SET auth_key = $1, updated_at = $2 WHERE connection_id = $3 AND credential_type = $4 AND account_id = $5 AND sync_user = $6 AND auth_key = $7',
+                        [encrypted, Date.now(), connectionId, credentialType, accountId, syncUser, row.auth_key]
+                    )
+                if (result.changes === 0) throw new Error('Connection credential changed before persistence')
+                return updated
+            }, { immediate: true })
+            // Invalidate only after COMMIT, or another connection can cache the old row under the new generation.
             invalidateConnectionCache(syncUser)
-            return updated
+            return persisted
         } catch (err) {
             if (err._credentialSuperseded) throw err
             lastErr = err
-            await new Promise(r => setTimeout(r, 150 * (attempt + 1)))
+            const remaining = deadline - Date.now()
+            if (remaining <= 0) break
+            await new Promise(r => setTimeout(r, Math.min(waitMs, remaining)))
+            waitMs = Math.min(waitMs * 2, PERSIST_RETRY_MAX_WAIT_MS)
         }
     }
-    console.error(`[TokenRefresh] CRITICAL: rotated ${credentialType} token for ${connectionId} could not be persisted; connection will brick. ${lastErr?.message || lastErr}`)
-    const e = new Error(`Failed to persist rotated ${credentialType} token for ${connectionId}: ${lastErr?.message || lastErr}`)
+    console.error(`[TokenRefresh] CRITICAL: rotated ${credentialType} token could not be persisted within ${PERSIST_RETRY_WINDOW_MS / 1000}s; connection will brick. code=${persistFailureCode(lastErr)}`)
+    const e = new Error(`Failed to persist rotated ${credentialType} token: code=${persistFailureCode(lastErr)}`)
     e._tokenPersistFailed = true
     throw e
 }
