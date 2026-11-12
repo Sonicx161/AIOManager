@@ -371,6 +371,10 @@ html.theme-light {
   scrollbar-width: none;
 }
 
+/* Radix pins popper wrappers to min-width:max-content, which would keep a select menu wider than a phone viewport even with a max-width on the menu itself. */
+[data-radix-popper-content-wrapper]:has(> [data-theme-part="select-content"]) {
+  min-width: 0 !important;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .animate-shimmer-bg,
