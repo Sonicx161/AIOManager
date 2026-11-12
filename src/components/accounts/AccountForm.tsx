@@ -1936,7 +1936,7 @@ export function AccountForm() {
                   disabled={submitting || !encryptionKey}
                   className="rounded-xl font-bold text-xs px-8"
                 >
-                  {submitting ? 'Adding...' : !encryptionKey ? 'Vault Locked' : 'Connect & Create'}
+                  {submitting ? 'Adding...' : !encryptionKey ? 'Vault Locked' : authIntent === 'login' ? 'Connect' : 'Connect & Create'}
                 </Button>
               )}
             </>
