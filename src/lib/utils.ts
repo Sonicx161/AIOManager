@@ -13,7 +13,7 @@ import { claimInstanceRemotes } from './addon-instance-identity.ts'
 
 const NON_ALPHANUMERIC_REGEX = /[^a-z0-9]/g
 const CANONICAL_URL_CACHE = new Map<string, string>()
-const CANONICAL_URL_CACHE_MAX_SIZE = 500
+const CANONICAL_URL_CACHE_MAX_SIZE = 10_000
 
 const normalizeAddonUrl = (url: string): string => {
   const cached = CANONICAL_URL_CACHE.get(url)

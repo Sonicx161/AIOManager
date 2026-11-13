@@ -52,6 +52,29 @@ function stable(value: unknown): string {
     return JSON.stringify(sortDeep(value))
 }
 
+type StableOf = (value: CanonicalAddon) => string
+
+function memoStable(): StableOf {
+    const memo = new WeakMap<object, string>()
+    return (value) => {
+        if (!value || typeof value !== 'object') return stable(value)
+        let s = memo.get(value)
+        if (s === undefined) { s = stable(value); memo.set(value, s) }
+        return s
+    }
+}
+
+function listsDiffer(a: CanonicalAddon[], b: CanonicalAddon[], stableOf: StableOf): boolean {
+    if (a.length !== b.length) return true
+    for (let i = 0; i < a.length; i++) {
+        const x = a[i], y = b[i]
+        if (x === y) continue
+        const bothObjects = !!x && typeof x === 'object' && !!y && typeof y === 'object'
+        if (bothObjects ? stableOf(x) !== stableOf(y) : stable([x]) !== stable([y])) return true
+    }
+    return false
+}
+
 function sortDeep(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(sortDeep)
     if (value && typeof value === 'object') {
@@ -82,6 +105,7 @@ export function threeWayMergeCanonical(
     opts: ThreeWayMergeOptions = {},
 ): ThreeWayMergeResult {
     const inboundDeletesShrink = opts.inboundDeletesShrink ?? false
+    const stableOf = memoStable()
     const hasRecordedBase = !!(base && base.length)
     if (!hasRecordedBase) {
         const localMap = new Map<string, CanonicalAddon>()
@@ -93,7 +117,7 @@ export function threeWayMergeCanonical(
             localMap.set(k, a)
             result.push(a)
         }
-        return { addons: result, changed: stable(result) !== stable(local) }
+        return { addons: result, changed: listsDiffer(result, local, stableOf) }
     }
     const effectiveBase = base
 
@@ -120,8 +144,8 @@ export function threeWayMergeCanonical(
         if (inL && inR) {
             // Present both sides → resolve updates. Inbound update wins when remote
             // diverged from base; otherwise keep local (carries client-side edits).
-            const remoteChanged = inB ? stable(R) !== stable(B) : true
-            const localChanged = inB ? stable(L) !== stable(B) : true
+            const remoteChanged = inB ? R !== B && stableOf(R as CanonicalAddon) !== stableOf(B as CanonicalAddon) : true
+            const localChanged = inB ? L !== B && stableOf(L as CanonicalAddon) !== stableOf(B as CanonicalAddon) : true
             if (!remoteChanged && localChanged) result.push(L as CanonicalAddon)
             else if (remoteChanged) result.push(R as CanonicalAddon) // inbound wins ties
             else result.push(L as CanonicalAddon)
@@ -144,5 +168,5 @@ export function threeWayMergeCanonical(
         // !inL && !inR → removed everywhere → omit.
     }
 
-    return { addons: result, changed: stable(result) !== stable(local) }
+    return { addons: result, changed: listsDiffer(result, local, stableOf) }
 }

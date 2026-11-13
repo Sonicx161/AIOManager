@@ -153,9 +153,10 @@ export function setSyncResponseCache(accountId, contentHash, serialized) {
     totalBytes += bytes
     stats.stores++
     evictOverflow()
-    if (bytes < COMPRESS_THRESHOLD_BYTES) return
+    if (bytes < COMPRESS_THRESHOLD_BYTES) return true
     buildVariant(accountId, contentHash, 'gzip', serialized)
     buildVariant(accountId, contentHash, 'br', serialized)
+    return true
 }
 
 export function invalidateSyncResponseCache(accountId) {

@@ -184,6 +184,19 @@ async function skipPathCanonicalReceipts(tx, id, canonicalAddons, log) {
     return { receipts, reasons, versions }
 }
 
+const LIVE_PULL_MIN_BYTES = 1024 * 1024
+const livePullBuffers = new Map()
+const livePullRegistry = new FinalizationRegistry((key) => {
+    const ref = livePullBuffers.get(key)
+    if (ref && !ref.deref()) livePullBuffers.delete(key)
+})
+
+function rememberLivePull(key, bytes) {
+    if (!key) return
+    livePullBuffers.set(key, new WeakRef(bytes))
+    livePullRegistry.register(bytes, key)
+}
+
 export function registerSyncRoutes(fastify) {
     fastify.get('/api/sync/:id', {
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
@@ -292,6 +305,15 @@ export function registerSyncRoutes(fastify) {
                 return reply.send(cachedResponse.serialized)
             }
 
+            // An oversize blob skips the response cache, so share one buffer across parallel pulls of the same revision.
+            const liveKey = row.content_hash ? `${id}:${row.content_hash}` : null
+            const live = liveKey ? livePullBuffers.get(liveKey)?.deref() : undefined
+            if (live) {
+                trace('syncRoute', 'pull.success', { accountId: id, bytes: live.length, cache: 'live', timing: Date.now() - start })
+                reply.header('ETag', row.content_hash)
+                reply.header('content-type', 'application/json; charset=utf-8')
+                return reply.send(live)
+            }
             const decryptedValueStr = decrypt(row.value, FALLBACK_KEYS)
             const needsMigration = (row.password && typeof row.password === 'string' && !isScryptHash(row.password)) ||
                 (row.value && typeof row.value === 'string' && !row.value.includes(':'))
@@ -327,11 +349,14 @@ export function registerSyncRoutes(fastify) {
                 // Serialize once with the route's own serializer; a later hit returns
                 // these exact bytes (probe-verified identical to the object path).
                 const serialized = reply.serialize(syncData)
-                setSyncResponseCache(id, row.content_hash, serialized)
+                const cached = setSyncResponseCache(id, row.content_hash, serialized)
                 trace('syncRoute', 'pull.success', { accountId: id, bytes: payloadBytes, cache: 'miss', cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
                 if (row.content_hash) reply.header('ETag', row.content_hash)
                 reply.header('content-type', 'application/json; charset=utf-8')
-                return reply.send(serialized)
+                if (cached || serialized.length < LIVE_PULL_MIN_BYTES) return reply.send(serialized)
+                const bytes = Buffer.from(serialized, 'utf8')
+                rememberLivePull(liveKey, bytes)
+                return reply.send(bytes)
             }
             trace('syncRoute', 'pull.success', { accountId: id, bytes: payloadBytes, cache: 'bypass', timing: Date.now() - start })
             if (row.content_hash) reply.header('ETag', row.content_hash)
