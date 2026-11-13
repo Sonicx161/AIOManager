@@ -233,21 +233,21 @@ export function hoursRowFromItem(item: HoursItemLike, counterKey: string): Watch
     }
 }
 
+// Hash state stays in locals: a 32-bit value in a closure variable is boxed on every write.
+function fnvText(hash: number, text: string): number {
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619)
+    return hash
+}
+
 // Stable fingerprint of the full runtime index, so a runtime change in any
 // viewer's history is visible to identity checks without enumerating rows.
 export function runtimeIndexFingerprint(index: RuntimeIndex): string {
     let hash = 2166136261
-    const mix = (text: string) => {
-        for (let i = 0; i < text.length; i++) {
-            hash ^= text.charCodeAt(i)
-            hash = Math.imul(hash, 16777619)
-        }
-    }
     for (const [itemId, typical] of index.typical) {
-        mix(`${itemId}:${typical}:${index.longest.get(itemId) ?? ''};`)
+        hash = fnvText(hash, `${itemId}:${typical}:${index.longest.get(itemId) ?? ''};`)
     }
     for (const [itemId, longest] of index.longest) {
-        if (!index.typical.has(itemId)) mix(`${itemId}::${longest};`)
+        if (!index.typical.has(itemId)) hash = fnvText(hash, `${itemId}::${longest};`)
     }
     return `${index.typical.size}-${hash >>> 0}`
 }

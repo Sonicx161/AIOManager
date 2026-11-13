@@ -3,7 +3,7 @@ import type { ActivityItem } from '@/types/activity'
 import type { EventRollups } from '@/lib/watch-event-rollups'
 import { cumulativeWatchKey } from '@/lib/activity-utils'
 import { buildRuntimeIndex, mediaResumePositionMs, runtimeIndexFingerprint, type RuntimeIndex } from '@/lib/watch-hours'
-import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo } from '@/lib/metrics-fingerprint'
+import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo, fnvText } from '@/lib/metrics-fingerprint'
 import { useSyncStore } from '@/store/syncStore'
 import { useAuthStore } from '@/store/authStore'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
@@ -362,29 +362,21 @@ export function selectMetricsRows(
 
 export type MetricsRollupInput = Pick<EventRollups, 'byMonth' | 'daysByAccount'>
 
+const rollupField = (hash: number, value: unknown) => Math.imul(fnvText(hash, String(value ?? '')) ^ 31, 16777619)
+
 function createRollupsFingerprint(rollups: MetricsRollupInput): string {
     let hash = 2166136261
 
-    const mix = (value: unknown) => {
-        const text = String(value ?? '')
-        for (let i = 0; i < text.length; i++) {
-            hash ^= text.charCodeAt(i)
-            hash = Math.imul(hash, 16777619)
-        }
-        hash ^= 31
-        hash = Math.imul(hash, 16777619)
-    }
-
     const byMonthKeys = Object.keys(rollups.byMonth)
     for (const key of byMonthKeys) {
-        mix(key)
-        mix(rollups.byMonth[key].count)
-        mix(rollups.byMonth[key].minutes)
+        hash = rollupField(hash, key)
+        hash = rollupField(hash, rollups.byMonth[key].count)
+        hash = rollupField(hash, rollups.byMonth[key].minutes)
     }
     for (const [accountId, days] of Object.entries(rollups.daysByAccount)) {
-        mix(accountId)
-        mix(days.length)
-        for (const day of days) mix(day)
+        hash = rollupField(hash, accountId)
+        hash = rollupField(hash, days.length)
+        for (const day of days) hash = rollupField(hash, day)
     }
 
     return `${byMonthKeys.length}-${hash >>> 0}`
@@ -422,19 +414,13 @@ export function subsetRuntimeIndex(index: RuntimeIndex, itemIds: Iterable<string
     const typical = new Map<string, number>()
     const longest = new Map<string, number>()
     let hash = 2166136261
-    const mix = (text: string) => {
-        for (let i = 0; i < text.length; i++) {
-            hash ^= text.charCodeAt(i)
-            hash = Math.imul(hash, 16777619)
-        }
-    }
     for (const itemId of new Set(itemIds)) {
         const t = index.typical.get(itemId)
         const l = index.longest.get(itemId)
         if (t === undefined && l === undefined) continue
         if (t !== undefined) typical.set(itemId, t)
         if (l !== undefined) longest.set(itemId, l)
-        mix(`${itemId}:${t}:${l};`)
+        hash = fnvText(hash, `${itemId}:${t}:${l};`)
     }
     return { runtimes: { typical, longest }, fingerprint: String(hash >>> 0) }
 }
@@ -495,7 +481,7 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
     // through the real transform, canonical attribution, rollups, runtime index)
     // plus the session scope. Viewer and period selection stay out of it, so a
     // selection change never discards in-flight work while a data change does.
-    const runtimeFullFingerprint = runtimeIndexFingerprint(runtimeIndex)
+    const runtimeFullFingerprint = useMemo(() => runtimeIndexFingerprint(runtimeIndex), [runtimeIndex])
     const dataKey = options?.sourceIdentity
         ? `${scope}\u0000${options.sourceIdentity}|${runtimeFullFingerprint}`
         : `${scope}\u0000${itemsFingerprint}|${rollupsFingerprint}|${runtimeFullFingerprint}`
