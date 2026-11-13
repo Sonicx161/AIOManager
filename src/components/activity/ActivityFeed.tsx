@@ -33,7 +33,7 @@ const EMPTY_SELECTED_ITEMS = new Set<string>()
 const GRID_CLASSES = 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
 const ACTIVITY_TAB_LABELS: Record<string, string> = {
     all: 'All Activity',
-    now: 'Recent',
+    now: 'Watching now',
     movies: 'Movies',
     series: 'Series',
 }
@@ -423,7 +423,7 @@ export const ActivityFeed = memo(function ActivityFeed({
             <PullToRefreshIndicator distance={pull.distance} phase={pull.phase} refreshing={pull.refreshing} />
             <WorkspaceTabs label="Activity history filters" value={activeTab} panelValue={activeTab} onValueChange={setActiveTab} className="w-full" tabs={<>
                         <TabsTrigger value="all">All Activity {renderTabCount(stats.tabCounts.all)}</TabsTrigger>
-                        <TabsTrigger value="now">Recent {renderTabCount(stats.tabCounts.now)}</TabsTrigger>
+                        <TabsTrigger value="now">Watching now {renderTabCount(stats.tabCounts.now)}</TabsTrigger>
                         <TabsTrigger value="movies">Movies {renderTabCount(stats.tabCounts.movies)}</TabsTrigger>
                         <TabsTrigger value="series">Series {renderTabCount(stats.tabCounts.series)}</TabsTrigger>
             </>} actions={
