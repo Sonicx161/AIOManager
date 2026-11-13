@@ -65,6 +65,8 @@ interface ActivityFeedProps {
     /** Page-level filters (viewer, period, search) that the header numbers depend on. */
     filterKey?: string
     canonicalConnections?: ReadonlyMap<string, string | undefined>
+    /** Posters the Continue Watching rail lends the feed cards for their own itemId. */
+    cwPosterIndex?: ReadonlyMap<string, string>
     /** The page's own refresh; enables phone pull-to-refresh when provided. */
     onRefresh?: () => unknown
 }
@@ -87,6 +89,7 @@ export const ActivityFeed = memo(function ActivityFeed({
     refreshing = false,
     filterKey = '',
     canonicalConnections,
+    cwPosterIndex,
     onRefresh,
 }: ActivityFeedProps) {
     const safeSelectedItems = selectedItems ?? EMPTY_SELECTED_ITEMS
@@ -338,10 +341,11 @@ export const ActivityFeed = memo(function ActivityFeed({
         viewMode: viewMode as 'grid' | 'list',
         safeSelectedItems,
         isBulkMode,
+        cwPosterIndex,
         onToggleSelect,
         onDelete,
         onOpenDetail,
-    }), [nowStatuses, viewMode, safeSelectedItems, isBulkMode, onToggleSelect, onDelete, onOpenDetail])
+    }), [nowStatuses, viewMode, safeSelectedItems, isBulkMode, cwPosterIndex, onToggleSelect, onDelete, onOpenDetail])
 
     const renderEmptyState = () => (
         <ActivityEmptyState

@@ -52,9 +52,11 @@ export function orderArtCandidates(
     identity: string | null,
     sizeFor: (base: string) => string,
     now = Date.now(),
+    pinned?: ArtCandidate,
 ): ArtCandidate[] {
     const pub = publishedArt(identity)
-    const list = pub ? [{ base: pub, url: sizeFor(pub) }, ...own.filter(c => c.base !== pub)] : [...own]
+    const lead = pub ? [{ base: pub, url: sizeFor(pub) }, ...own.filter(c => c.base !== pub)] : [...own]
+    const list = pinned ? [pinned, ...lead.filter(c => c.base !== pinned.base)] : lead
     const seen = new Set<string>()
     return list.filter(c => {
         if (seen.has(c.base) || isArtFailed(c.base, now)) return false

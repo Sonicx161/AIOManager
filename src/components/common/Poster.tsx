@@ -12,6 +12,8 @@ interface PosterProps extends React.ImgHTMLAttributes<HTMLImageElement> {
     itemType?: string
     fallback?: boolean
     displayWidth?: number
+    /** Tried ahead of the poster's own candidates (a Continue Watching loan). */
+    preferredSrc?: string
     /** Row TMDB id: last-resort poster through the keyed /api/metadata/tmdb proxy. */
     tmdbId?: number
     /** Row title and year for the strict last-resort TMDB title search. */
@@ -103,6 +105,7 @@ export function Poster({
     tmdbId,
     name,
     year,
+    preferredSrc,
     className,
     fallback = true,
     displayWidth,
@@ -120,9 +123,13 @@ export function Poster({
     // Identity of the last-resort title search; null when the row has no usable name.
     const titleSearchKey = trimmedTitle ? `${itemType ?? ''}:${trimmedTitle.toLowerCase()}:${year ?? ''}` : null
 
-    const { sources, identity } = useMemo(() => {
+    const { sources, identity, pinned } = useMemo(() => {
         const cleanSrc = sanitizePosterUrl(src)
         const effectiveSrc = typeof cleanSrc === 'string' && cleanSrc.trim() ? cleanSrc : undefined
+        const cleanPinned = sanitizePosterUrl(preferredSrc)
+        const pinnedBase = typeof cleanPinned === 'string' && cleanPinned.trim() ? cleanPinned : undefined
+        const pinnedUrl = pinnedBase ? proxyUrl(pinnedBase, width1x) : undefined
+        const pinned = pinnedBase && pinnedUrl ? { base: pinnedBase, url: pinnedUrl } : undefined
         const cinemetaItemId = getCinemetaItemId(itemId) ?? imdbIdFromPosterUrl(effectiveSrc)
         const own: ArtCandidate[] = []
         const add = (base: string | undefined) => {
@@ -148,8 +155,9 @@ export function Poster({
         return {
             sources: own,
             identity: artIdentity({ imdbId: cinemetaItemId, tmdbId, itemType, kitsuId: kitsuId ? String(kitsuId) : undefined }),
+            pinned,
         }
-    }, [src, itemId, fallback, width1x, tmdbId, itemType])
+    }, [src, itemId, fallback, width1x, tmdbId, itemType, preferredSrc])
 
     useEffect(() => {
         setRecoveredPoster(undefined)
@@ -166,17 +174,17 @@ export function Poster({
     // Re-render only when this title's published art or one of this poster's sources changes.
     const artKeys = useMemo(() => {
         const pub = publishedArt(identity)
-        return [...(identity ? [identity] : []), ...own.map(c => c.base), ...(pub ? [pub] : [])]
-    }, [identity, own])
+        return [...(identity ? [identity] : []), ...(pinned ? [pinned.base] : []), ...own.map(c => c.base), ...(pub ? [pub] : [])]
+    }, [identity, own, pinned])
     const artKeysId = artKeys.join('|')
     // eslint-disable-next-line react-hooks/exhaustive-deps
     const subscribe = useCallback((listener: () => void) => subscribeArt(artKeys, listener), [artKeysId])
     const artVersion = useSyncExternalStore(subscribe, () => artSnapshot(artKeys))
 
     const candidates = useMemo(
-        () => orderArtCandidates(own, identity, base => proxyUrl(base, width1x) ?? base),
+        () => orderArtCandidates(own, identity, base => proxyUrl(base, width1x) ?? base, undefined, pinned),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [own, identity, width1x, artVersion],
+        [own, identity, width1x, artVersion, pinned],
     )
     const current = candidates[0]
     const currentSrc = current?.url

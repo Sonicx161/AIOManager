@@ -1,3 +1,4 @@
+import { continueWatchingPosterFor } from '@/lib/activity-cw-poster'
 import { useEffect, useState, useRef, useMemo, useCallback, type CSSProperties } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
@@ -56,6 +57,8 @@ interface ActivityDetailModalProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     item: DetailItem | null
+    /** Continue Watching posters by IMDb id, tried ahead of the shown item's own art. */
+    cwPosterIndex?: ReadonlyMap<string, string>
     /** The caller's unscoped watch history; when omitted the modal derives its own. */
     watchHistory?: HistoryEntry[]
 }
@@ -481,7 +484,7 @@ async function fetchPersonFilmography(
     return ensureCurrentFilm({ person: { name: personName }, movies: [], series: [], anime: [] })
 }
 
-export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: providedWatchHistory }: ActivityDetailModalProps) {
+export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, watchHistory: providedWatchHistory }: ActivityDetailModalProps) {
     const { isLight } = useTheme()
     const [activeItem, setActiveItem] = useState<DetailItem | null>(item)
     const [meta, setMeta] = useState<CinemetaMeta | null>(null)
@@ -802,6 +805,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: pr
         : ''
 
     const renderItem: DetailItem | null = currentEntry?.kind === 'item' ? currentEntry.item : (activeItem ?? item)
+    const preferredPoster = continueWatchingPosterFor(cwPosterIndex, renderItem?.itemId)
 
     // The closed shell still handles navigation and exit animation, but does not
     // need another history derivation or another set of live query observers.
@@ -2204,7 +2208,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: pr
                                     className="relative h-10 w-7 shrink-0 overflow-hidden rounded-md bg-muted ring-1 ring-border/40"
                                     style={{ opacity: 'var(--bar-thumb)', transform: 'scale(calc(0.85 + 0.15 * var(--bar-thumb)))', ...(artworkChrome ? { '--tw-ring-color': `rgb(${artworkChrome.dominant.r} ${artworkChrome.dominant.g} ${artworkChrome.dominant.b} / 0.55)` } : {}) } as CSSProperties}
                                 >
-                                    <Poster src={posterSrc} itemId={posterItemId} tmdbId={posterTmdbId} itemType={renderItem.type} name={renderItem.name} year={titleSearchYear} alt="" className="h-full w-full object-cover" loading="lazy" />
+                                    <Poster src={posterSrc} itemId={posterItemId} tmdbId={posterTmdbId} itemType={renderItem.type} name={renderItem.name} year={titleSearchYear} preferredSrc={preferredPoster} alt="" className="h-full w-full object-cover" loading="lazy" />
                                 </div>
                                 <p ref={barTitleRef} data-bar-title="" className="min-w-0 flex-1 truncate text-xs font-bold text-foreground sm:text-sm" style={{ opacity: 'var(--bar-title)' }}>{title}</p>
                             </div>
@@ -2301,6 +2305,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, watchHistory: pr
                                             itemType={renderItem.type}
                                             name={renderItem.name}
                                             year={titleSearchYear}
+                                            preferredSrc={preferredPoster}
                                             alt={title}
                                             className="media-ring h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
                                             loading="eager"

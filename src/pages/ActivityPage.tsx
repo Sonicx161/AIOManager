@@ -26,6 +26,7 @@ import { useWatchEventStore } from '@/store/watchEventStore'
 import { useUIStore } from '@/store/uiStore'
 import { ActivityItemSkeleton } from '@/components/ui/skeleton'
 import { historyEntryToActivityItem, nuvioProgressKey, getCachedCinemetaName, watchContextKey, peerLoginLabel, canonicalStremioConnections } from '@/lib/activity-utils'
+import { continueWatchingPosterFor, continueWatchingPosterIndex } from '@/lib/activity-cw-poster'
 import { activitySearchHaystack, activityItemTimeMs } from '@/lib/activity-search-cache'
 import { continueWatchingRail } from '@/lib/activity-continue-watching'
 import { rollupMinutes } from '@/lib/activity-hours'
@@ -533,6 +534,16 @@ export function ActivityPage() {
     const headerRollupMinutes = useMemo(
         () => (timeFilter === 'all' && !searchTerm.trim() ? rollupMinutes(rollups, userFilter) : 0),
         [rollups, userFilter, timeFilter, searchTerm],
+    )
+
+    // Per-origin dismissal: the key carries the connection scope so removing
+    // one login's copy never hides a sibling's copy of the same title.
+    const railInProgress = useMemo(() => continueWatchingRail(inProgress, userFilter,
+        item => dismissedContinueWatching.includes(`${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`)),
+        [inProgress, userFilter, dismissedContinueWatching])
+    const cwPosterIndex = useMemo(
+        () => continueWatchingPosterIndex(railInProgress.slice(0, CONTINUE_WATCHING_LIMIT)),
+        [railInProgress],
     )
 
     const handleViewModeChange = useCallback((mode: 'grid' | 'list') => {
@@ -1183,11 +1194,7 @@ export function ActivityPage() {
                 </details>
             ))}
             {(() => {
-              // Per-origin dismissal: the key carries the connection scope so removing
-              // one login's copy never hides a sibling's copy of the same title.
-              const filteredInProgress = continueWatchingRail(inProgress, userFilter,
-                item => dismissedContinueWatching.includes(`${watchContextKey(item.accountId, item.sourceConnectionId)}:${item.itemId}`))
-              if (filteredInProgress.length === 0 || searchTerm) return null
+              if (railInProgress.length === 0 || searchTerm) return null
               const filterAccount = userFilter !== 'all' ? accountById.get(userFilter) : undefined
               return (
                 <ContentRail
@@ -1201,10 +1208,10 @@ export function ActivityPage() {
                     )}
                     subtitle="Latest saved progress and reported playback from connected platforms."
                     scrollAmount={512}
-                    count={Math.min(filteredInProgress.length, CONTINUE_WATCHING_LIMIT)}
-                    countLabel={filteredInProgress.length > CONTINUE_WATCHING_LIMIT ? `of ${filteredInProgress.length} in progress` : 'in progress'}
+                    count={Math.min(railInProgress.length, CONTINUE_WATCHING_LIMIT)}
+                    countLabel={railInProgress.length > CONTINUE_WATCHING_LIMIT ? `of ${railInProgress.length} in progress` : 'in progress'}
                 >
-                            {filteredInProgress.slice(0, CONTINUE_WATCHING_LIMIT).map((item, i) => {
+                            {railInProgress.slice(0, CONTINUE_WATCHING_LIMIT).map((item, i) => {
                                 const account = accountById.get(item.accountId)
                                 const rawPeer = account ? peerLoginLabel(account, item.sourceConnectionId) : null
                                 return (
@@ -1213,6 +1220,7 @@ export function ActivityPage() {
                                         item={item}
                                         account={account}
                                         index={i}
+                                        preferredPoster={continueWatchingPosterFor(cwPosterIndex, item.itemId)}
                                         watcherName={account ? mediaAccountName(account.id) : undefined}
                                         peerLabel={rawPeer ? (rawPeer.includes('@') ? maskEmailLevel(rawPeer, emailPrivacyLevel) : maskNameLevel(rawPeer, privacyLevel)) : null}
                                         onOpen={() => setDetailItem(item)}
@@ -1241,6 +1249,7 @@ export function ActivityPage() {
                     refreshing={isLoading}
                     filterKey={`${userFilter}|${timeFilter}|${customStartDate}|${searchTerm}`}
                     canonicalConnections={canonicalConnections}
+                    cwPosterIndex={cwPosterIndex}
                     currentActivity={inProgress}
                     viewMode={viewMode}
                     hoursScope={hoursScope}
@@ -1259,6 +1268,7 @@ export function ActivityPage() {
                 open={detailItem !== null}
                 onOpenChange={(open: boolean) => { if (!open) setDetailItem(null) }}
                 item={detailItem}
+                cwPosterIndex={cwPosterIndex}
                 watchHistory={watchHistory}
             />
             </Suspense>

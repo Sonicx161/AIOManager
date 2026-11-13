@@ -10,6 +10,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 
 import { cn, openStremioDetail, maskNameLevel, maskEmailLevel } from '@/lib/utils'
 import { resolveWatchBadgePct, formatSavedEpisodeRanges, MIN_PLAUSIBLE_WATCH_MS } from '@/lib/activity-utils'
+import { continueWatchingPosterFor } from '@/lib/activity-cw-poster'
 import { formatEpisodeRange } from '@/lib/episode-resolution'
 import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
@@ -36,6 +37,7 @@ interface ActivityItemCardProps {
     viewMode: 'grid' | 'list'
     isSelected: boolean
     isBulkMode: boolean
+    cwPosterIndex?: ReadonlyMap<string, string>
     onToggleSelect?: (id: string | string[]) => void
     onDelete?: (id: string | string[], removeFromLibrary: boolean) => void
     onOpenDetail?: (item: ActivityItem) => void
@@ -47,6 +49,7 @@ export const ActivityItemCard = memo(({
     viewMode,
     isSelected,
     isBulkMode,
+    cwPosterIndex,
     onToggleSelect,
     onDelete,
     onOpenDetail
@@ -58,6 +61,7 @@ export const ActivityItemCard = memo(({
     const privacyLevel = isPrivacyModeEnabled ? privacyLevelNames : 0
 
     const item = entry
+    const preferredPoster = continueWatchingPosterFor(cwPosterIndex, item.itemId)
     const isEpisodeLike = item.type === 'series' || item.type === 'anime' || item.type === 'episode'
     // Imported saved watch state: bitfield-aggregate series carry a verified episode summary
     // (no watch dates, no resume); flagged-only movies keep their positive watched badge.
@@ -178,6 +182,7 @@ export const ActivityItemCard = memo(({
                         itemType={item.type}
                         tmdbId={item.tmdbId}
                         name={item.name}
+                        preferredSrc={preferredPoster}
                         alt={item.name}
                         sizes="(min-width: 1536px) 296px, (min-width: 1280px) 244px, (min-width: 1024px) 242px, (min-width: 768px) 238px, (min-width: 640px) 232px, (min-width: 480px) 288px, 204px"
                         className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
@@ -338,6 +343,7 @@ export const ActivityItemCard = memo(({
                     itemType={item.type}
                     tmdbId={item.tmdbId}
                     name={item.name}
+                    preferredSrc={preferredPoster}
                     sizes="(min-width: 768px) 80px, 64px"
                     className="w-full h-full object-cover"
                     loading="lazy"

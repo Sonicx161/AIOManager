@@ -12,11 +12,12 @@ interface UpNextCardProps {
     watcherName?: string
     peerLabel?: string | null
     index: number
+    preferredPoster?: string
     onOpen: () => void
     onDismiss: () => void
 }
 
-export function UpNextCard({ item, account, watcherName, peerLabel, index, onOpen, onDismiss }: UpNextCardProps) {
+export function UpNextCard({ item, account, watcherName, peerLabel, index, preferredPoster, onOpen, onDismiss }: UpNextCardProps) {
     const progress = Math.round(item.progress)
     const isEpisode = (item.type === 'series' || item.type === 'anime') && item.episode !== undefined
     const live = item.mediaObservation?.kind === 'live' ? (item.mediaObservation.isPaused ? 'Paused' : 'Playing') : null
@@ -50,6 +51,7 @@ export function UpNextCard({ item, account, watcherName, peerLabel, index, onOpe
                         tmdbId={item.tmdbId}
                         name={item.name}
                         displayWidth={64}
+                        preferredSrc={preferredPoster}
                         alt=""
                         className="h-full w-full scale-110 object-cover blur-xl brightness-[.45] saturate-150"
                     />
@@ -63,6 +65,7 @@ export function UpNextCard({ item, account, watcherName, peerLabel, index, onOpe
                         name={item.name}
                         alt=""
                         displayWidth={68}
+                        preferredSrc={preferredPoster}
                         className="h-full w-full object-cover"
                         loading="lazy"
                     />

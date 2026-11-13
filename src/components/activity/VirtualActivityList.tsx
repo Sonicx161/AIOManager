@@ -35,6 +35,7 @@ export interface ActivityCardSlotProps {
     viewMode: FeedViewMode
     safeSelectedItems: Set<string>
     isBulkMode: boolean
+    cwPosterIndex?: ReadonlyMap<string, string>
     onToggleSelect?: (id: string | string[]) => void
     onDelete?: (id: string | string[], removeFromLibrary: boolean) => void
     onOpenDetail?: (item: ActivityItem) => void
@@ -81,6 +82,7 @@ const ActivityItemSlot = memo(function ActivityItemSlot({ entry, slot }: { entry
                 viewMode={slot.viewMode}
                 isSelected={slot.safeSelectedItems.has(entry.id)}
                 isBulkMode={slot.isBulkMode}
+                cwPosterIndex={slot.cwPosterIndex}
                 onToggleSelect={slot.onToggleSelect}
                 onDelete={slot.onDelete}
                 onOpenDetail={slot.onOpenDetail}
