@@ -11,6 +11,7 @@
     "test:client": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
     "test:server:smoke": "npm --prefix server run test:smoke",
     "test:boot": "node scripts/ci-boot-check.mjs",
+    "check:boot-budget": "node scripts/check-boot-budget.mjs",
     "generate:api": "npm --prefix server run generate-openapi && openapi-typescript server/openapi.json -o src/api/schema.d.ts",
     "test": "npm run test:client && npm run test:server:smoke",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",

@@ -28,6 +28,8 @@ jobs:
       - run: npm run typecheck
       - name: Production build
         run: npm run build
+      - name: Boot transfer budget and CSP hash check
+        run: npm run check:boot-budget
       - name: Built app boots in a real browser
         run: npm run test:boot
         env:
