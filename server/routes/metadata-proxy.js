@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
@@ -192,6 +193,11 @@ async function fetchUpstream(requestDescriptor) {
     return text
 }
 
+async function workspaceBinding(userId) {
+    const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [userId])
+    return row ? String(row.password ?? '') : null
+}
+
 export function registerMetadataProxyRoutes(fastify) {
     metadataCache.startCleanupJob()
     metadataCache.cleanupPoisonedFindRows().catch(() => {})
@@ -200,7 +206,8 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: RATE_LIMIT_PROXY },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) {
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) {
             reply.status(401); return { error: 'Unauthorized' }
         }
 
@@ -217,7 +224,7 @@ export function registerMetadataProxyRoutes(fastify) {
 
         let keyRecord
         try {
-            keyRecord = await loadUserKey(authUser, provider)
+            keyRecord = await loadUserKey(authUser, provider, binding)
         } catch (err) {
             fastify.log.error({ category: 'MetadataProxy' }, `Key lookup failed for user ${maskContext(authUser)} provider ${provider}: ${_redactKey(err && err.message)}`)
             reply.status(500); return { error: 'Key lookup failed' }
@@ -286,7 +293,8 @@ export function registerMetadataProxyRoutes(fastify) {
         }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) {
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) {
             reply.status(401); return { error: 'Unauthorized' }
         }
 
@@ -299,7 +307,7 @@ export function registerMetadataProxyRoutes(fastify) {
             keyRecord = { key: unsavedKey, format, source: 'unsaved' }
         } else {
             try {
-                keyRecord = await loadUserKey(authUser, provider)
+                keyRecord = await loadUserKey(authUser, provider, binding)
             } catch {
                 reply.status(500); return { error: 'Key lookup failed' }
             }
@@ -348,8 +356,8 @@ export function registerMetadataProxyRoutes(fastify) {
 
     const AUX_CACHE_TTL_DEFAULT = 6 * 60 * 60 * 1000
 
-    async function auxMetadataGet(cacheKey, fetcher, ttl = AUX_CACHE_TTL_DEFAULT) {
-        const result = await metadataCache.get(cacheKey, fetcher, { ttl })
+    async function auxMetadataGet(cacheKey, fetcher, ttl = AUX_CACHE_TTL_DEFAULT, owner = null) {
+        const result = await metadataCache.get(cacheKey, fetcher, { ttl, owner })
         return { value: result && result.value, hit: result ? result.source !== 'miss' && result.source !== 'stale' : false }
     }
 
@@ -363,11 +371,12 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: RATE_LIMIT_PMDB },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) { reply.status(401); return { error: 'Unauthorized' } }
 
         let keyRecord
         try {
-            keyRecord = await loadUserKey(authUser, 'pmdb')
+            keyRecord = await loadUserKey(authUser, 'pmdb', binding)
         } catch {
             reply.status(500); return { error: 'Key lookup failed' }
         }
@@ -392,7 +401,9 @@ export function registerMetadataProxyRoutes(fastify) {
             ? `${PMDB_BASE}/${cleanPath}?${queryString}`
             : `${PMDB_BASE}/${cleanPath}`
 
-        const cacheKey = `pmdb:${authUser}:${url}`
+        const owner = { id: authUser, password: binding }
+        const version = createHash('sha256').update(String(binding)).digest('hex')
+        const cacheKey = JSON.stringify(['private-v2', authUser, version, 'pmdb', url])
         try {
             const { value, hit } = await auxMetadataGet(cacheKey, async () => {
                 const controller = new AbortController()
@@ -411,7 +422,7 @@ export function registerMetadataProxyRoutes(fastify) {
                 const text = await response.text()
                 if (!response.ok) throw makeUpstreamError('PMDB', response.status)
                 return text
-            })
+            }, AUX_CACHE_TTL_DEFAULT, owner)
             reply.header('Content-Type', 'application/json')
             if (hit) reply.header('X-Cache', 'HIT')
             return value
@@ -424,10 +435,11 @@ export function registerMetadataProxyRoutes(fastify) {
 
     async function pmdbMutate(request, reply, method) {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) { reply.status(401); return { error: 'Unauthorized' } }
 
         let keyRecord
-        try { keyRecord = await loadUserKey(authUser, 'pmdb') } catch { reply.status(500); return { error: 'Key lookup failed' } }
+        try { keyRecord = await loadUserKey(authUser, 'pmdb', binding) } catch { reply.status(500); return { error: 'Key lookup failed' } }
         if (!keyRecord) { reply.status(401); return { error: 'PMDB key not configured' } }
 
         const wildcard = request.params['*'] || ''
@@ -496,10 +508,11 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: RATE_LIMIT_PROXY },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) { reply.status(401); return { error: 'Unauthorized' } }
 
         let keyRecord
-        try { keyRecord = await loadUserKey(authUser, 'mdblist') } catch { reply.status(500); return { error: 'Key lookup failed' } }
+        try { keyRecord = await loadUserKey(authUser, 'mdblist', binding) } catch { reply.status(500); return { error: 'Key lookup failed' } }
         if (!keyRecord) { reply.status(401); return { error: 'MDBList key not configured' } }
 
         const wildcard = request.params['*'] || ''
@@ -528,7 +541,9 @@ export function registerMetadataProxyRoutes(fastify) {
             .sort()
             .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(String(incomingQuery[k]))}`)
             .join('&')
-        const cacheKey = `mdblist:${authUser}:${pathParts.map(encodeURIComponent).join('/')}:${mdbKeyQuery}`
+        const owner = { id: authUser, password: binding }
+        const version = createHash('sha256').update(String(binding)).digest('hex')
+        const cacheKey = JSON.stringify(['private-v2', authUser, version, 'mdblist', pathParts, mdbKeyQuery])
 
         try {
             const { value, hit } = await auxMetadataGet(cacheKey, async () => {
@@ -540,7 +555,7 @@ export function registerMetadataProxyRoutes(fastify) {
                 const text = await response.text()
                 if (!response.ok) throw makeUpstreamError('MDBList', response.status)
                 return text
-            })
+            }, AUX_CACHE_TTL_DEFAULT, owner)
             reply.header('Content-Type', 'application/json')
             if (hit) reply.header('X-Cache', 'HIT')
             return value
@@ -555,10 +570,11 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: RATE_LIMIT_PROXY },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) { reply.status(401); return { error: 'Unauthorized' } }
 
         let keyRecord
-        try { keyRecord = await loadUserKey(authUser, 'tvdb') } catch { reply.status(500); return { error: 'Key lookup failed' } }
+        try { keyRecord = await loadUserKey(authUser, 'tvdb', binding) } catch { reply.status(500); return { error: 'Key lookup failed' } }
         if (!keyRecord) { reply.status(401); return { error: 'TVDB key not configured' } }
 
         const wildcard = request.params['*'] || ''
@@ -603,10 +619,11 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: RATE_LIMIT_PROXY },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) { reply.status(401); return { error: 'Unauthorized' } }
 
         let keyRecord
-        try { keyRecord = await loadUserKey(authUser, 'fanart') } catch { reply.status(500); return { error: 'Key lookup failed' } }
+        try { keyRecord = await loadUserKey(authUser, 'fanart', binding) } catch { reply.status(500); return { error: 'Key lookup failed' } }
         if (!keyRecord) { reply.status(401); return { error: 'Fanart key not configured' } }
 
         const wildcard = request.params['*'] || ''
@@ -642,7 +659,8 @@ export function registerMetadataProxyRoutes(fastify) {
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) {
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        if (binding === null) {
             reply.status(401); return { error: 'Unauthorized' }
         }
 
@@ -651,7 +669,7 @@ export function registerMetadataProxyRoutes(fastify) {
 
         let tmdbKeyRecord = null
         if (authUser) {
-            try { tmdbKeyRecord = await loadUserKey(authUser, 'tmdb') } catch {}
+            try { tmdbKeyRecord = await loadUserKey(authUser, 'tmdb', binding) } catch {}
         }
 
         const cacheKey = `comments:${imdbId || tmdbId}:${type || 'movie'}`

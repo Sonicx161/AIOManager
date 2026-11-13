@@ -1,7 +1,8 @@
 import db from '../db.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
-import { verifyAuth } from '../auth.js'
+import { verifyAuth, timingSafeEqual, authenticateDeviceCredential } from '../auth.js'
+import { getCachedAuthBound, hashAuthPassword } from '../state.js'
 import { assertWritablePrimary } from '../admin/account-state.js'
 import { isSafeUrl } from '../utils/ssrf.js'
 import { guardedWebFetch } from '../utils/safe-fetch.js'
@@ -58,8 +59,8 @@ function isValidKeyValue(key) {
     return typeof key === 'string' && key.trim().length > 0 && key.length <= 4096
 }
 
-async function upsertMetadataKey(userId, provider, encryptedKey, keyFormat, now) {
-    await db.run(
+async function upsertMetadataKey(tx, userId, provider, encryptedKey, keyFormat, now) {
+    await tx.run(
         `INSERT INTO metadata_keys (user_id, provider, encrypted_key, key_format, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id, provider) DO UPDATE SET
@@ -68,6 +69,21 @@ async function upsertMetadataKey(userId, provider, encryptedKey, keyFormat, now)
             updated_at = excluded.updated_at`,
         [userId, provider, encryptedKey, keyFormat, now, now]
     )
+}
+
+async function workspaceBinding(userId) {
+    const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [userId])
+    return row ? String(row.password ?? '') : null
+}
+
+async function withWorkspaceBinding(userId, binding, write) {
+    return db.tx(async tx => {
+        const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
+        const row = await tx.get(`SELECT password FROM kv_store WHERE key = $1${lock}`, [userId])
+        if (!row || String(row.password ?? '') !== binding) return false
+        await write(tx)
+        return true
+    }, { immediate: true })
 }
 
 export function registerMetadataKeysRoutes(fastify) {
@@ -102,7 +118,13 @@ export function registerMetadataKeysRoutes(fastify) {
         }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        const boundAuth = request.deviceAuth
+            ? (await authenticateDeviceCredential(authUser, request.headers['x-sync-device'], request.headers['x-sync-password'])).ok
+            : timingSafeEqual(getCachedAuthBound('sync:' + authUser, binding), hashAuthPassword(request.headers['x-sync-password']))
+        if (!authUser || binding === null || !boundAuth) {
+            reply.status(401); return { error: 'Unauthorized' }
+        }
         assertWritablePrimary()
 
         const { provider: rawProvider, key: rawKey } = request.body || {}
@@ -119,7 +141,8 @@ export function registerMetadataKeysRoutes(fastify) {
         const now = Date.now()
 
         try {
-            await upsertMetadataKey(authUser, provider, encrypt(key, PRIMARY_KEY), keyFormat, now)
+            const saved = await withWorkspaceBinding(authUser, binding, tx => upsertMetadataKey(tx, authUser, provider, encrypt(key, PRIMARY_KEY), keyFormat, now))
+            if (!saved) { reply.status(401); return { error: 'Unauthorized' } }
             invalidateUserKey(authUser, provider)
         } catch (err) {
             fastify.log.error({ category: 'MetadataKeys' }, `Save failed for provider ${provider}: ${err.message}`)
@@ -244,7 +267,7 @@ export function registerMetadataKeysRoutes(fastify) {
         }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        if (!authUser || !await db.get('SELECT 1 FROM kv_store WHERE key = $1', [authUser])) { reply.status(401); return { error: 'Unauthorized' } }
 
         const provider = normalizeProvider(request.params.provider)
         if (!provider) {
@@ -311,7 +334,13 @@ export function registerMetadataKeysRoutes(fastify) {
         }
     }, async (request, reply) => {
         const authUser = await verifyAuth(request)
-        if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
+        const binding = authUser ? await workspaceBinding(authUser) : null
+        const boundAuth = request.deviceAuth
+            ? (await authenticateDeviceCredential(authUser, request.headers['x-sync-device'], request.headers['x-sync-password'])).ok
+            : timingSafeEqual(getCachedAuthBound('sync:' + authUser, binding), hashAuthPassword(request.headers['x-sync-password']))
+        if (!authUser || binding === null || !boundAuth) {
+            reply.status(401); return { error: 'Unauthorized' }
+        }
         assertWritablePrimary()
 
         const { aiometadataUrl: rawUrl, uuid: rawUuid, password, addonPassword } = request.body || {}
@@ -375,22 +404,21 @@ export function registerMetadataKeysRoutes(fastify) {
 
         const imported = []
         const now = Date.now()
-        for (const [rawProvider, rawValue] of Object.entries(apiKeys)) {
-            const provider = normalizeProvider(rawProvider)
-            if (!provider) continue
-            const keyStr = typeof rawValue === 'string'
-                ? rawValue.trim()
-                : (rawValue == null ? '' : String(rawValue).trim())
-            if (!isValidKeyValue(keyStr)) continue
-            const keyFormat = detectKeyFormat(keyStr)
-            try {
-                await upsertMetadataKey(authUser, provider, encrypt(keyStr, PRIMARY_KEY), keyFormat, now)
-                invalidateUserKey(authUser, provider)
+        const saved = await withWorkspaceBinding(authUser, binding, async tx => {
+            for (const [rawProvider, rawValue] of Object.entries(apiKeys)) {
+                const provider = normalizeProvider(rawProvider)
+                if (!provider) continue
+                const keyStr = typeof rawValue === 'string'
+                    ? rawValue.trim()
+                    : (rawValue == null ? '' : String(rawValue).trim())
+                if (!isValidKeyValue(keyStr)) continue
+                const keyFormat = detectKeyFormat(keyStr)
+                await upsertMetadataKey(tx, authUser, provider, encrypt(keyStr, PRIMARY_KEY), keyFormat, now)
                 imported.push({ provider, keyFormat })
-            } catch (err) {
-                fastify.log.warn({ category: 'MetadataKeys' }, `Import save failed for provider ${provider}: ${err.message}`)
             }
-        }
+        })
+        if (!saved) { reply.status(401); return { error: 'Unauthorized' } }
+        for (const { provider } of imported) invalidateUserKey(authUser, provider)
 
         fastify.log.info({ category: 'MetadataKeys' }, `Imported ${imported.length} metadata key(s) for user ${maskContext(authUser)} from AIOMetadata.`)
         return { imported }

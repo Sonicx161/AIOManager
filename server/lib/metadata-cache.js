@@ -30,6 +30,7 @@ class MetadataCache {
         this.l1 = new Map()
         this.l1Bytes = 0
         this.pendingRequests = new Map()
+        this.ownerGenerations = new Map()
         this.cleanupTimer = null
         this.stats = {
             l1_evictions_total: 0,
@@ -139,7 +140,25 @@ class MetadataCache {
         }
     }
 
-    async _insertL2(key, responseText, expiresAt, now) {
+    async _insertL2(key, responseText, expiresAt, now, owner = null) {
+        if (owner) {
+            try {
+                return await db.tx(async tx => {
+                    const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
+                    const row = await tx.get(`SELECT password FROM kv_store WHERE key = $1${lock}`, [owner.id])
+                    if (!row || String(row.password ?? '') !== owner.password) return false
+                    await tx.run(
+                        `INSERT INTO metadata_cache (key, response, expires_at, created_at) VALUES ($1, $2, $3, $4)
+                         ON CONFLICT (key) DO UPDATE SET response = excluded.response, expires_at = excluded.expires_at, created_at = excluded.created_at`,
+                        [key, responseText, expiresAt, now]
+                    )
+                    return true
+                }, { immediate: true })
+            } catch (err) {
+                logger.warn && logger.warn(`[MetadataCache] L2 insert failed: ${err && err.message}`)
+                return false
+            }
+        }
         try {
             if (db.type === 'postgres') {
                 await db.run(
@@ -177,6 +196,9 @@ class MetadataCache {
         if (typeof fetcher !== 'function') {
             throw new Error('MetadataCache.get requires a fetcher function')
         }
+        const owner = options.owner || null
+        const generation = owner ? (this.ownerGenerations.get(owner.id) || 0) : 0
+        const current = () => !owner || (this.ownerGenerations.get(owner.id) || 0) === generation
         const now = this._now()
         const ttl = Number.isFinite(options.ttl) && options.ttl > 0 ? options.ttl : 0
         const permanent = options.permanent === true
@@ -198,7 +220,7 @@ class MetadataCache {
         const l2Result = await this._getL2(key, now)
         if (l2Result && !l2Result.expired) {
             this.stats.l2_hits_total++
-            this._setL1(key, l2Result.value, l2Result.expiresAt || (now + jitteredTtl(baseTtl)))
+            if (current()) this._setL1(key, l2Result.value, l2Result.expiresAt || (now + jitteredTtl(baseTtl)))
             return { value: l2Result.value, source: 'l2', stale: false }
         }
 
@@ -223,8 +245,14 @@ class MetadataCache {
                 ? now + jitteredTtl(valueTtl)
                 : (expiresAt || (now + jitteredTtl(PERMANENT_TTL)))
             const storedValue = typeof fetched === 'string' ? JSON.parse(fetched) : fetched
-            this._setL1(key, storedValue, expiresAtForStore)
-            await this._insertL2(key, responseText, expiresAtForStore, now)
+            if (owner) {
+                if (current() && await this._insertL2(key, responseText, expiresAtForStore, now, owner) && current()) {
+                    this._setL1(key, storedValue, expiresAtForStore)
+                }
+            } else {
+                this._setL1(key, storedValue, expiresAtForStore)
+                await this._insertL2(key, responseText, expiresAtForStore, now)
+            }
             return storedValue
         })()
 
@@ -239,7 +267,7 @@ class MetadataCache {
             }
             throw err
         } finally {
-            this.pendingRequests.delete(key)
+            if (this.pendingRequests.get(key) === promise) this.pendingRequests.delete(key)
         }
     }
 
@@ -340,6 +368,22 @@ class MetadataCache {
             clearInterval(this.cleanupTimer)
             this.cleanupTimer = null
         }
+    }
+
+    invalidateOwner(ownerId) {
+        this.ownerGenerations.set(ownerId, (this.ownerGenerations.get(ownerId) || 0) + 1)
+        const prefix = JSON.stringify(['private-v2', ownerId]).slice(0, -1) + ','
+        const prefixes = [prefix, `pmdb:${ownerId}:`, `mdblist:${ownerId}:`]
+        for (const [key, entry] of this.l1) {
+            if (prefixes.some(value => key.startsWith(value))) {
+                this.l1Bytes -= entry.bytes
+                this.l1.delete(key)
+            }
+        }
+        for (const key of this.pendingRequests.keys()) {
+            if (prefixes.some(value => key.startsWith(value))) this.pendingRequests.delete(key)
+        }
+        return prefixes
     }
 
     clearL1() {

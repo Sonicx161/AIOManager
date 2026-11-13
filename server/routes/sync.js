@@ -3,11 +3,14 @@ import db from '../db.js'
 import { kvHeadIndexed, kvHeadSource } from '../lib/kv-head.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
-import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, hashAuthPassword } from '../state.js'
+import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, invalidateCachedAuthPrefix, hashAuthPassword } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { hashApiKey } from '../api-keys.js'
 import { writeEncryptedIfChanged } from '../db-guards.js'
 import { invalidateCanonicalAddons } from './hydra.js'
+import { invalidateCanonicalForOwner } from '../hydra/canonical-cache.js'
+import { invalidateUserKeys } from '../lib/user-key-cache.js'
+import { metadataCache } from '../lib/metadata-cache.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
 import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash, prepareLegacyPasswordUpgrade, applyLegacyPasswordUpgrade } from '../lib/sync-password.js'
 import { isRegistrationsClosed } from '../config.js'
@@ -960,7 +963,21 @@ export function registerSyncRoutes(fastify) {
         }
 
         fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${maskContext(id)}`)
+        const privateCachePrefixes = metadataCache.invalidateOwner(id)
         await db.tx(async (tx) => {
+            const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
+            await tx.get(`SELECT key FROM kv_store WHERE key = $1${lock}`, [id])
+            for (const prefix of privateCachePrefixes) {
+                await tx.run('DELETE FROM metadata_cache WHERE substr(key, 1, length($1)) = $2', [prefix, prefix])
+            }
+            await tx.run('DELETE FROM metadata_keys WHERE user_id = $1', [id])
+            await tx.run('DELETE FROM stremio_catalog WHERE user_id = $1', [id])
+            await tx.run('DELETE FROM catalog_configs WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM watchlist_items WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM recommendation_cache WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM discovery_prefs WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM commands WHERE sync_user = $1', [id])
+            await tx.run('DELETE FROM account_server_tombstones WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM activity_events WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM activity_snapshots WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM account_canonical_addons WHERE sync_user = $1', [id])
@@ -979,7 +996,11 @@ export function registerSyncRoutes(fastify) {
             await tx.run('DELETE FROM kv_store WHERE key = $1', [id])
             await tx.run('DELETE FROM kv_store_history WHERE key = $1', [id])
         })
+        metadataCache.invalidateOwner(id)
         invalidateCachedAuth('sync:' + id)
+        invalidateCachedAuthPrefix('device:' + id + ':')
+        invalidateUserKeys(id)
+        invalidateCanonicalForOwner(id)
         invalidateSyncResponseCache(id)
         // The cascade cleared any admin state and notices for the user; pick that up now.
         await refreshAccountAdminState().catch(() => {})
