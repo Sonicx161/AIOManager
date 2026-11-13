@@ -9,6 +9,20 @@ on:
 jobs:
   client:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aiomanager_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -38,3 +52,11 @@ jobs:
         run: npm --prefix server run test:smoke
         env:
           ENCRYPTION_KEY: test-encryption-key-32bytes-long!!
+      - name: Server smoke tests on PostgreSQL (boot, health, sync round trip)
+        run: npm --prefix server run test:smoke
+        env:
+          ENCRYPTION_KEY: test-encryption-key-32bytes-long!!
+          DB_TYPE: postgres
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/aiomanager_test
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/aiomanager_test
+          SMOKE_SERVER_PORT: '17771'

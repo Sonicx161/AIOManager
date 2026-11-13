@@ -7,6 +7,52 @@ import { ensureDataDirectory } from '../config.js'
 import { globalHealthCache, healthCheckInFlight, authCache, proxyQueue, domainLastRequestTime } from '../state.js'
 import { ensureAdminSchema } from '../admin/schema.js'
 import { resetAccountAdminStateForTest, loadAccountAdminStateNow } from '../admin/account-state.js'
+import pgConnection from 'pg-connection-string'
+
+export function smokeDatabaseIsPostgres() {
+    return process.env.DB_TYPE === 'postgres' && !!(process.env.TEST_DATABASE_URL || process.env.DATABASE_URL)
+}
+
+// The Postgres smoke mode resets a whole schema; only an explicit, loopback,
+// test-named database is ever allowed. The URL is parsed with the same parser
+// pg uses and the EFFECTIVE host, port and database are validated, because
+// query parameters (host, hostaddr, port, dbname, options, service) redirect
+// the real connection while a plain URL parse still sees the harmless host.
+export function assertPostgresSmokeUrl(urlString, label = 'TEST_DATABASE_URL') {
+    if (typeof urlString !== 'string' || urlString.trim() === '') {
+        throw new Error(`${label} is missing`)
+    }
+    let parsed
+    try {
+        parsed = new URL(urlString)
+    } catch {
+        throw new Error(`${label} is not a valid URL`)
+    }
+    const targetParams = new Set(['host', 'hostaddr', 'port', 'dbname', 'database', 'options', 'service'])
+    for (const key of new URLSearchParams(parsed.search).keys()) {
+        if (targetParams.has(key.toLowerCase())) {
+            throw new Error(`${label} must not override the connection target via the "${key}" query parameter`)
+        }
+    }
+    let config
+    try {
+        config = pgConnection.parse(urlString)
+    } catch {
+        throw new Error(`${label} could not be parsed as a Postgres connection string`)
+    }
+    const host = String(config.host || '').replace(/^\[|\]$/g, '').toLowerCase()
+    if (!['localhost', '127.0.0.1', '::1'].includes(host)) {
+        throw new Error(`${label} connects to ${config.host || 'an unspecified host'}; the smoke suite only resets a loopback database`)
+    }
+    if (config.port !== undefined && config.port !== '' && (!/^\d+$/.test(String(config.port)) || Number(config.port) < 1 || Number(config.port) > 65535)) {
+        throw new Error(`${label} port "${config.port}" is not a valid integer`)
+    }
+    const name = decodeURIComponent(String(config.database || ''))
+    if (!/_(test|smoke)$/.test(name)) {
+        throw new Error(`${label} database "${name}" does not end in _test or _smoke; refusing to reset it`)
+    }
+    return urlString
+}
 
 const CORE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv_store (
@@ -211,10 +257,10 @@ CREATE TABLE IF NOT EXISTS device_credentials (
   token_hash TEXT NOT NULL,
   tier TEXT NOT NULL CHECK (tier IN ('idb', 'prf')),
   label TEXT,
-  created_at INTEGER NOT NULL DEFAULT 0,
-  expires_at INTEGER NOT NULL DEFAULT 0,
+  created_at BIGINT NOT NULL DEFAULT 0,
+  expires_at BIGINT NOT NULL DEFAULT 0,
   revoked INTEGER NOT NULL DEFAULT 0,
-  last_used_at INTEGER,
+  last_used_at BIGINT,
   credential_epoch INTEGER NOT NULL DEFAULT 1
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_device_credentials_account_device ON device_credentials (account_uuid, device_id);
@@ -228,23 +274,50 @@ CREATE TABLE IF NOT EXISTS commands (
   status TEXT NOT NULL,
   results TEXT,
   error TEXT,
-  created_at INTEGER NOT NULL DEFAULT 0,
-  updated_at INTEGER NOT NULL DEFAULT 0
+  created_at BIGINT NOT NULL DEFAULT 0,
+  updated_at BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_commands_user_updated ON commands (sync_user, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_commands_status ON commands (status);
 `
 
 export async function setupTestEnv() {
+    if (db.pool) {
+        await db.pool.end().catch(() => {})
+        db.pool = null
+        db.isHealthy = false
+    }
+    process.env.ENCRYPTION_KEY = 'test-encryption-key-32bytes-long!!'
+
+    if (smokeDatabaseIsPostgres()) {
+        if (!process.env.TEST_DATABASE_URL) {
+            throw new Error('the Postgres smoke mode requires TEST_DATABASE_URL; refusing to reset DATABASE_URL')
+        }
+        assertPostgresSmokeUrl(process.env.TEST_DATABASE_URL)
+        process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
+        db.type = 'postgres'
+        await db.init()
+        // Dedicated smoke database only: reset to a blank schema so every test
+        // file starts from the same empty state the SQLite :memory: path has.
+        await db.exec('DROP SCHEMA public CASCADE; CREATE SCHEMA public;')
+        await db.exec(CORE_SCHEMA)
+        await ensureAdminSchema(db)
+        resetAccountAdminStateForTest()
+        await loadAccountAdminStateNow().catch(() => {})
+
+        const app = Fastify({ logger: false })
+        ensureDataDirectory(app)
+        await initializeEncryptionKeys(app)
+        return app
+    }
+
     if (db.client) {
         db.client.close()
         db.client = null
     }
     db.type = 'sqlite'
-    db.pool = null
     db.isHealthy = false
     process.env.SQLITE_DB_PATH = ':memory:'
-    process.env.ENCRYPTION_KEY = 'test-encryption-key-32bytes-long!!'
 
     await db.init()
     db._stmtCache.clear()
@@ -262,12 +335,15 @@ export async function setupTestEnv() {
 }
 
 export function cleanupTestEnv() {
+    if (db.pool) {
+        db.pool.end().catch(() => {})
+        db.pool = null
+    }
     if (db.client) {
         db.client.close()
         db.client = null
     }
     db.type = 'sqlite'
-    db.pool = null
     db.isHealthy = false
     resetAccountAdminStateForTest()
     globalHealthCache.clear()
@@ -276,6 +352,7 @@ export function cleanupTestEnv() {
     proxyQueue.length = 0
     domainLastRequestTime.clear()
 }
+
 
 export function mockFetch(handler) {
     const originalFetch = globalThis.fetch
