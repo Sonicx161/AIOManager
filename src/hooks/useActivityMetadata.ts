@@ -9,10 +9,10 @@ import {
     isUnresolvedActivityName,
     metadataTargetKey,
     selectMetadataBatch,
+    shareResolvedMetadata,
     type PendingMetadataTarget,
     type ResolvedMetadata,
 } from '@/lib/activity-metadata-overlay'
-import { watcherIdentityKeys } from '@/lib/watcher-identity'
 
 const FAILED_LOOKUP_TTL_MS = 5 * 60 * 1000
 const FIRST_PASS_SIZE = 20
@@ -141,19 +141,7 @@ export function useActivityMetadata(items: ActivityItem[]): ActivityItem[] {
         return () => { active = false; cancelIdle() }
     }, [items, resolved, completedPass])
 
-    const sharedResolved = useMemo(() => {
-        const next = new Map(resolved)
-        for (const item of items) {
-            const metadata = resolved.get(item.itemId)
-            if (metadata) for (const key of watcherIdentityKeys(item)) next.set(key, metadata)
-        }
-        for (const item of items) {
-            if (resolved.has(item.itemId)) continue
-            const metadata = watcherIdentityKeys(item).map(key => next.get(key)).find(Boolean)
-            if (metadata) next.set(item.itemId, metadata)
-        }
-        return next
-    }, [items, resolved])
+    const sharedResolved = useMemo(() => shareResolvedMetadata(items, resolved), [items, resolved])
 
     return useMemo(() => applyResolvedMetadataOverlay(items, sharedResolved, reuseBySource.current), [items, sharedResolved])
 }

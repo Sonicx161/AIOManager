@@ -175,6 +175,7 @@ export function createTitleMetadataSearch(
 interface TitleConflictIndex {
     titleKeyByItem: Map<ActivityItem, string | undefined>
     conflictingTitles: Set<string>
+    probeKeys: ReadonlyArray<readonly string[]>
 }
 const titleConflictCache = new WeakMap<ActivityItem[], TitleConflictIndex>()
 
@@ -196,9 +197,47 @@ function titleConflictIndex(items: ActivityItem[]): TitleConflictIndex {
         titleIds.set(titleKey, ids)
     }
     const conflictingTitles = new Set([...titleIds].filter(([, ids]) => ids.size > 1).map(([key]) => key))
-    const index = { titleKeyByItem, conflictingTitles }
+    const probeKeys = items.map(item => {
+        const keys = watcherIdentityKeys(item)
+        const titleKey = titleKeyByItem.get(item)
+        return titleKey && conflictingTitles.has(titleKey) ? keys.filter(key => key.startsWith('tt:')) : keys
+    })
+    const index = { titleKeyByItem, conflictingTitles, probeKeys }
     titleConflictCache.set(items, index)
     return index
+}
+
+function firstResolved(resolved: Map<string, ResolvedMetadata>, keys: readonly string[]): ResolvedMetadata | undefined {
+    for (let i = 0; i < keys.length; i++) {
+        const entry = resolved.get(keys[i])
+        if (entry) return entry
+    }
+    return undefined
+}
+
+const identityKeysCache = new WeakMap<ActivityItem[], ReadonlyArray<readonly string[]>>()
+
+export function shareResolvedMetadata(items: ActivityItem[], resolved: Map<string, ResolvedMetadata>): Map<string, ResolvedMetadata> {
+    const next = new Map(resolved)
+    if (resolved.size === 0) return next
+    let keysByIndex = identityKeysCache.get(items)
+    if (!keysByIndex) {
+        keysByIndex = items.map(item => watcherIdentityKeys(item))
+        identityKeysCache.set(items, keysByIndex)
+    }
+    for (let i = 0; i < items.length; i++) {
+        const metadata = resolved.get(items[i].itemId)
+        if (!metadata) continue
+        const keys = keysByIndex[i]
+        for (let k = 0; k < keys.length; k++) next.set(keys[k], metadata)
+    }
+    for (let i = 0; i < items.length; i++) {
+        const itemId = items[i].itemId
+        if (resolved.has(itemId)) continue
+        const metadata = firstResolved(next, keysByIndex[i])
+        if (metadata) next.set(itemId, metadata)
+    }
+    return next
 }
 
 /**
@@ -215,12 +254,9 @@ export function applyResolvedMetadataOverlay(
 ): ActivityItem[] {
     if (resolved.size === 0) return items
     let changed = false
-    const { titleKeyByItem, conflictingTitles } = titleConflictIndex(items)
-    const next = items.map(item => {
-        const keys = watcherIdentityKeys(item)
-        const titleKey = titleKeyByItem.get(item)
-        const safeKeys = titleKey && conflictingTitles.has(titleKey) ? keys.filter(key => key.startsWith('tt:')) : keys
-        const entry = resolved.get(item.itemId) || safeKeys.map(key => resolved.get(key)).find(Boolean)
+    const { probeKeys } = titleConflictIndex(items)
+    const next = items.map((item, index) => {
+        const entry = resolved.get(item.itemId) || firstResolved(resolved, probeKeys[index])
         if (!entry) return item
         const name = isUnresolvedActivityName(item.name) ? entry.name || item.name : item.name
         const poster = item.poster || entry.poster
