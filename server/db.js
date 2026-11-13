@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3'
 import pg from 'pg'
+import { AsyncLocalStorage } from 'node:async_hooks'
 const { Pool, types } = pg
 
 types.setTypeParser(types.builtins.INT8, (val) => parseInt(val, 10))
@@ -7,6 +8,12 @@ types.setTypeParser(types.builtins.INT8, (val) => parseInt(val, 10))
 let _sqliteTxQueue = Promise.resolve()
 
 const SQLITE_STMT_CACHE_MAX = 500
+
+// Marks the async chain of a running SQLite transaction body with a per-run
+// token. Plain writes from chains holding the active token (the body itself)
+// run on the connection directly; anything else, including a chain that still
+// carries a closed transaction's token, queues behind the open transaction.
+const sqliteTxContext = new AsyncLocalStorage()
 
 // Connection settings shared with the boot preload (lib/settings-boot.js).
 export function pgConnectionConfig(env = process.env) {
@@ -48,6 +55,8 @@ class DB {
         this.pool = null
         this.isHealthy = false
         this._stmtCache = new Map()
+        this._sqliteTxOpen = false
+        this._sqliteTxToken = null
     }
 
     _prepare(sql) {
@@ -168,6 +177,18 @@ class DB {
             const res = await this.pool.query(sql, params)
             return { changes: res.rowCount }
         } else {
+            // One connection is shared by every request: while a transaction body
+            // is open, another chain's write would land inside it and be rolled
+            // back with it after that chain was already told it succeeded, so it
+            // waits for the transaction to close instead. Only the chain holding
+            // the active token runs directly; a closed transaction's stale token
+            // queues like any other foreign write.
+            if (this._sqliteTxOpen && sqliteTxContext.getStore() !== this._sqliteTxToken) {
+                const queued = _sqliteTxQueue.then(() => this._prepare(sql).run(params))
+                _sqliteTxQueue = queued.catch(() => {})
+                const info = await queued
+                return { changes: info.changes }
+            }
             const info = this._prepare(sql).run(params)
             return { changes: info.changes }
         }
@@ -197,18 +218,24 @@ class DB {
         } else {
             const run = async () => {
                 this.client.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN')
+                const token = {}
+                this._sqliteTxToken = token
+                this._sqliteTxOpen = true
                 try {
                     const sqliteFns = {
                         query: (sql, params = []) => this._prepare(sql).all(params),
                         get: (sql, params = []) => this._prepare(sql).get(params),
                         run: (sql, params = []) => ({ changes: this._prepare(sql).run(params).changes }),
                     }
-                    const result = await fn(sqliteFns)
+                    const result = await sqliteTxContext.run(token, () => fn(sqliteFns))
                     this.client.exec('COMMIT')
                     return result
                 } catch (err) {
                     try { this.client.exec('ROLLBACK') } catch {}
                     throw err
+                } finally {
+                    this._sqliteTxOpen = false
+                    if (this._sqliteTxToken === token) this._sqliteTxToken = null
                 }
             }
             const next = _sqliteTxQueue.then(run, run)
@@ -221,6 +248,12 @@ class DB {
         if (this.type === 'postgres') {
             await this.pool.query(sql)
         } else {
+            if (this._sqliteTxOpen && sqliteTxContext.getStore() !== this._sqliteTxToken) {
+                const queued = _sqliteTxQueue.then(() => this.client.exec(sql))
+                _sqliteTxQueue = queued.catch(() => {})
+                await queued
+                return
+            }
             this.client.exec(sql)
         }
     }
@@ -244,6 +277,8 @@ class DB {
                 this.client = null
             }
             this._stmtCache.clear()
+            this._sqliteTxOpen = false
+            this._sqliteTxToken = null
         }
         this.isHealthy = false
     }
