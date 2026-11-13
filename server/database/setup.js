@@ -1,5 +1,6 @@
 import path from 'path'
 import db from '../db.js'
+import { ensureKvHeadIndex } from '../lib/kv-head.js'
 import { DATA_DIR, isReadOnlyReplica } from '../config.js'
 import { ADMIN_TABLES } from '../admin/schema.js'
 import { registerTask } from '../lib/ops-metrics.js'
@@ -787,6 +788,7 @@ export async function initializeDatabase(fastify) {
                 } catch (e) { fastify.log.warn({ category: 'Database' }, `SQLite migration platform backfill: ${e.message}`) }
             }
             await migrateKvStoreColumns(fastify.log)
+            await ensureKvHeadIndex(fastify.log)
             const fhTableInfo = await db.query(`PRAGMA table_info(failover_history)`)
             const hasLatencyMs = fhTableInfo.some(col => col.name === 'latency_ms')
             if (!hasLatencyMs) {
@@ -813,6 +815,13 @@ export async function initializeDatabase(fastify) {
             } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try {
                 await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_connection ON autopilot_rules (connection_id)`)
+            } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            // Per-owner summaries read only these columns; without the indexes SQLite walks each row's stored addon list to reach them.
+            try {
+                await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_owner_summary ON autopilot_rules (owner_sync_user, account_id, id, edited_at, updated_at, platform, connection_id)`)
+            } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            try {
+                await db.run(`CREATE INDEX IF NOT EXISTS idx_canonical_addons_owner_summary ON account_canonical_addons (sync_user, account_id, updated_at)`)
             } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
             try {
                 const pruned = await db.run(`DELETE FROM account_api_keys WHERE rowid NOT IN (SELECT MAX(rowid) FROM account_api_keys GROUP BY sync_user, api_key_hash)`)

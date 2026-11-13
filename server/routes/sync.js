@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import db from '../db.js'
+import { kvHeadIndexed, kvHeadSource } from '../lib/kv-head.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, hashAuthPassword } from '../state.js'
@@ -233,10 +234,13 @@ export function registerSyncRoutes(fastify) {
             // column is suppressed only when the request etag or the warm cache can answer
             // without it, so a cached or 304 pull never reads the stored value.
             const ifNoneMatch = request.headers['if-none-match'] || null
-            let row = await db.get(
-                'SELECT password, content_hash, CASE WHEN content_hash = $1 OR content_hash = $2 THEN NULL ELSE value END AS value FROM kv_store WHERE key = $3',
-                [ifNoneMatch, peekSyncResponseCacheHash(id), id]
-            )
+            // With the head index the blob is left out here and read by the refetch below only when it is served.
+            let row = kvHeadIndexed()
+                ? await db.get(`SELECT password, content_hash, NULL AS value FROM ${kvHeadSource()} WHERE key = $1`, [id])
+                : await db.get(
+                    'SELECT password, content_hash, CASE WHEN content_hash = $1 OR content_hash = $2 THEN NULL ELSE value END AS value FROM kv_store WHERE key = $3',
+                    [ifNoneMatch, peekSyncResponseCacheHash(id), id]
+                )
 
             if (!row) {
                 trace('syncRoute', 'pull.error', { accountId: id, error: 'not-found' })
@@ -469,7 +473,7 @@ export function registerSyncRoutes(fastify) {
         // until the locked in-tx row confirms that exact credential, so a racing
         // request can never reuse a half-finished verification.
         const deviceSameAccount = request.deviceAuth?.accountUuid === id
-        const preTxRow = deviceSameAccount ? null : await db.get('SELECT password FROM kv_store WHERE key = $1', [id])
+        const preTxRow = deviceSameAccount ? null : await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [id])
         const preTxPassword = preTxRow?.password ?? null
         const rowMayExist = request.deviceAuth || preTxRow != null
         const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
@@ -513,7 +517,7 @@ export function registerSyncRoutes(fastify) {
             const row = await tx.get(
                 db.type === 'postgres'
                     ? 'SELECT password, content_hash, content_hint, updated_at FROM kv_store WHERE key = $1 FOR UPDATE'
-                    : 'SELECT password, content_hash, content_hint, updated_at FROM kv_store WHERE key = $1',
+                    : `SELECT password, content_hash, content_hint, updated_at FROM ${kvHeadSource()} WHERE key = $1`,
                 [id]
             )
 

@@ -8,6 +8,7 @@ import { trace } from './utils/trace.js'
 import { isAdminPath } from './admin/paths.js'
 import { isReadOnlyReplica } from './config.js'
 import { assertAccountActive, AuthStateError, StateUnavailableError } from './admin/account-state.js'
+import { kvHeadSource } from './lib/kv-head.js'
 
 export const timingSafeEqual = (a, b) => {
     try {
@@ -42,7 +43,7 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
         if ((await verifySyncPassword(String(token), row.token_hash)) !== true) return { ok: false, reason: 'unknown' }
         if (Number(row.revoked) === 1) return { ok: false, reason: 'revoked' }
         if (Number(row.expires_at) <= now) return { ok: false, reason: 'expired' }
-        const account = await db.get('SELECT credential_epoch FROM kv_store WHERE key = $1', [String(syncUser)])
+        const account = await db.get(`SELECT credential_epoch FROM ${kvHeadSource()} WHERE key = $1`, [String(syncUser)])
         if (!account) return { ok: false, reason: 'unknown' }
         if (Number(account.credential_epoch) !== Number(row.credential_epoch)) return { ok: false, reason: 'generation' }
         return { ok: true, accountUuid: row.account_uuid, row }
@@ -119,7 +120,7 @@ export async function verifyAuth(request) {
             trace('auth', 'verifyAuth.accept', { user: syncUser, source: 'cache' })
             return syncUser
         }
-        const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [syncUser])
+        const row = await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [syncUser])
         if (!row?.password) {
             trace('auth', 'verifyAuth.reject', { user: syncUser, reason: 'unknown-user' })
             return null
@@ -165,7 +166,7 @@ export async function requireProxyAuth(request, reply) {
         return null
     }
     try {
-        const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [syncUser])
+        const row = await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [syncUser])
         if (!row) {
             trace('auth', 'proxyAuth.reject', { user: syncUser, reason: 'unknown-user' })
             reply.status(401)

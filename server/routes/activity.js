@@ -9,6 +9,7 @@ import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js
 import { verifySyncPassword, upgradeLegacyPasswordHash } from '../lib/sync-password.js'
 import { deleteAccountActivity, tombstonedAccountIds, withAccountWriteLock } from '../lib/account-tombstones.js'
 import { assertAccountActive, assertWritablePrimary } from '../admin/account-state.js'
+import { kvHeadSource } from '../lib/kv-head.js'
 
 async function validateSyncAuth(request, reply) {
     // Account state gate: first statement, ahead of the deviceAuth early return and
@@ -27,7 +28,7 @@ async function validateSyncAuth(request, reply) {
         return syncUser
     }
 
-    const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [syncUser])
+    const row = await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [syncUser])
     if (!row) {
         reply.status(401)
         return null
