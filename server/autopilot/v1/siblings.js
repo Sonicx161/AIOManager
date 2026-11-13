@@ -36,6 +36,7 @@ export function createSiblings({ fastify, decryptRuleField, cycleTargets, confli
     // an empty array means "no siblings" and a missing key means "not prefetched".
     // Owner-less legacy rows are never siblings (they match only by their own rule id), so a
     // legacy rule's pair stays empty instead of pooling every owner-less rule of the account.
+    // The unary plus keeps SQLite on the account index for the sibling probe; Postgres keeps its active-rule index.
     const prefetchSiblingRows = async (rules) => {
         const pairs = new Map()
         for (const rule of rules) pairs.set(siblingKey(rule.owner_sync_user, rule.account_id), [])
@@ -44,6 +45,7 @@ export function createSiblings({ fastify, decryptRuleField, cycleTargets, confli
         const owners = [...new Set(rules.map(r => r.owner_sync_user || ''))]
         const accountPh = accountIds.map((_, i) => `$${i + 1}`).join(',')
         const ownerPh = owners.map((_, i) => `$${accountIds.length + i + 1}`).join(',')
+        const activeProbe = db.type === 'postgres' ? 'o.is_active = 1' : '+o.is_active = 1'
         try {
             const rows = await db.query(
                 `SELECT r.id, r.account_id, r.owner_sync_user, r.priority_chain, r.active_url, r.updated_at
@@ -52,7 +54,7 @@ export function createSiblings({ fastify, decryptRuleField, cycleTargets, confli
                  AND EXISTS (
                     SELECT 1 FROM autopilot_rules o
                     WHERE o.account_id = r.account_id AND COALESCE(o.owner_sync_user, '') = COALESCE(r.owner_sync_user, '')
-                    AND o.is_active = 1 AND o.id <> r.id
+                    AND ${activeProbe} AND o.id <> r.id
                  )`,
                 [...accountIds, ...owners]
             )
