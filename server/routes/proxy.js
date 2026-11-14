@@ -1005,6 +1005,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
                     const addons = data?.result?.addons
                     if (Array.isArray(addons)) {
                         const sanitizedAddons = dedupeAddonCollectionByTransportUrl(addons.map(sanitizeAddonForStremio))
+                        if (sanitizedAddons.length !== addons.length) data.duplicateAddonTransports = true
                         const lastGood = getLastGoodCollection(payload.authKey)
                         if (isSuspiciousShrink(lastGood?.length || 0, sanitizedAddons.length)) {
                             if (attempt < MAX_RETRIES) {

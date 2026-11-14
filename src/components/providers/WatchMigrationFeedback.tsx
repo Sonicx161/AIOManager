@@ -38,7 +38,7 @@ export function MigrationProgressPanel({ mode, message, progress }: {
     </section>
 }
 
-const resultLabels = { applied: 'Imported', unchanged: 'Already saved', conflict: 'Kept', failed: 'Unconfirmed' } as const
+const resultLabels = { applied: 'Imported', unchanged: 'Already saved', conflict: 'Kept', skipped: 'Skipped', failed: 'Unconfirmed' } as const
 // A stale-kept row was never written; it reads as not attempted, never as kept.
 const staleResultLabel = 'Not attempted'
 const resultLabel = (result: MigrationResult) => isStaleKeptResult(result) ? staleResultLabel : resultLabels[result.status]
@@ -81,7 +81,8 @@ export function MigrationResultsPanel({ plan, results, outcome, connections, not
     const byResult = useMemo(() => new Map(results.map(result => [result.rowId, result])), [results])
     const { imported, kept, unconfirmed: review, stale } = useMemo(() => migrationResultCounts(results), [results])
     // A stale-kept row was never written, so it joins the rows the run never reached.
-    const notAttempted = unattempted + stale
+    const skippedDuringImport = results.filter(result => result.status === 'skipped').length
+    const notAttempted = unattempted + stale + skippedDuringImport
     const readyWithoutResult = plan.rows.filter(row => row.status === 'ready' && !byResult.has(row.id)).length
     const otherReady = Math.max(0, readyWithoutResult - unattempted)
     const alreadySaved = plan.rows.filter(row => row.status === 'unchanged').length

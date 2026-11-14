@@ -27,7 +27,7 @@ export function migrationResultCounts(results: ReadonlyArray<Pick<MigrationResul
         if (result.status === 'applied') imported++
         else if (result.status === 'failed') unconfirmed++
         else if (isStaleKeptResult(result)) stale++
-        else kept++
+        else if (result.status !== 'skipped') kept++
     }
     return { imported, kept, unconfirmed, stale }
 }
@@ -36,11 +36,12 @@ const resultDescriptions = {
     applied: 'Saved and confirmed on this connection.',
     unchanged: 'Already saved here. No extra copy was needed.',
     conflict: 'Changed or existing watch information was kept.',
+    skipped: 'Nothing was changed.',
     failed: 'We couldn’t confirm this save. The title may already be saved; check a fresh preview before trying again.',
 } as const
 
 export function resultExplanation(result: MigrationResult): string {
-    if (isStaleKeptResult(result)) return result.message
+    if (isStaleKeptResult(result) || result.status === 'skipped') return result.message
     if (result.status === 'failed' && result.failure) return result.message
     if (result.status === 'conflict' && result.message.includes('source record changed')) return 'The source changed after the preview. This title wasn’t copied; preview again to check its new state.'
     if (result.status === 'conflict' && result.message.includes('playing on the destination')) return 'This title is playing now, so it wasn’t copied. Try again after playback stops.'

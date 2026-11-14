@@ -60,7 +60,7 @@ export interface WatchStatePatch {
 }
 
 export interface MigrationWriteResult {
-    status: 'applied' | 'unchanged' | 'conflict'
+    status: 'applied' | 'unchanged' | 'conflict' | 'skipped'
     message: string
     record?: WatchStateRecord
     /** The pre-write checks went stale, so nothing was written; the row needs a fresh preview. */
@@ -83,6 +83,7 @@ export interface MigrationWriteResult {
 
 export interface WatchStateDestination extends WatchStateEndpoint {
     capabilities: { watched: boolean; resume: boolean; dates: boolean; counts?: boolean; combined?: boolean; requiresDates?: boolean; requiresDuration?: boolean; ratings?: boolean; favorites?: boolean; notes: string[] }
+    preflight?(record: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<string | null>
     resolve(record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]>
     apply(expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult>
     /** Called once before the first write of an import run: drops per-run caches and re-verifies the session. */
@@ -124,7 +125,7 @@ export interface MigrationFailure {
 
 export interface MigrationResult {
     rowId: string
-    status: 'applied' | 'unchanged' | 'conflict' | 'failed'
+    status: 'applied' | 'unchanged' | 'conflict' | 'skipped' | 'failed'
     message: string
     completedAt: number
     failure?: MigrationFailure

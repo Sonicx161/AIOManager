@@ -2,13 +2,13 @@
 // failure fails closed instead of escalating to an irreversible whole-show removal.
 import type { LibraryItem } from '../types/activity.ts'
 import type { MetaVideo } from './watched-episodes.ts'
-import { decodeWatchedBitfield, encodeWatchedBitfield, hasNoWatchedBits, resolveWatchedBitsAgainstVideos } from './watched-bitfield.ts'
+import { encodeWatchedBitfield, hasNoWatchedBits, resolveWatchedBitsAgainstVideos } from './watched-bitfield.ts'
 
 export type EpisodeDeletePlan =
     | { kind: 'rewrite'; rewritten: LibraryItem }
     | { kind: 'remove-row' }
     | { kind: 'skip' }
-    | { kind: 'fail'; reason: 'no-videos' | 'no-bitfield' | 'anchor-mismatch' | 'non-tt' }
+    | { kind: 'fail'; reason: 'no-videos' | 'no-bitfield' | 'anchor-mismatch' | 'non-tt' | 'unsafe-list' }
 
 type DeleteTarget = { uniqueItemId?: string; season: number | null; episode: number | null }
 
@@ -28,12 +28,14 @@ export async function planEpisodeBitfieldDelete(args: {
     row: LibraryItem | undefined
     videos: MetaVideo[] | null
     target: DeleteTarget
+    safeList?: boolean
 }): Promise<EpisodeDeletePlan> {
     const { itemId, row, videos, target } = args
     // Non-tt ids (kitsu/mal/anidb) can never resolve a Cinemeta video list.
     if (!itemId.startsWith('tt')) return { kind: 'fail', reason: 'non-tt' }
     // Row absent remotely: nothing to delete remotely, the local purge handles the feed entry.
     if (!row) return { kind: 'skip' }
+    if ((row.state?.watched || '').trim() && (!args.safeList || !videos || row.type !== 'series')) return { kind: 'fail', reason: 'unsafe-list' }
     // Progress-only row (no bitfield, or one with every bit clear): the resume position is its
     // only state, so deleting that entry removes the row; any other entry is a stale event with
     // nothing remote to edit.
@@ -41,16 +43,7 @@ export async function planEpisodeBitfieldDelete(args: {
         return isResumeTarget(row.state, target) ? { kind: 'remove-row' } : { kind: 'skip' }
     }
 
-    // Without a video list nothing can be shifted, so only the exact single-bit case is provable.
-    if (videos == null) {
-        const raw = await decodeWatchedBitfield(row.state?.watched)
-        if (!raw || raw.watchedIndices.length === 0) return { kind: 'fail', reason: 'no-bitfield' }
-        const [only] = raw.watchedIndices
-        if (target.uniqueItemId && raw.watchedIndices.length === 1 && only === raw.length - 1 && raw.videoId === target.uniqueItemId) {
-            return { kind: 'remove-row' }
-        }
-        return { kind: 'fail', reason: 'no-videos' }
-    }
+    if (!videos) return { kind: 'fail', reason: 'unsafe-list' }
 
     // Decode exactly like stremio-core against the current list (anchor relocation + shift). A
     // missing anchor or a bit shifted out of the list means the write cannot be proven, so the
@@ -102,4 +95,21 @@ export async function planEpisodeBitfieldDelete(args: {
         },
     }
     return { kind: 'rewrite', rewritten }
+}
+
+export async function verifyEpisodeDeleteReadback(
+    itemId: string,
+    expected: LibraryItem | null,
+    read: () => Promise<LibraryItem[]>,
+): Promise<LibraryItem | null> {
+    const rows = await read()
+    if (rows.length !== 1 || rows[0]._id !== itemId) throw new Error('The deletion could not be verified')
+    const saved = rows[0]
+    if (expected === null) {
+        if (saved.removed !== true) throw new Error('The deletion could not be verified')
+        return null
+    }
+    const fields = ['watched', 'video_id', 'season', 'episode', 'timeOffset', 'timesWatched'] as const
+    if (saved.removed === true || saved.type !== expected.type || fields.some(field => saved.state?.[field] !== expected.state?.[field])) throw new Error('The deletion could not be verified')
+    return saved
 }

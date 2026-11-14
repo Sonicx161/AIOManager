@@ -28,6 +28,7 @@ import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitf
 import { isLiveLibraryRow } from '../stremio-liveness.ts'
 import { migrationStage, GlobalMatchFailure, WatchMigrationError } from './failures.ts'
 import { assertFreshChecks } from './prewrite-fresh.ts'
+import { UNSAFE_EPISODE_LIST } from '../stremio-bitfield-guard.ts'
 
 export interface StremioDestinationVideo {
     id: string
@@ -45,6 +46,7 @@ export interface StremioWatchDestinationOptions {
     open(signal: AbortSignal): Promise<{ request(body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void): Promise<unknown> }>
     /** Ordered-video provider (Cinemeta via the runtime wrapper); absent or ambiguous lists fail closed for episode writes. */
     seriesVideos?(id: string): Promise<StremioDestinationVideo[] | null>
+    safeBitfieldVideos?(id: string, type: string): Promise<StremioDestinationVideo[] | null>
 }
 
 type DestinationRequest = (body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void) => Promise<unknown>
@@ -768,20 +770,40 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         return { status: 'applied', message: APPLIED_MESSAGE, record: await episodeView(readback, index, season, episode) }
     }
 
+    const preflight = async (record: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<string | null> => {
+        if (record.type !== 'episode' || patch.watched !== true) return null
+        const rowId = candidateRowIds(record).find(id => PROVIDER_ITEM_ID.test(id))
+        if (!rowId) return UNSAFE_EPISODE_LIST
+        const inventory = await ensureInventory(signal)
+        const row = inventory.get(rowId)
+        const type = row ? row.raw.type : 'series'
+        if (typeof type !== 'string') return UNSAFE_EPISODE_LIST
+        const started = Date.now()
+        const videos = await options.safeBitfieldVideos?.(rowId, type).catch(() => null)
+        signal.throwIfAborted()
+        const index = normalizeSeriesVideos(videos ?? null)
+        if (!index || Date.now() < started || Date.now() - started > 60_000) return UNSAFE_EPISODE_LIST
+        seriesIndexCache.set(rowId, Promise.resolve(index))
+        return null
+    }
+
     const applyEpisode = async (rowId: string, season: number, episode: number, expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult> => {
-        const index = await seriesIndexFor(rowId)
         const episodeKey = seasonEpisodeKey(season, episode)
         const { request } = await migrationStage('identity', () => options.open(signal))
         signal.throwIfAborted()
+        const checkedAt = Date.now()
         const fresh = await readRow(request, rowId, signal)
         signal.throwIfAborted()
-        const checkedAt = Date.now()
+        const type = fresh ? fresh.raw.type : 'series'
+        const videos = typeof type === 'string' ? await options.safeBitfieldVideos?.(rowId, type).catch(() => null) : null
+        signal.throwIfAborted()
+        const index = normalizeSeriesVideos(videos ?? null)
+        if (index === null) return { status: 'skipped', message: UNSAFE_EPISODE_LIST }
         const unready = async (message: string): Promise<MigrationWriteResult> => ({
             status: 'conflict',
             message,
             record: fresh === null ? undefined : await episodeView(fresh, index, season, episode),
         })
-        if (index === null) return unready(NO_EPISODE_ORDER)
         if (patch.watched !== undefined && patch.positionMs !== undefined) return unready(CANNOT_COMBINE)
         const positionMs = patch.positionMs
         if (positionMs !== undefined && (!Number.isSafeInteger(positionMs) || positionMs <= 0)) return unready(BAD_RESUME)
@@ -866,5 +888,5 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         return result
     }
 
-    return { connectionId, label, subject, scope, capabilities, resolve, apply }
+    return { connectionId, label, subject, scope, capabilities, preflight, resolve, apply }
 }

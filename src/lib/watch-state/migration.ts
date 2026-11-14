@@ -94,6 +94,13 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
                 if (destination.capabilities.counts && Number.isSafeInteger(record.playCount)) patch.playCount = record.playCount
                 else row.notes.push('Historical play counts cannot be preserved by this destination.')
             }
+            const refusal = await destination.preflight?.(record, patch, matchingSignal)
+            if (refusal) {
+                row.status = 'skipped'
+                row.reason = refusal
+                finish()
+                continue
+            }
             let matches: WatchStateRecord[]
             try {
                 matches = await destination.resolve(record, matchingSignal)
@@ -176,7 +183,7 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
 
 export async function executeWatchMigration(plan: WatchMigrationPlan, source: WatchStateSource, destination: WatchStateDestination, selected: ReadonlySet<string>, previous: MigrationResult[], signal: AbortSignal, onResult: (result: MigrationResult) => void, progress?: MigrationProgress): Promise<void> {
     if (destination.scope !== plan.destination.scope || destination.connectionId !== plan.destination.connectionId) throw new Error('The destination changed. Preview again before importing.')
-    const finished = new Set(previous.filter(result => result.status === 'applied' || result.status === 'unchanged' || result.status === 'conflict').map(result => result.rowId))
+    const finished = new Set(previous.filter(result => result.status === 'applied' || result.status === 'unchanged' || result.status === 'conflict' || result.status === 'skipped').map(result => result.rowId))
     const rows = plan.rows.filter(row => row.status === 'ready' && row.target && row.patch && selected.has(row.id) && !finished.has(row.id))
     if (!rows.length) return
     progress?.('Verifying the source again…')

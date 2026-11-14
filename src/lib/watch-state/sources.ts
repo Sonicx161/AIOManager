@@ -137,6 +137,13 @@ export async function stremioWatchSession(account: Account, connection: Connecti
             return { request: (body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void) => request(body.type === 'DatastorePut' ? 'DatastorePut' : 'DatastoreGet', body, requestSignal, beforeDispatch) }
         },
         seriesVideos: fetchSeriesVideos,
+        safeBitfieldVideos: async (id, type) => {
+            const [{ safeBitfieldVideos }, { stremioClient }] = await Promise.all([import('../stremio-bitfield-guard.ts'), import('../../api/stremio-client.ts')])
+            assertCurrent()
+            const videos = await safeBitfieldVideos(() => stremioClient.getLiveAddonCollectionForBitfield(authKey, account.id), type, id)
+            assertCurrent()
+            return videos
+        },
     }
 }
 

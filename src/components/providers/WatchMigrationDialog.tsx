@@ -98,6 +98,7 @@ function rowExplanation(row: MigrationRow, result?: MigrationResult): string {
     const status = result?.status || row.status
     if (status === 'applied') return 'Imported and confirmed on this connection.'
     if (status === 'unchanged') return 'Already saved here. No changes were needed.'
+    if (status === 'skipped') return result?.message || row.reason
     if (status === 'ready') return 'Ready to copy. Only the selected watch information will be added.'
     if (status === 'failed') return 'We couldn’t confirm this import. Check the item details before trying again.'
     if (status === 'conflict') {

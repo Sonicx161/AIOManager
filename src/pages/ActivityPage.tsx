@@ -33,9 +33,9 @@ import { rollupMinutes } from '@/lib/activity-hours'
 import { useSettledOnce } from '@/hooks/useSettledSignal'
 import { useActivityMetadata } from '@/hooks/useActivityMetadata'
 import { enrichActivityItemsByIdentity } from '@/lib/activity-cross-source-enrichment'
-import { planEpisodeBitfieldDelete } from '@/lib/episode-bitfield-delete'
+import { planEpisodeBitfieldDelete, verifyEpisodeDeleteReadback } from '@/lib/episode-bitfield-delete'
 import { isEpisodeScopedDelete, isBareAnchoredEpisode, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
-import { fetchSeriesVideos } from '@/lib/watched-episodes'
+import { safeBitfieldVideos, UNSAFE_EPISODE_LIST } from '@/lib/stremio-bitfield-guard'
 import type { Account } from '@/types/account'
 
 import { FloatingActionBar } from '@/components/ui/floating-action-bar'
@@ -736,7 +736,7 @@ export function ActivityPage() {
                         if (episodeItems.length > 0) {
                             const rowIds = Array.from(new Set(episodeItems.map(i => i.itemId)))
                             try {
-                                for (const row of await stremioClient.getLibraryItemsByIds(authKey, rowIds, ctx)) {
+                                for (const row of await stremioClient.getLibraryItemsByIds(authKey, rowIds, ctx, true)) {
                                     rowsById.set(row._id, row)
                                 }
                             } catch (e) {
@@ -751,6 +751,7 @@ export function ActivityPage() {
 
                         const showLocks = new Map<string, Promise<unknown>>()
                         const touchedShows = new Set<string>()
+                        const uncertainShows = new Set<string>()
                         const withShowLock = (itemId: string, fn: () => Promise<void>): Promise<void> => {
                             const prev = showLocks.get(itemId) ?? Promise.resolve()
                             const next = prev.catch(() => {}).then(fn)
@@ -759,8 +760,8 @@ export function ActivityPage() {
                         }
 
                         await mapConcurrent(group.items, ACTIVITY_ITEM_DELETE_CONCURRENCY, async (item) => {
-                            const wholeShowDelete = async () => {
-                                await stremioClient.removeLibraryItem(authKey, item.itemId, ctx)
+                            const wholeShowDelete = async (beforeDispatch?: () => void) => {
+                                await stremioClient.removeLibraryItem(authKey, item.itemId, ctx, beforeDispatch)
                                 trace('activityDelete', 'stremio.item.ok', { accountId, connectionId: group.connectionId, itemId: item.itemId, mode: 'whole-show' })
                             }
                             try {
@@ -779,16 +780,21 @@ export function ActivityPage() {
                                 }
                                 const target = { uniqueItemId: item.uniqueItemId, season: item.season, episode: item.episode }
                                 await withShowLock(item.itemId, async () => {
+                                    if (uncertainShows.has(item.itemId)) throw new Error('The previous deletion could not be verified')
+                                    const row = rowsById.get(item.itemId)
+                                    const checksStarted = Date.now()
+                                    const videos = await safeBitfieldVideos(() => stremioClient.getLiveAddonCollectionForBitfield(authKey, ctx), row?.type || item.type, item.itemId)
                                     const plan = await planEpisodeBitfieldDelete({
                                         itemId: item.itemId,
-                                        row: rowsById.get(item.itemId),
-                                        videos: await fetchSeriesVideos(item.itemId),
+                                        row,
+                                        videos,
+                                        safeList: videos !== null,
                                         target,
                                     })
                                     if (plan.kind === 'fail') {
                                         // Transient/structural failures must never escalate to whole-show deletion.
                                         keptIds.add(item.id)
-                                        countKeep(plan.reason)
+                                        countKeep(plan.reason === 'unsafe-list' || plan.reason === 'non-tt' ? UNSAFE_EPISODE_LIST : plan.reason)
                                         failed = true
                                         if (plan.reason === 'no-videos') noVideos.push({ accountId, itemId: item.itemId, id: item.id, sourceConnectionId: group.connectionId })
                                         trace('activityDelete', 'stremio.item.kept', { accountId, connectionId: group.connectionId, itemId: item.itemId, reason: plan.reason })
@@ -798,12 +804,32 @@ export function ActivityPage() {
                                         trace('activityDelete', 'stremio.item.skip', { accountId, connectionId: group.connectionId, itemId: item.itemId, reason: 'nothing-remote' })
                                         return
                                     }
-                                    if (plan.kind === 'remove-row') {
-                                        await wholeShowDelete()
+                                    const assertFresh = () => {
+                                        if (Date.now() < checksStarted || Date.now() - checksStarted > 60_000) throw new Error(UNSAFE_EPISODE_LIST)
+                                    }
+                                    if (Date.now() < checksStarted || Date.now() - checksStarted > 60_000) {
+                                        keptIds.add(item.id)
+                                        countKeep(UNSAFE_EPISODE_LIST)
+                                        failed = true
                                         return
                                     }
-                                    await stremioClient.upsertLibraryItem(authKey, plan.rewritten, ctx)
-                                    rowsById.set(item.itemId, plan.rewritten)
+                                    try {
+                                        if (plan.kind === 'remove-row') {
+                                            await wholeShowDelete(assertFresh)
+                                        } else {
+                                            await stremioClient.upsertLibraryItem(authKey, plan.rewritten, ctx, assertFresh)
+                                        }
+                                        const saved = await verifyEpisodeDeleteReadback(item.itemId, plan.kind === 'remove-row' ? null : plan.rewritten, () => stremioClient.getLibraryItemsByIds(authKey, [item.itemId], ctx, true))
+                                        if (!saved) {
+                                            rowsById.delete(item.itemId)
+                                            return
+                                        }
+                                        rowsById.set(item.itemId, saved)
+                                    } catch (error) {
+                                        uncertainShows.add(item.itemId)
+                                        throw error
+                                    }
+                                    if (plan.kind !== 'rewrite') return
                                     touchedShows.add(item.itemId)
                                     // The rewrite preserves the row mtime, so the watcher inference
                                     // would otherwise read the repointed anchor as a fresh watch.
@@ -819,7 +845,7 @@ export function ActivityPage() {
                                 if (import.meta.env.DEV) console.error(`Failed to remove ${item.itemId}:`, e)
                                 trace('activityDelete', 'stremio.item.error', { accountId, connectionId: group.connectionId, itemId: item.itemId, error: (e as Error)?.message })
                                 keptIds.add(item.id)
-                                countKeep('item-error')
+                                countKeep(e instanceof Error && e.message === UNSAFE_EPISODE_LIST ? UNSAFE_EPISODE_LIST : 'item-error')
                                 failed = true
                             }
                         })
@@ -878,7 +904,7 @@ export function ActivityPage() {
     const keptReasonSummary = (keptReasons: Map<string, number>): string => {
         if (keptReasons.size === 0) return ''
         const parts = Array.from(keptReasons.entries())
-            .map(([reason, n]) => `${n} ${KEEP_REASON_LABELS[reason] || reason}${n > 1 ? 's' : ''}`)
+            .map(([reason, n]) => reason === UNSAFE_EPISODE_LIST ? reason : `${n} ${KEEP_REASON_LABELS[reason] || reason}${n > 1 ? 's' : ''}`)
         return ` (${parts.join(', ')})`
     }
 

@@ -17,6 +17,7 @@ export interface StremioWatchSourceOptions {
     scope: string
     open(signal: AbortSignal): Promise<{ request: (body: Record<string, unknown>, signal: AbortSignal) => Promise<unknown> }>
     seriesVideos?(id: string): Promise<StremioSeriesVideo[] | null>
+    safeBitfieldVideos?(id: string, type: string): Promise<StremioSeriesVideo[] | null>
     /** AIOManager's own watch-event log for this login; supplies exact per-episode dates Stremio does not store. */
     watchEvents?(): readonly WatchEventDateLike[]
     /** True when the user deleted this item from AIOManager Activity and the row was not watched again since. */

@@ -49,13 +49,15 @@ export function isRecoveredAddonCollection(addons: AddonDescriptor[] | null | un
   return Boolean(addons) && recoveredCollections.has(addons as AddonDescriptor[])
 }
 
-async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>) {
+async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>, beforeDispatch?: () => void) {
   const authHeaders = await getProxyAuthHeaders()
+  beforeDispatch?.()
   const res = await resilientFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders, ...headers },
     body: JSON.stringify(body),
     timeout: 30000,
+    retries: beforeDispatch ? 0 : undefined,
   })
   const text = await res.text()
   let data: Record<string, unknown>
@@ -231,6 +233,17 @@ export class StremioClient {
         throw new Error('Invalid or expired auth key')
       }
       throw error
+    }
+  }
+
+  async getLiveAddonCollectionForBitfield(authKey: string, accountContext: string): Promise<AddonDescriptor[] | null> {
+    try {
+      const data = await serverPost('/api/stremio-proxy', { type: 'AddonCollectionGet', authKey, update: false }, { 'x-account-context': accountContext })
+      const result = data?.result as Record<string, unknown> | undefined
+      if (data?.error || data?.recoveredFromLastGood || data?.duplicateAddonTransports || !Array.isArray(result?.addons) || result.addons.length === 0) return null
+      return result.addons as AddonDescriptor[]
+    } catch {
+      return null
     }
   }
 
@@ -465,7 +478,7 @@ export class StremioClient {
     }
   }
 
-  async getLibraryItemsByIds(authKey: string, ids: string[], accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK): Promise<LibraryItem[]> {
+  async getLibraryItemsByIds(authKey: string, ids: string[], accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, strict: boolean = false): Promise<LibraryItem[]> {
     try {
       const start = Date.now()
       const data = await serverPost('/api/stremio-proxy', {
@@ -492,6 +505,7 @@ export class StremioClient {
         return (result as Record<string, LibraryItem[]>).library
       }
 
+      if (strict) throw new Error('Stremio returned an invalid library response')
       return []
     } catch (error) {
       if (error instanceof Error) {
@@ -666,7 +680,7 @@ export class StremioClient {
     }
   }
 
-  async upsertLibraryItem(authKey: string, item: LibraryItem, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK): Promise<void> {
+  async upsertLibraryItem(authKey: string, item: LibraryItem, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, beforeDispatch?: () => void): Promise<void> {
     try {
       // Preserve a caller-supplied mtime: bitfield rewrites must not masquerade as fresh watches.
       const fullItem = { ...item, removed: false, _mtime: item._mtime || new Date().toISOString() }
@@ -676,13 +690,13 @@ export class StremioClient {
         authKey,
         collection: 'libraryItem',
         changes: [fullItem]
-      }, { 'x-account-context': accountContext })
+      }, { 'x-account-context': accountContext }, beforeDispatch)
 
       if (data?.error) {
         const err = data.error as Record<string, unknown>
         throw new Error((err.message as string) || 'Failed to update library item')
       }
-      if (data?.result === false) {
+      if (!(data?.result === true || (data?.result && typeof data.result === 'object' && (data.result as Record<string, unknown>).success === true))) {
         throw new Error('Stremio rejected the library update')
       }
     } catch (error) {
@@ -693,7 +707,7 @@ export class StremioClient {
     }
   }
 
-  async removeLibraryItem(authKey: string, item: LibraryItem | string, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK): Promise<void> {
+  async removeLibraryItem(authKey: string, item: LibraryItem | string, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, beforeDispatch?: () => void): Promise<void> {
     try {
       const fullItem = typeof item === 'string'
         ? { _id: item, removed: true, _mtime: new Date().toISOString() }
@@ -704,13 +718,13 @@ export class StremioClient {
         authKey,
         collection: 'libraryItem',
         changes: [fullItem]
-      }, { 'x-account-context': accountContext })
+      }, { 'x-account-context': accountContext }, beforeDispatch)
 
       if (data?.error) {
         const err = data.error as Record<string, unknown>
         throw new Error((err.message as string) || 'Failed to remove library item')
       }
-      if (data?.result === false) {
+      if (data?.result === false || (beforeDispatch && !(data?.result === true || (data?.result && typeof data.result === 'object' && (data.result as Record<string, unknown>).success === true)))) {
         throw new Error('Stremio rejected the library removal')
       }
     } catch (error) {
