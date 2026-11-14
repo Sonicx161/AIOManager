@@ -4,6 +4,9 @@
   "description": "Hybrid Sync Server for AIOManager",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
