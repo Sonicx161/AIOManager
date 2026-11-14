@@ -12,6 +12,7 @@ import { readCacheLayers, readTasks, registerTask } from '../lib/ops-metrics.js'
 import { cachedRead, adminRead } from './cached-read.js'
 import { listAudit } from './audit.js'
 import { platformKey, accountHandle } from '../utils/acct-handle.js'
+import { SESSION_DEVICE_PREFIX } from '../lib/session-key.js'
 
 const DAY = 24 * 60 * 60 * 1000
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -240,7 +241,7 @@ async function loadUsers(now = Date.now()) {
         hist: await q.query(`SELECT key, MIN(archived_at) AS first_at, SUM(${size}) AS bytes FROM kv_store_history GROUP BY key`, []),
         creds: await q.query('SELECT sync_user, credential_type, COUNT(*) AS n FROM server_credentials GROUP BY sync_user, credential_type', []),
         rules: await q.query('SELECT owner_sync_user, is_active, COUNT(*) AS n FROM autopilot_rules GROUP BY owner_sync_user, is_active', []),
-        devices: await q.query('SELECT account_uuid, MAX(last_used_at) AS last_used, MIN(created_at) AS first_at FROM device_credentials WHERE revoked = 0 GROUP BY account_uuid', []),
+        devices: await q.query('SELECT account_uuid, MAX(last_used_at) AS last_used, MIN(created_at) AS first_at FROM device_credentials WHERE revoked = 0 AND substr(device_id, 1, 8) <> $1 GROUP BY account_uuid', [SESSION_DEVICE_PREFIX]),
         subs: await q.query('SELECT sync_user, COUNT(*) AS n, MAX(last_seen_at) AS last_seen FROM hydra_subscribers GROUP BY sync_user', []),
         adminStates: await q.query('SELECT sync_user, disabled_at, deleted_at, restore_until FROM account_admin_state', []),
     }))

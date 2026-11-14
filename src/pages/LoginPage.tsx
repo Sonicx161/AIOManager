@@ -18,9 +18,11 @@ import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { clearLocalAuthSecrets, restoreLocalAuthSecrets } from '@/lib/crypto'
 import { apiGet } from '@/lib/http-client'
+import { endSessionAuthKey } from '@/lib/session-sync-token'
 import {
     deactivateDeviceAuth,
     enrollRememberedDevice,
+    requestSessionAuthKey,
     getRememberedGateInfo,
     unlockWithDevice,
     type RememberedGateInfo,
@@ -188,7 +190,10 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
     }
 
     const maybeRememberDevice = () => {
-        if (!remember) return
+        if (!remember) {
+            void requestSessionAuthKey()
+            return
+        }
         void (async () => {
             try {
                 const enrolled = await enrollRememberedDevice()
@@ -213,6 +218,7 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
         // Explicit password auth outranks the remembered layer: a stale device session
         // must never rewrite or gate these requests.
         deactivateDeviceAuth()
+        endSessionAuthKey()
         const attempt = ++authAttemptSeq.current
         let ownership = captureSyncOwnership()
         setLoading(false)
@@ -274,6 +280,7 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
         // Explicit password auth outranks the remembered layer: a stale device session
         // must never rewrite or gate these requests.
         deactivateDeviceAuth()
+        endSessionAuthKey()
         const attempt = ++authAttemptSeq.current
         let ownership = captureSyncOwnership()
         setIsUnlocking(false)

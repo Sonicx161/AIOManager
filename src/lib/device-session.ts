@@ -34,7 +34,7 @@ import {
 } from '@/lib/crypto'
 import { apiFetch } from '@/lib/http-client'
 import { getSyncPasswordHeader } from '@/lib/sync-auth'
-import { hasSessionSyncCredential } from '@/lib/session-sync-token'
+import { chooseSessionAuthKey, getSessionGeneration, dropSessionAuthKey, getSessionAuthKey, getSessionSyncCredential, hasSessionSyncCredential, saveSessionAuthKey } from '@/lib/session-sync-token'
 import { trace } from '@/lib/trace'
 import { resolveBootReactivation, type BootReactivationOutcome } from '@/lib/device-session-boot'
 import { resolveDeviceAuthFailureOutcome } from '@/lib/device-auth-failure'
@@ -77,6 +77,7 @@ interface DeviceSessionRuntime {
     wipeRedirectInFlight: boolean
     interceptorInstalled: boolean
     renewalAttemptedThisSession: boolean
+    originalFetch?: typeof window.fetch
 }
 
 // Keep the in-memory session and the existing fetch interceptor on the same object
@@ -114,9 +115,10 @@ export function installDeviceAuthInterceptor(): void {
     if (deviceSessionRuntime.interceptorInstalled || typeof window === 'undefined' || typeof window.fetch !== 'function') return
     deviceSessionRuntime.interceptorInstalled = true
     const originalFetch = window.fetch.bind(window)
+    deviceSessionRuntime.originalFetch = originalFetch
     window.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const session = deviceSessionRuntime.activeDeviceAuth
-        if (!session) return originalFetch(input, init)
+        if (!session) return fetchWithSessionAuthKey(originalFetch, input, init)
         const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
         if (!headers.has('x-sync-user') && !headers.has('x-sync-password')) {
             return originalFetch(input, init)
@@ -125,7 +127,7 @@ export function installDeviceAuthInterceptor(): void {
         headers.set('x-sync-password', session.deviceToken)
         headers.set('x-sync-device', session.deviceId)
         const [nextInput, nextInit] = input instanceof Request
-            ? [new Request(input, { headers }), undefined]
+            ? [new Request(new Request(input, init), { headers }), undefined]
             : [input, { ...init, headers }]
         const responsePromise = originalFetch(nextInput, nextInit)
         void responsePromise.then(
@@ -134,6 +136,116 @@ export function installDeviceAuthInterceptor(): void {
         )
         return responsePromise
     }) as typeof window.fetch
+}
+
+// A password session's requests carry its session key when it has one. If the server no longer accepts the key,
+// the same request goes out again with the password token it was built with, so the caller never sees the difference.
+async function fetchWithSessionAuthKey(originalFetch: typeof window.fetch, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const effective = input instanceof Request ? new Request(input, init) : null
+    const headers = new Headers(effective?.headers ?? init?.headers)
+    if (!headers.has('x-sync-password')) return effective ? originalFetch(effective) : originalFetch(input, init)
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const choice = chooseSessionAuthKey({ url, user: headers.get('x-sync-user'), password: headers.get('x-sync-password') }, window.location.href, Date.now())
+    if (!choice) return effective ? originalFetch(effective) : originalFetch(input, init)
+    if ('expired' in choice) {
+        dropSessionAuthKey(choice.expired.deviceId)
+        renewSessionAuthKey()
+        return effective ? originalFetch(effective) : originalFetch(input, init)
+    }
+    const key = choice.use
+    const generation = getSessionGeneration()
+    const wireToken = headers.get('x-sync-password')
+    const isCurrent = () => {
+        const current = useSyncStore.getState()
+        return generation === getSessionGeneration() && current.auth.isAuthenticated && current.auth.id === key.accountId && getSyncApiPath(current.serverUrl) === key.base && getSessionSyncCredential(key.accountId)?.token === wireToken
+    }
+    headers.set('x-sync-user', key.accountId)
+    headers.set('x-sync-password', key.token)
+    headers.set('x-sync-device', key.deviceId)
+    const res = input instanceof Request
+        ? await originalFetch(new Request(effective!.clone(), { headers }))
+        : await originalFetch(input, { ...init, headers })
+    if (res.status === 403) {
+        try {
+            const body = await res.clone().json() as { code?: unknown }
+            if (body?.code === 'PASSWORD_AUTH_REQUIRED') return isCurrent() ? (effective ? originalFetch(effective) : originalFetch(input, init)) : res
+        } catch {}
+    }
+    if (res.status !== 401) return res
+    let rejected = false
+    try {
+        const body = await res.clone().json() as { error?: unknown }
+        rejected = body?.error === 'Device credential rejected'
+    } catch {}
+    if (!rejected || !isCurrent()) return res
+    dropSessionAuthKey(key.deviceId)
+    const retried = effective ? await originalFetch(effective) : await originalFetch(input, init)
+    if (retried.status !== 401) renewSessionAuthKey()
+    return retried
+}
+
+let sessionAuthKeyRequest: Promise<boolean> | null = null
+let sessionAuthKeyRequestGeneration = -1
+let sessionAuthKeyRequestedAt = 0
+const SESSION_AUTH_KEY_RETRY_MS = 60_000
+
+// Asks the server for this tab's session key after a password sign-in. An older server answers 404 and the
+// session simply stays on its password token.
+export function requestSessionAuthKey(): Promise<boolean> {
+    const generation = getSessionGeneration()
+    if (sessionAuthKeyRequest && sessionAuthKeyRequestGeneration === generation) return sessionAuthKeyRequest
+    const pending = (async () => {
+        try {
+            const { auth, serverUrl } = useSyncStore.getState()
+            if (!auth.isAuthenticated || !auth.id || deviceSessionRuntime.activeDeviceAuth) return false
+            const credential = getSessionSyncCredential(auth.id)
+            if (!credential || getSessionAuthKey(auth.id)) return false
+            sessionAuthKeyRequestedAt = Date.now()
+            const base = getSyncApiPath(serverUrl)
+            const res = await fetch(`${base}/devices/session`, {
+                method: 'POST',
+                headers: { 'x-sync-user': auth.id, 'x-sync-password': credential.token },
+            })
+            if (!res.ok) return false
+            const body = await res.json() as { success?: unknown; session?: { deviceId?: unknown; token?: unknown; expiresAt?: unknown } }
+            const issued = body?.session
+            if (body?.success !== true || typeof issued?.deviceId !== 'string' || typeof issued.token !== 'string' || typeof issued.expiresAt !== 'number') return false
+            const current = useSyncStore.getState()
+            const stillCurrent = generation === getSessionGeneration() && current.auth.isAuthenticated && current.auth.id === auth.id && getSyncApiPath(current.serverUrl) === base && !deviceSessionRuntime.activeDeviceAuth && getSessionSyncCredential(auth.id)?.token === credential.token
+            const saved = stillCurrent && saveSessionAuthKey(auth.id, credential.token, { deviceId: issued.deviceId, token: issued.token, expiresAt: issued.expiresAt, base })
+            if (!saved) {
+                void (deviceSessionRuntime.originalFetch ?? fetch)(`${base}/devices/revoke`, {
+                    method: 'POST', keepalive: true,
+                    headers: { 'Content-Type': 'application/json', 'x-sync-user': auth.id, 'x-sync-password': issued.token, 'x-sync-device': issued.deviceId },
+                    body: JSON.stringify({ deviceId: issued.deviceId }),
+                }).catch(() => {})
+                return false
+            }
+            return true
+        } catch {
+            return false
+        }
+    })()
+    sessionAuthKeyRequest = pending
+    sessionAuthKeyRequestGeneration = generation
+    void pending.finally(() => { if (sessionAuthKeyRequest === pending) sessionAuthKeyRequest = null })
+    return pending
+}
+
+let sessionAuthKeyRetry: ReturnType<typeof setTimeout> | null = null
+
+// At most one request a minute: a key refused right after it was issued is asked for again when the minute is up.
+function renewSessionAuthKey(): void {
+    const wait = SESSION_AUTH_KEY_RETRY_MS - (Date.now() - sessionAuthKeyRequestedAt)
+    if (wait <= 0) {
+        void requestSessionAuthKey()
+        return
+    }
+    if (sessionAuthKeyRetry) return
+    sessionAuthKeyRetry = setTimeout(() => {
+        sessionAuthKeyRetry = null
+        void requestSessionAuthKey()
+    }, wait)
 }
 
 async function maybeWipeOnDeviceAuthFailure(res: Response): Promise<void> {

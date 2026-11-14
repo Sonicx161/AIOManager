@@ -68,6 +68,7 @@ import {
 } from './sync-store-helpers'
 export { markAccountsHydrated, readIdentityProfile, getSyncApiPath } from './sync-store-helpers'
 import {
+    endSessionAuthKey,
     getSessionSyncCredential,
     saveSessionSyncToken,
 } from '@/lib/session-sync-token'
@@ -1262,6 +1263,7 @@ export const useSyncStore = create<SyncState>()(
                 syncRuntime.syncDebounceFirstAt = null
                 if (syncRuntime.onlineHandler) { window.removeEventListener('online', syncRuntime.onlineHandler); syncRuntime.onlineHandler = null }
                 if (syncRuntime.syncBC) { syncRuntime.syncBC.close(); syncRuntime.syncBC = null }
+                endSessionAuthKey()
                 clearSyncCredentialCaches()
                 import('@/lib/device-session').then(({ deactivateDeviceAuth }) => deactivateDeviceAuth()).catch(() => {})
                 import('@/lib/canonical-base').then(({ clearCanonicalBases }) => clearCanonicalBases()).catch(() => {})

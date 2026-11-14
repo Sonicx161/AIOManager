@@ -3,12 +3,13 @@ import db from './db.js'
 import { decrypt } from './crypto.js'
 import { FALLBACK_KEYS } from './keys.js'
 import { getCachedAuth, setCachedAuth, hashAuthPassword } from './state.js'
-import { verifySyncPassword, upgradeLegacyPasswordHash } from './lib/sync-password.js'
+import { verifySyncPassword, verifyDeviceToken, verifySessionKey, upgradeLegacyPasswordHash } from './lib/sync-password.js'
 import { trace } from './utils/trace.js'
 import { isAdminPath } from './admin/paths.js'
 import { isReadOnlyReplica } from './config.js'
 import { assertAccountActive, AuthStateError, StateUnavailableError } from './admin/account-state.js'
 import { kvHeadSource } from './lib/kv-head.js'
+import { isSessionDevice } from './lib/session-key.js'
 
 export const timingSafeEqual = (a, b) => {
     try {
@@ -40,7 +41,11 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
             [String(syncUser), String(deviceId)]
         )
         if (!row) return { ok: false, reason: 'unknown' }
-        if ((await verifySyncPassword(String(token), row.token_hash)) !== true) return { ok: false, reason: 'unknown' }
+        // The device id decides the check: a session key only ever verifies against its own hash format, a device token only against scrypt.
+        const verified = isSessionDevice(String(deviceId))
+            ? verifySessionKey(String(token), row.token_hash)
+            : (await verifyDeviceToken(String(token), row.token_hash)) === true
+        if (!verified) return { ok: false, reason: 'unknown' }
         if (Number(row.revoked) === 1) return { ok: false, reason: 'revoked' }
         if (Number(row.expires_at) <= now) return { ok: false, reason: 'expired' }
         const account = await db.get(`SELECT credential_epoch FROM ${kvHeadSource()} WHERE key = $1`, [String(syncUser)])
@@ -74,7 +79,8 @@ export async function deviceAuthHook(request, reply) {
     // write, and outside the try below so a gate refusal can never be swallowed.
     await assertAccountActive(syncUser)
     const cacheKey = 'device:' + syncUser + ':' + deviceId
-    const cachedTokenHash = getCachedAuth(cacheKey)
+    const sessionDevice = isSessionDevice(deviceId)
+    const cachedTokenHash = sessionDevice ? null : getCachedAuth(cacheKey)
     if (cachedTokenHash && timingSafeEqual(cachedTokenHash, hashAuthPassword(presented))) {
         // accountUuid is provably syncUser here: the DB path only caches after matching
         // device_credentials rows on account_uuid = syncUser, and downstream consumers
@@ -86,9 +92,10 @@ export async function deviceAuthHook(request, reply) {
     const outcome = await authenticateDeviceCredential(syncUser, deviceId, presented)
     if (outcome.ok) {
         request.deviceAuth = { accountUuid: outcome.accountUuid }
-        setCachedAuth(cacheKey, presented)
+        if (!sessionDevice) setCachedAuth(cacheKey, presented)
         // A replica never writes, not even best-effort telemetry, against the follower.
-        if (!isReadOnlyReplica()) {
+        // A session key is not in the device list, so nothing reads its last use: polls with one write nothing.
+        if (!isReadOnlyReplica() && !isSessionDevice(deviceId)) {
             try {
                 await db.run('UPDATE device_credentials SET last_used_at = $1 WHERE id = $2', [Date.now(), outcome.row.id])
             } catch (err) {

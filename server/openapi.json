@@ -45,6 +45,15 @@
         }
       }
     },
+    "/api/devices/session": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/api/devices/revoke": {
       "post": {
         "responses": {

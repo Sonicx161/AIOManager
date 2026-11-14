@@ -6,6 +6,7 @@ import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, invalidateCachedAuthPrefix, hashAuthPassword } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { hashApiKey } from '../api-keys.js'
+import { isSessionDevice } from '../lib/session-key.js'
 import { writeEncryptedIfChanged } from '../db-guards.js'
 import { invalidateCanonicalAddons } from './hydra.js'
 import { invalidateCanonicalForOwner } from '../hydra/canonical-cache.js'
@@ -75,6 +76,19 @@ async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
         const sql = `INSERT INTO account_api_keys (account_id, sync_user, api_key_hash, created_at) VALUES ${placeholders}`
         await tx.run(sql, params)
     }
+}
+
+async function hasNewApiKey(tx, id, apiKeys) {
+    const existing = await tx.query('SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1', [id])
+    const keys = new Map()
+    for (const row of existing) {
+        if (!keys.has(row.account_id)) keys.set(row.account_id, new Set())
+        keys.get(row.account_id).add(row.api_key_hash)
+    }
+    for (const [accountId, apiKey] of Object.entries(apiKeys)) {
+        if (typeof apiKey === 'string' && apiKey && !keys.get(accountId)?.has(hashApiKey(apiKey))) return true
+    }
+    return false
 }
 
 async function archiveCurrentKV(tx, key, authUser) {
@@ -588,6 +602,11 @@ export function registerSyncRoutes(fastify) {
                     trace('syncRoute', 'push.success', { accountId: id, skipped: true, reason: 'conflict', keysChanged, timing: Date.now() - postStart })
                     // A rejected snapshot cannot replace the winner's key registry.
                     return { success: true, conflict: true, syncedAt: currentSyncedAt, contentHash: row.content_hash ?? null, serverStremioCredentialedAccounts }
+                }
+
+                if (request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && data.apiKeys && typeof data.apiKeys === 'object' && await hasNewApiKey(tx, id, data.apiKeys)) {
+                    reply.status(403)
+                    return { error: 'Password sign-in required', code: 'PASSWORD_AUTH_REQUIRED' }
                 }
 
                 // Revision checks precede even the no-op paths: a stale hint cannot

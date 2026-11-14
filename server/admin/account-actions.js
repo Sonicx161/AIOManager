@@ -10,6 +10,7 @@ import { auditedTx } from './audit.js'
 import { refreshAccountAdminState, patchLocalAccountState } from './account-state.js'
 import { accountHandle } from '../utils/acct-handle.js'
 import { isReadOnlyReplica } from '../config.js'
+import { SESSION_DEVICE_PREFIX } from '../lib/session-key.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const NOTICE_CAP = 20
@@ -274,8 +275,9 @@ export function createAccountActions({ log = console } = {}) {
             const account = await tx.get('SELECT credential_epoch FROM kv_store WHERE key = $1', [key])
             if (!account) return { missing: true }
             const devices = await tx.get(
-                'SELECT COUNT(*) AS n, MAX(CASE WHEN last_used_at > created_at THEN last_used_at ELSE created_at END) AS activity FROM device_credentials WHERE account_uuid = $1',
-                [key]
+                // A session key is not a device in the count, but issuing one is activity: a repeat sign out must end it.
+                'SELECT COUNT(CASE WHEN substr(device_id, 1, 8) = $1 THEN NULL ELSE 1 END) AS n, MAX(CASE WHEN last_used_at > created_at THEN last_used_at ELSE created_at END) AS activity FROM device_credentials WHERE account_uuid = $2',
+                [SESSION_DEVICE_PREFIX, key]
             )
             const deviceCount = Number(devices?.n || 0)
             const activity = devices?.activity == null ? null : Number(devices.activity)
