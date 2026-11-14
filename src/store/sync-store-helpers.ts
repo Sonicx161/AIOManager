@@ -156,6 +156,27 @@ export function normalizeStateForSkipHash(state: Record<string, unknown>): Recor
     return normalized
 }
 
+export function serializeStateForPush(state: Record<string, unknown>): { full: string; skipInput: string } {
+    const normalized = normalizeStateForSkipHash(state)
+    const full: string[] = []
+    const skip: string[] = []
+    for (const key of Object.keys(state)) {
+        const part = JSON.stringify(state[key])
+        if (part === undefined) continue
+        const name = JSON.stringify(key)
+        full.push(`${name}:${part}`)
+        const normalizedPart = normalized[key] === state[key] ? part : JSON.stringify(normalized[key])
+        if (normalizedPart !== undefined) skip.push(`${name}:${normalizedPart}`)
+    }
+    return { full: `{${full.join(',')}}`, skipInput: `{${skip.join(',')}}` }
+}
+
+export function payloadBytesIfOver(text: string, limit: number): number | null {
+    if (text.length * 3 <= limit) return null
+    const bytes = new TextEncoder().encode(text).length
+    return bytes > limit ? bytes : null
+}
+
 let _syncLock: Promise<void> | null = null
 
 export async function acquireSyncLock(): Promise<() => void> {

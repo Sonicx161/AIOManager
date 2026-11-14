@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import db from '../db.js'
+import { kvHeadSource } from '../lib/kv-head.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
 import { verifyAuth } from '../auth.js'
@@ -194,7 +195,7 @@ async function fetchUpstream(requestDescriptor) {
 }
 
 async function workspaceBinding(userId) {
-    const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [userId])
+    const row = await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [userId])
     return row ? String(row.password ?? '') : null
 }
 

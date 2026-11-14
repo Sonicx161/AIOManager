@@ -1,4 +1,5 @@
 import db from '../db.js'
+import { kvHeadSource } from '../lib/kv-head.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { verifyAuth, timingSafeEqual, authenticateDeviceCredential } from '../auth.js'
@@ -72,7 +73,7 @@ async function upsertMetadataKey(tx, userId, provider, encryptedKey, keyFormat, 
 }
 
 async function workspaceBinding(userId) {
-    const row = await db.get('SELECT password FROM kv_store WHERE key = $1', [userId])
+    const row = await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [userId])
     return row ? String(row.password ?? '') : null
 }
 

@@ -254,7 +254,7 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
     const privacyLevelNames = useUIStore(s => s.privacyLevelNames)
     const namePrivacy = isPrivacyModeEnabled ? privacyLevelNames : 0
-    const { history: watchHistory, loading: historyLoading } = useWatchHistory()
+    const { history: watchHistory, loading: historyLoading } = useWatchHistory(undefined, true, { sessions: false })
     const discoveryPrefs = useDiscoveryPrefs(HOUSEHOLD_CONTEXT)
     const householdSettings = useHouseholdSettings()
     const [catalogOpen, setCatalogOpen] = useState(false)

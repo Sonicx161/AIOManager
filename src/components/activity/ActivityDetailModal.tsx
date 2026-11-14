@@ -809,7 +809,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
 
     // The closed shell still handles navigation and exit animation, but does not
     // need another history derivation or another set of live query observers.
-    const { history: derivedWatchHistory } = useWatchHistory(undefined, shouldDeriveModalHistory(open, providedWatchHistory))
+    const { history: derivedWatchHistory } = useWatchHistory(undefined, shouldDeriveModalHistory(open, providedWatchHistory), { sessions: false })
     const allWatchHistory = pickModalHistory(providedWatchHistory, derivedWatchHistory)
 
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)

@@ -347,6 +347,10 @@ export const SESSION_IDLE_STREAK = 2
  * other full pages) is mounted; connections only cards show idle back to a
  * jittered 45s after several empty polls, and any live row restores 15s.
  */
+export function holdsSessionCadence(sessionsBackoff: boolean, sessionsEnabled: boolean, liveJobs: boolean): boolean {
+    return !sessionsBackoff && sessionsEnabled && liveJobs
+}
+
 export function sessionRefetchDelay(idleStreak: number, pageScopeMounted: boolean, key: string): number {
     if (pageScopeMounted || idleStreak < SESSION_IDLE_STREAK) return SESSION_POLL_MS
     return scopeJitteredInterval(SESSION_IDLE_POLL_MS, key)

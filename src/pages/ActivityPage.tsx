@@ -255,6 +255,8 @@ function detailItemFromUrlParams(itemId: string, type: string | null): ActivityI
     }
 }
 
+const NO_SESSION_POLL = { sessions: false } as const
+
 export function ActivityPage() {
     useDocumentTitle('Activity')
     const accounts = useAccountStore(s => s.accounts)
@@ -277,9 +279,8 @@ export function ActivityPage() {
     const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
     const { dismissedItems: dismissedContinueWatching } = useDiscoveryPrefs(CONTINUE_WATCHING_CONTEXT)
 
-    const { history: watchHistory, inProgress, refreshMedia, mediaIssues, mediaSettling } = useWatchHistory()
-
     const [activeView, setActiveView] = useState<'feed' | 'foryou'>('feed')
+    const { history: watchHistory, inProgress, refreshMedia, mediaIssues, mediaSettling } = useWatchHistory(undefined, true, activeView === 'foryou' ? NO_SESSION_POLL : undefined)
     const [forYouAccountId, setForYouAccountId] = useState<string | null>(null)
 
     // Convert to ActivityItem[] for existing feed components. Backfilled episodes (recovered from the

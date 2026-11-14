@@ -47,7 +47,8 @@ import { resetAllStores } from '@/lib/store-coordinator'
 import { trace } from '@/lib/trace'
 import {
     computeHash,
-    normalizeStateForSkipHash,
+    serializeStateForPush,
+    payloadBytesIfOver,
     acquireSyncLock,
     readIdentityProfile,
     writeIdentityProfile,
@@ -1514,14 +1515,14 @@ export const useSyncStore = create<SyncState>()(
 
                     const { encryptSyncPayload } = await import('@/lib/crypto')
                     ownership.assert()
-                    const stringifiedState = JSON.stringify(state)
+                    const { full: stringifiedState, skipInput } = serializeStateForPush(state)
 
                     if (stringifiedState === '[object Object]') {
                         throw new Error('Sync corruption detected: State is not an object.')
                     }
 
-                    const payloadBytes = new TextEncoder().encode(stringifiedState).length
-                    if (payloadBytes > 100 * 1024 * 1024) {
+                    const payloadBytes = payloadBytesIfOver(stringifiedState, 100 * 1024 * 1024)
+                    if (payloadBytes !== null) {
                         const mb = (payloadBytes / 1024 / 1024).toFixed(1)
                         console.error(`[Sync] Payload is ${mb}MB - exceeds safe threshold (100MB). Aborting push.`)
                         throw new Error(`Sync payload too large (${mb}MB). Remove some accounts or data.`)
@@ -1530,7 +1531,7 @@ export const useSyncStore = create<SyncState>()(
                     forceCanonicalRepublish = consumeForceFlag()
                     // Skip hash over the normalized state: volatile observation stamps
                     // (accountStates lastSync, rule lastCheck) must not defeat it.
-                    const stateHash = await computeHash(JSON.stringify(normalizeStateForSkipHash(state)))
+                    const stateHash = await computeHash(skipInput)
                     ownership.assert()
                     if (!forceCanonicalRepublish && !forceFull && get().pendingConflictAccountId !== auth.id && syncRuntime.lastPushedHash !== null && stateHash === syncRuntime.lastPushedHash) {
                         trace('sync', 'push.skip-unchanged', { accountId: auth.id, isAuto })
@@ -1789,7 +1790,7 @@ export const useSyncStore = create<SyncState>()(
                         ].filter(Boolean).join(' '),
                         isAuto
                     })
-                    trace('sync', 'push.success', { accountId: auth.id, isAuto, bytes: payloadBytes, compressed: isCompressed, timing: Date.now() - pushStart })
+                    trace('sync', 'push.success', { accountId: auth.id, isAuto, bytes: new TextEncoder().encode(stringifiedState).length, compressed: isCompressed, timing: Date.now() - pushStart })
                     syncRuntime.pendingRetry = false
                     resetRepublishAttempts()
                     // Confirmed delivery retires any pending-push marker for this workspace.

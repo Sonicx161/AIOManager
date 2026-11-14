@@ -8,6 +8,7 @@ import swagger from '@fastify/swagger'
 import { rateLimitKey } from './utils/rate-limit-key.js'
 import db from './db.js'
 import fs from 'fs'
+import { resolveLogoSource, isLongLivedRootAsset } from './lib/static-files.js'
 import { logFormatters } from './admin/log-fields.js'
 import { VERSION, PORT, loggerConfig, distPath, corsOrigins, ensureDataDirectory, isReadOnlyReplica } from './config.js'
 import { initializeEncryptionKeys } from './keys.js'
@@ -141,22 +142,21 @@ fastify.addHook('onSend', async (request, reply) => {
 registerWatchlistRoutes(fastify)
 registerDeviceCredentialRoutes(fastify)
 
+const staticEnabled = fs.existsSync(distPath)
+const logoSource = resolveLogoSource(distPath, staticEnabled, fs.existsSync)
+
 fastify.get('/logo.png', async (_request, reply) => {
-    const distLogo = `${distPath}/logo.png`
-    const publicLogo = `${distPath.replace(/\/dist$/, '')}/public/logo.png`
-    if (fs.existsSync(distLogo)) {
+    if (logoSource.kind === 'dist') return reply.sendFile('logo.png')
+    if (logoSource.kind === 'public') {
         reply.type('image/png')
-        return reply.send(fs.createReadStream(distLogo))
-    }
-    if (fs.existsSync(publicLogo)) {
-        reply.type('image/png')
-        return reply.send(fs.createReadStream(publicLogo))
+        reply.header('Cache-Control', 'public, max-age=0')
+        return reply.send(fs.createReadStream(logoSource.file))
     }
     reply.status(404)
     return { error: 'Logo not found' }
 })
 
-if (fs.existsSync(distPath)) {
+if (staticEnabled) {
     await fastify.register(fastifyStatic, {
         root: distPath,
         prefix: '/',
@@ -169,6 +169,7 @@ if (fs.existsSync(distPath)) {
             if (assetPath.endsWith('.html')) reply.header('Cache-Control', 'no-cache')
             // Cache hashed assets permanently; HTML and unhashed files must revalidate.
             else if (/[\\/]assets[\\/][^\\/]*-[A-Za-z0-9_-]{8,}\.[^\\/]+$/.test(assetPath)) reply.header('Cache-Control', 'public, max-age=31536000, immutable')
+            else if (isLongLivedRootAsset(distPath, assetPath)) reply.header('Cache-Control', 'public, max-age=86400')
             else reply.header('Cache-Control', 'public, max-age=0')
         }
     })

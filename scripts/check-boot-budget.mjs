@@ -6,7 +6,7 @@ import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 
-const BOOT_FILES_BUDGET = 33
+const BOOT_FILES_BUDGET = 24
 const BOOT_RAW_BUDGET = 1404000
 const BOOT_GZIP_BUDGET = 395000
 const BOOT_BROTLI_BUDGET = 336000
@@ -72,6 +72,27 @@ if (missing.length > 0) {
     process.exit(1)
 }
 
+// The boot and login screens must never statically reach the general icon chunk; their icons live in vendor-icons-boot.
+const staticImports = (file) => [...fs.readFileSync(file, 'utf8').matchAll(/\b(?:import|export)\b\s*(?:[\w$*{},\s]+?\bfrom\s*)?["'](\.{1,2}\/[^"']+\.js)["']/g)]
+    .map((m) => path.resolve(path.dirname(file), m[1]))
+const assetsDir = path.join(dist, 'assets')
+const loginChunks = fs.existsSync(assetsDir)
+    ? fs.readdirSync(assetsDir).filter((f) => /^LoginPage-[^.]+\.js$/.test(f)).map((f) => path.join(assetsDir, f))
+    : []
+const bootScripts = files.filter((f) => f.endsWith('.js')).map((f) => path.join(dist, f.replace(/^\//, '')))
+const reachedFrom = new Map([...bootScripts, ...loginChunks].map((f) => [path.resolve(f), null]))
+const pending = [...reachedFrom.keys()]
+while (pending.length > 0) {
+    const file = pending.pop()
+    if (!fs.existsSync(file)) continue
+    for (const dep of staticImports(file)) {
+        if (reachedFrom.has(dep)) continue
+        reachedFrom.set(dep, file)
+        pending.push(dep)
+    }
+}
+const leakedIconChunks = [...reachedFrom.keys()].filter((f) => /^vendor-icons-(?!boot-)[^.]+\.js$/.test(path.basename(f)))
+
 const inlineScripts = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1])
 const builtHashes = inlineScripts.map((code) => `sha256-${crypto.createHash('sha256').update(code).digest('base64')}`)
 
@@ -118,6 +139,17 @@ check('files', total.files, BOOT_FILES_BUDGET, 'files')
 check('raw', total.raw, BOOT_RAW_BUDGET)
 check('gzip', total.gzip, BOOT_GZIP_BUDGET)
 check('brotli', total.brotli, BOOT_BROTLI_BUDGET)
+
+if (leakedIconChunks.length > 0) {
+    for (const leaked of leakedIconChunks) {
+        const via = reachedFrom.get(leaked)
+        console.error(`boot-budget: FAIL the boot or login screens statically load the general icon chunk ${path.basename(leaked)} (${via ? `imported by ${path.basename(via)}` : 'preloaded by index.html'}).`)
+    }
+    console.error('boot-budget: boot screens must import icons by name from lucide-react so they stay in vendor-icons-boot.')
+    failed = true
+} else {
+    console.log(`boot-budget: boot and login static closure (${reachedFrom.size} files) stays clear of the general icon chunk`)
+}
 
 const unpinned = builtHashes.filter((h) => !pinnedHashes.includes(h))
 const stale = pinnedHashes.filter((h) => !builtHashes.includes(h))

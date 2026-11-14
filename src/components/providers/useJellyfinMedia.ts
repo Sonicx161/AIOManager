@@ -37,6 +37,7 @@ import {
     scopeJitteredInterval,
     stableRandom,
     sessionRefetchDelay,
+    holdsSessionCadence,
     setBounded,
     SETTLED_ARCHIVE_MAX,
     type ArchiveFailureState,
@@ -676,13 +677,6 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
     // A full-history walk never starts in a hidden tab; one already running finishes.
     const documentVisible = useSyncExternalStore(subscribeVisibility, isDocumentVisible, () => true)
     useEffect(() => { mediaQueries.mount(); return () => mediaQueries.unmount() }, [])
-    useEffect(() => {
-        // Page-scope consumers hold /Sessions at the 15s cadence for every
-        // connection; only card-only trees may idle back.
-        if (sessionsBackoff) return undefined
-        pageScopeMediaConsumers += 1
-        return () => { pageScopeMediaConsumers -= 1 }
-    }, [sessionsBackoff])
     // Jobs stay mounted while the tab is hidden: TanStack pauses the poll
     // intervals in the background, and emptying the queries on hide would
     // cancel in-flight walks, drop the projector inputs and force a full
@@ -712,6 +706,12 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
             .map(scope => ({ ...scope, encryptionKey, workspaceId, storage, queryKey: mediaQueryKey(scope, encryptionKey, workspaceId) }))
         jobsRef.current = { signature: jobsSignature, jobs }
     }
+    const holdsCadence = holdsSessionCadence(sessionsBackoff, sessionsEnabled, jobs.some(job => supportsLiveSessions(job.connection)))
+    useEffect(() => {
+        if (!holdsCadence) return undefined
+        pageScopeMediaConsumers += 1
+        return () => { pageScopeMediaConsumers -= 1 }
+    }, [holdsCadence])
     const vaultEpoch = encryptionKey ? epoch(encryptionKey) : -1
     const hydration = useSyncExternalStore(subscribeHydration, () => restoredMediaCache, () => emptyRestoredMediaCache)
     useEffect(() => {

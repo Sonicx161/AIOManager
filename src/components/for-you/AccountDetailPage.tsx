@@ -90,7 +90,7 @@ export function AccountDetailPage({ accountId, onBack }: AccountDetailPageProps)
 
     const RAIL_SIZE = useRailSize(accountId)
 
-    const { history: allHistory, loading: historyLoading } = useWatchHistory()
+    const { history: allHistory, loading: historyLoading } = useWatchHistory(undefined, true, { sessions: false })
 
     const allActivity = useMemo(
         () => allHistory.map(historyEntryToActivityItem).filter(item => !item.backfill),
