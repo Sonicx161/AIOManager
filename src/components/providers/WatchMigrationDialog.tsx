@@ -478,6 +478,7 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                         </div>}
                         {undatedCount > 0 && <p className="flex items-start gap-2 text-xs text-muted-foreground"><Info aria-hidden="true" className="h-4 w-4 shrink-0" />{undatedCount.toLocaleString()} {undatedCount === 1 ? 'title has' : 'titles have'} no exact watch time and will be sent without a date.</p>}
                         {alreadySavedCount > 0 && <p className="flex items-start gap-2 text-xs text-muted-foreground"><ShieldCheck aria-hidden="true" className="h-4 w-4 shrink-0" />{alreadySavedCount.toLocaleString()} {alreadySavedCount === 1 ? 'title is' : 'titles are'} already saved here and won’t be copied again.</p>}
+                        {connection.platform === 'jellyfin' && <p className="text-xs leading-relaxed text-muted-foreground">Already saved can include history this destination copied from linked trackers or a shared account.</p>}
                         <div data-theme-part="panel" className="space-y-2 rounded-2xl border border-border/40 bg-muted/20 p-3">
                             <p className="flex items-center gap-2 text-xs font-medium"><Info aria-hidden="true" className="h-4 w-4 shrink-0 text-muted-foreground" />Import details and limits</p>
                             {!plan.source.complete && <p className="text-xs leading-relaxed text-warning">Some source history could not be verified as complete. Only the titles in this preview can be copied; existing destination history is kept.</p>}

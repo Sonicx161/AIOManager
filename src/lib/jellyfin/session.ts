@@ -3,6 +3,7 @@ import type { JellyfinSecret } from './connection-data.ts'
 import { createJellyfinClient, JellyfinError, normalizeJellyfinUrl } from './client.ts'
 
 export { normalizeJellyfinUrl } from './client.ts'
+export const PROFILE_MISMATCH_MESSAGE = 'This sign-in belongs to a different profile than the one shown. Reconnect it to import into the right profile.'
 
 export interface JellyfinLogin {
     baseUrl: string
@@ -92,6 +93,10 @@ export class JellyfinClient {
             if (signal?.aborted || (error instanceof JellyfinError && (error.status === 401 || error.kind === 'aborted'))) throw error
         }
         const product = details?.product || 'compatible'
+        if (login.method === 'token' && login.userId?.trim() && (product === 'aiometadata' || product === 'aiostreams')) {
+            const sessionUser = await this.client.getSessionUser(signedIn.accessToken, signal)
+            if (sessionUser && sessionUser.Id !== signedIn.user.Id) throw new Error(PROFILE_MISMATCH_MESSAGE)
+        }
         const productName = product === 'aiometadata' ? 'AIOMetadata' : product === 'aiostreams' ? 'AIOStreams'
             : product === 'jellyfin' ? 'Jellyfin' : 'Jellyfin-compatible server'
         const userName = typeof signedIn.user.Name === 'string' && signedIn.user.Name.trim()

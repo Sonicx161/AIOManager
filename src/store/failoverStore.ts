@@ -16,8 +16,7 @@ import { findScopedChecksAtRisk } from '@/lib/failover-scope'
 import { resilientFetch } from '@/lib/api-resilience'
 import { useAuthStore } from '@/store/authStore'
 import { toast } from '@/hooks/use-toast'
-import { isSyncEligibleConnection } from '@/types/connection'
-import type { Account } from '@/types/account'
+import { resolveRuleSyncTarget, serverRuleBinding } from '@/lib/autopilot-binding'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
 import { findRuleOverlaps, getRuleMissingConnection } from '@/lib/autopilot-conflicts'
 import { reuseUnchanged } from '@/lib/reuse-unchanged'
@@ -56,6 +55,7 @@ export interface FailoverRule {
     customCheckUrls?: CustomCheckEntry[] // Additional URLs to health-check alongside specific addons
     platform?: string
     connectionId?: string
+    missingConnectionId?: string
     skipReason?: AutopilotSkipReason | null
     lastError?: AutopilotRuleError | null
     createdAt?: number
@@ -108,7 +108,7 @@ interface FailoverStore {
     reorderRules: (accountId: string, orderedRuleIds: string[]) => Promise<void>
     toggleRuleActive: (ruleId: string, isActive: boolean) => Promise<void>
     checkRules: () => Promise<void>
-    pullServerState: () => Promise<void>
+    pullServerState: (opts?: { skipRuleSync?: boolean }) => Promise<void>
     pulse: () => Promise<void>
     testRule: (ruleId: string) => Promise<{ primary: unknown, backup: unknown }>
     startAutomation: () => void
@@ -264,7 +264,7 @@ const normalizeCustomChecks = (checks: Array<CustomCheckEntry | string> | undefi
 // redundant and at worst re-clobbers managed chains with an intermediate state.
 // Manual user actions (addRule/updateRule/toggleRuleActive) omit it so intentional
 // edits still propagate.
-const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: { localOnly?: boolean; urlMemo?: Map<string, string> }) => {
+const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: { localOnly?: boolean; urlMemo?: Map<string, string>; skipRuleSync?: boolean }) => {
     if (!rule.isActive || !rule.priorityChain.length) return false
 
     const account = useAccountStore.getState().accounts.find(a => a.id === rule.accountId)
@@ -319,7 +319,7 @@ const reconcileAccountAddonsWithActiveRule = async (rule: FailoverRule, opts?: {
         reconciled = true
     }
 
-    if (reconciled) {
+    if (reconciled && !opts?.skipRuleSync) {
         await syncRuleToServer(rule)
     }
 
@@ -421,20 +421,6 @@ function ruleSyncPayload(rule: FailoverRule, ctx: { authKey: string, connectionI
         messageTemplate: rule.messageTemplate || null,
         customCheckUrls: normalizeCustomChecks(rule.customCheckUrls),
     }
-}
-
-// A rule keeps the target it was first saved with: a re-send never moves it to another
-// platform or connection, it skips instead.
-function resolveRuleSyncTarget(rule: FailoverRule, account: Account, hasStremioKey: boolean): { connectionId?: string, connectionGeneration?: string, credentialType?: string, platform?: string } | null {
-    if (rule.connectionId) {
-        const conn = account.connections?.find(c => c.id === rule.connectionId)
-        return { connectionId: rule.connectionId, connectionGeneration: conn?.generation, credentialType: conn?.connectionType, platform: rule.platform || conn?.platform }
-    }
-    if (rule.platform && rule.platform !== 'stremio') return null
-    if (hasStremioKey) return { platform: 'stremio' }
-    if (rule.platform === 'stremio') return null
-    const fallbackConn = account.connections?.find(c => c.enabled && isSyncEligibleConnection(c))
-    return fallbackConn ? { connectionId: fallbackConn.id, connectionGeneration: fallbackConn.generation, credentialType: fallbackConn.connectionType, platform: fallbackConn.platform } : null
 }
 
 // Server bodies are owner-scoped text (addon and rule labels). Read defensively and
@@ -831,6 +817,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             }
 
             failoverHydrated = true
+            if (get().rules.some(r => !r.connectionId)) await get().pullServerState({ skipRuleSync: true })
 
             if (storedWebhook) {
                 let webhook = storedWebhook
@@ -920,7 +907,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         const sr = serverRule as Record<string, unknown>
                         const existsIndex = rules.findIndex(r => r.id === (sr.id as string))
 
-                        const processedRule = rebuildRuleFromServerState(sr, accountId)
+                        const binding = serverRuleBinding(sr, useAccountStore.getState().accounts.find(a => a.id === accountId))
+                        const processedRule = { ...rebuildRuleFromServerState(sr, accountId), ...(binding || {}) }
 
                         let mergedRule: FailoverRule
                         if (existsIndex !== -1) {
@@ -986,7 +974,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         } finally { _isPulling = false }
     },
 
-    pullServerState: async () => {
+    pullServerState: async (opts) => {
         const { rules } = get()
         if (rules.length === 0 || _isPulling) return
         const editsAtStart = new Map(_ruleEditSeq)
@@ -1068,6 +1056,8 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                             lastCheck: serverRule.lastCheck ? new Date(serverRule.lastCheck as string | number) : localRule.lastCheck,
                             skipReason: readSkipReason(serverRule),
                             lastError: readRuleError(serverRule.lastError),
+                            platform: !isPendingUpdate && typeof serverRule.platform === 'string' ? serverRule.platform : localRule.platform,
+                            ...(!isPendingUpdate ? serverRuleBinding(serverRule, useAccountStore.getState().accounts.find(a => a.id === accountId)) || {} : {}),
                             status: nextActiveUrl
                                 ? (normNextActive === normPrimary ? 'monitoring' : 'failed-over')
                                 : localRule.status
@@ -1082,7 +1072,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                         // platform, so reconciling must only APPLY it locally — never push
                         // the local list back out (backgroundSync/pushToConnections), which
                         // would resurrect the Swap & Hide clobber one level down the stack.
-                        if (await reconcileAccountAddonsWithActiveRule(updatedRules[ruleIndex], { localOnly: true, urlMemo })) {
+                        if (await reconcileAccountAddonsWithActiveRule(updatedRules[ruleIndex], { localOnly: true, urlMemo, skipRuleSync: opts?.skipRuleSync })) {
                             hasUpdates = true
                         }
                     }
@@ -1159,7 +1149,7 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
         const generation = get().sessionGeneration
         const safeChain = Array.isArray(priorityChain) ? priorityChain : []
         const safeCustomChecks = normalizeCustomChecks(customCheckUrls)
-        const newRule: FailoverRule = {
+        let newRule: FailoverRule = {
             id: crypto.randomUUID(),
             accountId,
             name,
@@ -1174,6 +1164,12 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
             messageTemplate: messageTemplate || undefined,
             customCheckUrls: safeCustomChecks,
             createdAt: Date.now(),
+        }
+
+        const account = useAccountStore.getState().accounts.find(a => a.id === accountId)
+        if (account) {
+            const target = resolveRuleSyncTarget(newRule, account, !!getStremioAuthKey(account), true)
+            if (target) newRule = { ...newRule, platform: target.platform, connectionId: target.connectionId }
         }
 
         // Server-first validation: an authenticated save throws (409 overlap, server or

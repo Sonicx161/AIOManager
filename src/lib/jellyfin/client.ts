@@ -465,6 +465,15 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         return user
     }
 
+    async function getSessionUser(accessToken: string, signal?: AbortSignal): Promise<JellyfinUser | null> {
+        try {
+            return parseUser(await request({ label: 'Users/Me', path: '/Users/Me', token: accessToken, signal }), 'Users/Me')
+        } catch (error) {
+            if (error instanceof JellyfinError && (error.status === 400 || error.status === 404)) return null
+            throw error
+        }
+    }
+
     async function connectToken(accessToken: string, userId?: string, signal?: AbortSignal): Promise<JellyfinSignIn> {
         if (userId === undefined) {
             let res: unknown
@@ -1554,6 +1563,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
         authenticateWithQuickConnect,
         listUsers,
         getUser: fetchUser,
+        getSessionUser,
         inspect,
         readItem,
         readWatchItem,

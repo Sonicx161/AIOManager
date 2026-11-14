@@ -256,6 +256,7 @@ export interface JellyfinClient {
     authenticateWithQuickConnect(secret: string, signal?: AbortSignal): Promise<JellyfinSignIn>
     listUsers(accessToken: string, signal?: AbortSignal): Promise<JellyfinUser[]>
     getUser(accessToken: string, userId: string, signal?: AbortSignal): Promise<JellyfinUser>
+    getSessionUser(accessToken: string, signal?: AbortSignal): Promise<JellyfinUser | null>
     inspect(accessToken: string, user: JellyfinUser, signal?: AbortSignal): Promise<JellyfinServerDetails>
     readItem(accessToken: string, userId: string, itemId: string, signal?: AbortSignal): Promise<JellyfinItem>
     readWatchItem(accessToken: string, userId: string, itemId: string, signal?: AbortSignal): Promise<JellyfinItem>

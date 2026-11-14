@@ -485,6 +485,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             messageTemplate: rule.message_template || null,
             platform: rule.platform || null,
             connectionId: rule.connection_id || null,
+            connectionGeneration: rule.connection_generation || null,
             skipReason: resolveRuleSkipReason(rule, runtime, priorityChain),
             ...(checkError ? { lastError: {
                 code: checkError.code,
@@ -858,7 +859,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 SELECT r.id, r.updated_at, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
                        COALESCE(s.last_check, r.last_check) AS last_check,
                        COALESCE(s.stabilization, r.stabilization) AS stabilization,
-                       r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
+                       r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, r.connection_generation, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
                 FROM autopilot_rules r
                 LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
                 WHERE r.account_id = $1 AND r.owner_sync_user = $2
@@ -1361,7 +1362,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 `SELECT r.id, r.updated_at, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
                         COALESCE(s.last_check, r.last_check) AS last_check,
                         COALESCE(s.stabilization, r.stabilization) AS stabilization,
-                        r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
+                        r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, r.connection_generation, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
                  FROM autopilot_rules r
                  LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
                  WHERE r.owner_sync_user = $1 AND r.account_id IN (${placeholders})`,

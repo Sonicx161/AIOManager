@@ -7,6 +7,8 @@ interface ConflictRule {
   name?: string
   priorityChain: string[]
   connectionId?: string
+  missingConnectionId?: string
+  skipReason?: string | null
   platform?: string
   isActive?: boolean
 }
@@ -14,7 +16,7 @@ interface ConflictRule {
 interface ConnectionAccount {
   id: string
   authKey?: string
-  connections?: ReadonlyArray<{ id: string; platform: string; connectionType?: string }>
+  connections?: ReadonlyArray<{ id: string; platform: string; connectionType?: string; enabled?: boolean }>
 }
 
 export interface TakenRuleAddon {
@@ -60,18 +62,17 @@ export function growsRuleOverlap(chain: ReadonlyArray<string>, original: Readonl
 export function getRuleMissingConnection(rule: ConflictRule, account: ConnectionAccount | undefined): { platform: string; label: string; signature: string } | null {
   if (!account) return null
   const connections = account.connections || []
-  const boundConnection = rule.connectionId ? connections.find(connection => connection.id === rule.connectionId) : null
-  const hasStremio = connections.some(connection => connection.platform === 'stremio' && (!connection.connectionType || connection.connectionType === 'native')) || !!account.authKey && account.authKey.length > 60
-  const hasLogin = rule.connectionId
-    ? !!boundConnection || (rule.connectionId === `${account.id}:stremio` && hasStremio)
-    : rule.platform && rule.platform !== 'stremio'
-        ? connections.some(connection => connection.platform === rule.platform)
-        : hasStremio
-  if (hasLogin) return null
-  const platform = rule.platform || 'stremio'
+  const usable = connections.filter(connection => connection.enabled !== false && connection.connectionType !== 'hydra-inbound' && connection.platform !== 'jellyfin')
+  const boundConnection = rule.connectionId ? usable.find(connection => connection.id === rule.connectionId) : null
+  const hasStremio = usable.some(connection => connection.platform === 'stremio' && (!connection.connectionType || connection.connectionType === 'native')) || !!account.authKey && account.authKey.length > 60
+  const platforms = [...new Set(usable.map(connection => connection.platform))]
+  const platform = rule.platform || boundConnection?.platform || (!rule.connectionId ? (hasStremio && platforms.length === 0 ? 'stremio' : platforms.length === 1 ? platforms[0] : '') : '')
+  const hasLogin = platform === 'stremio' ? hasStremio : platform ? usable.some(connection => connection.platform === platform) : hasStremio || usable.length > 0
   const labels: Record<string, string> = { stremio: 'Stremio', nuvio: 'Nuvio', realstream: 'RealStream', hydra: 'Hydra', aiostreams: 'AIOStreams', aiometadata: 'AIOMetadata' }
-  const label = `${labels[platform] || 'Connection'} login removed`
-  return { platform, label, signature: JSON.stringify([rule.id, rule.name || '', rule.connectionId || '', platform, rule.isActive, rule.priorityChain, connections.map(connection => [connection.id, connection.platform]).sort(([a], [b]) => a.localeCompare(b))]) }
+  const boundAvailable = rule.skipReason !== 'no_credentials' && !rule.missingConnectionId && (rule.connectionId ? !!boundConnection || (rule.connectionId === `${account.id}:stremio` && hasStremio) : platform === 'stremio' && hasStremio)
+  if (hasLogin && boundAvailable) return null
+  const label = `${labels[platform] || 'Connection'} login ${rule.missingConnectionId || !hasLogin ? 'removed' : 'unavailable'}`
+  return { platform, label, signature: JSON.stringify([rule.id, rule.name || '', rule.connectionId || '', rule.missingConnectionId || '', platform, rule.isActive, rule.priorityChain, connections.map(connection => [connection.id, connection.platform, connection.connectionType || '', String(connection.enabled !== false)]).sort(([a], [b]) => a.localeCompare(b))]) }
 }
 
 export async function ruleAddonReference(url: string): Promise<string> {

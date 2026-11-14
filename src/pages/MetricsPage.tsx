@@ -6,13 +6,13 @@ import { Skeleton, StatCardSkeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/common/EmptyState'
 import { ContentRail, ContentRailCard } from '@/components/ui/content-rail'
 import { MetricsEmptyState } from '@/components/common/PageEmptyStates'
-import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState } from '@/hooks/useMetricsWorker'
 import { useMetricsFirstReveal } from '@/hooks/useMetricsFirstReveal'
 import { useAccountStore } from '@/store/accountStore'
+import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import type { Account } from '@/types/account'
 import { historyEntryToActivityItem, canonicalStremioConnections } from '@/lib/activity-utils'
@@ -136,6 +136,11 @@ export function MetricsPage() {
     const prefersReducedMotion = useReducedMotion()
     const accounts = useAccountStore(s => s.accounts)
     const accountsById = useMemo(() => new Map(accounts.map(account => [account.id, account])), [accounts])
+    const uniqueAccountsById = useMemo(() => {
+        const unique = new Map<string, (typeof accounts)[number] | null>()
+        for (const account of accounts) unique.set(account.id, unique.has(account.id) ? null : account)
+        return unique
+    }, [accounts])
     const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
     const cacheLoading = useLibraryCache(s => s.loading)
     const ensureLoaded = useLibraryCache(s => s.ensureLoaded)
@@ -791,14 +796,12 @@ export function MetricsPage() {
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                             {stats.userPersonas?.map((u) => {
                                 const traits = stats.userTraits?.find((t) => t.id === u.id)
+                                const profileAccount = uniqueAccountsById.get(u.id) ?? undefined
                                 return (
                                     <Card key={u.id} className="rounded-2xl bg-card/50 border border-border/40 shadow-sm">
                                         <CardContent className="p-4 space-y-3">
                                             <div className="flex items-center gap-3">
-                                                <div className="relative w-10 h-10 shrink-0 flex items-center justify-center">
-                                                    <SquircleOverlay />
-                                                    <span className="relative z-10 text-sm font-bold text-muted-foreground">{maskAccountName(u.name)[0]}</span>
-                                                </div>
+                                                <AccountAvatar account={profileAccount ?? { name: u.name }} size="lg" className="shrink-0" />
                                                 <div className="min-w-0">
                                                     <div className="font-bold text-sm truncate">{maskAccountName(u.name)}</div>
                                                     <div className="flex flex-wrap gap-1 mt-1.5">

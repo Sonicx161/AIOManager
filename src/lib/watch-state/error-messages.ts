@@ -1,4 +1,5 @@
 import { JellyfinError } from '../jellyfin/client.ts'
+import { PROFILE_MISMATCH_MESSAGE } from '../jellyfin/session.ts'
 import { GlobalMatchFailure, WatchMigrationError, migrationFailureMessage } from './failures.ts'
 
 export const AUTH_EXPIRED_MATCH_MESSAGE = 'The destination sign-in expired. Reconnect and preview again.'
@@ -75,6 +76,7 @@ export function repeatedMatchFailureMessage(error: unknown): string {
 }
 
 const KNOWN_MESSAGES = [
+    PROFILE_MISMATCH_MESSAGE,
     'The destination library could not be read completely, so matches cannot be verified safely. Try the preview again.',
     'The destination sign-in expired. Reconnect and preview again.',
     'The Stremio sign-in expired. Reconnect and preview again.',

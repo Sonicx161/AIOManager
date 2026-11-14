@@ -21,6 +21,7 @@ import {
 } from './jellyfin-records.ts'
 import type { ParsedWatchIdentity } from './jellyfin-records.ts'
 import { createWatchStateRequestGate } from './request-gate.ts'
+import { PROFILE_MISMATCH_MESSAGE } from '../jellyfin/session.ts'
 import { assertFreshChecks, StaleChecksError } from './prewrite-fresh.ts'
 
 const SERIES_READ_WORKERS = 4
@@ -54,6 +55,7 @@ async function verifyJellyfinBinding(connection: Connection, open: (value: strin
     const client = createJellyfinClient(secret.baseUrl, { deviceId: secret.deviceId })
     const user = await client.getUser(secret.accessToken, secret.userId, signal)
     const details = await client.inspect(secret.accessToken, user, signal)
+    await verifySessionUser(client, secret, details.product, signal)
     const saved = connection.mediaServer
     if (saved?.serverId) {
         if (!details.serverId) throw new Error('The server identity could not be verified. Reconnect this connection, then try again.')
@@ -73,10 +75,17 @@ async function verifyJellyfinBinding(connection: Connection, open: (value: strin
     }
 }
 
+async function verifySessionUser(client: JellyfinWatchClient, secret: JellyfinSecret, product: JellyfinProduct, signal: AbortSignal): Promise<void> {
+    if (product !== 'aiometadata' && product !== 'aiostreams') return
+    const user = await client.getSessionUser(secret.accessToken, signal)
+    if (user && user.Id !== secret.userId) throw new Error(PROFILE_MISMATCH_MESSAGE)
+}
+
 async function reverifyJellyfinScope(binding: JellyfinBinding, signal: AbortSignal): Promise<void> {
     const user = await binding.client.getUser(binding.secret.accessToken, binding.secret.userId, signal)
     if (user.Id !== binding.secret.userId) throw new Error('The remote user changed. Preview again.')
     const details = await binding.client.inspect(binding.secret.accessToken, user, signal)
+    await verifySessionUser(binding.client, binding.secret, details.product, signal)
     if (details.product !== binding.details.product) throw new Error('The remote server product changed. Preview again.')
     if ((details.serverId ?? undefined) !== (binding.details.serverId ?? undefined)) throw new Error('The remote server changed. Preview again.')
     if (await jellyfinScope(binding.secret.baseUrl, binding.secret.userId, details) !== binding.scope) {
@@ -236,6 +245,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
     const facadeGate = useNativeInventory ? null : createWatchStateRequestGate()
     const client = facadeGate === null ? binding.client : {
         ...binding.client,
+        getSessionUser: (accessToken: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.getSessionUser(accessToken, requestSignal)),
         getUser: (accessToken: string, userId: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.getUser(accessToken, userId, requestSignal)),
         inspect: (accessToken: string, user: JellyfinUser, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.inspect(accessToken, user, requestSignal)),
         readWatchItem: (accessToken: string, userId: string, itemId: string, requestSignal?: AbortSignal) => facadeGate.run(requestSignal ?? signal, () => binding.client.readWatchItem(accessToken, userId, itemId, requestSignal)),
@@ -443,9 +453,11 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         if (providers !== undefined) applyParents.set(key, providers)
         return providers
     }
-    const beginRun = async (): Promise<void> => {
+    const beginRun = async (runSignal: AbortSignal): Promise<void> => {
         scopeVerified = false
         applyParents.clear()
+        await reverifyJellyfinScope(gatedBinding, runSignal)
+        scopeVerified = true
     }
     const apply = async (expected: WatchStateRecord, patch: WatchStatePatch, applySignal: AbortSignal): Promise<MigrationWriteResult> => {
         try {
