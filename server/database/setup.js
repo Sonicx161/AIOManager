@@ -145,11 +145,11 @@ export async function initializeDatabase(fastify) {
         last_notification BIGINT,
         updated_at BIGINT
       );
-
-      CREATE INDEX IF NOT EXISTS idx_rule_stats_last_check ON autopilot_rule_stats (last_check);
     `
 
     await db.exec(schema)
+    // No query reads this index, and it made every Autopilot heartbeat rewrite an index entry.
+    await db.exec('DROP INDEX IF EXISTS idx_rule_stats_last_check')
 
     // New tables for v2.0 activity engine - created separately with migration guards
     // so a stale intermediate table from dev builds doesn't crash the entire exec()

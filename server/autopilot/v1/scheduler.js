@@ -30,6 +30,15 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
         return true
     }
 
+    // Rules whose awaits are all already settled chain as microtasks, so the pool hands the loop back between rules once it has held it this long.
+    const LOOP_HOLD_MS = 8
+    let loopHeldSince = nowMs()
+    const yieldIfDue = async () => {
+        if (nowMs() - loopHeldSince < LOOP_HOLD_MS) return
+        await new Promise(resolve => setImmediate(resolve))
+        loopHeldSince = nowMs()
+    }
+
     const runAutopilot = async () => {
         // Write safe mode skips the whole cycle until restart; the tripwire logs the reminder.
         if (autopilotTripwire.isSafeMode()) {
@@ -217,6 +226,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
                         if (!mayStart()) return
                         started.add(rule.id)
                         await processRule(rule)
+                        await yieldIfDue()
                     }
                 }
                 let nextGroup = 0

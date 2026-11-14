@@ -27,8 +27,11 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
             ruleFetchCacheBytes -= hit.bytes
             return null
         }
-        ruleFetchCache.delete(id)
-        ruleFetchCache.set(id, hit)
+        if (validRead()) {
+            hit.expires = nowMs() + RULE_CACHE_TTL_MS
+            ruleFetchCache.delete(id)
+            ruleFetchCache.set(id, hit)
+        }
         return hit
     }
 
@@ -245,6 +248,7 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         const hit = ruleDecryptCache.get(key)
         if (hit) {
             if (hit.cipher === ciphertext && nowMs() - hit.at <= RULE_CACHE_TTL_MS) {
+                hit.at = nowMs()
                 ruleDecryptCache.delete(key)
                 ruleDecryptCache.set(key, hit)
                 ruleDecryptCacheStats.hits++

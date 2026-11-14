@@ -31,6 +31,63 @@ export function createSiblings({ fastify, decryptRuleField, cycleTargets, confli
     // One plan per sibling rule: the chain members another rule owns, plus that chain's target.
     const siblingKey = (owner, accountId) => `${owner || ''}\0${accountId ?? ''}`
 
+    // A rule's chain and active url are fixed per (id, updated_at), so the per-cycle sibling read fetches versions and loads those two columns once per version.
+    // The bound counts the UTF-8 bytes of the two held columns plus a fixed overhead per rule: an estimate of held payload, not of process memory.
+    const SIBLING_FIELDS_MAX_BYTES = 64 * 1024 * 1024
+    const SIBLING_FIELDS_READ_CHUNK = 500
+    const SIBLING_ENTRY_OVERHEAD_BYTES = 256
+    const siblingFields = new Map()
+    let siblingFieldBytes = 0
+    const dropSiblingFields = (id) => {
+        const held = siblingFields.get(id)
+        if (!held) return
+        siblingFields.delete(id)
+        siblingFieldBytes -= held.bytes
+    }
+    const textBytes = (value) => (typeof value === 'string' ? Buffer.byteLength(value, 'utf8') : 0)
+    const sameRule = (fields, head) => fields.updated_at === head.updated_at
+        && fields.account_id === head.account_id
+        && (fields.owner_sync_user || '') === (head.owner_sync_user || '')
+    // Returns null when a row no longer is the rule the head read saw (deleted, id reused, or changed in between).
+    const siblingFieldsFor = async (heads) => {
+        const found = new Map()
+        const missing = new Map()
+        for (const head of heads) {
+            const held = head.updated_at == null ? null : siblingFields.get(head.id)
+            if (held && sameRule(held, head)) {
+                siblingFields.delete(head.id)
+                siblingFields.set(head.id, held)
+                found.set(head.id, held)
+            } else {
+                missing.set(head.id, head)
+            }
+        }
+        const ids = [...missing.keys()]
+        for (let i = 0; i < ids.length; i += SIBLING_FIELDS_READ_CHUNK) {
+            const chunk = ids.slice(i, i + SIBLING_FIELDS_READ_CHUNK)
+            const rows = await db.query(
+                `SELECT id, account_id, owner_sync_user, priority_chain, active_url, updated_at FROM autopilot_rules WHERE id IN (${chunk.map((_, j) => `$${j + 1}`).join(',')})`,
+                chunk
+            )
+            for (const row of rows || []) {
+                const head = missing.get(row.id)
+                if (!head || !sameRule(row, head)) return null
+                const entry = {
+                    account_id: row.account_id, owner_sync_user: row.owner_sync_user,
+                    priority_chain: row.priority_chain, active_url: row.active_url, updated_at: row.updated_at,
+                    bytes: SIBLING_ENTRY_OVERHEAD_BYTES + textBytes(row.priority_chain) + textBytes(row.active_url),
+                }
+                found.set(row.id, entry)
+                dropSiblingFields(row.id)
+                if (row.updated_at == null || entry.bytes > SIBLING_FIELDS_MAX_BYTES) continue
+                while (siblingFieldBytes + entry.bytes > SIBLING_FIELDS_MAX_BYTES && siblingFields.size > 0) dropSiblingFields(siblingFields.keys().next().value)
+                siblingFields.set(row.id, entry)
+                siblingFieldBytes += entry.bytes
+            }
+        }
+        return found.size === heads.length ? found : null
+    }
+
     // One query per chunk replaces one sibling read per rule. Only accounts where one owner
     // holds 2+ active rules return rows; every requested owner+account pair gets an entry, so
     // an empty array means "no siblings" and a missing key means "not prefetched".
@@ -46,18 +103,32 @@ export function createSiblings({ fastify, decryptRuleField, cycleTargets, confli
         const accountPh = accountIds.map((_, i) => `$${i + 1}`).join(',')
         const ownerPh = owners.map((_, i) => `$${accountIds.length + i + 1}`).join(',')
         const activeProbe = db.type === 'postgres' ? 'o.is_active = 1' : '+o.is_active = 1'
+        const scopedRead = (columns) => db.query(
+            `SELECT ${columns}
+             FROM autopilot_rules r
+             WHERE r.account_id IN (${accountPh}) AND COALESCE(r.owner_sync_user, '') IN (${ownerPh}) AND COALESCE(r.owner_sync_user, '') <> '' AND r.is_active = 1
+             AND EXISTS (
+                SELECT 1 FROM autopilot_rules o
+                WHERE o.account_id = r.account_id AND COALESCE(o.owner_sync_user, '') = COALESCE(r.owner_sync_user, '')
+                AND ${activeProbe} AND o.id <> r.id
+             )`,
+            [...accountIds, ...owners]
+        )
         try {
-            const rows = await db.query(
-                `SELECT r.id, r.account_id, r.owner_sync_user, r.priority_chain, r.active_url, r.updated_at
-                 FROM autopilot_rules r
-                 WHERE r.account_id IN (${accountPh}) AND COALESCE(r.owner_sync_user, '') IN (${ownerPh}) AND COALESCE(r.owner_sync_user, '') <> '' AND r.is_active = 1
-                 AND EXISTS (
-                    SELECT 1 FROM autopilot_rules o
-                    WHERE o.account_id = r.account_id AND COALESCE(o.owner_sync_user, '') = COALESCE(r.owner_sync_user, '')
-                    AND ${activeProbe} AND o.id <> r.id
-                 )`,
-                [...accountIds, ...owners]
-            )
+            const heads = (await scopedRead('r.id, r.account_id, r.owner_sync_user, r.updated_at')) || []
+            const fieldsById = await siblingFieldsFor(heads)
+            if (fieldsById) {
+                for (const head of heads) {
+                    const fields = fieldsById.get(head.id)
+                    pairs.get(siblingKey(head.owner_sync_user, head.account_id))?.push({
+                        id: head.id, account_id: head.account_id, owner_sync_user: head.owner_sync_user,
+                        priority_chain: fields.priority_chain, active_url: fields.active_url, updated_at: fields.updated_at,
+                    })
+                }
+                return pairs
+            }
+            // The two reads disagreed about a rule: take everything from one scoped read instead.
+            const rows = await scopedRead('r.id, r.account_id, r.owner_sync_user, r.priority_chain, r.active_url, r.updated_at')
             for (const row of rows || []) pairs.get(siblingKey(row.owner_sync_user, row.account_id))?.push(row)
             return pairs
         } catch (err) {

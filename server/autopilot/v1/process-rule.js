@@ -212,9 +212,8 @@ export function createProcessRule({
         // without it; its chain-member summary answers the steady-state violation check instead.
         let addonList = null
         let addonListRaw = null
-        let storedAddonListKey = null
-        const adoptAddonList = (raw) => {
-            addonListRaw = raw
+        let addonListAdopted = false
+        const parseStoredAddonList = (raw, warn) => {
             let parsed = []
             try {
                 const decrypted = raw ? decrypt(raw, FALLBACK_KEYS) : null
@@ -226,10 +225,16 @@ export function createProcessRule({
                     parsed = JSON.parse(raw)
                 }
             } catch (e) {
-                fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Addon list parse failed: ${scrubUrls(e.message)}`)
+                if (warn) fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Addon list parse failed: ${scrubUrls(e.message)}`)
             }
-            addonList = parsed
-            storedAddonListKey = stableStringify(addonList)
+            return parsed
+        }
+        // The stored list's comparison key is only read by a commit that writes, so it is built from the stored bytes then.
+        const storedAddonListKey = () => (addonListAdopted ? stableStringify(parseStoredAddonList(addonListRaw, false)) : null)
+        const adoptAddonList = (raw) => {
+            addonListRaw = raw
+            addonListAdopted = true
+            addonList = parseStoredAddonList(raw, true)
             const relevantUrls = new Set([...normalizedChainUrls, ...siblingPlans.flatMap(plan => [...plan.urls, plan.target])])
             const identities = addonList.filter(addon => addon?.manifest?.id && relevantUrls.has(normalizeAddonUrl(addon.transportUrl)))
                 .map(addon => ({ transportUrl: addon.transportUrl, manifest: { id: addon.manifest.id } }))
@@ -618,7 +623,7 @@ export function createProcessRule({
 
         const update = planCommit({
             rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl,
-            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey, shouldUpdateNotificationTime, lastDeepAuditToSave
+            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey: needsSync && syncSucceeded ? storedAddonListKey() : null, shouldUpdateNotificationTime, lastDeepAuditToSave
         })
         // Owner identity rides the dirty update so the scheduler can drop commits for
         // owners blocked between processing and the flush (snapshot check, no DB read).
