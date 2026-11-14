@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { defaultRangeExtractor, useVirtualizer, useWindowVirtualizer, type Range } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, measureElement, useVirtualizer, useWindowVirtualizer, type Range } from '@tanstack/react-virtual'
 import { Activity, Bookmark } from 'lucide-react'
 import { StatusChip } from '@/components/ui/status-chip'
 import { cn } from '@/lib/utils'
@@ -144,6 +144,7 @@ const VirtualActivityList = memo(function VirtualActivityList({
     const elementVirtualizer = useVirtualizer({
         count: rows.length,
         estimateSize,
+        measureElement: (element, entry, instance) => entry?.borderBoxSize?.[0]?.blockSize ?? measureElement(element, entry, instance),
         overscan: OVERSCAN_ROWS,
         scrollMargin: listOffset,
         getItemKey: (index) => rows[index].key,
@@ -154,6 +155,7 @@ const VirtualActivityList = memo(function VirtualActivityList({
     const windowVirtualizer = useWindowVirtualizer({
         count: rows.length,
         estimateSize,
+        measureElement: (element, entry, instance) => entry?.borderBoxSize?.[0]?.blockSize ?? measureElement(element, entry, instance),
         overscan: OVERSCAN_ROWS,
         scrollMargin: listOffset,
         getItemKey: (index) => rows[index].key,
@@ -425,7 +427,7 @@ const VirtualActivityList = memo(function VirtualActivityList({
         }
         if (row.kind === 'header') {
             return (
-                <div data-theme-part="card" className="rounded-t-2xl border border-b-0 border-border/40 bg-card/50 px-3 pt-3 shadow-sm">
+                <div data-theme-part="card" className="rounded-t-2xl border border-b-0 border-border/40 bg-card/50 px-3 py-1.5">
                     <ActivityDateHeader date={row.date} watchCount={row.watchCount} formatDateHeader={formatDateHeader} />
                 </div>
             )
@@ -437,7 +439,7 @@ const VirtualActivityList = memo(function VirtualActivityList({
                 data-theme-part="card"
                 className={cn(
                     'border-x border-border/40 bg-card/50 px-3',
-                    slot.viewMode === 'grid' ? cn(GRID_CLASSES, row.first ? 'pt-3' : 'pt-4') : 'pt-3',
+                    slot.viewMode === 'grid' ? cn(GRID_CLASSES, row.first ? 'pt-3' : 'pt-2', !row.last && 'pb-2') : 'pt-3',
                     row.last && 'rounded-b-2xl border-b border-border/40 pb-3 shadow-sm',
                 )}
             >
