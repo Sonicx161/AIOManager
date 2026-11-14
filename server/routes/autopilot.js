@@ -10,6 +10,7 @@ import { maskContext } from '../utils/log-helpers.js'
 import { serverState } from '../state.js'
 import { trace } from '../utils/trace.js'
 import { applyOneActiveFlags } from '../autopilot/one-active.js'
+import { nextRuleVersion } from '../autopilot/v1/rule-version.js'
 import { resolveRuleSkipReason } from '../autopilot/engine.js'
 import { getGlobalWebhook, setGlobalWebhook, maskWebhookUrl } from '../autopilot/global-webhook.js'
 import { autopilotDb, autopilotTripwire, autopilotOwnerBudget, ownerSaveDb, runAsOwner } from '../autopilot/write-tripwire.js'
@@ -110,7 +111,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             fastify.log.warn({ category: 'Autopilot' }, `Failed to upsert credential for ${maskContext(accountId)}: ${credErr.message}`)
         }
     }
-    const { sendNotification, syncStremioLive, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState, decryptRuleField } = autopilotEngine
+    const { sendNotification, syncStremioLive, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState, decryptRuleField, beginRuleCacheRead, endRuleCacheRead, retireRuleCaches, retireRuleSecrets } = autopilotEngine
     // Engine's versioned decrypt cache (keyed by rule id + updated_at, ciphertext
     // revalidated before reuse). Falls back to a plain decrypt when a harness passes
     // an engine stub without it.
@@ -320,7 +321,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                     notify_enabled = COALESCE(EXCLUDED.notify_enabled, autopilot_rules.notify_enabled),
                     is_active = EXCLUDED.is_active,
                     is_automatic = EXCLUDED.is_automatic,
-                    updated_at = EXCLUDED.updated_at,
+                    updated_at = ${nextRuleVersion('EXCLUDED.updated_at', 'autopilot_rules.updated_at')},
                     edited_at = EXCLUDED.edited_at,
                     cooldown_ms = EXCLUDED.cooldown_ms,
                     message_template = EXCLUDED.message_template,
@@ -363,7 +364,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                     notify_enabled = COALESCE(excluded.notify_enabled, autopilot_rules.notify_enabled),
                     is_active = excluded.is_active,
                     is_automatic = excluded.is_automatic,
-                    updated_at = excluded.updated_at,
+                    updated_at = ${nextRuleVersion('excluded.updated_at', 'autopilot_rules.updated_at')},
                     edited_at = excluded.edited_at,
                     cooldown_ms = excluded.cooldown_ms,
                     message_template = excluded.message_template,
@@ -393,14 +394,14 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             `, [id, accountId, name, encryptedAuthKey, encryptedChain, encryptedAddonList, encryptedActiveUrl, encryptedWebhookUrl, notifyEnabledCol, is_active ? 1 : 0, is_automatic ? 1 : 0, now, cooldown_ms, messageTemplate || null, resolvedOwner, effectivePlatform, connectionId || null, encryptedCustomChecks, now, connectionId ? connectionGeneration || null : null])
         }
 
-        const saved = await conn.get('SELECT account_id, owner_sync_user FROM autopilot_rules WHERE id = $1', [id])
+        const saved = await conn.get('SELECT account_id, owner_sync_user, updated_at FROM autopilot_rules WHERE id = $1', [id])
         if (!saved || saved.owner_sync_user !== resolvedOwner || saved.account_id !== accountId) {
             throw Object.assign(new Error('Rule changed while saving. Refresh and try again.'), { statusCode: 409 })
         }
         if (effectivePlatform === 'stremio' && encryptedAuthKey) {
             await upsertCredential(resolvedOwner, accountId, name, encryptedAuthKey, 'stremio', null, conn)
         }
-        return { resolvedOwner, encryptedAuthKey }
+        return { resolvedOwner, encryptedAuthKey, updatedAt: saved.updated_at }
     }
 
     const hashEnforcementPayload = ({ authKey, safeChain, targetActiveUrl, storedAddons }) =>
@@ -441,29 +442,29 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         }
     }
 
-    const parseStabilization = (rule) => {
+    const parseStabilization = (rule, readToken) => {
         if (!rule.stabilization) return {}
         try {
             // ruleDecryptField is safe for stats-sourced stabilization: the memo is
             // keyed by the rule's updated_at but revalidates the exact ciphertext, so
             // a heartbeat that rewrites the stats blob misses and re-decrypts.
-            return JSON.parse(ruleDecryptField(rule, 'stabilization') || '{}')
+            return JSON.parse(ruleDecryptField(rule, 'stabilization', readToken) || '{}')
         } catch {
             return {}
         }
     }
 
-    const buildAutopilotState = (rule) => {
+    const buildAutopilotState = (rule, readToken) => {
         const runtime = getRuleRuntimeState?.(rule.id)
         let customCheckUrls = []
         try {
             if (rule.custom_check_urls) {
-                const decrypted = ruleDecryptField(rule, 'custom_check_urls')
+                const decrypted = ruleDecryptField(rule, 'custom_check_urls', readToken)
                 const source = decrypted && decrypted.startsWith('[') ? decrypted : (rule.custom_check_urls.startsWith('[') ? rule.custom_check_urls : null)
                 if (source) customCheckUrls = normCustomChecks(JSON.parse(source))
             }
         } catch (e) { customCheckUrls = [] }
-        const priorityChain = rule.priority_chain ? JSON.parse(ruleDecryptField(rule, 'priority_chain') || '[]') : []
+        const priorityChain = rule.priority_chain ? JSON.parse(ruleDecryptField(rule, 'priority_chain', readToken) || '[]') : []
         const checkError = getRuleCheckError?.(rule.id)
         const lastCheck = runtime?.lastCheck ?? rule.last_check
         return {
@@ -471,15 +472,15 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             name: rule.name || null,
             cooldownMs: rule.cooldown_ms || null,
             priorityChain,
-            activeUrl: runtime?.activeUrl ?? (rule.active_url ? ruleDecryptField(rule, 'active_url') : null),
-            webhookUrl: rule.webhook_url ? ruleDecryptField(rule, 'webhook_url') : '',
+            activeUrl: runtime?.activeUrl ?? (rule.active_url ? ruleDecryptField(rule, 'active_url', readToken) : null),
+            webhookUrl: rule.webhook_url ? ruleDecryptField(rule, 'webhook_url', readToken) : '',
             // Only a saved mode is a statement (NULL = legacy row / older client): the
             // client keeps its local value when the key is absent.
             ...(rule.notify_enabled == null ? {} : { notifyEnabled: rule.notify_enabled === 1 }),
             isActive: rule.is_active === 1,
             isAutomatic: rule.is_automatic === 1,
             lastCheck: checkError && !(lastCheck >= checkError.at) ? checkError.at : lastCheck,
-            stabilization: runtime?.stabilization ?? parseStabilization(rule),
+            stabilization: runtime?.stabilization ?? parseStabilization(rule, readToken),
             customCheckUrls: Array.isArray(customCheckUrls) ? customCheckUrls : [],
             messageTemplate: rule.message_template || null,
             platform: rule.platform || null,
@@ -495,12 +496,12 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         }
     }
 
-    const buildAutopilotStates = (rules, context) => {
+    const buildAutopilotStates = (rules, context, readToken) => {
         const states = []
         let skippedCount = 0
         for (const rule of rules || []) {
             try {
-                states.push(buildAutopilotState(rule))
+                states.push(buildAutopilotState(rule, readToken))
             } catch (err) {
                 skippedCount++
                 fastify.log.warn({ category: 'Autopilot' }, `Skipped unreadable rule ${rule.id} for ${context}: ${err.message}`)
@@ -615,7 +616,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                     // encrypt() uses a random IV, so compare plaintext before touching TOAST-heavy addon_list.
                     if (plainJsonEqual(storedAddonList, reconciledList)) return
 
-                    await autopilotDb.run('UPDATE autopilot_rules SET addon_list = $1, updated_at = $2 WHERE id = $3 AND owner_sync_user = $4', [
+                    await autopilotDb.run(`UPDATE autopilot_rules SET addon_list = $1, updated_at = ${nextRuleVersion('$2')} WHERE id = $3 AND owner_sync_user = $4`, [
                         encrypt(JSON.stringify(reconciledList), PRIMARY_KEY),
                         Date.now(),
                         id,
@@ -711,7 +712,8 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Plaintext comparison failed, falling back to upsert: ${cmpErr.message}`)
             }
 
-            await upsertRuleRecord({ id, accountId, name, ...rulePayload, platform, connectionId, connectionGeneration: connectionGenerationToken }, existingRule, authUser, engineOwnedBlocked, conn)
+            const saved = await upsertRuleRecord({ id, accountId, name, ...rulePayload, platform, connectionId, connectionGeneration: connectionGenerationToken }, existingRule, authUser, engineOwnedBlocked, conn)
+            retireRuleSecrets?.(id, saved.updatedAt)
 
             fastify.log.info({ category: 'Autopilot' }, `[${maskContext(accountId)}] Rule synced to server (Swap & Hide Mode).`)
             if (!engineOwnedBlocked) {
@@ -816,7 +818,8 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                         fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Plaintext comparison failed, falling back to upsert: ${cmpErr.message}`)
                     }
 
-                    await upsertRuleRecord({ id, accountId, name, ...rulePayload, platform, connectionId, connectionGeneration: connectionGenerationToken }, existingRule, authUser, engineOwnedBlocked, conn)
+                    const saved = await upsertRuleRecord({ id, accountId, name, ...rulePayload, platform, connectionId, connectionGeneration: connectionGenerationToken }, existingRule, authUser, engineOwnedBlocked, conn)
+                    retireRuleSecrets?.(id, saved.updatedAt)
                     if (engineOwnedBlocked) {
                         results.push({ id, ok: false, error: STORED_STATE_UNREADABLE })
                         return
@@ -849,6 +852,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             if (hasRules) { reply.status(403); return { error: 'Forbidden' } }
         }
 
+        const readToken = beginRuleCacheRead?.()
         try {
             const rules = await db.query(`
                 SELECT r.id, r.updated_at, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
@@ -860,11 +864,13 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 WHERE r.account_id = $1 AND r.owner_sync_user = $2
             `, [accountId, authUser])
 
-            return buildAutopilotStates(rules, maskContext(accountId))
+            return buildAutopilotStates(rules, maskContext(accountId), readToken)
         } catch (err) {
             fastify.log.error({ category: 'Autopilot' }, `State fetch failed for ${maskContext(accountId)}: ${err.message}`)
             reply.status(500)
             return { error: 'Unable to load Autopilot state', lastWorkerRun: serverState.lastWorkerRun, lastCycle: serverState.autopilotLastCycleStats }
+        } finally {
+            endRuleCacheRead?.(readToken)
         }
     })
 
@@ -885,13 +891,13 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             if (ids.length > 0) {
                 const placeholders = ids.map((_, i) => `$${i + 4}`).join(',')
                 result = await db.run(
-                    `UPDATE autopilot_rules SET is_active = 0, updated_at = $1
+                    `UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')}
                      WHERE account_id = $2 AND owner_sync_user = $3 AND is_active = 1 AND id NOT IN (${placeholders})`,
                     [now, accountId, authUser, ...ids]
                 )
             } else {
                 result = await db.run(
-                    `UPDATE autopilot_rules SET is_active = 0, updated_at = $1
+                    `UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')}
                      WHERE account_id = $2 AND owner_sync_user = $3 AND is_active = 1`,
                     [now, accountId, authUser]
                 )
@@ -1024,7 +1030,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             const current = await conn.get('SELECT account_id FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2', [id, authUser])
             if (!current || current.account_id !== rule.account_id) return reply.code(404).send({ error: 'Rule not found' })
             const now = Date.now()
-            await ownerSaveDb(authUser, conn).run('UPDATE autopilot_rules SET is_active = 0, updated_at = $1, edited_at = $2 WHERE id = $3 AND account_id = $4 AND owner_sync_user = $5 AND is_active <> 0', [now, now, id, rule.account_id, authUser])
+            await ownerSaveDb(authUser, conn).run(`UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')}, edited_at = $2 WHERE id = $3 AND account_id = $4 AND owner_sync_user = $5 AND is_active <> 0`, [now, now, id, rule.account_id, authUser])
             clearRuleRuntimeState?.(id)
             return { success: true }
         })
@@ -1060,10 +1066,12 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             return { error: 'Forbidden' }
         }
 
-        await db.tx(async (tx) => {
-            await tx.run('DELETE FROM autopilot_rule_stats WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2)', [id, authUser])
-            await tx.run('DELETE FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2', [id, authUser])
+        const removed = await db.tx(async (tx) => {
+            const rows = await tx.query('DELETE FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2 RETURNING id, updated_at', [id, authUser])
+            if (rows.length) await tx.run('DELETE FROM autopilot_rule_stats WHERE rule_id = $1', [id])
+            return rows
         })
+        retireRuleCaches?.(removed)
         clearRuleRuntimeState?.(id)
         trace('autopilot', 'delete.success', { ruleId: id, timing: Date.now() - start })
         return { success: true }
@@ -1083,16 +1091,17 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         }
 
         const result = await db.tx(async (tx) => {
-            // Collect the rule ids before deleting them: the history subquery would otherwise match nothing.
-            const ruleIds = (await tx.query('SELECT id FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [accountId, authUser])).map(r => r.id)
-            if (ruleIds.length > 0) {
-                const placeholders = ruleIds.map((_, i) => `$${i + 1}`).join(',')
-                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ruleIds)
-                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ruleIds)
+            const removed = await tx.query('DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2 RETURNING id, updated_at', [accountId, authUser])
+            const ruleIds = removed.map(r => r.id)
+            for (let offset = 0; offset < ruleIds.length; offset += 500) {
+                const ids = ruleIds.slice(offset, offset + 500)
+                const placeholders = ids.map((_, i) => `$${i + 1}`).join(',')
+                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ids)
+                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ids)
             }
-            const r = await tx.run('DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [accountId, authUser])
-            return r
+            return { changes: removed.length, ruleIds: removed }
         })
+        retireRuleCaches?.(result.ruleIds)
         clearAccountRuleRuntimeState?.(accountId)
         fastify.log.info({ category: 'Autopilot' }, `Bulk-deleted rules for account ${maskContext(accountId)}...`)
         return { success: true, deleted: result?.changes || 0 }
@@ -1149,14 +1158,17 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         assertWritablePrimary()
         const start = Date.now()
 
+        let removedRuleIds = []
         const counts = await withAccountWriteLock(authUser, [accountId], (conn) => conn.tx(async (tx) => {
-            const ruleIds = (await tx.query('SELECT id FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [accountId, authUser])).map(r => r.id)
-            if (ruleIds.length > 0) {
-                const placeholders = ruleIds.map((_, i) => `$${i + 1}`).join(',')
-                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ruleIds)
-                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ruleIds)
+            removedRuleIds = await tx.query('DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2 RETURNING id, updated_at', [accountId, authUser])
+            const ruleIds = removedRuleIds.map(r => r.id)
+            for (let offset = 0; offset < ruleIds.length; offset += 500) {
+                const ids = ruleIds.slice(offset, offset + 500)
+                const placeholders = ids.map((_, i) => `$${i + 1}`).join(',')
+                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ids)
+                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ids)
             }
-            const rules = await tx.run('DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [accountId, authUser])
+            const rules = { changes: removedRuleIds.length }
             const credentials = await tx.run('DELETE FROM server_credentials WHERE account_id = $1 AND sync_user = $2', [accountId, authUser])
             const canonical = await tx.run('DELETE FROM account_canonical_addons WHERE account_id = $1 AND sync_user = $2', [accountId, authUser])
             await tx.run('DELETE FROM account_addon_actions WHERE account_id = $1 AND sync_user = $2', [accountId, authUser])
@@ -1164,6 +1176,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             await recordAccountTombstone(tx, authUser, accountId)
             return { rules: rules?.changes || 0, credentials: credentials?.changes || 0, canonical: canonical?.changes || 0 }
         }))
+        retireRuleCaches?.(removedRuleIds)
         if (counts.rules > 0) {
             clearAccountRuleRuntimeState?.(accountId)
             const { invalidateConnectionCache } = await import('../providers/reconciler.js')
@@ -1237,6 +1250,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         const generation = readConnectionGeneration(request.query?.generation)
         const start = Date.now()
 
+        let removedRuleIds = []
         const counts = await withAccountWriteLock(authUser, [accountId], (conn) => conn.tx(async (tx) => {
             let claimLegacy = 1
             if (generation) {
@@ -1256,16 +1270,19 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                 ? 'AND (connection_generation = $4 OR (connection_generation IS NULL AND $5 = 1))'
                 : 'AND connection_generation IS NULL'
             const scopedParams = generation ? [accountId, authUser, connectionId, generation, claimLegacy] : [accountId, authUser, connectionId]
-            const ruleIds = (await tx.query(`SELECT id FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2 AND connection_id = $3 ${generationFilter}`, scopedParams)).map(r => r.id)
-            if (ruleIds.length > 0) {
-                const placeholders = ruleIds.map((_, i) => `$${i + 1}`).join(',')
-                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ruleIds)
-                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ruleIds)
+            removedRuleIds = await tx.query(`DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2 AND connection_id = $3 ${generationFilter} RETURNING id, updated_at`, scopedParams)
+            const ruleIds = removedRuleIds.map(r => r.id)
+            for (let offset = 0; offset < ruleIds.length; offset += 500) {
+                const ids = ruleIds.slice(offset, offset + 500)
+                const placeholders = ids.map((_, i) => `$${i + 1}`).join(',')
+                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ids)
+                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ids)
             }
-            const rules = await tx.run(`DELETE FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2 AND connection_id = $3 ${generationFilter}`, scopedParams)
+            const rules = { changes: removedRuleIds.length }
             const credentials = await tx.run(`DELETE FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND connection_id = $3 ${generationFilter}`, scopedParams)
             return { rules: rules?.changes || 0, credentials: credentials?.changes || 0 }
         }))
+        retireRuleCaches?.(removedRuleIds)
         if (counts.rules > 0) clearAccountRuleRuntimeState?.(accountId)
         const { invalidateConnectionCache } = await import('../providers/reconciler.js')
         invalidateConnectionCache(authUser)
@@ -1337,42 +1354,47 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         if (!Array.isArray(accountIds) || accountIds.length === 0) { return {} }
         if (accountIds.length > MAX_BATCH_STATE_ACCOUNTS) { reply.status(400); return { error: `Too many account IDs (max ${MAX_BATCH_STATE_ACCOUNTS})` } }
 
-        const placeholders = accountIds.map((_, i) => `$${i + 2}`).join(',')
-        const rules = await db.query(
-            `SELECT r.id, r.updated_at, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
-                    COALESCE(s.last_check, r.last_check) AS last_check,
-                    COALESCE(s.stabilization, r.stabilization) AS stabilization,
-                    r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
-             FROM autopilot_rules r
-             LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
-             WHERE r.owner_sync_user = $1 AND r.account_id IN (${placeholders})`,
-            [authUser, ...accountIds]
-        )
+        const readToken = beginRuleCacheRead?.()
+        try {
+            const placeholders = accountIds.map((_, i) => `$${i + 2}`).join(',')
+            const rules = await db.query(
+                `SELECT r.id, r.updated_at, r.account_id, r.priority_chain, r.active_url, r.webhook_url, r.notify_enabled, r.is_active, r.is_automatic,
+                        COALESCE(s.last_check, r.last_check) AS last_check,
+                        COALESCE(s.stabilization, r.stabilization) AS stabilization,
+                        r.name, r.cooldown_ms, r.custom_check_urls, r.message_template, r.platform, r.connection_id, CASE WHEN r.auth_key IS NULL AND r.connection_id IS NULL THEN 1 ELSE 0 END AS unmonitored
+                 FROM autopilot_rules r
+                 LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
+                 WHERE r.owner_sync_user = $1 AND r.account_id IN (${placeholders})`,
+                [authUser, ...accountIds]
+            )
 
-        const allRules = rules || []
-        const totalCount = allRules.length
-        const slicedRules = (limit != null && offset != null)
-            ? allRules.slice(offset, offset + limit)
-            : allRules
+            const allRules = rules || []
+            const totalCount = allRules.length
+            const slicedRules = (limit != null && offset != null)
+                ? allRules.slice(offset, offset + limit)
+                : allRules
 
-        const result = {}
-        let skippedCount = 0
-        for (const rule of slicedRules) {
-            if (!result[rule.account_id]) result[rule.account_id] = []
-            try {
-                result[rule.account_id].push(buildAutopilotState(rule))
-            } catch (err) {
-                skippedCount++
-                fastify.log.error({ category: 'Autopilot' }, `Failed to decrypt rule ${rule.id}: ${err.message}`)
+            const result = {}
+            let skippedCount = 0
+            for (const rule of slicedRules) {
+                if (!result[rule.account_id]) result[rule.account_id] = []
+                try {
+                    result[rule.account_id].push(buildAutopilotState(rule, readToken))
+                } catch (err) {
+                    skippedCount++
+                    fastify.log.error({ category: 'Autopilot' }, `Failed to decrypt rule ${rule.id}: ${err.message}`)
+                }
             }
-        }
-        return {
-            states: result,
-            lastWorkerRun: serverState.lastWorkerRun,
-            totalCount,
-            lastCycle: serverState.autopilotLastCycleStats,
-            partial: skippedCount > 0,
-            skippedCount
+            return {
+                states: result,
+                lastWorkerRun: serverState.lastWorkerRun,
+                totalCount,
+                lastCycle: serverState.autopilotLastCycleStats,
+                partial: skippedCount > 0,
+                skippedCount
+            }
+        } finally {
+            endRuleCacheRead?.(readToken)
         }
     })
 

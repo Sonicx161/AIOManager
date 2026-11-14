@@ -215,7 +215,7 @@ function rememberLivePull(key, bytes) {
     livePullRegistry.register(bytes, key)
 }
 
-export function registerSyncRoutes(fastify) {
+export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
     fastify.get('/api/sync/:id', {
         config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
         schema: {
@@ -983,6 +983,7 @@ export function registerSyncRoutes(fastify) {
 
         fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${maskContext(id)}`)
         const privateCachePrefixes = metadataCache.invalidateOwner(id)
+        let deletedRuleIds = []
         await db.tx(async (tx) => {
             const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
             await tx.get(`SELECT key FROM kv_store WHERE key = $1${lock}`, [id])
@@ -1007,14 +1008,19 @@ export function registerSyncRoutes(fastify) {
             await tx.run('DELETE FROM account_api_keys WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM hydra_subscribers WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM account_addon_actions WHERE sync_user = $1', [id])
-            await tx.run('DELETE FROM autopilot_rule_stats WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
-            await tx.run('DELETE FROM failover_history WHERE rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $1)', [id])
-            await tx.run('DELETE FROM autopilot_rules WHERE owner_sync_user = $1', [id])
+            deletedRuleIds = await tx.query('DELETE FROM autopilot_rules WHERE owner_sync_user = $1 RETURNING id, updated_at', [id])
+            for (let offset = 0; offset < deletedRuleIds.length; offset += 500) {
+                const ids = deletedRuleIds.slice(offset, offset + 500).map(row => row.id)
+                const placeholders = ids.map((_, i) => `$${i + 1}`).join(',')
+                await tx.run(`DELETE FROM autopilot_rule_stats WHERE rule_id IN (${placeholders})`, ids)
+                await tx.run(`DELETE FROM failover_history WHERE rule_id IN (${placeholders})`, ids)
+            }
             await tx.run('DELETE FROM account_admin_state WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM account_notices WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM kv_store WHERE key = $1', [id])
             await tx.run('DELETE FROM kv_store_history WHERE key = $1', [id])
         })
+        autopilotEngine?.()?.retireRuleCaches?.(deletedRuleIds)
         metadataCache.invalidateOwner(id)
         invalidateCachedAuth('sync:' + id)
         invalidateCachedAuthPrefix('device:' + id + ':')

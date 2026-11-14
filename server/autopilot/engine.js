@@ -61,7 +61,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     const RULE_CACHE_MAX_BYTES = Math.max(0, parseInt(process.env.AUTOPILOT_RULE_CACHE_MAX_BYTES || String(256 * 1024 * 1024), 10) || 0)
     // Freshness is the (id, updated_at) version key, which every writer bumps; the TTL only bounds idle memory.
     const RULE_CACHE_TTL_MS = envMs('AUTOPILOT_RULE_CACHE_TTL_MS', 86400000, 60000)
-    const ruleCache = createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CACHE_TTL_MS })
+    const ruleCache = createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CACHE_TTL_MS, READER_MAX_AGE_MS: Math.max(900000, 2 * AUTOPILOT_CYCLE_BUDGET_MS) })
     const { decryptRuleField } = ruleCache
 
     // Probes default to the connect-time guarded transport; an injected deps.fetch (golden harness) replaces it.
@@ -124,8 +124,16 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         checkAddonHealthInternal,
         getHealthLatency,
         decryptRuleField,
+        beginRuleCacheRead: ruleCache.beginRead,
+        withRuleCacheRead: ruleCache.withRead,
+        endRuleCacheRead: ruleCache.endRead,
         invalidateRuleCaches: ruleCache.dropRuleCaches,
-        syncStremioLive,
+        retireRuleCaches: ruleCache.retireRuleCaches,
+        retireRuleSecrets: ruleCache.retireRuleSecrets,
+        syncStremioLive: async (...args) => {
+            const token = ruleCache.beginRead()
+            try { return await ruleCache.withRead(token, () => syncStremioLive(...args)) } finally { ruleCache.endRead(token) }
+        },
         enforceConnectionOnly,
         buildReconciledList,
         writeStremioCollection,

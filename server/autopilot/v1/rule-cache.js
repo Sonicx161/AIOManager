@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { decrypt } from '../../crypto.js'
 import { FALLBACK_KEYS } from '../../keys.js'
 
-export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CACHE_TTL_MS }) {
+export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CACHE_TTL_MS, READER_MAX_AGE_MS = 15 * 60 * 1000 }) {
     const ruleFetchCache = new Map()
     let ruleFetchCacheBytes = 0
     const ruleCacheStats = { hits: 0, misses: 0, bytesSaved: 0, windowStart: nowMs() }
@@ -31,8 +32,130 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         return hit
     }
 
-    const ruleCacheSet = (id, updatedAt, fullRow) => {
-        if (RULE_CACHE_MAX_BYTES <= 0 || updatedAt == null) return
+    const floors = new Map()
+    const FLOOR_LIMIT = 200000
+    const FLOOR_MIN_AGE_MS = 60 * 60 * 1000
+    const readers = new Map()
+    const readerContext = new AsyncLocalStorage()
+    let sequence = 0
+    let overflow = null
+    let invalidVersions = null
+    let warnedOverflow = false
+    let nextPruneAt = 0
+    let protectedPruneAt = Infinity
+    let lastReaderSweep = null
+    const beginRead = () => {
+        const now = nowMs()
+        if (lastReaderSweep === null || now < lastReaderSweep || now - lastReaderSweep >= 60000) {
+            revokeExpiredReaders()
+            lastReaderSweep = now
+        }
+        const token = ++sequence
+        readers.set(token, now)
+        return token
+    }
+    const endRead = (token) => { if (readers.delete(token)) nextPruneAt = overflow ? 0 : Math.min(nextPruneAt, protectedPruneAt) }
+    const withRead = (token, fn) => readerContext.run(token, fn)
+    const revokeExpiredReaders = () => {
+        const now = nowMs()
+        for (const [token, started] of readers) {
+            if (now - started >= READER_MAX_AGE_MS || now < started) endRead(token)
+        }
+    }
+    const validRead = (token = readerContext.getStore()) => {
+        const started = readers.get(token)
+        if (started === undefined) return false
+        const age = nowMs() - started
+        if (age < 0 || age >= READER_MAX_AGE_MS) { endRead(token); return false }
+        return true
+    }
+    const oldestReader = () => {
+        revokeExpiredReaders()
+        let oldest = Infinity
+        for (const token of readers.keys()) oldest = Math.min(oldest, token)
+        return oldest
+    }
+    const pruneFloors = () => {
+        const now = nowMs()
+        const oldest = oldestReader()
+        if (now < nextPruneAt) return
+        const cutoff = now - FLOOR_MIN_AGE_MS
+        nextPruneAt = Infinity
+        protectedPruneAt = Infinity
+        for (const [id, floor] of floors) {
+            if (floor.all === Infinity) continue
+            if (floor.sequence >= oldest) {
+                protectedPruneAt = Math.min(protectedPruneAt, floor.at + FLOOR_MIN_AGE_MS)
+                continue
+            }
+            if (floor.at <= cutoff) floors.delete(id)
+            else nextPruneAt = Math.min(nextPruneAt, floor.at + FLOOR_MIN_AGE_MS)
+        }
+        if (overflow) {
+            if (overflow.sequence >= oldest) protectedPruneAt = Math.min(protectedPruneAt, overflow.at + FLOOR_MIN_AGE_MS)
+            // Newer readers cannot hold a row read before any overflow retirement.
+            else overflow = null
+        }
+    }
+    const hashes = (id) => {
+        let a = 2166136261, b = 0x9e3779b9
+        for (const ch of String(id)) {
+            a = Math.imul(a ^ ch.charCodeAt(0), 16777619)
+            b = Math.imul(b ^ ch.charCodeAt(0), 2246822519)
+        }
+        return [a >>> 0, b >>> 0, (a + b) >>> 0]
+    }
+    // False positives only prevent caching; overflow entries must never be forgotten while readers can use them.
+    const contains = (bits, id) => bits && hashes(id).every(hash => {
+        const bit = hash % (bits.length * 8)
+        return (bits[bit >>> 3] & (1 << (bit & 7))) !== 0
+    })
+    const mark = (bits, id) => {
+        for (const hash of hashes(id)) {
+            const bit = hash % (bits.length * 8)
+            bits[bit >>> 3] |= 1 << (bit & 7)
+        }
+    }
+    const blocked = (id, version, secrets = false, token = readerContext.getStore()) => {
+        if (version == null || !Number.isSafeInteger(Number(version)) || (overflow && token <= overflow.sequence && contains(overflow.bits, id)) || contains(invalidVersions, id)) return true
+        const floor = floors.get(id)
+        const n = Number(version)
+        return !!floor && ((floor.all != null && n <= floor.all) || (secrets && floor.secrets != null && n <= floor.secrets))
+    }
+    const raiseFloor = (id, kind, version) => {
+        let floor = floors.get(id)
+        if (!floor && floors.size >= FLOOR_LIMIT) {
+            pruneFloors()
+            floor = floors.get(id)
+            if (!floor && floors.size >= FLOOR_LIMIT) {
+                if (!overflow) overflow = { bits: new Uint8Array(1024 * 1024), at: 0, sequence: 0 }
+                mark(overflow.bits, id)
+                if (!Number.isSafeInteger(Number(version))) {
+                    if (!invalidVersions) invalidVersions = new Uint8Array(1024 * 1024)
+                    mark(invalidVersions, id)
+                }
+                overflow.at = nowMs()
+                overflow.sequence = ++sequence
+                nextPruneAt = Math.min(nextPruneAt, overflow.at + FLOOR_MIN_AGE_MS)
+                if (!warnedOverflow) {
+                    warnedOverflow = true
+                    fastify.log.warn?.({ category: 'Autopilot' }, 'Rule cache retirement overflow is blocking affected cache entries.')
+                }
+                return
+            }
+        }
+        if (!floor) floors.set(id, floor = { all: null, secrets: null, at: 0, sequence: 0 })
+        const n = Number(version)
+        if (!Number.isSafeInteger(n)) floor.all = Infinity
+        else floor[kind] = floor[kind] == null ? n : Math.max(floor[kind], n)
+        floor.at = nowMs()
+        floor.sequence = ++sequence
+        nextPruneAt = Math.min(nextPruneAt, floor.at + FLOOR_MIN_AGE_MS)
+    }
+
+    const ruleCacheSet = (id, updatedAt, fullRow, token) => {
+        if (!validRead(token)) return
+        if (RULE_CACHE_MAX_BYTES <= 0 || blocked(id, updatedAt, false, token)) return
         const existing = ruleFetchCache.get(id)
         if (existing) { ruleFetchCache.delete(id); ruleFetchCacheBytes -= existing.bytes }
         const { addon_list: _addonList, ...row } = fullRow
@@ -52,7 +175,8 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         const hit = ruleFetchCache.get(id)
         return hit && hit.updatedAt === updatedAt ? hit.snapshot : null
     }
-    const ruleSnapshotSet = (id, updatedAt, snapshot) => {
+    const ruleSnapshotSet = (id, updatedAt, snapshot, token) => {
+        if (!validRead(token) || blocked(id, updatedAt, false, token)) return
         const hit = ruleFetchCache.get(id)
         if (hit && hit.updatedAt === updatedAt) hit.snapshot = snapshot
     }
@@ -74,9 +198,10 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         if (held.updatedAt !== updatedAt) { dropHeldList(id); return null }
         return held.raw
     }
-    const ruleListHold = (id, updatedAt, raw) => {
+    const ruleListHold = (id, updatedAt, raw, token) => {
+        if (!validRead(token)) return
+        if (typeof raw !== 'string' || blocked(id, updatedAt, false, token)) return
         dropHeldList(id)
-        if (typeof raw !== 'string' || updatedAt == null) return
         const bytes = Buffer.byteLength(raw, 'utf8')
         if (bytes > HELD_LIST_MAX_BYTES) return
         heldLists.set(id, { updatedAt, raw, bytes })
@@ -111,10 +236,11 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         ruleDecryptCacheStats.evictions++
     }
 
-    function decryptRuleField(row, field) {
+    function decryptRuleField(row, field, token) {
         const ciphertext = row[field]
         // Legacy plaintext (no IV:cipher:tag shape) never enters the cache.
         if (typeof ciphertext !== 'string' || !ciphertext.includes(':') || ciphertext.startsWith('http')) return decrypt(ciphertext, FALLBACK_KEYS)
+        if (!validRead(token) || blocked(row.id, row.updated_at, true, token)) return decrypt(ciphertext, FALLBACK_KEYS)
         const key = `${row.id}\u0000${row.updated_at ?? 'null'}\u0000${field}`
         const hit = ruleDecryptCache.get(key)
         if (hit) {
@@ -137,7 +263,7 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         // Corrupt rows simply re-attempt (and re-fail) every recheck, exactly
         // like the uncached behavior; per-cycle failure recording at the call
         // sites keys off this return value and is unaffected.
-        if (plaintext === null || plaintext === undefined) return plaintext
+        if (plaintext === null || plaintext === undefined || blocked(row.id, row.updated_at, true, token)) return plaintext
         // Bound the encoded payload bytes. JavaScript strings and Map metadata
         // also have heap overhead, separately limited by the entry count.
         const plainBytes = Buffer.byteLength(plaintext, 'utf8')
@@ -187,8 +313,49 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         return { rules, ruleDecrypt }
     }
 
+    const dropRuleSecrets = (id) => {
+        const prefix = `${id}\u0000`
+        for (const [key, entry] of ruleDecryptCache) {
+            if (!key.startsWith(prefix)) continue
+            ruleDecryptCacheBytes -= entry.bytes
+            ruleDecryptCache.delete(key)
+        }
+    }
+
+    const retireRuleCaches = (rules) => {
+        const rows = rules || []
+        const ids = rows.map(row => typeof row === 'object' ? row.id : row)
+        for (const row of rows) {
+            const id = typeof row === 'object' ? row.id : row
+            const version = typeof row === 'object' && row.updated_at != null ? Math.max(nowMs(), Number(row.updated_at)) : nowMs()
+            raiseFloor(id, 'all', version)
+        }
+        return dropRuleCaches(ids)
+    }
+
+    const retireRuleSecrets = (id, savedUpdatedAt) => {
+        raiseFloor(id, 'secrets', savedUpdatedAt == null ? nowMs() : Number(savedUpdatedAt) - 1)
+        dropRuleSecrets(id)
+    }
+
+    const sweepExpired = () => {
+        pruneFloors()
+        const now = nowMs()
+        for (const [id, hit] of ruleFetchCache) {
+            if (hit.expires > now) continue
+            ruleFetchCache.delete(id)
+            ruleFetchCacheBytes -= hit.bytes
+        }
+        for (const [key, entry] of ruleDecryptCache) {
+            if (now - entry.at <= RULE_CACHE_TTL_MS) continue
+            ruleDecryptCacheBytes -= entry.bytes
+            ruleDecryptCache.delete(key)
+        }
+    }
+
     const logStatsWindows = () => {
         if (nowMs() - ruleCacheStats.windowStart >= 5 * 60 * 1000) {
+            sweepExpired()
             const total = ruleCacheStats.hits + ruleCacheStats.misses
             if (total > 0) {
                 const hitPct = Math.round((ruleCacheStats.hits / total) * 100)
@@ -215,6 +382,9 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
     }
 
     return {
+        beginRead,
+        endRead,
+        withRead,
         ruleCacheGet,
         ruleCacheSet,
         ruleCacheStats,
@@ -225,8 +395,11 @@ export function createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CAC
         ruleListRelease: dropHeldList,
         decryptRuleField,
         dropRuleCaches,
+        retireRuleCaches,
+        retireRuleSecrets,
+        sweepExpired,
         logStatsWindows,
-        getRuleCacheStats: () => ({ ...ruleCacheStats, entries: ruleFetchCache.size, bytes: ruleFetchCacheBytes, heldLists: heldLists.size, heldListBytes }),
+        getRuleCacheStats: () => ({ ...ruleCacheStats, entries: ruleFetchCache.size, bytes: ruleFetchCacheBytes, floors: floors.size, readers: readers.size, heldLists: heldLists.size, heldListBytes }),
         getRuleDecryptCacheStats: () => ({
             ...ruleDecryptCacheStats,
             entries: ruleDecryptCache.size,

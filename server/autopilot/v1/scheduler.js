@@ -12,6 +12,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
     // further batches, its in-flight rules stay excluded until they settle, and the next cycle starts now.
     let cycleGeneration = 0
     let cycleStartedAt = 0
+    let cycleReadToken = null
     const inFlightRules = new Set()
     serverState.autopilotWatchdog = { trips: 0, lastTripAt: null, deadlineMs: AUTOPILOT_CYCLE_WATCHDOG_MS }
     const tripWatchdogIfStalled = () => {
@@ -19,6 +20,8 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
         const runningMs = nowMs() - cycleStartedAt
         if (runningMs < AUTOPILOT_CYCLE_WATCHDOG_MS) return false
         cycleGeneration++
+        ruleCache.endRead?.(cycleReadToken)
+        cycleReadToken = null
         cycleStartedAt = 0
         serverState.autopilotWatchdog.trips++
         serverState.autopilotWatchdog.lastTripAt = nowMs()
@@ -49,6 +52,9 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
 
         fastify.log.debug({ category: 'Autopilot' }, `Autonomous Engine: Starting budgeted scaling-aware scan.`)
 
+        const readToken = ruleCache.beginRead?.()
+        cycleReadToken = readToken
+        const run = async () => {
         try {
             const CHUNK_SIZE = AUTOPILOT_SCAN_CHUNK_SIZE
             const startCursor = serverState.autopilotScanCursor || ''
@@ -267,14 +273,18 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
             ruleCache.logStatsWindows()
 
         } finally {
+            ruleCache.endRead?.(readToken)
             // An abandoned cycle leaves the shared cycle state to the cycle that replaced it.
             if (live()) {
+                cycleReadToken = null
                 probeCycle?.end?.()
                 cycleTargets.clear()
                 cycleStartedAt = 0
                 serverState.isWorkerRunning = false
             }
         }
+        }
+        return ruleCache.withRead ? ruleCache.withRead(readToken, run) : run()
     }
 
     const startAutopilotWorker = () => {

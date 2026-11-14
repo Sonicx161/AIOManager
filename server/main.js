@@ -316,7 +316,7 @@ fastify.post('/api/debug/trace', { bodyLimit: 1024 * 1024, config: { rateLimit: 
     return null
 })
 
-registerSyncRoutes(fastify)
+registerSyncRoutes(fastify, { autopilotEngine: () => autopilotEngine })
 registerAccountNoticeRoutes(fastify)
 
 const reconciler = createReconciler(fastify)

@@ -2,6 +2,7 @@ import { autopilotDb as db } from '../write-tripwire.js'
 import { normalizeAddonUrl } from '../../utils/addon-url.js'
 import { maskContext } from '../../utils/log-helpers.js'
 import { ownerPredicate } from './owner-scope.js'
+import { nextRuleVersion } from './rule-version.js'
 import { urlRef, scrubUrls } from './url-ref.js'
 import { loadCanonicalDestinations, withCurrentDestinations, resolveStremioConnectionId, stremioExcludedUrlsFromPolicy } from './destinations.js'
 import { preserveLiveMembers } from '../one-active.js'
@@ -174,7 +175,7 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             if (err.status === 401) {
                 fastify.log.error({ category: 'Autopilot' }, `[${maskContext(accountId)}] Auth Key Expired (401). Disabling rule.`)
                 const [ownerSql, ownerParams] = ownerPredicate(owner, 4)
-                await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = $1 WHERE id = $2 AND account_id = $3${ownerSql}`, [nowMs(), ruleId, accountId, ...ownerParams])
+                await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')} WHERE id = $2 AND account_id = $3${ownerSql}`, [nowMs(), ruleId, accountId, ...ownerParams])
             }
             fastify.log.error({ category: 'Autopilot' }, `[${maskContext(accountId)}] Mirror sync failed: ${scrubUrls(err.message)}`)
             throw err

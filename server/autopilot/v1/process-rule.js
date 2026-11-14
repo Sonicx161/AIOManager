@@ -1,4 +1,5 @@
 import { autopilotDb as db } from '../write-tripwire.js'
+import { nextRuleVersion } from './rule-version.js'
 import { normalizeAddonUrl } from '../../utils/addon-url.js'
 import { decrypt } from '../../crypto.js'
 import { FALLBACK_KEYS } from '../../keys.js'
@@ -51,7 +52,7 @@ export function createProcessRule({
         })
         if (decryptFailures >= 3) {
             const [ownerSql, ownerParams] = ownerPredicate(rule.owner_sync_user, 4)
-            await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = $1 WHERE id = $2 AND account_id = $3${ownerSql}`, [now, rule.id, rule.account_id, ...ownerParams])
+            await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')} WHERE id = $2 AND account_id = $3${ownerSql}`, [now, rule.id, rule.account_id, ...ownerParams])
             clearRuleRuntimeState(rule.id)
             fastify.log.error({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Disabled rule ${rule.id} after repeated decrypt failures.`)
         }
@@ -480,7 +481,7 @@ export function createProcessRule({
                             if (err.status === 401) {
                                 fastify.log.error({ category: 'Autopilot', fmt: 'ap.auth_expired', acct: rule.account_id }, `[${maskContext(rule.account_id)}] Auth Key Expired (401). Disabling rule.`)
                                 const [ownerSql, ownerParams] = ownerPredicate(rule.owner_sync_user, 4)
-                                await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = $1 WHERE id = $2 AND account_id = $3${ownerSql}`, [nowMs(), rule.id, rule.account_id, ...ownerParams])
+                                await db.run(`UPDATE autopilot_rules SET is_active = 0, updated_at = ${nextRuleVersion('$1')} WHERE id = $2 AND account_id = $3${ownerSql}`, [nowMs(), rule.id, rule.account_id, ...ownerParams])
                             }
                             throw err
                         }

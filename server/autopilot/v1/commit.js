@@ -1,6 +1,7 @@
 import { autopilotDb as db } from '../write-tripwire.js'
 import { encrypt } from '../../crypto.js'
 import { PRIMARY_KEY } from '../../keys.js'
+import { nextRuleVersion } from './rule-version.js'
 
 export const stableStringify = (value) => {
     if (value === undefined) return 'undefined'
@@ -20,13 +21,13 @@ export async function runFullRuleUpdate(conn, [activeUrlToSave, addonListToSave,
     if (addonListToSave == null) {
         return conn.run(`
             UPDATE autopilot_rules
-            SET active_url = COALESCE($1, active_url), updated_at = $2
+            SET active_url = COALESCE($1, active_url), updated_at = ${nextRuleVersion('$2')}
             WHERE id = $3
         `, [activeUrlToSave, now, ruleId])
     }
     return conn.run(`
         UPDATE autopilot_rules
-        SET active_url = COALESCE($1, active_url), addon_list = $2, updated_at = $3
+        SET active_url = COALESCE($1, active_url), addon_list = $2, updated_at = ${nextRuleVersion('$3')}
         WHERE id = $4
     `, [activeUrlToSave, addonListToSave, now, ruleId])
 }
