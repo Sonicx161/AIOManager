@@ -14,6 +14,7 @@ import { createCommit } from './v1/commit.js'
 import { createProcessRule } from './v1/process-rule.js'
 import { createScheduler } from './v1/scheduler.js'
 import { createConnectionRetry } from './v1/connection-retry.js'
+import { scrubUrls } from './v1/url-ref.js'
 import { autopilotTripwire, guardFetch, guardProvider } from './write-tripwire.js'
 
 export { stableStringify, addonListChanged, runFullRuleUpdate } from './v1/commit.js'
@@ -89,7 +90,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         fastify, nowMs, rand, bootAt, reconciler, stremioDriver, checkAddonHealthInternal, checkCustomUrlsHealth,
         RULE_DEEP_AUDIT_MS, RULE_FIRST_DEEP_AUDIT_MAX_MS,
     })
-    const { planCommit, flushUpdates } = createCommit({ nowMs, setRuleRuntimeState, RULE_HEARTBEAT_MS })
+    const { planCommit, flushUpdates } = createCommit({ nowMs, setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState, onTransitionError: (err, id) => fastify.log.error({ category: 'Autopilot' }, `Transition effects failed for rule ${id}: ${scrubUrls(err?.message || String(err))}`), RULE_HEARTBEAT_MS })
     const connectionRetry = createConnectionRetry({ nowMs })
     const { processAutopilotRule: processRuleUnguarded } = createProcessRule({
         fastify, nowMs, reconciler, decryptRuleField, runtimeState, cycleTargets, siblingChainPlans,

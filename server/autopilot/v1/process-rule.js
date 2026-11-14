@@ -141,7 +141,7 @@ export function createProcessRule({
             return
         }
         const decryptedActiveUrl = decryptRuleField(rule, 'active_url') || rule.active_url
-        let shouldUpdateNotificationTime = false
+        let transitionEffect = null
 
         let chain = []
         try {
@@ -564,28 +564,29 @@ export function createProcessRule({
                     const type = normalizedTarget === normalizeAddonUrl(primaryUrl).toLowerCase() ? 'recovery' : 'failover'
                     const msg = TRANSITION_MESSAGES[type]
 
-                    // Notify first so the one insert can record delivery; a worker crash during a slow webhook then loses this row.
-                    const notified = {}
-                    let notifyError = null
-                    try {
-                        if (await notifyTransition(rule, { type, msg, chain, targetActiveUrl }, notified)) shouldUpdateNotificationTime = true
-                    } catch (err) {
-                        notifyError = err
-                    }
-
                     const reason = switchReason({ type, decision, members, activeIndex, targetIndex: normalizedChainUrls.indexOf(normalizedTarget), chain, timeoutMs: PROBE_TIMEOUT_MS })
                     const retryAt = pushedPlatforms?.some(p => !p.ok) ? connectionRetry?.get?.(rule.id)?.nextAt ?? null : null
-                    await recordFailoverHistory(rule, type, msg, primaryUrl, targetActiveUrl, {
-                        chain: normalizedChain,
-                        activeUrl: normalizedTarget,
-                        from: currentActiveNorm,
-                        ...(reason ? { reason } : {}),
-                        ...(pushedPlatforms ? { platforms: pushedPlatforms } : {}),
-                        notified: notified.channel ?? null,
-                        ...(notified.channel ? { notifiedOk: notified.sent === true } : {}),
-                        ...(retryAt ? { retryAt } : {}),
-                    }, getHealthLatency(targetActiveUrl))
-                    if (notifyError) throw notifyError
+                    transitionEffect = async () => {
+                        if (accountBlockedInSnapshot(rule.owner_sync_user)) return false
+                        const notified = {}
+                        let sent = false
+                        try {
+                            sent = await notifyTransition(rule, { type, msg, chain, targetActiveUrl }, notified)
+                        } catch (err) {
+                            fastify.log.error({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Notification failed: ${scrubUrls(err?.message || String(err))}`)
+                        }
+                        await recordFailoverHistory(rule, type, msg, primaryUrl, targetActiveUrl, {
+                            chain: normalizedChain,
+                            activeUrl: normalizedTarget,
+                            from: currentActiveNorm,
+                            ...(reason ? { reason } : {}),
+                            ...(pushedPlatforms ? { platforms: pushedPlatforms } : {}),
+                            notified: notified.channel ?? null,
+                            ...(notified.channel ? { notifiedOk: notified.sent === true } : {}),
+                            ...(retryAt ? { retryAt } : {}),
+                        }, getHealthLatency(targetActiveUrl))
+                        return sent
+                    }
                 }
                 if (ownerBlockedAfterWrite) {
                     fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Post-write effects skipped: the account owner is blocked.`)
@@ -623,11 +624,14 @@ export function createProcessRule({
 
         const update = planCommit({
             rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl,
-            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey: needsSync && syncSucceeded ? storedAddonListKey() : null, shouldUpdateNotificationTime, lastDeepAuditToSave
+            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey: needsSync && syncSucceeded ? storedAddonListKey() : null, shouldUpdateNotificationTime: false, lastDeepAuditToSave
         })
         // Owner identity rides the dirty update so the scheduler can drop commits for
         // owners blocked between processing and the flush (snapshot check, no DB read).
-        if (update) update.ownerSyncUser = rule.owner_sync_user
+        if (update) {
+            update.ownerSyncUser = rule.owner_sync_user
+            if (transitionEffect) update.transitionEffect = transitionEffect
+        }
         return update
     }
 

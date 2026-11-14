@@ -17,22 +17,22 @@ export const stableStringify = (value) => {
 // Compares plaintext (never encrypted blobs: the random IV makes those always differ).
 export const addonListChanged = (storedKey, nextList) => storedKey !== stableStringify(nextList ?? null)
 
-export async function runFullRuleUpdate(conn, [activeUrlToSave, addonListToSave, now, ruleId]) {
+export async function runFullRuleUpdate(conn, [activeUrlToSave, addonListToSave, now, ruleId, readVersion]) {
     if (addonListToSave == null) {
         return conn.run(`
             UPDATE autopilot_rules
             SET active_url = COALESCE($1, active_url), updated_at = ${nextRuleVersion('$2')}
-            WHERE id = $3
-        `, [activeUrlToSave, now, ruleId])
+            WHERE id = $3 AND COALESCE(updated_at, 0) = $4
+        `, [activeUrlToSave, now, ruleId, readVersion ?? 0])
     }
     return conn.run(`
         UPDATE autopilot_rules
         SET active_url = COALESCE($1, active_url), addon_list = $2, updated_at = ${nextRuleVersion('$3')}
-        WHERE id = $4
-    `, [activeUrlToSave, addonListToSave, now, ruleId])
+        WHERE id = $4 AND COALESCE(updated_at, 0) = $5
+    `, [activeUrlToSave, addonListToSave, now, ruleId, readVersion ?? 0])
 }
 
-export function createCommit({ nowMs, setRuleRuntimeState, RULE_HEARTBEAT_MS }) {
+export function createCommit({ nowMs, setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState, onTransitionError, RULE_HEARTBEAT_MS }) {
     // Publishes the runtime state and returns the pending write (or null when nothing is due).
     const planCommit = ({ rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl, targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey, shouldUpdateNotificationTime, lastDeepAuditToSave }) => {
         const stabilizationJson = JSON.stringify(stabilization)
@@ -67,7 +67,7 @@ export function createCommit({ nowMs, setRuleRuntimeState, RULE_HEARTBEAT_MS }) 
 
             return {
                 type: 'full',
-                ruleParams: [activeUrlToSave, addonListToSave, now, rule.id],
+                ruleParams: [activeUrlToSave, addonListToSave, now, rule.id, rule.updated_at],
                 statsParams: [rule.id, stabilizationToSave, now, lastNotificationToSave, now]
             }
         } else {
@@ -83,11 +83,30 @@ export function createCommit({ nowMs, setRuleRuntimeState, RULE_HEARTBEAT_MS }) 
         if (dirtyUpdates.length === 0) return
         const fullUpdates = dirtyUpdates.filter(u => u.type === 'full')
         const heartbeatUpdates = dirtyUpdates.filter(u => u.type === 'heartbeat')
-        await db.tx(async (conn) => {
+        const committed = fullUpdates.length > 0 ? await db.tx(async (conn) => {
+            const committed = []
             for (const update of fullUpdates) {
-                await runFullRuleUpdate(conn, update.ruleParams)
+                const result = await runFullRuleUpdate(conn, update.ruleParams)
+                if (result.changes) committed.push(update)
+                else clearRuleRuntimeState?.(update.ruleParams[3])
             }
-            const allStats = [...fullUpdates, ...heartbeatUpdates]
+            return committed
+        }) : []
+        await Promise.all(committed.map(async (update) => {
+            if (!update.transitionEffect) return
+            try {
+                if (await update.transitionEffect()) {
+                    const timestamp = nowMs()
+                    update.statsParams[3] = timestamp
+                    const runtime = getRuleRuntimeState?.(update.ruleParams[3])
+                    if (runtime) setRuleRuntimeState(update.ruleParams[3], { ...runtime, lastNotification: timestamp })
+                }
+            } catch (err) {
+                onTransitionError?.(err, update.ruleParams[3])
+            }
+        }))
+        const allStats = [...committed, ...heartbeatUpdates]
+        if (allStats.length > 0) await db.tx(async (conn) => {
             for (let si = 0; si < allStats.length; si += 100) {
                 const statChunk = allStats.slice(si, si + 100)
                 const statRows = statChunk.map((_, j) => `($${j * 5 + 1}, $${j * 5 + 2}, $${j * 5 + 3}, $${j * 5 + 4}, $${j * 5 + 5})`).join(',')

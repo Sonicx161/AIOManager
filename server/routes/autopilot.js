@@ -570,14 +570,16 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         // mid-window engine commit changes the hash and busts the debounce.
         let storedAddons
         let targetActiveUrl
+        let readVersion
         try {
             const freshRow = id
-                ? await autopilotDb.get('SELECT addon_list, active_url, is_active FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2', [id, ownerSyncUser])
+                ? await autopilotDb.get('SELECT addon_list, active_url, is_active, updated_at FROM autopilot_rules WHERE id = $1 AND owner_sync_user = $2', [id, ownerSyncUser])
                 : null
             if (!freshRow || freshRow.is_active === 0) {
                 fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Rule ${id} vanished before echo enforcement; skipping.`)
                 return
             }
+            readVersion = freshRow.updated_at ?? 0
             let freshList = null
             if (freshRow.addon_list) {
                 const decrypted = decrypt(freshRow.addon_list, FALLBACK_KEYS)
@@ -617,12 +619,17 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                     // encrypt() uses a random IV, so compare plaintext before touching TOAST-heavy addon_list.
                     if (plainJsonEqual(storedAddonList, reconciledList)) return
 
-                    await autopilotDb.run(`UPDATE autopilot_rules SET addon_list = $1, updated_at = ${nextRuleVersion('$2')} WHERE id = $3 AND owner_sync_user = $4`, [
+                    const result = await autopilotDb.run(`UPDATE autopilot_rules SET addon_list = $1, updated_at = ${nextRuleVersion('$2')} WHERE id = $3 AND owner_sync_user = $4 AND COALESCE(updated_at, 0) = $5`, [
                         encrypt(JSON.stringify(reconciledList), PRIMARY_KEY),
                         Date.now(),
                         id,
-                        ownerSyncUser
+                        ownerSyncUser,
+                        readVersion
                     ])
+                    if (!result.changes) {
+                        clearRuleRuntimeState?.(id)
+                        clearDebouncedEnforcement(id, payloadHash)
+                    }
                 }
             })
             .catch(err => {

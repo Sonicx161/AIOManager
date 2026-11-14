@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto'
 import db from '../db.js'
 import { hashApiKey } from '../api-keys.js'
 import { isSafeUrl, isSafeUrlResolved } from '../utils/ssrf.js'
-import { decrypt } from '../crypto.js'
-import { FALLBACK_KEYS } from '../keys.js'
+import { decrypt, encrypt } from '../crypto.js'
+import { FALLBACK_KEYS, PRIMARY_KEY } from '../keys.js'
+import { ownerSaveDb } from '../autopilot/write-tripwire.js'
+import { nextRuleVersion } from '../autopilot/v1/rule-version.js'
 import { VERSION } from '../config.js'
 import { enqueueProxyRequest } from '../proxy-queue.js'
 import { guardedResilientFetch, guardedWebFetch } from '../utils/safe-fetch.js'
@@ -23,6 +25,17 @@ const MAX_ADDONS_IN_COLLECTION = 500
 const LAST_USED_COALESCE_MS = 60_000
 
 let logger = console
+
+function aiostreamsIdentity(raw) {
+    try {
+        const url = new URL(raw)
+        const match = url.pathname.match(/^(.*)\/stremio\/(?:u\/([^/]+)|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/[^/]+)(?:\/v\/[^/]+)?\/manifest\.json\/?$/i)
+        if (!match) return null
+        return match[3] ? `uuid:${match[3].toLowerCase()}` : `alias:${url.origin.toLowerCase()}${match[1]}/stremio/u/${decodeURIComponent(match[2]).toLowerCase()}`
+    } catch {
+        return null
+    }
+}
 
 const isValidAddonUrl = (url) =>
     typeof url === 'string' &&
@@ -315,10 +328,36 @@ function propagationFields(mode) {
         : { propagatedTo: [], warning: CANONICAL_ONLY_WARNING }
 }
 
+async function migrateRuleUrls(conn, account, oldUrl, newUrl, manifest, write) {
+    const rules = await conn.query('SELECT id, priority_chain, active_url, addon_list FROM autopilot_rules WHERE account_id = $1 AND owner_sync_user = $2', [account.account_id, account.sync_user || ''])
+    const oldKey = normalizeAddonUrl(oldUrl)
+    const same = value => typeof value === 'string' && normalizeAddonUrl(value) === oldKey
+    for (const rule of rules) {
+        const chain = rule.priority_chain ? JSON.parse(decrypt(rule.priority_chain, FALLBACK_KEYS) || 'null') : []
+        const active = rule.active_url ? decrypt(rule.active_url, FALLBACK_KEYS) : null
+        if (!Array.isArray(chain) || (rule.active_url && !active)) throw new Error('Autopilot rule state is unreadable')
+        const list = rule.addon_list ? JSON.parse(decrypt(rule.addon_list, FALLBACK_KEYS) || 'null') : null
+        if (rule.addon_list && !Array.isArray(list)) throw new Error('Autopilot addon list is unreadable')
+        const chainChanged = chain.some(same)
+        const activeChanged = same(active)
+        const listChanged = list?.some(addon => same(addon?.transportUrl || addon?.url))
+        if (!chainChanged && !activeChanged && !listChanged) continue
+        if (!write) continue
+        const nextChain = chain.map(url => same(url) ? newUrl : url)
+        const nextActive = same(active) ? newUrl : active
+        const nextList = list?.map(addon => same(addon?.transportUrl || addon?.url) ? { ...addon, transportUrl: newUrl, manifest } : addon)
+        await ownerSaveDb(account.sync_user || '', conn).run(`UPDATE autopilot_rules SET priority_chain = $1, active_url = $2, addon_list = $3, updated_at = ${nextRuleVersion('$4')} WHERE id = $5 AND account_id = $6 AND owner_sync_user = $7`, [
+            chainChanged ? encrypt(JSON.stringify(nextChain), PRIMARY_KEY) : rule.priority_chain, activeChanged ? encrypt(nextActive, PRIMARY_KEY) : rule.active_url,
+            listChanged ? encrypt(JSON.stringify(nextList), PRIMARY_KEY) : rule.addon_list, Date.now(), rule.id, account.account_id, account.sync_user || ''
+        ])
+    }
+}
+
 // addonActions: [{ url, action }] rows riding the canonical write's transaction.
-async function writeCanonicalAddons(account, addons, addonActions = []) {
+async function writeCanonicalAddons(account, addons, addonActions = [], migration = null) {
     const accountId = account.account_id
     const syncUser = account.sync_user || ''
+    if (migration) await migrateRuleUrls(db, account, ...migration, false)
     // Write boundary gates: entry, immediately before the Stremio platform write and
     // before the canonical store write, so a mid-request block performs neither.
     await assertAccountActive(syncUser)
@@ -386,8 +425,11 @@ async function writeCanonicalAddons(account, addons, addonActions = []) {
         }
     }
     if (stremioWriteThrough) {
-        if (addonActions.length > 0) {
-            await db.tx(tx => recordAddonActions(tx, { syncUser, accountId, entries: addonActions }))
+        if (addonActions.length > 0 || migration) {
+            await db.tx(async tx => {
+                if (addonActions.length > 0) await recordAddonActions(tx, { syncUser, accountId, entries: addonActions })
+                if (migration) await migrateRuleUrls(tx, account, ...migration, true)
+            })
         }
         return 'stremio'
     }
@@ -419,6 +461,7 @@ async function writeCanonicalAddons(account, addons, addonActions = []) {
         if (addonActions.length > 0) {
             await recordAddonActions(tx, { syncUser, accountId, entries: addonActions })
         }
+        if (migration) await migrateRuleUrls(tx, account, ...migration, true)
     })
     invalidateCanonicalAddons(accountId, syncUser)
     return 'canonical'
@@ -741,7 +784,12 @@ export function registerHydraRoutes(fastify, reconciler = null) {
             if (!fetchUrl) {
                 const preRead = await readFreshCanonical(account, reply)
                 if (!preRead) return UNAVAILABLE
-                const existing = preRead.find(a => (a.manifest?.id || a.id) === addonId)
+                const matches = preRead.filter(a => (a.manifest?.id || a.id) === addonId)
+                if (matches.length > 1 && aiostreamsIdentity(matches[0].transportUrl || matches[0].url || '')) {
+                    reply.code(409)
+                    return { error: 'conflict', message: 'Multiple AIOStreams addons share this ID; provide an addon URL.' }
+                }
+                const existing = matches[0]
                 if (!existing) {
                     reply.code(404)
                     return { error: 'not_found', message: 'Addon not installed; provide addonUrl to install it' }
@@ -761,8 +809,22 @@ export function registerHydraRoutes(fastify, reconciler = null) {
 
                 const target = normalizeAddonUrl(fetchUrl)
                 let matchIdx = current.findIndex(a => normalizeAddonUrl(a.transportUrl || a.url || '') === target)
+                const identity = aiostreamsIdentity(fetchUrl)
+                if (identity && matchIdx < 0) {
+                    const matches = current.map((a, i) => aiostreamsIdentity(a.transportUrl || a.url || '') === identity ? i : -1).filter(i => i >= 0)
+                    if (matches.length > 1) {
+                        reply.code(409)
+                        return { error: 'conflict', message: 'Multiple addons share this AIOStreams identity.' }
+                    }
+                    if (matches.length > 0) matchIdx = matches[0]
+                }
                 if (matchIdx < 0 && manifest?.id) {
-                    matchIdx = current.findIndex(a => (a.manifest?.id || a.id) === manifest.id)
+                    const matches = current.map((a, i) => (a.manifest?.id || a.id) === manifest.id ? i : -1).filter(i => i >= 0)
+                    if (identity && matches.length > 0) {
+                        reply.code(409)
+                        return { error: 'conflict', message: 'The matching AIOStreams instance could not be determined.' }
+                    }
+                    if (matches.length > 0) matchIdx = matches[0]
                 }
 
                 let updated
@@ -781,10 +843,13 @@ export function registerHydraRoutes(fastify, reconciler = null) {
                     actions = [{ url: fetchUrl, action: 'install' }]
                 }
 
-                const mode = await writeCanonicalAddons(account, updated, actions)
+                const oldUrl = matchIdx >= 0 ? (current[matchIdx].transportUrl || current[matchIdx].url) : null
+                const migration = oldUrl && normalizeAddonUrl(oldUrl) !== target ? [oldUrl, fetchUrl, manifest] : null
+                const mode = await writeCanonicalAddons(account, updated, actions, migration)
                 return { updated, mode }
             })
             if (result === UNAVAILABLE) return UNAVAILABLE
+            if (result.error) return result
             stampSubscriberActivity(account, 'push')
 
             // Fan-outs run one at a time per account and each enforces the canonical state read inside its own turn.
