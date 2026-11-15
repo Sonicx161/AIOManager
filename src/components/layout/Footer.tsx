@@ -6,6 +6,9 @@ import { useUIStore } from '@/store/uiStore'
 import { isNewerVersion, cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
 
+const LATEST_RELEASE_KEY = 'aiom:latest-release'
+const LATEST_RELEASE_TTL_MS = 6 * 60 * 60 * 1000
+
 export function Footer({ className }: { className?: string }) {
   const isDev = import.meta.env?.DEV
   const version = pkg.version
@@ -14,18 +17,32 @@ export function Footer({ className }: { className?: string }) {
   const [updateAvailable, setUpdateAvailable] = React.useState<string | null>(null)
 
   React.useEffect(() => {
+    const applyLatest = (latestStr: unknown) => {
+      if (typeof latestStr !== 'string' || !latestStr) return
+      const currentStr = `${version}${build ? `+build.${build}` : ''}`
+
+      // Use the strict semver utility to prevent +build tags from triggering downgradable updates
+      if (isNewerVersion(currentStr, latestStr) && version !== 'Dev') {
+        setUpdateAvailable(latestStr.replace('v', ''))
+      }
+    }
+
     const checkUpdate = async () => {
+      try {
+        const cached = JSON.parse(localStorage.getItem(LATEST_RELEASE_KEY) || 'null')
+        if (cached && typeof cached.at === 'number' && Date.now() - cached.at < LATEST_RELEASE_TTL_MS) {
+          applyLatest(cached.tag)
+          return
+        }
+      } catch {}
       try {
         const res = await fetch('https://api.github.com/repos/sonicx161/AIOManager/releases/latest')
         if (res.ok) {
           const data = await res.json()
-          const latestStr = data.tag_name
-          const currentStr = `${version}${build ? `+build.${build}` : ''}`
-
-          // Use the strict semver utility to prevent +build tags from triggering downgradable updates
-          if (isNewerVersion(currentStr, latestStr) && version !== 'Dev') {
-            setUpdateAvailable(latestStr.replace('v', ''))
-          }
+          applyLatest(data.tag_name)
+          try {
+            localStorage.setItem(LATEST_RELEASE_KEY, JSON.stringify({ tag: data.tag_name, at: Date.now() }))
+          } catch {}
         }
       } catch {}
     }
