@@ -49,9 +49,9 @@ export function isRecoveredAddonCollection(addons: AddonDescriptor[] | null | un
   return Boolean(addons) && recoveredCollections.has(addons as AddonDescriptor[])
 }
 
-async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>, beforeDispatch?: () => void) {
+async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>, beforeDispatch?: () => void | Promise<void>) {
   const authHeaders = await getProxyAuthHeaders()
-  beforeDispatch?.()
+  await beforeDispatch?.()
   const res = await resilientFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders, ...headers },
@@ -680,7 +680,7 @@ export class StremioClient {
     }
   }
 
-  async upsertLibraryItem(authKey: string, item: LibraryItem, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, beforeDispatch?: () => void): Promise<void> {
+  async upsertLibraryItem(authKey: string, item: LibraryItem, accountContext: string = ACCOUNT_CONTEXT_SYSTEM_CHECK, beforeDispatch?: () => void | Promise<void>): Promise<void> {
     try {
       // Preserve a caller-supplied mtime: bitfield rewrites must not masquerade as fresh watches.
       const fullItem = { ...item, removed: false, _mtime: item._mtime || new Date().toISOString() }

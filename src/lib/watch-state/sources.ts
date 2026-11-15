@@ -134,15 +134,22 @@ export async function stremioWatchSession(account: Account, connection: Connecti
         open: async openSignal => {
             const fresh = await readUser(openSignal)
             if (fresh.id !== user.id) throw new Error('The Stremio account changed. Preview again from the start.')
-            return { request: (body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void) => request(body.type === 'DatastorePut' ? 'DatastorePut' : 'DatastoreGet', body, requestSignal, beforeDispatch) }
+            return { request: (body: Record<string, unknown>, requestSignal: AbortSignal, beforeDispatch?: () => void | Promise<void>) => request(body.type === 'DatastorePut' ? 'DatastorePut' : 'DatastoreGet', body, requestSignal, beforeDispatch) }
         },
         seriesVideos: fetchSeriesVideos,
-        safeBitfieldVideos: async (id, type) => {
-            const [{ safeBitfieldVideos }, { stremioClient }] = await Promise.all([import('../stremio-bitfield-guard.ts'), import('../../api/stremio-client.ts')])
+        readSeriesVideos: async (id, type, lookupSignal) => {
+            const { resolveSeriesVideos } = await import('../stremio-series-resolver.ts')
             assertCurrent()
-            const videos = await safeBitfieldVideos(() => stremioClient.getLiveAddonCollectionForBitfield(authKey, account.id), type, id)
+            const result = await resolveSeriesVideos(authKey, `migration:${user.id}`, type, id, lookupSignal)
             assertCurrent()
-            return videos
+            return result.kind === 'list' ? result.videos : null
+        },
+        safeBitfieldVideos: async (id, type, lookupSignal) => {
+            const { resolveFreshSeriesVideos } = await import('../stremio-series-resolver.ts')
+            assertCurrent()
+            const result = await resolveFreshSeriesVideos(authKey, `migration:${user.id}`, type, id, lookupSignal)
+            assertCurrent()
+            return result.kind === 'list' && result.writeGrade && Date.now() >= result.fetchedAt && Date.now() - result.fetchedAt <= 300_000 ? { videos: result.videos, fetchedAt: result.fetchedAt, source: result.source } : null
         },
     }
 }

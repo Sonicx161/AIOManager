@@ -2,26 +2,14 @@
 // failure fails closed instead of escalating to an irreversible whole-show removal.
 import type { LibraryItem } from '../types/activity.ts'
 import type { MetaVideo } from './watched-episodes.ts'
-import { encodeWatchedBitfield, hasNoWatchedBits, resolveWatchedBitsAgainstVideos } from './watched-bitfield.ts'
+import { decodeStremioVisibleIndices, encodeEmptyWatchedBitfield, encodeWatchedBitfield } from './watched-bitfield.ts'
 
 export type EpisodeDeletePlan =
     | { kind: 'rewrite'; rewritten: LibraryItem }
-    | { kind: 'remove-row' }
     | { kind: 'skip' }
     | { kind: 'fail'; reason: 'no-videos' | 'no-bitfield' | 'anchor-mismatch' | 'non-tt' | 'unsafe-list' }
 
 type DeleteTarget = { uniqueItemId?: string; season: number | null; episode: number | null }
-
-function normalizeVideoId(id: string | undefined): string | undefined {
-    const parts = id?.split(':')
-    return parts?.length === 2 ? `${parts[0]}:1:${parts[1]}` : id
-}
-
-function isResumeTarget(state: LibraryItem['state'], target: DeleteTarget): boolean {
-    const videoId = normalizeVideoId(state?.video_id)
-    return (!!target.uniqueItemId && !!videoId && videoId === normalizeVideoId(target.uniqueItemId))
-        || (target.season != null && target.episode != null && state?.season === target.season && state?.episode === target.episode)
-}
 
 export async function planEpisodeBitfieldDelete(args: {
     itemId: string
@@ -30,71 +18,35 @@ export async function planEpisodeBitfieldDelete(args: {
     target: DeleteTarget
     safeList?: boolean
 }): Promise<EpisodeDeletePlan> {
-    const { itemId, row, videos, target } = args
-    // Non-tt ids (kitsu/mal/anidb) can never resolve a Cinemeta video list.
-    if (!itemId.startsWith('tt')) return { kind: 'fail', reason: 'non-tt' }
-    // Row absent remotely: nothing to delete remotely, the local purge handles the feed entry.
+    const { row, videos, target } = args
     if (!row) return { kind: 'skip' }
-    if ((row.state?.watched || '').trim() && (!args.safeList || !videos || row.type !== 'series')) return { kind: 'fail', reason: 'unsafe-list' }
-    // Progress-only row (no bitfield, or one with every bit clear): the resume position is its
-    // only state, so deleting that entry removes the row; any other entry is a stale event with
-    // nothing remote to edit.
-    if (!(row.state?.watched || '').trim() || await hasNoWatchedBits(row.state?.watched)) {
-        return isResumeTarget(row.state, target) ? { kind: 'remove-row' } : { kind: 'skip' }
-    }
-
-    if (!videos) return { kind: 'fail', reason: 'unsafe-list' }
-
-    // Decode exactly like stremio-core against the current list (anchor relocation + shift). A
-    // missing anchor or a bit shifted out of the list means the write cannot be proven, so the
-    // remote row is left untouched.
-    const decoded = await resolveWatchedBitsAgainstVideos(row.state?.watched, videos)
-    if (decoded.kind !== 'bits') return { kind: 'fail', reason: decoded.reason === 'no-bitfield' || decoded.reason === 'decode' ? 'no-bitfield' : 'anchor-mismatch' }
-
-    const targetIdx = decoded.indices.find(i => {
-        const v = videos[i]
-        if (!v) return false
-        return (target.uniqueItemId && v.id === target.uniqueItemId) || (v.season === target.season && v.episode === target.episode)
-    })
-    if (targetIdx === undefined) {
-        // Not marked watched: the feed entry is either the row's current resume position
-        // (progress only) or a stale event. Neither has per-episode bits to remove.
-        const state = row.state
-        if (!isResumeTarget(state, target)) return { kind: 'skip' }
-        const lastWatched = videos[Math.max(...decoded.indices)]
-        if (!lastWatched) return { kind: 'fail', reason: 'anchor-mismatch' }
-        return {
-            kind: 'rewrite',
-            rewritten: {
-                ...row,
-                state: {
-                    ...state,
-                    video_id: lastWatched.id,
-                    season: lastWatched.season ?? undefined,
-                    episode: lastWatched.episode ?? undefined,
-                    timeOffset: 0,
-                },
-            },
-        }
-    }
-
-    const remaining = decoded.indices.filter(i => i !== targetIdx)
-    if (remaining.length === 0) return { kind: 'remove-row' }
-
-    const anchor = videos[remaining[remaining.length - 1]]
-    const watched = await encodeWatchedBitfield(remaining, videos)
-    const rewritten: LibraryItem = {
+    if (!args.safeList || !videos) return { kind: 'fail', reason: 'unsafe-list' }
+    const matches = videos.filter(v => target.uniqueItemId
+        ? v.id === target.uniqueItemId
+        : target.season != null && target.episode != null && v.season === target.season && v.episode === target.episode)
+    if (matches.length !== 1) return { kind: 'fail', reason: 'unsafe-list' }
+    const watched = row.state?.watched
+    if (!watched) return { kind: 'fail', reason: 'no-bitfield' }
+    const anchorId = watched.split(':').slice(0, -2).join(':')
+    if (!videos.some(v => v.id === anchorId)) return { kind: 'fail', reason: 'anchor-mismatch' }
+    const before = await decodeStremioVisibleIndices(watched, videos)
+    if (!before) return { kind: 'fail', reason: 'no-bitfield' }
+    const ids = new Set(before.map(i => videos[i].id))
+    const resumeId = row.state?.video_id
+    const hasResumeId = !!resumeId && resumeId !== row._id
+    const coordinatesMatch = matches[0].season != null && matches[0].episode != null && row.state?.season === matches[0].season && row.state?.episode === matches[0].episode
+    if (!hasResumeId && coordinatesMatch && videos.filter(v => v.season === matches[0].season && v.episode === matches[0].episode).length !== 1) return { kind: 'fail', reason: 'unsafe-list' }
+    const resumeIsTarget = hasResumeId ? resumeId === matches[0].id : coordinatesMatch
+    if (!ids.delete(matches[0].id)) return resumeIsTarget && (row.state?.timeOffset ?? 0) > 0 ? { kind: 'fail', reason: 'no-bitfield' } : { kind: 'skip' }
+    const remaining = videos.flatMap((v, i) => ids.has(v.id) ? [i] : [])
+    const encoded = remaining.length ? await encodeWatchedBitfield(remaining, videos) : await encodeEmptyWatchedBitfield(anchorId)
+    const after = await decodeStremioVisibleIndices(encoded, videos)
+    if (!after || after.length !== ids.size || after.some(i => !ids.has(videos[i].id))) return { kind: 'fail', reason: 'anchor-mismatch' }
+    const anchor = remaining.length ? videos[remaining[remaining.length - 1]] : undefined
+    return { kind: 'rewrite', rewritten: {
         ...row,
-        state: {
-            ...row.state,
-            watched,
-            video_id: anchor.id,
-            season: anchor.season ?? undefined,
-            episode: anchor.episode ?? undefined,
-            timesWatched: remaining.length,
-        },
-    }
-    return { kind: 'rewrite', rewritten }
+        state: { ...row.state, watched: encoded, ...(resumeIsTarget ? { video_id: anchor?.id ?? '', season: anchor?.season ?? 0, episode: anchor?.episode ?? 0, timeOffset: 0 } : {}) },
+    } }
 }
 
 export async function verifyEpisodeDeleteReadback(

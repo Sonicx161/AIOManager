@@ -20,7 +20,7 @@ import { applySyncedSettings, markSyncedSettingsPushed, readSyncedSettings, snap
 import { resolveRestoreSaltPolicy } from '@/lib/salt-policy'
 import { serverHasStremioCredential, canonicalMembershipChanged } from '@/lib/canonical-visibility'
 import { needsCredentialHeal } from '@/lib/credential-heal'
-import { mergeDeletedEventMaps } from '@/lib/event-tombstones'
+import { mergeDeletedEventMaps, mergeWatchEventsById } from '@/lib/event-tombstones'
 import { mergeNotesTrash, filterNotesByTrash } from '@/lib/notes-tombstones'
 import { shouldSendPullEtag, readServerSyncTimestamp, shouldMirrorAccountPull } from '@/lib/pull-restore'
 import { setActiveWorkspace, getActiveWorkspaceId, ANON_WORKSPACE_ID } from '@/lib/workspace-persistence'
@@ -1003,9 +1003,7 @@ export const useSyncStore = create<SyncState>()(
                         // Preserve cloud deletion markers when the deferred watch blob is unreadable.
                         if (!watchBlobBroken) syncRuntime.lastPulledDeletedWatchEvents = remoteDeleted
                         const mergedDeleted = mergeDeletedEventMaps(local.deletedEventKeys, remoteDeleted)
-                        const merged = new Map<string, Record<string, unknown>>()
-                        ;[...remoteEvents, ...local.events as unknown as Record<string, unknown>[]].forEach(e => merged.set(e.id as string, e))
-                        const mergedEvents = Array.from(merged.values())
+                        const mergedEvents = mergeWatchEventsById([...remoteEvents, ...local.events as unknown as Record<string, unknown>[]])
                             .sort((a, b) => (b.event_ts as number) - (a.event_ts as number))
                         const mergedSnapshot = { ...(secondary.watchSnapshot || {} as Record<string, unknown>), ...local.snapshot }
                         const remoteRollups = (secondary.watchEventRollups && typeof secondary.watchEventRollups === 'object')
@@ -2058,9 +2056,7 @@ export const useSyncStore = create<SyncState>()(
                         // Preserve previous deletion markers if the watch blob is unreadable.
                         if (!watchBlobBroken) syncRuntime.lastPulledDeletedWatchEvents = remoteDeleted
                         const mergedDeleted = mergeDeletedEventMaps(local.deletedEventKeys, remoteDeleted)
-                        const merged = new Map<string, Record<string, unknown>>()
-                        ;[...(secondary.watchEvents as Record<string, unknown>[]), ...local.events as unknown as Record<string, unknown>[]].forEach(e => merged.set(e.id as string, e))
-                        const mergedEvents = Array.from(merged.values()).sort((a, b) => (b.event_ts as number) - (a.event_ts as number))
+                        const mergedEvents = mergeWatchEventsById([...(secondary.watchEvents as Record<string, unknown>[]), ...local.events as unknown as Record<string, unknown>[]]).sort((a, b) => (b.event_ts as number) - (a.event_ts as number))
                         const mergedSnapshot = { ...((secondary.watchSnapshot || {}) as Record<string, unknown>), ...local.snapshot }
                         const remoteRollups = (secondary.watchEventRollups && typeof secondary.watchEventRollups === 'object')
                             ? secondary.watchEventRollups as import('@/lib/watch-event-rollups').EventRollups

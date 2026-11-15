@@ -15,7 +15,7 @@
 //   - DatastorePut libraryItem changes are FULL-ROW replacements, not patches: preserving
 //     existing metadata means echoing the entire row back with only `state` modified.
 //   - state.timeOffset/duration are MILLISECONDS; flaggedWatched > 0 marks movies watched;
-//     series timesWatched counts watched episodes; state.watched is the per-episode bitfield
+//     state.watched is the per-episode bitfield
 //     "{videoId}:{length}:{base64(zlib-deflate(bits))}" indexed by the series' videos sorted
 //     (season, episode, released); state.video_id/season/episode/timeOffset form the single
 //     per-series resume slot.
@@ -24,11 +24,17 @@
 import type { MigrationWriteResult, WatchStateDestination, WatchStatePatch, WatchStateRecord } from './types.ts'
 import { canonicalWatchIdentity, hasSavedWatchState, sourceTime, watchFingerprint } from './records.ts'
 import { skippedNoIdRowsNote } from './source-stremio.ts'
-import { encodeWatchedBitfield, interpretWatchedBitfield } from '../watched-bitfield.ts'
+import { decodeStremioVisibleIndices, encodeWatchedBitfield } from '../watched-bitfield.ts'
 import { isLiveLibraryRow } from '../stremio-liveness.ts'
 import { migrationStage, GlobalMatchFailure, WatchMigrationError } from './failures.ts'
 import { assertFreshChecks } from './prewrite-fresh.ts'
 import { UNSAFE_EPISODE_LIST } from '../stremio-bitfield-guard.ts'
+import { SeriesLookupRateLimitError } from '../series-batch-retry.ts'
+
+function retainRateLimit(error: unknown): null {
+    if (error instanceof SeriesLookupRateLimitError) throw error
+    return null
+}
 
 export interface StremioDestinationVideo {
     id: string
@@ -43,13 +49,14 @@ export interface StremioWatchDestinationOptions {
     subject: string
     scope: string
     /** Returns a transport pinned to the remote user verified at session creation; the runtime wrapper owns auth and identity re-checks. */
-    open(signal: AbortSignal): Promise<{ request(body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void): Promise<unknown> }>
-    /** Ordered-video provider (Cinemeta via the runtime wrapper); absent or ambiguous lists fail closed for episode writes. */
+    open(signal: AbortSignal): Promise<{ request(body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void | Promise<void>): Promise<unknown> }>
+    /** Lists used for preview and for guarded writes. */
     seriesVideos?(id: string): Promise<StremioDestinationVideo[] | null>
-    safeBitfieldVideos?(id: string, type: string): Promise<StremioDestinationVideo[] | null>
+    readSeriesVideos?(id: string, type: string, signal?: AbortSignal): Promise<StremioDestinationVideo[] | null>
+    safeBitfieldVideos?(id: string, type: string, signal?: AbortSignal): Promise<{ videos: StremioDestinationVideo[]; fetchedAt: number; source: string } | null>
 }
 
-type DestinationRequest = (body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void) => Promise<unknown>
+type DestinationRequest = (body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void | Promise<void>) => Promise<unknown>
 
 const PROVIDER_ITEM_ID = /^(?:tt\d{5,}|tmdb:\d+)$/
 const MAX_LIBRARY_ITEMS = 10_000
@@ -140,9 +147,9 @@ async function recordFingerprint(scope: string, row: Record<string, unknown>, ep
 
 interface SeriesVideoSlot {
     id: string
-    season: number
-    episode: number
-    released: string
+    season?: number | null
+    episode?: number | null
+    released?: string | null
 }
 
 interface StremioSeriesIndex {
@@ -155,59 +162,39 @@ function seasonEpisodeKey(season: number, episode: number): string {
     return `${season}:${episode}`
 }
 
-/**
- * Normalizes a raw video list into the write index space. Anything that makes the ordering
- * ambiguous fails closed: duplicate video ids, two videos sharing (season, episode) - the
- * (season, episode, released) sort could then depend on data we do not have - or entries
- * without integer season/episode numbers, whose index position stremio-core never defines.
- */
 function normalizeSeriesVideos(list: unknown): StremioSeriesIndex | null {
     if (!Array.isArray(list) || list.length === 0) return null
-    const videos: SeriesVideoSlot[] = []
-    for (const entry of list) {
-        if (!isRecord(entry) || typeof entry.id !== 'string' || !entry.id) return null
-        const season = intOrUndefined(entry.season)
-        const episode = intOrUndefined(entry.episode)
-        if (season === undefined || episode === undefined) return null
-        videos.push({ id: entry.id, season, episode, released: typeof entry.released === 'string' ? entry.released : '' })
-    }
-    const seenIds = new Set<string>()
-    const seenEpisodes = new Set<string>()
-    for (const video of videos) {
-        if (seenIds.has(video.id)) return null
-        seenIds.add(video.id)
-        const key = seasonEpisodeKey(video.season, video.episode)
-        if (seenEpisodes.has(key)) return null
-        seenEpisodes.add(key)
-    }
-    videos.sort((a, b) => a.season - b.season || a.episode - b.episode || a.released.localeCompare(b.released))
+    const videos = list as SeriesVideoSlot[]
+    if (videos.some(video => !isRecord(video) || typeof video.id !== 'string' || !video.id)) return null
     const bySeasonEpisode = new Map<string, number>()
+    const ambiguous = new Set<string>()
     const byVideoId = new Map<string, number>()
     videos.forEach((video, index) => {
-        bySeasonEpisode.set(seasonEpisodeKey(video.season, video.episode), index)
+        if (byVideoId.has(video.id)) return
         byVideoId.set(video.id, index)
+        if (Number.isSafeInteger(video.season) && Number.isSafeInteger(video.episode)) {
+            const key = seasonEpisodeKey(video.season!, video.episode!)
+            if (bySeasonEpisode.has(key)) ambiguous.add(key)
+            else bySeasonEpisode.set(key, index)
+        }
     })
+    for (const key of ambiguous) bySeasonEpisode.delete(key)
+    if (byVideoId.size !== videos.length) return null
     return { order: videos, bySeasonEpisode, byVideoId }
 }
 
 type SeriesBits = { kind: 'none' } | { kind: 'bits'; indices: number[] } | { kind: 'unprovable' }
 
-/**
- * Interprets state.watched against the verified index space. A non-empty string that decodes
- * to zero bits is NOT proven empty (decode returns [] even for corrupt compression), flags or
- * counts without any bitfield are not proven empty either, and any anchor/bit that does not
- * resolve inside the list makes the row unprovable. 'unprovable' always fails closed.
- */
 async function readSeriesBits(state: Record<string, unknown>, index: StremioSeriesIndex): Promise<SeriesBits> {
     const watched = state.watched
     if (typeof watched !== 'string' || watched === '') {
         if ((finiteNumber(state.flaggedWatched) ?? 0) > 0) return { kind: 'unprovable' }
-        if ((finiteNumber(state.timesWatched) ?? 0) > 0) return { kind: 'unprovable' }
         return { kind: 'none' }
     }
-    const timesWatched = finiteNumber(state.timesWatched)
-    const interpreted = await interpretWatchedBitfield(watched, index.order, { anchorPolicy: 'max', timesWatched })
-    return interpreted.kind === 'bits' ? { kind: 'bits', indices: interpreted.indices } : { kind: 'unprovable' }
+    const anchor = watched.split(':').slice(0, -2).join(':')
+    if (!index.byVideoId.has(anchor)) return { kind: 'unprovable' }
+    const indices = await decodeStremioVisibleIndices(watched, index.order)
+    return indices === null ? { kind: 'unprovable' } : { kind: 'bits', indices }
 }
 
 type SlotStatus = 'absent' | 'target' | 'other' | 'unverified'
@@ -344,16 +331,18 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
     const rowLocks = new Map<string, Promise<unknown>>()
     const ownWrites = new Map<string, { fingerprint: string; episodes: Map<string, { watched?: true; positionMs?: number }> }>()
     const seriesIndexCache = new Map<string, Promise<StremioSeriesIndex | null>>()
+    const plannedLists = new Map<string, { source: string; hash: string }>()
     let inventoryPromise: Promise<Map<string, DestinationRow>> | null = null
 
-    const seriesIndexFor = (rowId: string): Promise<StremioSeriesIndex | null> => {
+    const seriesIndexFor = (rowId: string, type = 'series', signal?: AbortSignal): Promise<StremioSeriesIndex | null> => {
         const cached = seriesIndexCache.get(rowId)
         if (cached !== undefined) return cached
         const promise = (async () => {
-            if (!options.seriesVideos) return null
+            if (!options.readSeriesVideos) return null
             try {
-                return normalizeSeriesVideos(await options.seriesVideos(rowId))
+                return normalizeSeriesVideos(await options.readSeriesVideos(rowId, type, signal))
             } catch {
+                signal?.throwIfAborted()
                 return null
             }
         })()
@@ -416,12 +405,17 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         return rows.length === 1 ? rows[0] : null
     })
 
-    const putRow = async (request: DestinationRequest, checkedAt: number, row: Record<string, unknown>, signal: AbortSignal): Promise<void> => {
+    const putRow = async (request: DestinationRequest, checkedAt: number, row: Record<string, unknown>, signal: AbortSignal, listFetchedAt?: number, revalidate?: () => Promise<void>): Promise<void> => {
+        const assertReady = () => {
+            assertFreshChecks(checkedAt)
+            if (listFetchedAt !== undefined && (Date.now() < listFetchedAt || Date.now() - listFetchedAt > 300_000)) throw new Error(UNSAFE_EPISODE_LIST)
+            if (revalidate) return revalidate().then(() => assertFreshChecks(checkedAt))
+        }
         assertFreshChecks(checkedAt)
         signal.throwIfAborted()
         // The transport awaits headers and a pacer reservation before the fetch; the
         // guard re-runs through beforeDispatch immediately before the write leaves.
-        const result = await migrationStage('write', () => request({ type: 'DatastorePut', collection: 'libraryItem', changes: [row] }, signal, () => assertFreshChecks(checkedAt)))
+        const result = await migrationStage('write', () => request({ type: 'DatastorePut', collection: 'libraryItem', changes: [row] }, signal, assertReady))
         // The official API returns { success: true }; some compatible transports return
         // a bare true. An acknowledgement only permits the mandatory readback below.
         if (result !== true && !(isRecord(result) && result.success === true)) throw new WatchMigrationError({ stage: 'write', reason: 'acknowledgement' }, 'Stremio did not confirm the library update.')
@@ -517,7 +511,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         }
     }
 
-    const createTargets = async (record: WatchStateRecord): Promise<WatchStateRecord[]> => {
+    const createTargets = async (record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]> => {
         const rowId = candidateRowIds(record).find(id => PROVIDER_ITEM_ID.test(id))
         if (rowId === undefined) return []
         if (record.type === 'movie') {
@@ -540,7 +534,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         if (record.type === 'episode' && record.season !== undefined && record.episode !== undefined) {
             const identity = canonicalWatchIdentity('episode', rowId, record.season, record.episode)
             if (identity === null) return []
-            const index = await seriesIndexFor(rowId)
+            const index = await seriesIndexFor(rowId, 'series', signal)
             if (index === null || !index.bySeasonEpisode.has(seasonEpisodeKey(record.season, record.episode))) return []
             return [{
                 id: `episode:${rowId}:${record.season}:${record.episode}`,
@@ -572,7 +566,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             const row = inventory.get(rowId)
             if (row !== undefined) matched.set(rowId, row)
         }
-        if (matched.size === 0) return createTargets(record)
+        if (matched.size === 0) return createTargets(record, resolveSignal)
         const views: WatchStateRecord[] = []
         for (const row of matched.values()) {
             if (record.type === 'movie') {
@@ -581,7 +575,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
                 if (row.removed || row.kind !== 'series' || record.season === undefined || record.episode === undefined) {
                     views.push(await mismatchView(row, record))
                 } else {
-                    views.push(await episodeView(row, await seriesIndexFor(row.id), record.season, record.episode))
+                    views.push(await episodeView(row, await seriesIndexFor(row.id, typeof row.raw.type === 'string' ? row.raw.type : 'series', resolveSignal), record.season, record.episode))
                 }
             } else {
                 views.push(await mismatchView(row, record))
@@ -633,11 +627,9 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         }
         if (check.patch.watched === true) {
             written.add('watched')
-            written.add('timesWatched')
             const bits = await readSeriesBits(readback.state, check.index)
             if (bits.kind !== 'bits' || bits.indices.length !== check.expectedBits.length) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
             for (const bit of bits.indices) if (!check.expectedBits.includes(bit)) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-            if (finiteNumber(readback.state.timesWatched) !== check.expectedBits.length) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         }
         if (check.patch.positionMs !== undefined) {
             written.add('video_id')
@@ -654,7 +646,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
             }
         }
         for (const field of STATE_FIELDS) {
-            if (!written.has(field) && readback.state[field] !== check.prewrite.state[field]) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
+            if (field !== 'timesWatched' && !written.has(field) && readback.state[field] !== check.prewrite.state[field]) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         }
         return episodeView(readback, check.index, check.season, check.episode)
     }
@@ -732,14 +724,17 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         index: StremioSeriesIndex,
         expected: WatchStateRecord,
         patch: WatchStatePatch,
-        signal: AbortSignal
+        signal: AbortSignal,
+        listFetchedAt: number,
+        revalidate: () => Promise<void>,
     ): Promise<MigrationWriteResult> => {
         if (!PROVIDER_ITEM_ID.test(rowId)) throw new Error(BAD_TARGET)
         const now = new Date().toISOString()
         const state: Record<string, unknown> = {}
         if (patch.watched === true) {
             state.watched = await encodeWatchedBitfield([targetIndex], index.order)
-            state.timesWatched = 1
+            const visible = await decodeStremioVisibleIndices(state.watched as string, index.order)
+            if (!visible || visible.length !== 1 || index.order[visible[0]].id !== index.order[targetIndex].id) return { status: 'skipped', message: SERIES_UNPROVABLE }
         } else if (patch.positionMs !== undefined) {
             state.video_id = index.order[targetIndex].id
             state.season = season
@@ -750,7 +745,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(undefined, patch, 'series')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row: Record<string, unknown> = { _id: rowId, name: expected.seriesTitle || expected.title || rowId, type: 'series', poster: '', removed: false, temp: false, _ctime: now, _mtime: createdMtime(state, now), state }
-        await putRow(request, checkedAt, row, signal)
+        await putRow(request, checkedAt, row, signal, listFetchedAt, revalidate)
         await trackOwnWrite(rowId, row, seasonEpisodeKey(season, episode), patch.watched === true ? { watched: true } : { positionMs: patch.positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')
@@ -759,7 +754,6 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         if (patch.watched === true) {
             const bits = await readSeriesBits(readback.state, index)
             if (bits.kind !== 'bits' || bits.indices.length !== 1 || bits.indices[0] !== targetIndex) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
-            if (finiteNumber(readback.state.timesWatched) !== 1) throw new WatchMigrationError({ stage: 'verification', reason: 'state_mismatch' }, READBACK_FAILED)
         } else if (patch.positionMs !== undefined) {
             if (readback.state.video_id !== index.order[targetIndex].id
                 || intOrUndefined(readback.state.season) !== season
@@ -778,12 +772,12 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const row = inventory.get(rowId)
         const type = row ? row.raw.type : 'series'
         if (typeof type !== 'string') return UNSAFE_EPISODE_LIST
-        const started = Date.now()
-        const videos = await options.safeBitfieldVideos?.(rowId, type).catch(() => null)
+        const videos = await options.safeBitfieldVideos?.(rowId, type, signal).catch(error => { signal.throwIfAborted(); return retainRateLimit(error) })
         signal.throwIfAborted()
-        const index = normalizeSeriesVideos(videos ?? null)
-        if (!index || Date.now() < started || Date.now() - started > 60_000) return UNSAFE_EPISODE_LIST
+        const index = normalizeSeriesVideos(videos?.videos ?? null)
+        if (!index || !videos || !videos.source || !Number.isFinite(videos.fetchedAt) || Date.now() < videos.fetchedAt || Date.now() - videos.fetchedAt > 300_000) return UNSAFE_EPISODE_LIST
         seriesIndexCache.set(rowId, Promise.resolve(index))
+        plannedLists.set(rowId, { source: videos.source, hash: await watchFingerprint(index.order.map(video => video.id)) })
         return null
     }
 
@@ -791,14 +785,25 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const episodeKey = seasonEpisodeKey(season, episode)
         const { request } = await migrationStage('identity', () => options.open(signal))
         signal.throwIfAborted()
-        const checkedAt = Date.now()
+        const initial = await readRow(request, rowId, signal)
+        signal.throwIfAborted()
+        const type = initial ? initial.raw.type : 'series'
+        const videos = typeof type === 'string' ? await options.safeBitfieldVideos?.(rowId, type, signal).catch(error => { signal.throwIfAborted(); return retainRateLimit(error) }) : null
+        signal.throwIfAborted()
+        const index = normalizeSeriesVideos(videos?.videos ?? null)
+        if (index === null || !videos || !videos.source || !Number.isFinite(videos.fetchedAt) || Date.now() < videos.fetchedAt || Date.now() - videos.fetchedAt > 300_000) return { status: 'skipped', message: UNSAFE_EPISODE_LIST }
+        const initialHash = await watchFingerprint(index.order.map(video => video.id))
+        const planned = plannedLists.get(rowId)
+        if (planned && (planned.source !== videos.source || planned.hash !== initialHash)) return { status: 'skipped', message: UNSAFE_EPISODE_LIST }
+        const revalidate = async () => {
+            const latest = await options.safeBitfieldVideos?.(rowId, type as string, signal).catch(error => { signal.throwIfAborted(); return retainRateLimit(error) })
+            signal.throwIfAborted()
+            if (!latest || latest.source !== videos.source || Date.now() < latest.fetchedAt || Date.now() - latest.fetchedAt > 300_000 || await watchFingerprint(latest.videos.map(video => video.id)) !== initialHash) throw new Error(UNSAFE_EPISODE_LIST)
+        }
         const fresh = await readRow(request, rowId, signal)
         signal.throwIfAborted()
-        const type = fresh ? fresh.raw.type : 'series'
-        const videos = typeof type === 'string' ? await options.safeBitfieldVideos?.(rowId, type).catch(() => null) : null
-        signal.throwIfAborted()
-        const index = normalizeSeriesVideos(videos ?? null)
-        if (index === null) return { status: 'skipped', message: UNSAFE_EPISODE_LIST }
+        const checkedAt = Date.now()
+        if ((fresh ? fresh.raw.type : 'series') !== type) return { status: 'skipped', message: UNSAFE_EPISODE_LIST }
         const unready = async (message: string): Promise<MigrationWriteResult> => ({
             status: 'conflict',
             message,
@@ -809,7 +814,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         if (positionMs !== undefined && (!Number.isSafeInteger(positionMs) || positionMs <= 0)) return unready(BAD_RESUME)
         const targetIndex = index.bySeasonEpisode.get(episodeKey)
         if (targetIndex === undefined) return unready(EPISODE_NOT_LISTED)
-        if (fresh === null) return createEpisodeRow(request, checkedAt, rowId, season, episode, targetIndex, index, expected, patch, signal)
+        if (fresh === null) return createEpisodeRow(request, checkedAt, rowId, season, episode, targetIndex, index, expected, patch, signal, videos.fetchedAt, revalidate)
         if (fresh.removed) return unready(REMOVED_ROW)
         if (fresh.kind !== 'series') return unready(CHANGED_MESSAGE)
         const bits = await readSeriesBits(fresh.state, index)
@@ -828,12 +833,17 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
                 return { status: 'applied', message: APPLIED_MESSAGE, record: verified }
             }
             if (slot === 'target' && slotOffset !== null) return unready(SAVED_UNSEEN)
-            const mergedBits = [...existingBits, targetIndex].sort((a, b) => a - b)
-            const state: Record<string, unknown> = { ...fresh.state, watched: await encodeWatchedBitfield(mergedBits, index.order), timesWatched: mergedBits.length }
+            const expectedIds = new Set(existingBits.map(i => index.order[i].id))
+            expectedIds.add(index.order[targetIndex].id)
+            const mergedBits = index.order.flatMap((video, i) => expectedIds.has(video.id) ? [i] : [])
+            const watched = await encodeWatchedBitfield(mergedBits, index.order)
+            const visible = await decodeStremioVisibleIndices(watched, index.order)
+            if (!visible || visible.length !== expectedIds.size || visible.some(i => !expectedIds.has(index.order[i].id))) return unready(SERIES_UNPROVABLE)
+            const state: Record<string, unknown> = { ...fresh.state, watched }
             const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
             if (lastWatched !== null) state.lastWatched = lastWatched
             const row = stampedRow(fresh.raw, state)
-            await putRow(request, checkedAt, row, signal)
+            await putRow(request, checkedAt, row, signal, videos.fetchedAt, revalidate)
             await trackOwnWrite(rowId, row, episodeKey, { watched: true })
             signal.throwIfAborted()
             const readback = await readRow(request, rowId, signal, 'readback')
@@ -867,7 +877,7 @@ export function createStremioWatchDestination(options: StremioWatchDestinationOp
         const lastWatched = plannedLastWatched(fresh.state.lastWatched, patch, 'series')
         if (lastWatched !== null) state.lastWatched = lastWatched
         const row = stampedRow(fresh.raw, state)
-        await putRow(request, checkedAt, row, signal)
+        await putRow(request, checkedAt, row, signal, videos.fetchedAt, revalidate)
         await trackOwnWrite(rowId, row, episodeKey, { positionMs })
         signal.throwIfAborted()
         const readback = await readRow(request, rowId, signal, 'readback')

@@ -67,6 +67,7 @@ export interface ActivityItem {
     genres?: string[]
     source?: string // platform the watch came from: 'stremio' | 'nuvio' | ... (absent = unknown)
     sourceConnectionId?: string // exact remote login this item came from (same-platform multiplicity); absent = canonical/legacy route
+    bfConfirmedAt?: number
     backfill?: boolean // recovered from Stremio's watched-bitfield; no real per-episode time, so excluded from time-based Replay stats
     /** Imported saved watch state (bitfield aggregate series / flagged-only movie): no real watch dates, presented as saved state. */
     importedSavedState?: boolean
@@ -114,6 +115,7 @@ export interface WatchEvent {
     timesWatched?: number
     /** Server rows only: Stremio's accumulated watch time when the row was recorded. */
     overall_time_watched?: number
+    bfConfirmedAt?: number
     backfill?: boolean // recovered from Stremio's watched-bitfield (no real per-episode timestamp)
     /**
      * Positive per-episode completion confirmation stamped by recordBackfillEpisodes when

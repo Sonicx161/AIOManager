@@ -1,3 +1,4 @@
+import { mergeBackfillEvent } from '@/lib/event-tombstones'
 import { mergeAddons } from '@/lib/utils'
 import { mergeAddonDeletionState, filterResurrected } from '@/lib/addon-tombstones'
 import { normalizeDestinations } from '@/lib/addon-destinations'
@@ -774,11 +775,16 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
         if (incomingEvents.length > 0 || tombstonesChanged) {
             const current = useWatchEventStore.getState().events
             const currentIds = new Set(current.map(e => e.id))
-            const newEvents = incomingEvents.filter((e) => !currentIds.has(e.id as string))
+            const newEvents = incomingEvents.filter(e => !currentIds.has(e.id as string) || (typeof e.id === 'string' && e.id.startsWith('bf:')))
             if (newEvents.length > 0 || tombstonesChanged) {
                 own.assert()
                 const merged = [...current, ...newEvents] as Record<string, unknown>[]
-                const deduped = Array.from(new Map(merged.map((e) => [e.id as string, e])).values())
+                const byId = new Map<unknown, Record<string, unknown>>()
+                for (const event of merged) {
+                    const previous = byId.get(event.id)
+                    byId.set(event.id, previous ? mergeBackfillEvent(previous, event) : event)
+                }
+                const deduped = Array.from(byId.values())
                 const sorted = deduped.sort((a, b) => ((b as Record<string, unknown>).event_ts as number) - ((a as Record<string, unknown>).event_ts as number))
                 const snapshot = data.watchSnapshot || useWatchEventStore.getState().snapshot
                 useWatchEventStore.getState().initialize(sorted as unknown as import('@/types/activity').WatchEvent[], snapshot as Record<string, Record<string, import('@/types/activity').SnapshotItem>>, mergedDeletedMap)

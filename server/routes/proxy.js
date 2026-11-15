@@ -1,3 +1,4 @@
+import { createSeriesVideosService } from '../lib/series-videos.js'
 import { addonManifestUrl } from '../utils/addon-endpoint-url.js'
 import { registerCacheLayer } from '../lib/ops-metrics.js'
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
@@ -88,7 +89,7 @@ const isValidMetaRows = (rows) => {
     })
 }
 
-export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
+export function registerProxyRoutes(fastify, { checkAddonHealthInternal, seriesVideosFetch }) {
     const manifestCache = new Map()
     const MANIFEST_CACHE_TTL = 600000 // 10 minutes
     // stremio-addons.net serves Cache-Control: public, max-age=86400, so the directory proxy
@@ -1253,6 +1254,27 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal }) {
         readOnly: isReadOnlyReplica,
     })
     registerCacheLayer('cinemeta', { label: 'Cinemeta meta cache', stats: () => cinemetaCache.stats() })
+
+    const seriesVideos = createSeriesVideosService(seriesVideosFetch ? { fetchImpl: seriesVideosFetch } : undefined)
+    fastify.post('/api/series-videos-batch', {
+        bodyLimit: 1024 * 1024,
+        config: { rateLimit: { max: 3000, timeWindow: '1 minute' } },
+        schema: { body: { type: 'object', required: ['items'], additionalProperties: false, properties: {
+            items: { type: 'array', maxItems: 100, items: { type: 'object', required: ['base', 'type', 'id'], additionalProperties: false, properties: {
+                base: { type: 'string', minLength: 1, maxLength: 8192 }, type: { type: 'string', minLength: 1, maxLength: 100 }, id: { type: 'string', minLength: 1, maxLength: 1024 }, fresh: { type: 'boolean' },
+            } } },
+        } } },
+    }, async (request, reply) => {
+        const authResult = await requireProxyAuth(request, reply)
+        if (authResult) return authResult
+        const owner = String(request.deviceAuth?.accountUuid || request.headers['x-sync-user'] || '')
+        const results = await Promise.all(request.body.items.map(item => seriesVideos.resolve(item, owner)))
+        if (results.some(result => result.kind === 'busy')) {
+            reply.status(429).header('Retry-After', '2')
+            return { error: 'Series video queue is busy' }
+        }
+        return { results }
+    })
 
     fastify.post('/api/cinemeta-meta-batch', {
         bodyLimit: 64 * 1024,

@@ -161,6 +161,13 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
     const sourceProfileNames = useCallback((item: Connection) => sourceProfileRows[item.id], [sourceProfileRows])
 
     useEffect(() => {
+        if (!open || !busy) return
+        const waiting = () => setProgress('Waiting to check more shows…')
+        window.addEventListener('aiom:series-lookup-wait', waiting)
+        return () => window.removeEventListener('aiom:series-lookup-wait', waiting)
+    }, [open, busy])
+
+    useEffect(() => {
         if (busy) stopButton.current?.focus()
         else if (plan && !showResults) previewHeading.current?.focus({ preventScroll: true })
         else if (!plan) primaryButton.current?.focus({ preventScroll: true })

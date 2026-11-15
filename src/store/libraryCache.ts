@@ -685,8 +685,8 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             metaSkipped = true
                             learnTmdbAliases(cachedItems || [])
                             const cachedRows = seriesRowsForBackfill.get(login.ctx)
-                            if (cachedRows && cachedRows.length > 0) {
-                                useWatchEventStore.getState().recordBackfillEpisodes(account.id, cachedRows, { contextKey: login.ctx, sourceConnectionId: login.connectionId, ownerConnectionId: login.ownerConnectionId })
+                            if (cachedRows || metaRows) {
+                                useWatchEventStore.getState().recordBackfillEpisodes(account.id, cachedRows || [], { contextKey: login.ctx, sourceConnectionId: login.connectionId, ownerConnectionId: login.ownerConnectionId, authKey: login.authKey, completeLibrary: true, libraryIds: metaRows.map(([id]) => id) })
                                     .then(backfilled => { if (backfilled > 0) triggerSync() })
                                     .catch(e => { if (import.meta.env?.DEV) console.error(`[LibraryCache] bitfield backfill (meta-skip) failed for ${account.name || account.id}:`, e) })
                             }
@@ -710,7 +710,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
                     const seriesRows = libraryItems.filter(item =>
                         (item.type === 'series' || item.type === 'anime' || item.type === 'episode')
-                        && item._id?.startsWith('tt')
+                        && item._id
                         && item.state?.watched
                     )
                     if (seriesRows.length > 0) seriesRowsForBackfill.set(login.ctx, seriesRows)
@@ -745,7 +745,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                         triggerSync()
                     }
 
-                    useWatchEventStore.getState().recordBackfillEpisodes(account.id, libraryItems, diffOptions)
+                    useWatchEventStore.getState().recordBackfillEpisodes(account.id, libraryItems, { ...diffOptions, contextKey: login.ctx, authKey: login.authKey, completeLibrary: true })
                         .then(backfilled => { if (backfilled > 0) triggerSync() })
                         .catch(e => { if (import.meta.env.DEV) console.error(`[LibraryCache] bitfield backfill failed for ${account.name || account.id}:`, e) })
 

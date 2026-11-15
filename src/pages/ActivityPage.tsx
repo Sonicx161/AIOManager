@@ -34,8 +34,10 @@ import { useSettledOnce } from '@/hooks/useSettledSignal'
 import { useActivityMetadata } from '@/hooks/useActivityMetadata'
 import { enrichActivityItemsByIdentity } from '@/lib/activity-cross-source-enrichment'
 import { planEpisodeBitfieldDelete, verifyEpisodeDeleteReadback } from '@/lib/episode-bitfield-delete'
-import { isEpisodeScopedDelete, isBareAnchoredEpisode, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
-import { safeBitfieldVideos, UNSAFE_EPISODE_LIST } from '@/lib/stremio-bitfield-guard'
+import { isEpisodeScopedDelete, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
+import { UNSAFE_EPISODE_LIST } from '@/lib/stremio-bitfield-guard'
+import { resolveFreshSeriesVideos } from '@/lib/stremio-series-resolver'
+import { watchFingerprint } from '@/lib/watch-state/records'
 import type { Account } from '@/types/account'
 
 import { FloatingActionBar } from '@/components/ui/floating-action-bar'
@@ -766,25 +768,22 @@ export function ActivityPage() {
                                 trace('activityDelete', 'stremio.item.ok', { accountId, connectionId: group.connectionId, itemId: item.itemId, mode: 'whole-show' })
                             }
                             try {
-                                // Movies (even with season 0/episode 0) and rows without real
-                                // episode coordinates have no per-episode state to edit.
                                 if (!isEpisodeScopedDelete(item)) {
                                     await withShowLock(item.itemId, wholeShowDelete)
                                     return
                                 }
                                 if (rowsFetchFailed) return
-                                // A part-watched episode is the row's only watch state — removing
-                                // the row IS the episode delete.
-                                if (isBareAnchoredEpisode(rowsById.get(item.itemId), item.uniqueItemId)) {
-                                    await withShowLock(item.itemId, wholeShowDelete)
-                                    return
-                                }
-                                const target = { uniqueItemId: item.uniqueItemId, season: item.season, episode: item.episode }
+                                const target = { uniqueItemId: item.uniqueItemId, season: item.season ?? null, episode: item.episode ?? null }
                                 await withShowLock(item.itemId, async () => {
                                     if (uncertainShows.has(item.itemId)) throw new Error('The previous deletion could not be verified')
-                                    const row = rowsById.get(item.itemId)
                                     const checksStarted = Date.now()
-                                    const videos = await safeBitfieldVideos(() => stremioClient.getLiveAddonCollectionForBitfield(authKey, ctx), row?.type || item.type, item.itemId)
+                                    const prior = rowsById.get(item.itemId)
+                                    const resolved = await resolveFreshSeriesVideos(authKey, ctx, prior?.type || item.type, item.itemId)
+                                    const videos = resolved.kind === 'list' && resolved.writeGrade && Date.now() >= resolved.fetchedAt && Date.now() - resolved.fetchedAt <= 300_000 ? resolved.videos : null
+                                    const freshRows = await stremioClient.getLibraryItemsByIds(authKey, [item.itemId], ctx, true)
+                                    if (freshRows.length > 1 || (freshRows[0] && freshRows[0]._id !== item.itemId)) throw new Error('The item could not be verified')
+                                    const row = freshRows[0]
+                                    if (row && row.type !== (prior?.type || item.type)) throw new Error(UNSAFE_EPISODE_LIST)
                                     const plan = await planEpisodeBitfieldDelete({
                                         itemId: item.itemId,
                                         row,
@@ -805,8 +804,11 @@ export function ActivityPage() {
                                         trace('activityDelete', 'stremio.item.skip', { accountId, connectionId: group.connectionId, itemId: item.itemId, reason: 'nothing-remote' })
                                         return
                                     }
-                                    const assertFresh = () => {
-                                        if (Date.now() < checksStarted || Date.now() - checksStarted > 60_000) throw new Error(UNSAFE_EPISODE_LIST)
+                                    const initialHash = await watchFingerprint(videos!.map(video => video.id))
+                                    const assertFresh = async () => {
+                                        if (Date.now() < checksStarted || Date.now() - checksStarted > 60_000 || resolved.kind !== 'list' || Date.now() < resolved.fetchedAt || Date.now() - resolved.fetchedAt > 300_000) throw new Error(UNSAFE_EPISODE_LIST)
+                                        const latest = await resolveFreshSeriesVideos(authKey, ctx, prior?.type || item.type, item.itemId)
+                                        if (latest.kind !== 'list' || !latest.writeGrade || latest.source !== resolved.source || await watchFingerprint(latest.videos.map(video => video.id)) !== initialHash || Date.now() < checksStarted || Date.now() - checksStarted > 60_000) throw new Error(UNSAFE_EPISODE_LIST)
                                     }
                                     if (Date.now() < checksStarted || Date.now() - checksStarted > 60_000) {
                                         keptIds.add(item.id)
@@ -815,12 +817,8 @@ export function ActivityPage() {
                                         return
                                     }
                                     try {
-                                        if (plan.kind === 'remove-row') {
-                                            await wholeShowDelete(assertFresh)
-                                        } else {
-                                            await stremioClient.upsertLibraryItem(authKey, plan.rewritten, ctx, assertFresh)
-                                        }
-                                        const saved = await verifyEpisodeDeleteReadback(item.itemId, plan.kind === 'remove-row' ? null : plan.rewritten, () => stremioClient.getLibraryItemsByIds(authKey, [item.itemId], ctx, true))
+                                        await stremioClient.upsertLibraryItem(authKey, plan.rewritten, ctx, assertFresh)
+                                        const saved = await verifyEpisodeDeleteReadback(item.itemId, plan.rewritten, () => stremioClient.getLibraryItemsByIds(authKey, [item.itemId], ctx, true))
                                         if (!saved) {
                                             rowsById.delete(item.itemId)
                                             return
@@ -830,7 +828,6 @@ export function ActivityPage() {
                                         uncertainShows.add(item.itemId)
                                         throw error
                                     }
-                                    if (plan.kind !== 'rewrite') return
                                     touchedShows.add(item.itemId)
                                     // The rewrite preserves the row mtime, so the watcher inference
                                     // would otherwise read the repointed anchor as a fresh watch.

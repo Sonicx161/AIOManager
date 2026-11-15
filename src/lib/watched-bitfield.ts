@@ -77,6 +77,27 @@ async function readWatchedField(watchedStr: string | null | undefined): Promise<
     }
 }
 
+/** Returns Stremio's visible indices, or null for an invalid field. */
+export async function decodeStremioVisibleIndices(
+    watchedStr: string | null | undefined,
+    videos: readonly { id: string }[],
+): Promise<number[] | null> {
+    const field = await readWatchedField(watchedStr)
+    const token = String(watchedStr || '').split(':').slice(-2, -1)[0] ?? ''
+    if (!/^[1-9][0-9]*$/.test(token) || !Number.isSafeInteger(Number(token))
+        || !field?.buf || !field.videoId || field.length !== Number(token)) return null
+    const anchor = videos.findIndex(video => video.id === field.videoId)
+    if (anchor < 0) return []
+    const offset = field.length - anchor - 1
+    const indices: number[] = []
+    for (let i = 0; i < videos.length; i++) {
+        const previous = i + offset
+        if (previous < 0 || (offset !== 0 && previous >= videos.length)) continue
+        if (previous < field.buf.length * 8 && (field.buf[previous >> 3] & (1 << (previous & 7)))) indices.push(i)
+    }
+    return indices
+}
+
 export async function decodeWatchedBitfield(watchedStr: string | null | undefined): Promise<DecodedBitfield | null> {
     const field = await readWatchedField(watchedStr)
     if (!field) return null
@@ -115,6 +136,13 @@ export async function hasNoWatchedBits(watchedStr: string | null | undefined): P
     if (field.length !== Number(token)) return false
     if (field.buf.length < Math.ceil(field.length / 8)) return false
     return field.buf.every(byte => byte === 0)
+}
+
+export async function hasNoVisibleWatchedBits(watchedStr: string | null | undefined): Promise<boolean> {
+    const token = String(watchedStr || '').split(':').slice(-2, -1)[0] ?? ''
+    if (!/^[1-9][0-9]*$/.test(token) || !Number.isSafeInteger(Number(token))) return false
+    const field = await readWatchedField(watchedStr)
+    return !!field?.buf && !!field.videoId && field.length === Number(token) && field.buf.every(byte => byte === 0)
 }
 
 export type ResolvedWatchedBits =
@@ -178,4 +206,9 @@ export async function encodeWatchedBitfield(indices: number[], videos: { id: str
         bytes[idx >> 3] |= 1 << (idx & 7)
     }
     return `${anchor.id}:${length}:${bytesToBase64(await deflateRaw(bytes))}`
+}
+
+export async function encodeEmptyWatchedBitfield(anchorId: string): Promise<string> {
+    if (!anchorId) throw new Error('Missing anchor')
+    return `${anchorId}:1:${bytesToBase64(await deflateRaw(new Uint8Array(1)))}`
 }

@@ -6,27 +6,68 @@ import { getSeasonEpisode, isActuallyWatched, isDatelessSavedWatchState, isResum
 import { scopeIndexesFor, reuseScopePartitionedIndexes, stremioTimeOf } from '@/lib/watch-event-indexes'
 import { isPlausibleWatchMs, plausibleWatchEventTs } from '@/lib/watch-time'
 import { MIN_EVENTS_GLOBAL, hasSeriesEventIdentity } from '@/lib/watch-event-cap'
-import { decodeWatchedBitfield, hasNoWatchedBits, isWellFormedWatchedField, resolveWatchedBitsAgainstVideos } from '@/lib/watched-bitfield'
+import { decodeStremioVisibleIndices, hasNoVisibleWatchedBits } from '@/lib/watched-bitfield'
 import { mapConcurrent } from '@/lib/concurrency'
-import { resolveWatchedEpisodes, fetchSeriesVideos, getCachedSeriesVideos } from '@/lib/watched-episodes'
+import { getCachedResolvedSeriesVideos, resolveSeriesVideos } from '@/lib/stremio-series-resolver'
 import { evictLegacyExternalEvents } from '@/lib/external-watch-events'
 import { EventRollups, emptyRollups, capWatchEventsWithRollups, mergeRollups } from '@/lib/watch-event-rollups'
-import { isIdentityDeleted } from '@/lib/event-tombstones'
+import { isIdentityDeleted, isSyntheticBackfillEvent, mergeBackfillDuplicates, mergeBackfillEvent, mergeWatchEventsById } from '@/lib/event-tombstones'
 import { aliasIdentityKeys, aliasDeletedAt, canonicalEpisodeIdentity } from '@/lib/activity-id-alias'
+import { createBackfillProcessed } from './backfill-processed.ts'
 
 const STORAGE_KEY = 'aio_watch_events_v2'
 
 /** Own-bit results per item; pending lists items whose bit is unknown only because the episode list was not cached. */
 export type OwnEpisodeBits = Map<string, boolean> & { pending?: ReadonlySet<string> }
 
-// Per-session guard: `${accountId}:${seriesId}:${watchedString}` already attempted, so repeated
-// library refreshes don't re-decode + re-fetch Cinemeta for unchanged series.
-const backfillProcessed = new Set<string>()
-if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') backfillProcessed.clear()
-  })
+const backfillProcessed = createBackfillProcessed()
+type TrustedBackfill = { scope: string; show: string; watched: string; ids: string[]; confirmedAt: number }
+const trustedBackfills = new Map<string, TrustedBackfill>()
+const backfillRetries = new Map<string, { watched: string; at: number }>()
+const TRUSTED_BACKFILL_CAP = 2048
+const TRUSTED_BACKFILL_BYTES = 8 * 1024 * 1024
+const BACKFILL_RETRY_MS = 60 * 60 * 1000
+
+const syntheticEventsByArray = new WeakMap<WatchEvent[], Map<string, Map<string, WatchEvent[]>>>()
+
+function syntheticEventsByScope(events: WatchEvent[]) {
+    const cached = syntheticEventsByArray.get(events)
+    if (cached) return cached
+    const scopes = new Map<string, Map<string, WatchEvent[]>>()
+    for (const event of events) {
+        if (!isSyntheticBackfillEvent(event)) continue
+        const scope = eventScopeKey(event)
+        let shows = scopes.get(scope)
+        if (!shows) scopes.set(scope, shows = new Map())
+        let entries = shows.get(event.itemId)
+        if (!entries) shows.set(event.itemId, entries = [])
+        entries.push(event)
+    }
+    syntheticEventsByArray.set(events, scopes)
+    return scopes
 }
+
+function rememberTrustedBackfill(key: string, value: TrustedBackfill) {
+    trustedBackfills.delete(key)
+    trustedBackfills.set(key, value)
+    let bytes = 0
+    for (const [k, v] of trustedBackfills) bytes += (k.length + v.scope.length + v.show.length + v.watched.length + v.ids.reduce((n, id) => n + id.length, 0)) * 2 + 128
+    while (trustedBackfills.size > TRUSTED_BACKFILL_CAP || bytes > TRUSTED_BACKFILL_BYTES) {
+        const oldest = trustedBackfills.entries().next().value
+        if (!oldest) break
+        const [k, v] = oldest
+        bytes -= (k.length + v.scope.length + v.show.length + v.watched.length + v.ids.reduce((n, id) => n + id.length, 0)) * 2 + 128
+        trustedBackfills.delete(k)
+    }
+}
+
+function rememberBackfillRetry(key: string, watched: string, at: number) {
+    backfillRetries.delete(key)
+    backfillRetries.set(key, { watched, at })
+    while (backfillRetries.size > TRUSTED_BACKFILL_CAP) backfillRetries.delete(backfillRetries.keys().next().value!)
+}
+const backfillRevisions = new Map<string, number>()
+let backfillRevision = 0
 
 // Snapshot: { [accountId]: { [itemId]: SnapshotItem } }
 type Snapshot = Record<string, Record<string, SnapshotItem>>
@@ -133,7 +174,7 @@ interface WatchEventState {
 
     mergeExternalWatchEvents: (accountId: string, platform: string, items: ExternalWatchItem[], options?: { sourceConnectionId?: string }) => void
 
-    recordBackfillEpisodes: (accountId: string, items: LibraryItem[], options?: { contextKey?: string; sourceConnectionId?: string; ownerConnectionId?: string }) => Promise<number>
+    recordBackfillEpisodes: (accountId: string, items: LibraryItem[], options?: { contextKey?: string; sourceConnectionId?: string; ownerConnectionId?: string; authKey?: string; completeLibrary?: boolean; libraryIds?: string[] }) => Promise<number>
 
     export: () => { events: WatchEvent[]; snapshot: Snapshot; deletedEvents: Record<string, number>; rollups: EventRollups }
     reset: () => void
@@ -216,7 +257,7 @@ async function persistWatchEventsNow() {
     const deleted = _pendingDeleted
     _pendingDeleted = null
     try {
-        await localforage.setItem(STORAGE_KEY, { events, snapshot, snapshotOwners, rollups })
+        await localforage.setItem(STORAGE_KEY, { events, snapshot, snapshotOwners, rollups, backfillProcessed: backfillProcessed.export(), trustedBackfills: Array.from(trustedBackfills), backfillRetries: Array.from(backfillRetries) })
     } catch (e) {
         if (import.meta.env.DEV) console.error('[watchEventStore] persist failed:', e)
     }
@@ -276,6 +317,7 @@ export function watchEventIdentityKey(e: { accountId: string; sourceConnectionId
 }
 
 function isEventTombstoned(e: WatchEvent, deleted: Record<string, number>): boolean {
+    if (isSyntheticBackfillEvent(e) && isIdentityDeleted(`bfid:${e.id}`, deleted, e.bfConfirmedAt ?? 0)) return true
     if (isIdentityDeleted(watchEventIdentityKey(e), deleted, e.event_ts)) return true
     if (!e.itemId.startsWith('tt') && !e.itemId.startsWith('tmdb:')) return false
     return aliasIdentityKeys(eventScopeKey(e), e.itemId, e.video_id, e.season, e.episode, e.type)
@@ -337,7 +379,7 @@ function capDeletedEvents(deleted: Record<string, number>, survivingEvents: Watc
     const kept = entries
     const evictable = kept.filter(([key]) => !survivingKeys.has(key))
     const pinned = kept.filter(([key]) => survivingKeys.has(key))
-    evictable.sort((a, b) => b[1] - a[1])
+    evictable.sort((a, b) => Number(a[0].startsWith('bfid:')) - Number(b[0].startsWith('bfid:')) || b[1] - a[1])
     const room = Math.max(0, DELETED_EVENTS_CAP - pinned.length)
     return Object.fromEntries([...pinned, ...evictable.slice(0, room)])
 }
@@ -362,7 +404,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             return hasSeriesEventIdentity(e)
         })
         const deleted = deletedEventKeys ?? get().deletedEventKeys
-        const alive = filterTombstonedEvents(collapseDayDuplicates(cleaned), deleted)
+        const alive = collapseDayDuplicates(filterTombstonedEvents(mergeBackfillDuplicates(cleaned), deleted))
         const { kept: capped, rollups: folded } = capWatchEventsWithRollups(alive, get().rollups)
         const rollups = incomingRollups ? mergeRollups(folded, incomingRollups) : folded
         set({ events: capped, snapshot: pinTombstonedBaselines(snapshot, deleted), snapshotOwners: snapshotOwners ?? get().snapshotOwners, rollups, deletedEventKeys: deleted, initialized: true })
@@ -384,8 +426,16 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     ? inner
                     : storedDeleted) as Record<string, number>
             }
-            const stored = await localforage.getItem<{ events: WatchEvent[]; snapshot: Snapshot; snapshotOwners?: Record<string, string>; rollups?: EventRollups }>(STORAGE_KEY)
+            const stored = await localforage.getItem<{ events: WatchEvent[]; snapshot: Snapshot; snapshotOwners?: Record<string, string>; rollups?: EventRollups; backfillProcessed?: Record<string, string>; trustedBackfills?: Array<[string, TrustedBackfill]>; backfillRetries?: Array<[string, { watched: string; at: number }]> }>(STORAGE_KEY)
             if (stored && stored.events) {
+                backfillProcessed.load(stored.backfillProcessed || {})
+                for (const entry of (Array.isArray(stored.trustedBackfills) ? stored.trustedBackfills.slice(-TRUSTED_BACKFILL_CAP) : [])) {
+                    if (!Array.isArray(entry) || typeof entry[0] !== 'string') continue
+                    const v = entry[1]
+                    if (!v || typeof v.scope !== 'string' || typeof v.show !== 'string' || typeof v.watched !== 'string' || !Array.isArray(v.ids) || v.ids.length > 10000 || !v.ids.every(id => typeof id === 'string') || !Number.isFinite(v.confirmedAt)) continue
+                    rememberTrustedBackfill(entry[0], v)
+                }
+                for (const entry of (Array.isArray(stored.backfillRetries) ? stored.backfillRetries.slice(-TRUSTED_BACKFILL_CAP) : [])) if (Array.isArray(entry) && typeof entry[0] === 'string' && entry[1] && typeof entry[1].watched === 'string' && Number.isFinite(entry[1].at)) rememberBackfillRetry(entry[0], entry[1].watched, entry[1].at)
                 const cleaned = stored.events.filter(e => {
                     const isSeries = e.type === 'series' || e.type === 'anime' || e.type === 'episode'
                     if (isSeries && e.season != null && e.season > 100) return false
@@ -395,7 +445,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     const ts = plausibleWatchEventTs(e.event_ts)
                     return ts === e.event_ts ? e : { ...e, event_ts: ts }
                 })
-                const collapsed = filterTombstonedEvents(collapseDayDuplicates(cleaned), deleted)
+                const collapsed = collapseDayDuplicates(filterTombstonedEvents(mergeBackfillDuplicates(cleaned), deleted))
                 const rollups = stored.rollups ? { ...emptyRollups(), ...stored.rollups } : get().rollups
                 const snapshot = pinTombstonedBaselines(stored.snapshot || {}, deleted)
                 set({ events: collapsed, snapshot, snapshotOwners: stored.snapshotOwners || {}, rollups, deletedEventKeys: deleted, initialized: true })
@@ -537,7 +587,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         const cachePending = new Set<string>()
         const baseline = contextKey ? get().snapshot[contextKey] || {} : undefined
         const pending = items.filter(item => {
-            if (!isSeriesItem(item) || !item._id?.startsWith('tt') || !item.state?.video_id) return false
+            if (!isSeriesItem(item) || !item._id || !item.state?.video_id) return false
             const prior = baseline?.[item._id]
             return !prior || (stremioTimeOf(item._mtime) ?? 0) > prior.mtime
         })
@@ -545,14 +595,14 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             const videoId = item.state?.video_id
             const watched = item.state?.watched
             // No bitfield, or a readable one with every bit clear: this episode is known unmarked.
-            if (!watched || await hasNoWatchedBits(watched)) { bits.set(item._id, false); return }
-            const videos = await getCachedSeriesVideos(item._id)
+            if (!watched || await hasNoVisibleWatchedBits(watched)) { bits.set(item._id, false); return }
+            const videos = getCachedResolvedSeriesVideos(contextKey || '', item.type || 'series', item._id)
             if (!videos) {
-                if (await isWellFormedWatchedField(watched)) cachePending.add(item._id)
+                if (await decodeStremioVisibleIndices(watched, []) !== null) cachePending.add(item._id)
                 return
             }
-            const resolved = await resolveWatchedBitsAgainstVideos(watched, videos)
-            if (resolved.kind === 'bits') bits.set(item._id, resolved.indices.some(index => videos[index]?.id === videoId))
+            const resolved = await decodeStremioVisibleIndices(watched, videos)
+            if (resolved !== null) bits.set(item._id, resolved.some(index => videos[index]?.id === videoId))
         })
         return Object.assign(bits, { pending: cachePending })
     },
@@ -784,6 +834,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 if (mergeCandidate) {
                     const mergedEvent = {
                         ...mergeCandidate,
+                        ...(mergeCandidate.id.startsWith('bf:') ? { backfill: false } : {}),
                         event_ts: Math.max(mergeCandidate.event_ts, mtime),
                         detected_ts: now,
                         name: item.name || mergeCandidate.name || 'Unknown',
@@ -851,7 +902,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         }
 
         const merged = [...state.events, ...newEvents]
-        const deduped = Array.from(new Map(merged.map(e => [e.id, e])).values())
+        const deduped = mergeWatchEventsById(merged)
         const sorted = deduped.sort((a, b) => b.event_ts - a.event_ts)
         const alive = filterTombstonedEvents(sorted, get().deletedEventKeys)
         // Under the global floor the cap provably cannot evict
@@ -894,48 +945,110 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
     // so an old partial stop the bitfield confirms counts as watched, while partials outside the
     // bitfield stay partial. No duplicate backfill event and no fabricated chronology.
     recordBackfillEpisodes: async (accountId, items, options) => {
-        const state = get()
         const ctx = options?.contextKey ?? accountId
         const eventAttribution = options?.sourceConnectionId || options?.ownerConnectionId
             ? { sourceConnectionId: options.sourceConnectionId ?? options.ownerConnectionId, scopeKey: ctx }
             : {}
-        // Seed indexes from the shared per-array cache: the GLOBAL id set (see
-        // diffAndRecord — migrated historical ids suppress duplicates across scopes)
-        // plus this scope's identities, as private copies (the loop adds recovered
-        // episodes to them).
-        const seedIndexes = scopeIndexesFor(state.events, ctx)
-        const existingIds = seedIndexes.ids
-        const existingIdentities = seedIndexes.identities
         const now = Date.now()
         const newEvents: WatchEvent[] = []
         // Bitfield-confirmed identities already covered by real events in this exact scope:
         // their events get flaggedWatched stamped below instead of a duplicate recovery.
         const confirmedExistingIdentities = new Set<string>()
+        const staleIds = new Set<string>()
+        const confirmedBfIds = new Set<string>()
+        let processedChanged = false
 
-        for (const item of items) {
+        const keyOf = (item: LibraryItem) => JSON.stringify([ctx, options?.sourceConnectionId || options?.ownerConnectionId || '', item.type || 'series', item._id])
+        if (options?.completeLibrary && backfillProcessed.prune(ctx, new Set(options.libraryIds ?? items.map(item => item._id)))) processedChanged = true
+        const revisions = new Map<string, number>()
+        const candidates = items.filter(item => {
+            if (!item._id || !isSeriesItem(item)) return false
+            const key = keyOf(item)
+            const revision = ++backfillRevision
+            backfillRevisions.set(key, revision)
+            revisions.set(key, revision)
+            if (!item.state?.watched || !options?.authKey) return false
+            const retry = backfillRetries.get(key)
+            if (retry?.watched === item.state.watched) return now >= retry.at && now - retry.at >= BACKFILL_RETRY_MS
+            if (backfillProcessed.get(key) !== item.state.watched) return true
+            const trusted = trustedBackfills.get(key)
+            return trusted?.watched !== item.state.watched
+
+        })
+        const current = (item: LibraryItem) => backfillRevisions.get(keyOf(item)) === revisions.get(keyOf(item))
+        const results = await mapConcurrent(candidates, 100, item =>
+            resolveSeriesVideos(options!.authKey!, ctx, item.type || 'series', item._id))
+
+        const decoded = await Promise.all(results.map((result, index) => result.kind === 'list'
+            ? decodeStremioVisibleIndices(candidates[index].state?.watched, result.videos) : null))
+        for (const [index, item] of candidates.entries()) {
+            if (!current(item)) continue
+            const key = keyOf(item)
+            const result = results[index]
+            const indices = decoded[index]
+            const trusted = result.kind === 'list' && result.writeGrade && result.fetchedAt <= Date.now() && Date.now() - result.fetchedAt <= 300000 && indices !== null
+            if (trusted && result.kind === 'list' && indices !== null) {
+                rememberTrustedBackfill(key, { scope: ctx, show: item._id, watched: item.state!.watched!, ids: indices.map(i => result.videos[i].id), confirmedAt: Date.now() })
+                backfillRetries.delete(key)
+            } else rememberBackfillRetry(key, item.state!.watched!, Date.now())
+            processedChanged = true
+        }
+        const itemByKey = new Map(items.filter(item => item._id && isSeriesItem(item)).map(item => [keyOf(item), item]))
+        const attempted = new Map(candidates.map((item, index) => [keyOf(item), index]))
+        const trustedByShow = new Map<string, { ids: Set<string>; confirmedAt: number }>()
+        for (const [key, checkpoint] of trustedBackfills) {
+            const item = itemByKey.get(key)
+            const index = attempted.get(key)
+            if (!options?.authKey || checkpoint.scope !== ctx || !item || !current(item) || item.state?.watched !== checkpoint.watched) continue
+            if (backfillRetries.get(key)?.watched === item.state.watched) continue
+            if (index !== undefined && (results[index].kind !== 'list' || !results[index].writeGrade || decoded[index] === null)) continue
+            trustedByShow.set(checkpoint.show, { ids: new Set(checkpoint.ids), confirmedAt: checkpoint.confirmedAt })
+        }
+        const currentEvents = get().events
+        const shows = syntheticEventsByScope(currentEvents).get(ctx)
+        if (shows) for (const [show, checkpoint] of trustedByShow) {
+            for (const event of shows.get(show) || []) {
+                if (!checkpoint.ids.has(event.video_id || '') && (event.bfConfirmedAt ?? 0) <= checkpoint.confirmedAt) staleIds.add(event.id)
+            }
+        }
+        if (candidates.length === 0 && staleIds.size === 0) {
+            for (const [key, revision] of revisions) if (backfillRevisions.get(key) === revision) backfillRevisions.delete(key)
+            if (processedChanged) persistWatchEvents()
+            return 0
+        }
+        const seedIndexes = scopeIndexesFor(staleIds.size ? currentEvents.filter(event => !staleIds.has(event.id) || !isSyntheticBackfillEvent(event)) : currentEvents, ctx)
+        const existingIds = seedIndexes.ids
+        const realBackfillIds = new Set(currentEvents.filter(event => event.id.startsWith('bf:') && !isSyntheticBackfillEvent(event)).map(event => event.id))
+        const existingIdentities = seedIndexes.identities
+
+        for (const [index, item] of candidates.entries()) {
             const seriesId = item._id
-            if (!seriesId || !isSeriesItem(item) || !seriesId.startsWith('tt')) continue
-
-            const guardKey = `${ctx}:${seriesId}:${item.state?.watched || ''}`
-            if (backfillProcessed.has(guardKey)) continue
-
-            const decoded = await decodeWatchedBitfield(item.state?.watched)
-            if (!decoded || decoded.watchedIndices.length === 0) { backfillProcessed.add(guardKey); if (backfillProcessed.size > 2000) backfillProcessed.clear(); continue }
-            const videos = await fetchSeriesVideos(seriesId)
-            if (!videos) continue // transient (meta fetch failed) -> retry on a later refresh
-            const episodes = resolveWatchedEpisodes(decoded, videos)
-            if (!episodes) continue // fail-closed checksum did not pass -> retry on a later refresh, NO marks
-            backfillProcessed.add(guardKey)
-            if (backfillProcessed.size > 2000) backfillProcessed.clear()
-
-            const lastWatchedTs = stremioTimeOf(item.state?.lastWatched)
-                || stremioTimeOf(item._mtime)
-            const ts = lastWatchedTs || now
+            const guardKey = keyOf(item)
+            if (!current(item)) continue
+            const result = results[index]
+            if (result.kind !== 'list') continue
+            const indices = decoded[index]
+            if (indices === null) continue
+            const episodes = indices.map(index => {
+                const video = result.videos[index]
+                return { videoId: video.id, season: video.season, episode: video.episode }
+            })
+            const pendingConfirmation = result.writeGrade && episodes.some(ep => {
+                const marker = get().deletedEventKeys[`bfid:bf:${ctx}:${ep.videoId}`]
+                return !realBackfillIds.has(`bf:${ctx}:${ep.videoId}`) && marker !== undefined && marker >= Date.now()
+            })
+            if (pendingConfirmation) backfillProcessed.delete(guardKey)
+            else backfillProcessed.set(guardKey, item.state!.watched!)
+            processedChanged = true
+            const ts = stremioTimeOf(item.state?.lastWatched) || 0
+            const trusted = result.writeGrade && result.fetchedAt <= Date.now() && Date.now() - result.fetchedAt <= 300000
 
             for (const ep of episodes) {
                 const season = ep.season ?? undefined
                 const episode = ep.episode ?? undefined
                 const identity = getEpisodeIdentity(seriesId, ep.videoId, season, episode, item.type || 'series')
+                const id = `bf:${ctx}:${ep.videoId}`
+                if (trusted && existingIds.has(id)) confirmedBfIds.add(id)
                 if (existingIdentities.has(identity)) {
                     // Real event(s) already cover this episode: collect the identity so the
                     // merge below stamps the confirmation flag on the events that exist NOW
@@ -945,8 +1058,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                 }
                 // The bitfield carries no per-episode date, so it can never prove a re-watch after a delete.
                 if (identityDeletedAt(ctx, seriesId, ep.videoId, season, episode, item.type || 'series', get().deletedEventKeys) !== undefined) continue
-                const id = `bf:${ctx}:${ep.videoId}`
-                if (existingIds.has(id)) continue
+                if (existingIds.has(id) || (!trusted && (get().deletedEventKeys[`bfid:${id}`] !== undefined || (trustedByShow.has(seriesId) && !trustedByShow.get(seriesId)!.ids.has(ep.videoId))))) continue
 
                 newEvents.push({
                     id,
@@ -963,11 +1075,16 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     season,
                     episode,
                     backfill: true,
+                    ...(trusted ? { bfConfirmedAt: Date.now() } : {}),
                     ...eventAttribution,
                 })
                 existingIdentities.add(identity)
                 existingIds.add(id)
             }
+        }
+
+        for (const [key, revision] of revisions) {
+            if (backfillRevisions.get(key) === revision) backfillRevisions.delete(key)
         }
 
         // Stamp the positive confirmation on the covering events as they exist NOW (post-await
@@ -976,7 +1093,13 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         // other field — including detected_ts — is preserved: the flag is the only change.
         const cur = get()
         let flaggedCount = 0
-        const baseEvents = confirmedExistingIdentities.size > 0 ? cur.events.map(e => {
+        const baseEvents = confirmedExistingIdentities.size > 0 || confirmedBfIds.size > 0 ? cur.events.map(e => {
+            if (confirmedBfIds.has(e.id)) {
+                const confirmedAt = Date.now()
+                if ((e.bfConfirmedAt ?? 0) >= confirmedAt) return e
+                flaggedCount++
+                return { ...e, bfConfirmedAt: confirmedAt }
+            }
             if (e.backfill || (e.flaggedWatched ?? 0) > 0) return e
             if (eventScopeKey(e) !== ctx) return e
             const identity = getEpisodeIdentity(e.itemId, e.video_id, e.season, e.episode, e.type)
@@ -985,21 +1108,28 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
             return { ...e, flaggedWatched: 1 }
         }) : cur.events
 
-        if (newEvents.length === 0 && flaggedCount === 0) return 0
+        const deleted = { ...cur.deletedEventKeys }
+        for (const id of staleIds) deleted[`bfid:${id}`] = Math.max(deleted[`bfid:${id}`] ?? 0, Date.now())
+        const cappedDeleted = capDeletedEvents(deleted, baseEvents)
+        if (newEvents.length === 0 && flaggedCount === 0 && staleIds.size === 0) {
+            if (processedChanged) persistWatchEvents()
+            return 0
+        }
 
-        const merged = [...baseEvents, ...newEvents]
-        const deduped = Array.from(new Map(merged.map(e => [e.id, e])).values())
+        const merged = [...baseEvents.filter(event => !staleIds.has(event.id) || !isSyntheticBackfillEvent(event)), ...newEvents]
+        const deduped = mergeWatchEventsById(merged)
         const sorted = deduped.sort((a, b) => b.event_ts - a.event_ts)
         const { kept: capped, rollups } = capWatchEventsWithRollups(
-            filterTombstonedEvents(sorted, get().deletedEventKeys),
+            filterTombstonedEvents(sorted, cappedDeleted),
             cur.rollups
         )
         reuseScopePartitionedIndexes(cur.events, capped)
-        set({ events: capped, rollups })
+        set({ events: capped, rollups, deletedEventKeys: cappedDeleted })
+        if (staleIds.size) persistDeletedEvents(cappedDeleted)
         persistWatchEvents()
         // Callers treat >0 as "state changed": annotations alone must still persist,
         // so the count includes stamped flags, not just new recoveries.
-        return newEvents.length + flaggedCount
+        return newEvents.length + flaggedCount + staleIds.size
     },
 
     export: () => ({
@@ -1015,6 +1145,9 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         // Deletes are durable: reset clears watch data but NEVER the tombstones; wiping
         // them would resurrect every deleted event on the next pull.
         const deleted = get().deletedEventKeys
+        backfillProcessed.clear()
+        trustedBackfills.clear()
+        backfillRetries.clear()
         set({ events: [], snapshot: {}, snapshotOwners: {}, deletedEventKeys: deleted, rollups: emptyRollups(), initialized: false })
         localforage.removeItem(STORAGE_KEY).catch(() => {})
         if (Object.keys(deleted).length > 0) persistDeletedEvents(deleted)
@@ -1078,7 +1211,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
 
             const existingEvent = eventsById.get(se.id)
             if (existingEvent) {
-                const mergedEvent = { ...existingEvent, ...event }
+                const mergedEvent = mergeBackfillEvent(existingEvent, { ...existingEvent, ...event })
                 if (!isPlausibleWatchMs(mergedEvent.event_ts)) {
                     mergedEvent.event_ts = isPlausibleWatchMs(existingEvent.event_ts) ? existingEvent.event_ts : NaN
                 }

@@ -1,5 +1,6 @@
 import type { MigrationFailure } from './types.ts'
 import { StaleChecksError } from './prewrite-fresh.ts'
+import { SeriesLookupRateLimitError } from '../series-batch-retry.ts'
 
 // Only these structured fields leave the importer. Never export exception text,
 // transport bodies, URLs, auth keys or provider-specific error messages.
@@ -21,6 +22,7 @@ export class GlobalMatchFailure extends Error {
 
 export function migrationFailure(error: unknown, stage: MigrationFailure['stage'] = 'write'): MigrationFailure {
     if (error instanceof WatchMigrationError) return { ...error.failure }
+    if (error instanceof SeriesLookupRateLimitError) return { stage, reason: 'rate_limited', httpStatus: 429 }
     const name = error instanceof Error ? error.name : ''
     return { stage, reason: name === 'TimeoutError' ? 'timeout' : name === 'TypeError' ? 'network' : 'unknown' }
 }
