@@ -437,14 +437,14 @@ export function estimateRowHeight(
 
     if (row.kind === 'header') return 20 + 12
     if (row.kind === 'cards') {
-        if (context.viewMode === 'list') return LIST_CARD_HEIGHT + LIST_SPACING
-        return gridLine + (row.first ? LIST_SPACING : GRID_GAP)
+        if (context.viewMode === 'list') return LIST_CARD_HEIGHT + LIST_SPACING + (row.last ? 16 : 0)
+        return gridLine + (row.first ? LIST_SPACING : GRID_GAP) + (row.last ? 16 : 0)
     }
     const lines = Math.ceil(row.items.length / columns)
     const body = context.viewMode === 'list'
         ? lines * LIST_CARD_HEIGHT + (lines - 1) * LIST_SPACING
         : lines * gridLine + (lines - 1) * GRID_GAP
-    return 24 + 20 + 12 + body
+    return 24 + 20 + 12 + body + 16
 }
 
 export function findRowIndexByKey(rows: FeedRow[], key: string): number {

@@ -417,7 +417,7 @@ const VirtualActivityList = memo(function VirtualActivityList({
     const renderRow = (row: FeedRow) => {
         if (row.kind === 'section') {
             return (
-                <section data-theme-part="card" className="space-y-3 rounded-2xl border border-border/40 bg-card/50 p-3 shadow-sm">
+                <section className="space-y-3 border border-transparent p-3">
                     <ActivityDateHeader date={row.date} watchCount={row.watchCount} formatDateHeader={formatDateHeader} />
                     <div className={slot.viewMode === 'grid' ? GRID_CLASSES : 'space-y-3'}>
                         {renderCards(row.items)}
@@ -427,20 +427,17 @@ const VirtualActivityList = memo(function VirtualActivityList({
         }
         if (row.kind === 'header') {
             return (
-                <div data-theme-part="card" className="rounded-t-2xl border border-b-0 border-border/40 bg-card/50 px-3 py-1.5">
+                <div className="border border-b-0 border-transparent px-3 py-1.5">
                     <ActivityDateHeader date={row.date} watchCount={row.watchCount} formatDateHeader={formatDateHeader} />
                 </div>
             )
         }
-        // One visual line of a big group. Side borders continue across rows so the
-        // group still reads as one section card; spacing lives in row padding.
         return (
             <div
-                data-theme-part="card"
                 className={cn(
-                    'border-x border-border/40 bg-card/50 px-3',
+                    'border-x border-transparent px-3',
                     slot.viewMode === 'grid' ? cn(GRID_CLASSES, row.first ? 'pt-3' : 'pt-2', !row.last && 'pb-2') : 'pt-3',
-                    row.last && 'rounded-b-2xl border-b border-border/40 pb-3 shadow-sm',
+                    row.last && 'border-b border-transparent pb-3',
                 )}
             >
                 {renderCards(row.items)}
@@ -458,8 +455,31 @@ const VirtualActivityList = memo(function VirtualActivityList({
         return sum
     }
 
+    const totalSize = virtualizer.getTotalSize()
+    const firstItem = virtualItems[0]
+    const renderShift = firstItem ? firstItem.start - (virtualizer.measurementsCache[firstItem.index]?.start ?? firstItem.start) : 0
+    const decorations = groupAnchors.flatMap((anchor, index) => {
+        const first = anchor.rowIndex
+        const last = (groupAnchors[index + 1]?.rowIndex ?? rows.length) - 1
+        if (!virtualItems.some(item => item.index >= first && item.index <= last)) return []
+        const start = virtualizer.measurementsCache[first]?.start ?? anchorOffset(first)
+        const lastMeasurement = virtualizer.measurementsCache[last]
+        const end = lastMeasurement ? lastMeasurement.end : anchorOffset(last) + estimateSize(last)
+        return [{ key: anchor.key, start: start + renderShift - scrollMargin, height: Math.max(0, end - start - 16) }]
+    })
+
     return (
-        <div ref={listRef} data-activity-virtual-list style={{ position: 'relative', height: virtualizer.getTotalSize() }}>
+        <div ref={listRef} data-activity-virtual-list style={{ position: 'relative', height: totalSize }}>
+            {decorations.map(decoration => (
+                <div
+                    key={`decoration-${decoration.key}`}
+                    data-theme-part="card"
+                    data-activity-day-decoration
+                    aria-hidden="true"
+                    className="rounded-2xl border border-border/40 bg-card/50 shadow-sm"
+                    style={{ position: 'absolute', pointerEvents: 'none', top: decoration.start, left: 0, right: 0, height: decoration.height }}
+                />
+            ))}
             {groupAnchors.filter(anchor => anchor.dateId).map(anchor => (
                 <div
                     key={`anchor-${anchor.key}`}
@@ -469,16 +489,22 @@ const VirtualActivityList = memo(function VirtualActivityList({
                     style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 0, transform: `translateY(${anchorOffset(anchor.rowIndex) - scrollMargin}px)` }}
                 />
             ))}
-            {virtualItems.map(virtualRow => (
-                <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    ref={virtualizer.measureElement}
-                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
-                >
-                    {renderRow(rows[virtualRow.index])}
-                </div>
-            ))}
+            {virtualItems.map(virtualRow => {
+                const row = rows[virtualRow.index]
+                const isLast = row.kind === 'cards' && row.last
+                return (
+                    <div
+                        key={virtualRow.key}
+                        data-index={virtualRow.index}
+                        ref={virtualizer.measureElement}
+                        style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
+                    >
+                        <div style={{ paddingBottom: row.kind === 'section' || isLast ? 16 : 0 }}>
+                            {renderRow(row)}
+                        </div>
+                    </div>
+                )
+            })}
         </div>
     )
 })
