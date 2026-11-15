@@ -201,7 +201,7 @@ export function guardedFetch(url, {
                 const status = res.statusCode || 0
                 const location = res.headers.location
                 if (status >= 300 && status < 400 && location && redirect !== 'manual') {
-                    res.resume()
+                    res.destroy()
                     if (n >= maxHops) return fail('too-many-redirects')
                     let next
                     try { next = new URL(location, u) } catch { return fail('ssrf-blocked') }
