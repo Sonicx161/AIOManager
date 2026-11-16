@@ -30,6 +30,7 @@ export const DOCS_FRONTMATTER: Record<string, DocsFrontmatter> = {
     "metrics/tabs": {"title":"Metrics Tabs","description":"A breakdown of every tab on the Metrics page and what each one shows."},
     "project/credits": {"title":"Credits","description":"The people and projects that made AIOManager possible."},
     "project/support": {"title":"Support the Project","description":"Ways to support AIOManager development."},
+    "project/third-party-licenses": {"title":"Third-party licenses","description":"License notices for bundled third-party artwork."},
     "reference/configuration": {"title":"Configuration Reference","description":"Every AIOManager setting and environment variable documented."},
     "reference/index": {"title":"Technical Reference","description":"Environment variables, keyboard shortcuts, and API documentation."},
     "reference/security": {"title":"Security Model","description":"How AIOManager protects your credentials and data."},

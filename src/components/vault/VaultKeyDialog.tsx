@@ -30,6 +30,7 @@ import { toast } from '@/hooks/use-toast'
 import { VaultKey } from '@/types/vault'
 import { cn, getTimeAgo } from '@/lib/utils'
 import { providerAbbr, expiryDateError } from '@/components/vault/vault-key-fields'
+import { ProviderLogo } from '@/components/vault/ProviderLogo'
 import { ExpiryState, expiryLabel, firstMissingField, maskedKeyDisplay, resolveExpiry, statusLine } from '@/components/vault/vault-key-sheet'
 
 interface VaultKeyDialogProps {
@@ -79,7 +80,12 @@ function ProviderButton({ p, onSelect }: { p: RegistryProvider; onSelect: (p: Re
             className="flex items-center gap-3 rounded-xl border border-border/40 bg-muted/10 px-3 py-3 text-left transition-colors hover:border-border/70 hover:bg-muted/25"
         >
             <span data-theme-part="badge" className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/40 text-xs font-bold ${c.bg} ${c.text}`}>
-                {providerAbbr(p.name)}
+                <ProviderLogo
+                    catalogId={p.id}
+                    fallback={providerAbbr(p.name)}
+                    className="flex h-7 w-7 items-center justify-center rounded-md border border-black/10 bg-[#fafafa] p-0.5"
+                    imgClassName="h-full w-full rounded object-contain"
+                />
             </span>
             <span className="min-w-0 flex-1 truncate text-sm font-medium">{p.name}</span>
         </button>
@@ -799,7 +805,13 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
                         <Label htmlFor="v-custom-abbr">Header badge</Label>
                         <div className="flex items-center gap-3">
                             <span data-theme-part="badge" className={cn('flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/40 text-sm font-bold', tint(resolvedGroup).bg, tint(resolvedGroup).text)}>
-                                {abbr}
+                                <ProviderLogo
+                                    catalogId={customAbbr ? undefined : selected.id}
+                                    provider={customAbbr ? undefined : selected.vaultProvider}
+                                    fallback={abbr}
+                                    className="flex h-9 w-9 items-center justify-center rounded-lg border border-black/10 bg-[#fafafa] p-0.5"
+                                    imgClassName="h-full w-full rounded object-contain"
+                                />
                             </span>
                             <Input
                                 id="v-custom-abbr"

@@ -39,6 +39,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import type { VaultKey } from '@/types/vault'
+import { ProviderLogo } from '@/components/vault/ProviderLogo'
 
 type Keyed = HeaderKeyInput & VaultKey
 type Row = HeaderKeyRow<Keyed>
@@ -238,7 +239,13 @@ function KeyRow({ row, phone, actions }: { row: Row; phone: boolean; actions: Ro
       <div className="flex items-center gap-2 pl-3 pr-2">
         <span className={cn('h-2 w-2 shrink-0 rounded-full', DOT[row.status])} />
         <div data-theme-part="badge" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-border/40 bg-muted/50 text-[11px] font-bold text-muted-foreground">
-          {getKeyAbbr(row.key)}
+          <ProviderLogo
+            catalogId={row.key.customAbbr ? undefined : row.key.catalogId}
+            provider={row.key.customAbbr ? undefined : row.key.provider}
+            fallback={getKeyAbbr(row.key)}
+            className="flex h-5 w-5 items-center justify-center rounded-md border border-black/10 bg-[#fafafa] p-0.5"
+            imgClassName="h-full w-full rounded object-contain"
+          />
         </div>
         {phone ? (
           <button type="button" aria-label={`${label}, key actions`} aria-haspopup="menu" onClick={() => setOpen(true)} className="min-h-[44px] min-w-0 flex-1 py-2.5 text-left">

@@ -25,6 +25,7 @@ import { toast } from '@/hooks/use-toast'
 import { useDocumentTitle } from '@/hooks/use-document-title'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
 import { VaultKey } from '@/types/vault'
+import { ProviderLogo } from '@/components/vault/ProviderLogo'
 
 import { ProviderHealth } from '@/types/provider'
 
@@ -83,8 +84,14 @@ function ProviderTile({ k, size = 32 }: { k: VaultKey; size?: number }) {
     return (
         <div className="relative shrink-0 flex items-center justify-center" style={{ width: size, height: size }}>
             <SquircleOverlay />
-            <span className="relative z-10 leading-none font-bold text-muted-foreground" style={{ fontSize: size * 0.35 }}>
-                {abbr}
+            <span className="relative z-10 flex h-full w-full items-center justify-center leading-none font-bold text-muted-foreground" style={{ fontSize: size * 0.35 }}>
+                <ProviderLogo
+                    catalogId={k.catalogId}
+                    provider={k.provider}
+                    fallback={abbr}
+                    className="flex h-[72%] w-[72%] items-center justify-center rounded-md border border-black/10 bg-[#fafafa] p-0.5"
+                    imgClassName="h-full w-full rounded object-contain"
+                />
             </span>
         </div>
     )
