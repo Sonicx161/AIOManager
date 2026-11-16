@@ -18,6 +18,10 @@ export const syncRuntime = {
     // Preserve cloud notes until the local notes store has hydrated.
     lastPulledNotes: null as import('./notesStore').Note[] | null,
     lastPulledVaultTombstones: null as import('./vaultStore').VaultTombstone[] | null,
+    vaultImportAccount: null as string | null,
+    vaultImportWorkspace: null as string | null,
+    vaultImportReady: false,
+    vaultCloudKnownEmpty: false,
     // Preserved on push when this device has no avatar; mirrors the pull's upgrade-only identity rule.
     lastPulledCloudAvatar: null as string | null,
     pendingRetry: false,

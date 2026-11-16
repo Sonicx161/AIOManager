@@ -346,6 +346,11 @@ export const useSyncStore = create<SyncState>()(
                     // A fresh workspace starts in a fresh namespace; the wipe
                     // above already cleared the signed-out one.
                     setActiveWorkspace(newId)
+                    await useVaultStore.getState().initialize()
+                    syncRuntime.vaultImportAccount = newId
+                    syncRuntime.vaultImportWorkspace = getActiveWorkspaceId()
+                    syncRuntime.vaultImportReady = true
+                    syncRuntime.vaultCloudKnownEmpty = true
                     writeIdentityProfile(newId, name, null)
                     set({
                         auth: { id: newId, password, name, avatar: null, isAuthenticated: true },
@@ -389,6 +394,12 @@ export const useSyncStore = create<SyncState>()(
                 // Select the target persistence namespace before importing any state.
                 const priorWorkspace = recovery?.priorWorkspace ?? getActiveWorkspaceId()
                 setActiveWorkspace(id)
+                if (syncRuntime.vaultImportAccount !== id || syncRuntime.vaultImportWorkspace !== getActiveWorkspaceId()) {
+                    syncRuntime.vaultImportAccount = null
+                    syncRuntime.vaultImportWorkspace = null
+                    syncRuntime.vaultImportReady = false
+                    syncRuntime.vaultCloudKnownEmpty = false
+                }
                 // A newer pull or session transition invalidates this continuation.
                 const pullToken = recovery?.ownership.seq ?? ++syncRuntime.pullSeq
                 if (!recovery) syncRuntime.adoptedSeq = null
@@ -467,7 +478,10 @@ export const useSyncStore = create<SyncState>()(
                             localNotesEmpty = await isLocalNotesStoreEmpty()
                         } catch { localNotesEmpty = false }
                     }
-                    const sendPullEtag = get().pendingConflictAccountId !== id && shouldSendPullEtag({
+                    const vaultPullTrusted = syncRuntime.vaultImportReady
+                        && syncRuntime.vaultImportAccount === id
+                        && syncRuntime.vaultImportWorkspace === getActiveWorkspaceId()
+                    const sendPullEtag = vaultPullTrusted && get().pendingConflictAccountId !== id && shouldSendPullEtag({
                         storedEtag,
                         sessionUnlocked,
                         lastSyncedNotesCount: get().lastSyncedNotesCount,
@@ -858,6 +872,8 @@ export const useSyncStore = create<SyncState>()(
                     let authInstalled = false
                     let hydrationOk = false
                     let pullCompleted = false
+                    syncRuntime.vaultImportReady = false
+                    syncRuntime.vaultCloudKnownEmpty = false
                     // Avatar decode failure keeps push trust closed.
                     let avatarIncomplete: string | null = null
                     const setHydration = (status: 'ok' | 'failed') => {
@@ -979,11 +995,19 @@ export const useSyncStore = create<SyncState>()(
                     fence()
                     if (Array.isArray(secondary.vault) || Array.isArray(secondary.vaultTombstones)) {
                         const { useVaultStore } = await import('./vaultStore')
+                        const pulledVault = (secondary.vault || []) as import('@/types/vault').VaultKey[]
+                        const pulledVaultTombstones = (secondary.vaultTombstones || []) as import('./vaultStore').VaultTombstone[]
+                        syncRuntime.vaultImportAccount = id
+                        syncRuntime.vaultImportWorkspace = ownership.workspace
+                        syncRuntime.vaultImportReady = false
+                        syncRuntime.vaultCloudKnownEmpty = pulledVault.length === 0 && pulledVaultTombstones.length === 0
                         await useVaultStore.getState().initialize(ownership)
                         // Initialization may return after losing ownership; fence before publishing markers.
                         fence()
-                        syncRuntime.lastPulledVaultTombstones = (secondary.vaultTombstones || []) as import('./vaultStore').VaultTombstone[]
-                        await useVaultStore.getState().importVault((secondary.vault || []) as import('@/types/vault').VaultKey[], (secondary.vaultTombstones || []) as import('./vaultStore').VaultTombstone[], ownership)
+                        syncRuntime.lastPulledVaultTombstones = pulledVaultTombstones
+                        await useVaultStore.getState().importVault(pulledVault, pulledVaultTombstones, ownership)
+                        fence()
+                        syncRuntime.vaultImportReady = true
                     }
                     fence()
 
@@ -1250,6 +1274,10 @@ export const useSyncStore = create<SyncState>()(
 
                 syncRuntime.lastPushedHash = null
                 syncRuntime.lastPulledNotes = null
+                syncRuntime.vaultImportAccount = null
+                syncRuntime.vaultImportWorkspace = null
+                syncRuntime.vaultImportReady = false
+                syncRuntime.vaultCloudKnownEmpty = false
                 syncRuntime.pendingRetry = false
                 syncRuntime.serverCanonicalAddonsV2 = null
                 resetAccountsHydration()
@@ -1333,6 +1361,38 @@ export const useSyncStore = create<SyncState>()(
 
                 if (!useAccountStore.getState().hydrated) {
                     if (import.meta.env.DEV) console.log("[Sync] Skipping push: account store not hydrated yet")
+                    return false
+                }
+
+                // A vault push is safe only after this identity's local vault has
+                // unlocked and the last certified pull has finished importing it.
+                // A newly registered account is the explicit empty-cloud exception.
+                let vaultState = useVaultStore.getState()
+                if (vaultState.isLocked && useAuthStore.getState().encryptionKey && !vaultState.error) {
+                    await vaultState.initialize(ownership)
+                    if (!pushCurrent()) return false
+                    vaultState = useVaultStore.getState()
+                }
+                const vaultIdentityMatches = syncRuntime.vaultImportAccount === auth.id
+                    && syncRuntime.vaultImportWorkspace === ownership.workspace
+                const vaultReady = !!useAuthStore.getState().encryptionKey
+                    && !vaultState.isLocked
+                    && !vaultState.loading
+                    && !vaultState.error
+                    && vaultIdentityMatches
+                    && (syncRuntime.vaultImportReady || syncRuntime.vaultCloudKnownEmpty)
+                if (!vaultReady) {
+                    const reason = vaultState.error
+                        ? 'Sync paused: vault could not be unlocked, sign in again'
+                        : vaultState.isLocked
+                            ? 'Sync paused: vault is locked'
+                            : vaultState.loading
+                                ? 'Sync paused: vault is still loading'
+                                : !vaultIdentityMatches
+                                    ? 'Sync paused: vault identity is not current'
+                                    : 'Sync paused: vault pull is still applying'
+                    get().addLogEntry({ type: 'push', status: 'error', message: `${isAuto ? '' : 'Push skipped: '}${reason}.`, isAuto })
+                    trace('sync', 'push.guard-reject', { accountId: auth.id, reason: reason.replace(/^Sync paused: /, '') })
                     return false
                 }
 
@@ -2160,6 +2220,10 @@ export const useSyncStore = create<SyncState>()(
 
             reset: () => {
                 resetAccountsHydration()
+                syncRuntime.vaultImportAccount = null
+                syncRuntime.vaultImportWorkspace = null
+                syncRuntime.vaultImportReady = false
+                syncRuntime.vaultCloudKnownEmpty = false
                 syncRuntime.pullSeq++
                 syncRuntime.adoptedSeq = null
                 syncRuntime.hydration = null

@@ -363,6 +363,7 @@ export function VaultPage() {
     const keys = useVaultStore(s => s.keys)
     const encryptionKey = useAuthStore(s => s.encryptionKey)
     const vaultLoading = useVaultStore(s => s.loading)
+    const vaultError = useVaultStore(s => s.error)
     const health = useProviderStore(s => s.health)
     const forceRefreshAll = useProviderStore(s => s.forceRefreshAll)
     const isRefreshing = useProviderStore(s => s.isRefreshing)
@@ -533,6 +534,14 @@ export function VaultPage() {
             setIsErasing(false)
         }
     }, [clearVault])
+
+    if (vaultError) {
+        return (
+            <div role="alert" className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {vaultError}
+            </div>
+        )
+    }
 
     if (!encryptionKey) {
         return (
