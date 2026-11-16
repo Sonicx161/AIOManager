@@ -190,6 +190,12 @@ async function seriesRecords(scope: string, item: LibraryItem, videos: StremioSe
                 if (indices === null) {
                     await surface(['The watched-episode alignment for this series could not be verified, so it is listed as unmatched.'])
                 } else {
+                    if (decoded.watchedIndices.length > indices.length) {
+                        const anchorMissing = !videos.some(video => video.id === decoded.videoId)
+                        await surface([anchorMissing
+                            ? 'The stored watched-episode anchor is missing from the episode list, so its watched episodes are listed as unmatched.'
+                            : 'Some watched episodes fall outside the current episode list, so they are listed as unmatched.'])
+                    }
                     decodedBits = Math.max(decodedBits, indices.length)
                     let unmappedBits = 0
                     const counts = new Map<string, number>()
