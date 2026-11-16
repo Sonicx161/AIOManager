@@ -75,6 +75,16 @@ import {
 } from '@/lib/session-sync-token'
 import { exportAvatarValue } from '@/lib/avatar-export'
 
+function clearVaultSyncRuntime() {
+    syncRuntime.lastPulledVaultTombstones = null
+    syncRuntime.vaultImportAccount = null
+    syncRuntime.vaultImportWorkspace = null
+    syncRuntime.vaultImportReady = false
+    syncRuntime.vaultCloudKnownEmpty = false
+    syncRuntime.pendingVaultRetry = false
+    syncRuntime.pendingRetry = false
+}
+
 // Suppress toasts during initial boot to prevent React "state update on unmounted component" warnings
 setTimeout(() => { syncRuntime.appReady = true }, 3000)
 
@@ -345,6 +355,7 @@ export const useSyncStore = create<SyncState>()(
 
                     // A fresh workspace starts in a fresh namespace; the wipe
                     // above already cleared the signed-out one.
+                    clearVaultSyncRuntime()
                     setActiveWorkspace(newId)
                     await useVaultStore.getState().initialize()
                     syncRuntime.vaultImportAccount = newId
@@ -395,10 +406,12 @@ export const useSyncStore = create<SyncState>()(
                 const priorWorkspace = recovery?.priorWorkspace ?? getActiveWorkspaceId()
                 setActiveWorkspace(id)
                 if (syncRuntime.vaultImportAccount !== id || syncRuntime.vaultImportWorkspace !== getActiveWorkspaceId()) {
-                    syncRuntime.vaultImportAccount = null
-                    syncRuntime.vaultImportWorkspace = null
-                    syncRuntime.vaultImportReady = false
-                    syncRuntime.vaultCloudKnownEmpty = false
+                    const pendingSameAccount = priorWorkspace === id && get().auth.id === id && syncRuntime.pendingVaultRetry
+                    clearVaultSyncRuntime()
+                    if (pendingSameAccount) {
+                        syncRuntime.pendingRetry = true
+                        syncRuntime.pendingVaultRetry = true
+                    }
                 }
                 // A newer pull or session transition invalidates this continuation.
                 const pullToken = recovery?.ownership.seq ?? ++syncRuntime.pullSeq
@@ -695,7 +708,7 @@ export const useSyncStore = create<SyncState>()(
                             addons: d.addons || { version: '1.0', savedAddons: [] },
                             profiles: Array.isArray(d.profiles) ? d.profiles : [],
                             failover: d.failover || [],
-                            vault: Array.isArray(d.vault) ? d.vault : [],
+                            vault: d.vault,
                             vaultTombstones: Array.isArray(d.vaultTombstones) ? d.vaultTombstones : [],
                             notes: Array.isArray(d.notes) ? d.notes : [],
                             notesTrash: Array.isArray(d.notesTrash) ? d.notesTrash : [],
@@ -993,10 +1006,10 @@ export const useSyncStore = create<SyncState>()(
                         await useNotesStore.getState().importTrash(secondary.notesTrash, ownership)
                     }
                     fence()
-                    if (Array.isArray(secondary.vault) || Array.isArray(secondary.vaultTombstones)) {
+                    if (Array.isArray(secondary.vault)) {
                         const { useVaultStore } = await import('./vaultStore')
                         const pulledVault = (secondary.vault || []) as import('@/types/vault').VaultKey[]
-                        const pulledVaultTombstones = (secondary.vaultTombstones || []) as import('./vaultStore').VaultTombstone[]
+                        const pulledVaultTombstones = (Array.isArray(secondary.vaultTombstones) ? secondary.vaultTombstones : []) as import('./vaultStore').VaultTombstone[]
                         syncRuntime.vaultImportAccount = id
                         syncRuntime.vaultImportWorkspace = ownership.workspace
                         syncRuntime.vaultImportReady = false
@@ -1008,6 +1021,8 @@ export const useSyncStore = create<SyncState>()(
                         await useVaultStore.getState().importVault(pulledVault, pulledVaultTombstones, ownership)
                         fence()
                         syncRuntime.vaultImportReady = true
+                    } else {
+                        pullIncomplete = 'Cloud vault is missing or malformed; a complete pull is required.'
                     }
                     fence()
 
@@ -1274,11 +1289,7 @@ export const useSyncStore = create<SyncState>()(
 
                 syncRuntime.lastPushedHash = null
                 syncRuntime.lastPulledNotes = null
-                syncRuntime.vaultImportAccount = null
-                syncRuntime.vaultImportWorkspace = null
-                syncRuntime.vaultImportReady = false
-                syncRuntime.vaultCloudKnownEmpty = false
-                syncRuntime.pendingRetry = false
+                clearVaultSyncRuntime()
                 syncRuntime.serverCanonicalAddonsV2 = null
                 resetAccountsHydration()
                 // Invalidate in-flight work before resetting session state.
@@ -1382,6 +1393,8 @@ export const useSyncStore = create<SyncState>()(
                     && vaultIdentityMatches
                     && (syncRuntime.vaultImportReady || syncRuntime.vaultCloudKnownEmpty)
                 if (!vaultReady) {
+                    syncRuntime.pendingRetry = true
+                    syncRuntime.pendingVaultRetry = true
                     const reason = vaultState.error
                         ? 'Sync paused: vault could not be unlocked, sign in again'
                         : vaultState.isLocked
@@ -1688,6 +1701,7 @@ export const useSyncStore = create<SyncState>()(
                         emptiedHubs,
                     })
                     const sendPush = async (pushBody: string): Promise<Record<string, unknown> | null> => {
+                        if (!pushCurrent()) return null
                         // Debounce sizing input: the wire size this push actually uploads.
                         syncRuntime.lastPushedEnvelopeBytes = pushBody.length
                         const res = await resilientFetch(`${apiPath}/sync/${auth.id}`, {
@@ -1850,6 +1864,7 @@ export const useSyncStore = create<SyncState>()(
                     })
                     trace('sync', 'push.success', { accountId: auth.id, isAuto, bytes: new TextEncoder().encode(stringifiedState).length, compressed: isCompressed, timing: Date.now() - pushStart })
                     syncRuntime.pendingRetry = false
+                    syncRuntime.pendingVaultRetry = false
                     resetRepublishAttempts()
                     // Confirmed delivery retires any pending-push marker for this workspace.
                     noteConfirmedPush(getActiveWorkspaceId())
@@ -1991,6 +2006,8 @@ export const useSyncStore = create<SyncState>()(
                     applicationStarted = true
                     fence()
                     set({ isInitialSyncCompleted: false, lastSyncedCloudEtag: null })
+                    syncRuntime.vaultImportReady = false
+                    syncRuntime.vaultCloudKnownEmpty = false
                     syncRuntime.hydration = { seq: mirrorToken, id: auth.id, status: 'pending', kind: 'mirror' }
 
                     // Restore deferred avatar and watch blobs as part of the mirror.
@@ -2099,13 +2116,20 @@ export const useSyncStore = create<SyncState>()(
                         syncRuntime.lastPulledNotes = data.notes as import('./notesStore').Note[]
                         set({ lastSyncedNotesCount: data.notes.length })
                     }
-                    if (Array.isArray(data.vault) || Array.isArray(data.vaultTombstones)) {
+                    if (Array.isArray(data.vault)) {
+                        const tombstones = (Array.isArray(data.vaultTombstones) ? data.vaultTombstones : []) as import('./vaultStore').VaultTombstone[]
                         fence()
                         await useVaultStore.getState().initialize(ownership)
-                        // Fence marker publication after initialization.
                         fence()
-                        syncRuntime.lastPulledVaultTombstones = (data.vaultTombstones || []) as import('./vaultStore').VaultTombstone[]
-                        await useVaultStore.getState().importVault((data.vault || []) as import('@/types/vault').VaultKey[], (data.vaultTombstones || []) as import('./vaultStore').VaultTombstone[], ownership)
+                        syncRuntime.lastPulledVaultTombstones = tombstones
+                        await useVaultStore.getState().importVault(data.vault as import('@/types/vault').VaultKey[], tombstones, ownership)
+                        fence()
+                        syncRuntime.vaultImportAccount = auth.id
+                        syncRuntime.vaultImportWorkspace = ownership.workspace
+                        syncRuntime.vaultCloudKnownEmpty = data.vault.length === 0 && tombstones.length === 0
+                        syncRuntime.vaultImportReady = true
+                    } else {
+                        mirrorIncomplete.push('cloud vault')
                     }
                     fence()
                     if (Array.isArray(secondary.watchEvents)) {
@@ -2150,6 +2174,8 @@ export const useSyncStore = create<SyncState>()(
                     // Incomplete mirrors keep pushes disabled and require a full refresh.
                     const recordOurs = syncRuntime.hydration?.seq === mirrorToken
                     if (mirrorIncomplete.length > 0) {
+                        syncRuntime.vaultImportReady = false
+                        syncRuntime.vaultCloudKnownEmpty = false
                         if (recordOurs) syncRuntime.hydration = { seq: mirrorToken, id: auth.id, status: 'failed', kind: 'mirror' }
                         get().addLogEntry({
                             type: 'force-mirror',
@@ -2220,10 +2246,7 @@ export const useSyncStore = create<SyncState>()(
 
             reset: () => {
                 resetAccountsHydration()
-                syncRuntime.vaultImportAccount = null
-                syncRuntime.vaultImportWorkspace = null
-                syncRuntime.vaultImportReady = false
-                syncRuntime.vaultCloudKnownEmpty = false
+                clearVaultSyncRuntime()
                 syncRuntime.pullSeq++
                 syncRuntime.adoptedSeq = null
                 syncRuntime.hydration = null
@@ -2286,6 +2309,34 @@ export const useSyncStore = create<SyncState>()(
         }
     )
 )
+
+// Retry a rejected push once both the session and its vault are ready.
+let vaultRetryScheduled = false
+function retryPendingVaultPush() {
+    if (!syncRuntime.pendingVaultRetry || vaultRetryScheduled) return
+    const sync = useSyncStore.getState()
+    const vault = useVaultStore.getState()
+    if (!sync.auth.isAuthenticated || sync.isSyncing || !sync.isInitialSyncCompleted
+        || !useAuthStore.getState().encryptionKey || vault.isLocked || vault.loading || vault.error
+        || !syncRuntime.vaultImportReady || syncRuntime.vaultImportAccount !== sync.auth.id
+        || syncRuntime.vaultImportWorkspace !== getActiveWorkspaceId()) return
+    vaultRetryScheduled = true
+    setTimeout(() => {
+        vaultRetryScheduled = false
+        const current = useSyncStore.getState()
+        const currentVault = useVaultStore.getState()
+        if (!syncRuntime.pendingVaultRetry || current.isSyncing || !current.isInitialSyncCompleted
+            || !current.auth.isAuthenticated || current.auth.id !== sync.auth.id
+            || !useAuthStore.getState().encryptionKey || currentVault.isLocked || currentVault.loading || currentVault.error
+            || !syncRuntime.vaultImportReady || syncRuntime.vaultImportAccount !== current.auth.id
+            || syncRuntime.vaultImportWorkspace !== getActiveWorkspaceId()) return
+        syncRuntime.pendingVaultRetry = false
+        syncRuntime.pendingRetry = false
+        current.syncToRemote(true).catch(() => {})
+    }, 0)
+}
+useVaultStore.subscribe(retryPendingVaultPush)
+useSyncStore.subscribe(retryPendingVaultPush)
 
 if (typeof window !== 'undefined') {
     // Migration: stop storing the raw password (pre-remembered-device sessions).

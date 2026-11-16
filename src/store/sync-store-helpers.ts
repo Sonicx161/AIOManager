@@ -25,6 +25,7 @@ export const syncRuntime = {
     // Preserved on push when this device has no avatar; mirrors the pull's upgrade-only identity rule.
     lastPulledCloudAvatar: null as string | null,
     pendingRetry: false,
+    pendingVaultRetry: false,
     syncDebounceTimer: null as ReturnType<typeof setTimeout> | null,
     // When the current deferral window opened (first unsynced change), for the max-wait cap.
     syncDebounceFirstAt: null as number | null,
