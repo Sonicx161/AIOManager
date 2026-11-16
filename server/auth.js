@@ -37,7 +37,11 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
     }
     try {
         const row = await db.get(
-            'SELECT id, account_uuid, token_hash, revoked, expires_at, credential_epoch FROM device_credentials WHERE account_uuid = $1 AND device_id = $2',
+            `SELECT d.id, d.account_uuid, d.token_hash, d.revoked, d.expires_at, d.credential_epoch,
+                    a.key AS account_key, a.credential_epoch AS account_epoch
+             FROM device_credentials d
+             LEFT JOIN kv_store a ON a.key = d.account_uuid
+             WHERE d.account_uuid = $1 AND d.device_id = $2`,
             [String(syncUser), String(deviceId)]
         )
         if (!row) return { ok: false, reason: 'unknown' }
@@ -48,9 +52,8 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
         if (!verified) return { ok: false, reason: 'unknown' }
         if (Number(row.revoked) === 1) return { ok: false, reason: 'revoked' }
         if (Number(row.expires_at) <= now) return { ok: false, reason: 'expired' }
-        const account = await db.get(`SELECT credential_epoch FROM ${kvHeadSource()} WHERE key = $1`, [String(syncUser)])
-        if (!account) return { ok: false, reason: 'unknown' }
-        if (Number(account.credential_epoch) !== Number(row.credential_epoch)) return { ok: false, reason: 'generation' }
+        if (row.account_key == null) return { ok: false, reason: 'unknown' }
+        if (Number(row.account_epoch) !== Number(row.credential_epoch)) return { ok: false, reason: 'generation' }
         return { ok: true, accountUuid: row.account_uuid, row }
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err

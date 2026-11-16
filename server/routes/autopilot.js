@@ -1329,19 +1329,24 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
 
-        const row = await db.get('SELECT COUNT(*) as count FROM autopilot_rules WHERE owner_sync_user = $1 AND is_active = 1', [authUser])
+        // Keep SQLite's covering summary index: fetching is_active from the table for
+        // every rule can be more expensive than its indexed count query.
+        const row = db.type === 'sqlite'
+            ? await db.get('SELECT COUNT(*) as count FROM autopilot_rules WHERE owner_sync_user = $1 AND is_active = 1', [authUser])
+            : null
         // Read-only version of the owner's rule state (count + newest rule/stats update). Both
         // updated_at columns are bumped by every engine and user write, so an unchanged version
         // lets the client skip the states pull. No writes of any kind here.
         const versionRows = await db.query(
-            `SELECT r.id, r.updated_at AS rules_updated, s.updated_at AS stats_updated
+            `SELECT r.id, r.updated_at AS rules_updated, s.updated_at AS stats_updated${db.type === 'sqlite' ? '' : ', r.is_active'}
              FROM autopilot_rules r
              LEFT JOIN autopilot_rule_stats s ON s.rule_id = r.id
              WHERE r.owner_sync_user = $1`,
             [authUser]
         )
-        let rulesUpdated = 0, statsUpdated = 0, memoryRevision = 0
+        let rulesUpdated = 0, statsUpdated = 0, memoryRevision = 0, activeRuleCount = 0
         for (const v of versionRows || []) {
+            if (Number(v.is_active) === 1) activeRuleCount++
             rulesUpdated = Math.max(rulesUpdated, Number(v.rules_updated) || 0)
             statsUpdated = Math.max(statsUpdated, Number(v.stats_updated) || 0)
             memoryRevision = Math.max(memoryRevision, getRuleRevision?.(v.id) || 0)
@@ -1354,7 +1359,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         const watchdog = serverState.autopilotWatchdog
         const endedAt = serverState.autopilotLastCycleEndedAt
         return {
-            lastWorkerRun: serverState.lastWorkerRun, activeRuleCount: row?.count || 0, lastCycle: serverState.autopilotLastCycleStats, safeMode,
+            lastWorkerRun: serverState.lastWorkerRun, activeRuleCount: row ? Number(row.count) : activeRuleCount, lastCycle: serverState.autopilotLastCycleStats, safeMode,
             lastCycleAgeMs: endedAt ? Math.max(0, Date.now() - endedAt) : null,
             watchdog: watchdog ? { trips: watchdog.trips, lastTripAt: watchdog.lastTripAt } : null,
             stateVersion,
