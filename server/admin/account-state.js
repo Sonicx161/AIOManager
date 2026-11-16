@@ -31,6 +31,14 @@ export class StateUnavailableError extends Error {
     }
 }
 
+export class AuthUnavailableError extends StateUnavailableError {
+    constructor(cause) {
+        super()
+        this.name = 'AuthUnavailableError'
+        this.cause = cause
+    }
+}
+
 export class ReadOnlyReplicaError extends Error {
     constructor() {
         super('read_only_replica')
@@ -41,6 +49,11 @@ export class ReadOnlyReplicaError extends Error {
 
 // Fixed reply bodies, identical on every surface; no admin free text ever rides them.
 export function applyAccountStateErrorMapping(error, reply) {
+    if (error instanceof AuthUnavailableError) {
+        reply.header('Retry-After', '30')
+        reply.status(503)
+        return { error: 'authentication_unavailable', message: 'Authentication is unavailable right now. Try again shortly.' }
+    }
     if (error instanceof AuthStateError) {
         if (error.state === 'deleted') {
             reply.status(403)

@@ -7,7 +7,7 @@ import { verifySyncPassword, verifyDeviceToken, verifySessionKey, upgradeLegacyP
 import { trace } from './utils/trace.js'
 import { isAdminPath } from './admin/paths.js'
 import { isReadOnlyReplica } from './config.js'
-import { assertAccountActive, AuthStateError, StateUnavailableError } from './admin/account-state.js'
+import { assertAccountActive, AuthStateError, StateUnavailableError, AuthUnavailableError } from './admin/account-state.js'
 import { kvHeadSource } from './lib/kv-head.js'
 import { isSessionDevice } from './lib/session-key.js'
 
@@ -54,9 +54,8 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
         return { ok: true, accountUuid: row.account_uuid, row }
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
-        // surface DB failures instead of collapsing them into the generic 'unknown' reason
         trace('auth', 'deviceCredential.error', { user: syncUser, deviceId, error: err?.message })
-        return { ok: false, reason: 'unknown' }
+        throw new AuthUnavailableError(err)
     }
 }
 
@@ -152,7 +151,7 @@ export async function verifyAuth(request) {
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
         trace('auth', 'verifyAuth.reject', { user: syncUser, reason: 'error', error: err?.message })
-        return null
+        throw new AuthUnavailableError(err)
     }
 }
 
@@ -199,8 +198,7 @@ export async function requireProxyAuth(request, reply) {
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err
         trace('auth', 'proxyAuth.reject', { user: syncUser, reason: 'error', error: err?.message })
-        reply.status(401)
-        return { error: 'Unauthorized' }
+        throw new AuthUnavailableError(err)
     }
     return null
 }

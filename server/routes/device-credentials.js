@@ -3,7 +3,7 @@ import db from '../db.js'
 import { verifyAuth, authenticateDeviceCredential, timingSafeEqual } from '../auth.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
-import { assertWritablePrimary } from '../admin/account-state.js'
+import { assertWritablePrimary, AuthUnavailableError, applyAccountStateErrorMapping } from '../admin/account-state.js'
 import { invalidateCachedAuth, invalidateCachedAuthPrefix, getCachedAuthBound, hashAuthPassword } from '../state.js'
 import { hashSyncPassword, hashSessionKey, verifySyncPassword } from '../lib/sync-password.js'
 import { isReadOnlyReplica } from '../config.js'
@@ -111,7 +111,8 @@ export function registerDeviceCredentialRoutes(fastify) {
             // Re-enrollment replaced the credential: any cached token for this device is dead.
             invalidateCachedAuth('device:' + authUser + ':' + deviceId)
             return { success: true, device: publicDeviceRecord(row) }
-        } catch {
+        } catch (err) {
+            if (err instanceof AuthUnavailableError) return applyAccountStateErrorMapping(err, reply)
             reply.status(500)
             return { error: 'Enrollment failed' }
         }
