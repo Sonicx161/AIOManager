@@ -5,11 +5,13 @@ import { encrypt, decrypt } from '@/lib/crypto'
 import { useAuthStore } from '@/store/authStore'
 import localforage from 'localforage'
 import { captureSyncOwnership, type SyncOwnership } from './sync-store-helpers'
+import { subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
 
 const STORAGE_KEY = 'aioman:key-vault'
 const TOMBSTONE_KEY = `${STORAGE_KEY}:tombstones`
 
 let _vaultQueue: Promise<void> = Promise.resolve()
+let _vaultRuntimeGeneration = 0
 // Generation of the initialize call that owns the store's loading flag.
 let _initSeq = 0
 
@@ -26,6 +28,7 @@ interface VaultStore extends VaultState {
     updateKey: (id: string, key: Partial<VaultKey>) => Promise<void>
     moveKey: (id: string, direction: 'up' | 'down') => Promise<void>
     clearVault: () => Promise<void>
+    resetRuntime: () => void
     importVault: (keys: VaultKey[], tombstones?: VaultTombstone[], ownership?: SyncOwnership) => Promise<void>
     saveFailed: boolean
     resetSaveFailed: () => void
@@ -70,6 +73,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     initialize: async (ownership?: SyncOwnership) => {
         // Capture ownership before the first read, including non-hydration callers.
         const own = ownership ?? captureSyncOwnership()
+        const generation = _vaultRuntimeGeneration
         const { encryptionKey } = useAuthStore.getState()
         if (!encryptionKey) {
             own.assert()
@@ -87,7 +91,7 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             const initSeq = ++_initSeq
             set({ loading: true, error: null })
             // Publish only while ownership-current and still the latest initialize.
-            const mine = () => own.current() && _initSeq === initSeq
+            const mine = () => own.current() && generation === _vaultRuntimeGeneration && _initSeq === initSeq
             try {
                 const tombstones = normalizeTombstones(await localforage.getItem<VaultTombstone[]>(TOMBSTONE_KEY))
                 own.assert()
@@ -106,13 +110,13 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             } catch (error) {
                 if (import.meta.env.DEV) console.error('Failed to initialize vault:', error)
 
-                if (mine()) set({ error: 'Failed to decrypt vault. Your keys might be corrupted or the password changed.' })
+                if (mine()) set({ isLocked: true, error: 'Vault could not be unlocked. Sign in again to restore syncing.' })
             } finally {
                 // The latest initialize owns the store: clear loading, or on ownership
                 // loss clear keys too; keeping isLocked true makes the next push
                 // re-initialize instead of exporting an empty vault.
                 if (_initSeq === initSeq) {
-                    if (own.current()) set({ loading: false })
+                    if (own.current() && generation === _vaultRuntimeGeneration) set({ loading: false })
                     else set({ keys: [], isLocked: true, error: null, loading: false })
                 }
             }
@@ -122,8 +126,10 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
     },
 
     addKey: (newKey) => {
+        const generation = _vaultRuntimeGeneration
         // The queue survives a failed op, but the caller still gets the real outcome.
         const op = _vaultQueue.then(async () => {
+            if (generation !== _vaultRuntimeGeneration) return
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -136,23 +142,27 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             const updatedKeys = [...get().keys, key]
             try {
                 const encryptedData = await encrypt(JSON.stringify(updatedKeys), encryptionKey)
+                if (generation !== _vaultRuntimeGeneration) return
                 await localforage.setItem(STORAGE_KEY, encryptedData)
             } catch (err) {
                 if (import.meta.env.DEV) console.error('[VaultStore] Failed to persist addKey:', err)
                 throw new Error('Failed to save key to vault. Please try again.')
             }
 
+            if (generation !== _vaultRuntimeGeneration) return
             set({ keys: updatedKeys, tombstones: get().tombstones.filter(t => t.id !== key.id), saveFailed: false })
             triggerSync()
         })
         _vaultQueue = op.catch(() => {
-            set({ saveFailed: true })
+            if (generation === _vaultRuntimeGeneration) set({ saveFailed: true })
         })
         return op
     },
 
     removeKey: (id) => {
+        const generation = _vaultRuntimeGeneration
         _vaultQueue = _vaultQueue.then(async () => {
+            if (generation !== _vaultRuntimeGeneration) return
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -160,23 +170,28 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             const tombstones = mergeTombstones(get().tombstones, [{ id, deletedAt: Date.now() }])
             try {
                 const encryptedData = await encrypt(JSON.stringify(updatedKeys), encryptionKey)
+                if (generation !== _vaultRuntimeGeneration) return
                 await localforage.setItem(STORAGE_KEY, encryptedData)
+                if (generation !== _vaultRuntimeGeneration) return
                 await persistTombstones(tombstones)
             } catch (err) {
                 if (import.meta.env.DEV) console.error('[VaultStore] Failed to persist removeKey:', err)
                 throw new Error('Failed to remove key from vault. Please try again.')
             }
 
+            if (generation !== _vaultRuntimeGeneration) return
             set({ keys: updatedKeys, tombstones, saveFailed: false })
             triggerSync()
         }).catch(() => {
-            set({ saveFailed: true })
+            if (generation === _vaultRuntimeGeneration) set({ saveFailed: true })
         })
         return _vaultQueue
     },
 
     updateKey: (id, updates) => {
+        const generation = _vaultRuntimeGeneration
         const op = _vaultQueue.then(async () => {
+            if (generation !== _vaultRuntimeGeneration) return
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -185,23 +200,27 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
             )
             try {
                 const encryptedData = await encrypt(JSON.stringify(updatedKeys), encryptionKey)
+                if (generation !== _vaultRuntimeGeneration) return
                 await localforage.setItem(STORAGE_KEY, encryptedData)
             } catch (err) {
                 if (import.meta.env.DEV) console.error('[VaultStore] Failed to persist updateKey:', err)
                 throw new Error('Failed to update key in vault. Please try again.')
             }
 
+            if (generation !== _vaultRuntimeGeneration) return
             set({ keys: updatedKeys, saveFailed: false })
             triggerSync()
         })
         _vaultQueue = op.catch(() => {
-            set({ saveFailed: true })
+            if (generation === _vaultRuntimeGeneration) set({ saveFailed: true })
         })
         return op
     },
 
     moveKey: (id, direction) => {
+        const generation = _vaultRuntimeGeneration
         _vaultQueue = _vaultQueue.then(async () => {
+            if (generation !== _vaultRuntimeGeneration) return
             const { encryptionKey } = useAuthStore.getState()
             if (!encryptionKey) throw new Error('Session expired. Sign in again to continue.')
 
@@ -217,53 +236,66 @@ export const useVaultStore = create<VaultStore>((set, get) => ({
 
             try {
                 const encryptedData = await encrypt(JSON.stringify(keys), encryptionKey)
+                if (generation !== _vaultRuntimeGeneration) return
                 await localforage.setItem(STORAGE_KEY, encryptedData)
             } catch (err) {
                 if (import.meta.env.DEV) console.error('[VaultStore] Failed to persist moveKey:', err)
                 throw new Error('Failed to reorder keys in vault. Please try again.')
             }
 
+            if (generation !== _vaultRuntimeGeneration) return
             set({ keys, saveFailed: false })
             triggerSync()
         }).catch(() => {
-            set({ saveFailed: true })
+            if (generation === _vaultRuntimeGeneration) set({ saveFailed: true })
         })
         return _vaultQueue
     },
 
     clearVault: async () => {
+        const generation = _vaultRuntimeGeneration
         const tombstones = mergeTombstones(
             get().tombstones,
             get().keys.map(key => ({ id: key.id, deletedAt: Date.now() }))
         )
         try {
             await localforage.removeItem(STORAGE_KEY)
+            if (generation !== _vaultRuntimeGeneration) return
             await persistTombstones(tombstones)
         } catch (err) {
             if (import.meta.env.DEV) console.error('[VaultStore] Failed to clear vault:', err)
             throw new Error('Failed to clear vault. Please try again.')
         }
+        if (generation !== _vaultRuntimeGeneration) return
         const { encryptionKey } = useAuthStore.getState()
         set({ keys: [], tombstones, isLocked: !encryptionKey })
         triggerSync()
     },
 
+    resetRuntime: () => {
+        _vaultRuntimeGeneration += 1
+        set({ keys: [], tombstones: [], isLocked: true, loading: false, error: null, saveFailed: false })
+    },
+
     importVault: (keys, tombstones = [], ownership?: SyncOwnership) => {
         const own = ownership ?? captureSyncOwnership()
+        const generation = _vaultRuntimeGeneration
         // Runs on the same queue as the mutators so it merges against their latest state.
-        const op = _vaultQueue.then(() => importVaultInner(keys, tombstones, own))
+        const op = _vaultQueue.then(() => importVaultInner(keys, tombstones, own, generation))
         _vaultQueue = op.catch(() => { })
         return op
     }
 }))
 
-async function importVaultInner(keys: VaultKey[], tombstones: VaultTombstone[], own: SyncOwnership): Promise<void> {
+async function importVaultInner(keys: VaultKey[], tombstones: VaultTombstone[], own: SyncOwnership, generation: number): Promise<void> {
     if (import.meta.env.DEV) console.log('[VaultStore] Attempting to import vault keys. Count:', keys?.length)
     const { encryptionKey } = useAuthStore.getState()
     if (!encryptionKey) {
         if (import.meta.env.DEV) console.warn('[VaultStore] Cannot import vault while locked. Keys will be ignored.')
         return
     }
+
+    if (generation !== _vaultRuntimeGeneration) return
 
     if (!keys || !Array.isArray(keys)) {
         if (import.meta.env.DEV) console.warn('[VaultStore] Invalid keys format for import:', keys)
@@ -303,10 +335,13 @@ async function importVaultInner(keys: VaultKey[], tombstones: VaultTombstone[], 
     const mergedKeys = Array.from(mergedById.values())
     const encryptedData = await encrypt(JSON.stringify(mergedKeys), encryptionKey)
     // Fence key and tombstone writes separately, then fence state publication.
+    if (generation !== _vaultRuntimeGeneration) return
     own.assert()
     await localforage.setItem(STORAGE_KEY, encryptedData)
+    if (generation !== _vaultRuntimeGeneration) return
     own.assert()
     await persistTombstones(mergedTombstones, own)
+    if (generation !== _vaultRuntimeGeneration) return
     own.assert()
 
     useVaultStore.setState({ keys: mergedKeys, tombstones: mergedTombstones, isLocked: false })
@@ -321,8 +356,12 @@ useAuthStore.subscribe((state, prevState) => {
             })
         })
     } else if (!state.encryptionKey && prevState.encryptionKey) {
-        useVaultStore.setState({ keys: [], isLocked: true })
+        useVaultStore.getState().resetRuntime()
     }
+})
+
+subscribeWorkspaceChanges(() => {
+    useVaultStore.getState().resetRuntime()
 })
 
 if (useAuthStore.getState().encryptionKey) {
