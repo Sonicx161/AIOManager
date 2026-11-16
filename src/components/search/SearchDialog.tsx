@@ -226,8 +226,6 @@ export function SearchDialog({ open, onOpenChange, onResultClick }: SearchDialog
         return () => ac.abort()
     }, [selectedPerson])
 
-    useEffect(() => { setActiveCategory('all') }, [query])
-
     const handleResultClick = useCallback((result: SearchResult) => {
         onResultClick(result)
         onOpenChange(false)
@@ -288,14 +286,14 @@ export function SearchDialog({ open, onOpenChange, onResultClick }: SearchDialog
                         ref={inputRef}
                         type="text"
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
+                        onChange={(e) => { setQuery(e.target.value); setActiveCategory('all') }}
                         placeholder="Search movies, series, anime, people…"
                         className="min-w-0 flex-1 bg-transparent text-sm font-medium text-foreground placeholder:text-muted-foreground/50 focus:outline-none"
                     />
                     {query && (
                         <button data-theme-part="button"
                             type="button"
-                            onClick={() => setQuery('')}
+                            onClick={() => { setQuery(''); setActiveCategory('all') }}
                             className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
                         >
                             <X className="h-4 w-4" />

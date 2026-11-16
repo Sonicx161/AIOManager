@@ -675,6 +675,8 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
     // the keyboard navigates, so selection can never drift from the visual
     // grouping.
     const ordered = useMemo(() => groups.flatMap((g) => g.items), [groups])
+    if (selectedIndex !== 0 && selectedIndex >= ordered.length) setSelectedIndex(0)
+    const activeIndex = selectedIndex >= ordered.length ? 0 : selectedIndex
     const needsVirtualResults = indexActive && ordered.length > VIRTUAL_RESULTS_THRESHOLD
     useEffect(() => {
         if (!needsVirtualResults || VirtualCommandResults) return
@@ -696,22 +698,12 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
         return map
     }, [ordered])
 
-    useEffect(() => {
-        setSelectedIndex(0)
-    }, [query])
-
     // Keyboard navigation moves aria-activedescendant without DOM focus; preload the
     // highlighted row's destination chunk the same way a hover would.
     useEffect(() => {
-        const item = ordered[selectedIndex]
+        const item = ordered[activeIndex]
         if (item?.target) preloadRouteChunk(item.target)
-    }, [ordered, selectedIndex])
-
-    // Keep the selection inside the result list as it shrinks or empties.
-    // Never allow a negative index with zero results.
-    useEffect(() => {
-        setSelectedIndex((prev) => (prev >= ordered.length ? 0 : prev))
-    }, [ordered.length])
+    }, [ordered, activeIndex])
 
     useEffect(() => {
         if (!open || bulkActions.length > 0) return
@@ -746,17 +738,17 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
         if (e.key === 'ArrowDown') {
             e.preventDefault()
             if (ordered.length === 0) return
-            setSelectedIndex((prev) => Math.min(prev + 1, ordered.length - 1))
+            setSelectedIndex(Math.min(activeIndex + 1, ordered.length - 1))
         } else if (e.key === 'ArrowUp') {
             e.preventDefault()
             if (ordered.length === 0) return
-            setSelectedIndex((prev) => Math.max(prev - 1, 0))
+            setSelectedIndex(Math.max(activeIndex - 1, 0))
         } else if (e.key === 'Enter') {
             if (needsVirtualResults && !VirtualCommandResults) {
                 e.preventDefault()
                 return
             }
-            const item = ordered[selectedIndex]
+            const item = ordered[activeIndex]
             if (item) {
                 e.preventDefault()
                 item.action()
@@ -774,15 +766,15 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
 
     useEffect(() => {
         if (ordered.length > VIRTUAL_RESULTS_THRESHOLD) return
-        const el = scrollRef.current?.querySelector(`[data-index="${selectedIndex}"]`)
+        const el = scrollRef.current?.querySelector(`[data-index="${activeIndex}"]`)
         if (el) {
             el.scrollIntoView({ block: 'nearest' })
         }
-    }, [selectedIndex, ordered.length])
+    }, [activeIndex, ordered.length])
 
     const renderCommandItem = (item: CommandItem) => {
         const flatIndex = indexById.get(item.id) ?? -1
-        const isSelected = flatIndex === selectedIndex
+        const isSelected = flatIndex === activeIndex
 
         return (
             <button data-theme-part="nav-item" data-state={isSelected ? "active" : "inactive"}
@@ -862,11 +854,11 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
                         aria-expanded
                         aria-autocomplete="list"
                         aria-controls={filtered.length > 0 ? 'command-palette-listbox' : undefined}
-                        aria-activedescendant={ordered[selectedIndex]
-                            ? `command-palette-option-${ordered[selectedIndex].id}`
+                        aria-activedescendant={ordered[activeIndex]
+                            ? `command-palette-option-${ordered[activeIndex].id}`
                             : undefined}
                         value={query}
-                        onChange={(e) => setQuery(e.target.value)}
+                        onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0) }}
                         placeholder={subList === 'accounts' ? 'Choose an account...' : subList === 'addons' ? 'Choose a saved addon to deploy...' : 'Search pages, accounts, addons, actions...'}
                         className="h-6 w-full min-w-0 flex-1 border-0 bg-transparent p-0 text-base font-medium text-foreground outline-none placeholder:text-muted-foreground/55 focus:ring-0 sm:text-sm"
                     />
@@ -888,7 +880,7 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
                         ) : (
                             <div id="command-palette-listbox" role="listbox" aria-label="Command results">
                         {ordered.length > VIRTUAL_RESULTS_THRESHOLD ? (VirtualCommandResults
-                            ? <VirtualCommandResults groups={groups} selectedIndex={selectedIndex} query={query} scrollRoot={scrollRoot} renderItem={renderCommandItem} />
+                            ? <VirtualCommandResults groups={groups} selectedIndex={activeIndex} query={query} scrollRoot={scrollRoot} renderItem={renderCommandItem} />
                             : <div className="px-6 py-4 text-sm text-muted-foreground" role="status">
                                 {resultsLoadFailed ? <>Could not load search results. <button type="button" className="underline" onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation() }} onClick={() => setResultsLoadAttempt(attempt => attempt + 1)}>Retry</button></> : 'Loading search results...'}
                             </div>) : groups.map(({ category, items }) => (

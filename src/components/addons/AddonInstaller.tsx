@@ -33,17 +33,20 @@ export function AddonInstaller() {
   const [debouncedUrl, setDebouncedUrl] = useState('')
   const { isLight } = useTheme()
 
+  const trimmedUrl = addonUrl.trim()
+  const previewable = isOpen && trimmedUrl.startsWith('http')
+
   useEffect(() => {
-    const trimmed = addonUrl.trim()
-    if (!isOpen || !trimmed || !trimmed.startsWith('http')) {
-      setDebouncedUrl('')
-      return
-    }
+    if (!previewable) setDebouncedUrl('')
+  }, [previewable])
+
+  useEffect(() => {
+    if (!previewable) return
     const timer = setTimeout(() => {
-      setDebouncedUrl(trimmed.replace(/^stremio:\/\//, 'https://'))
+      setDebouncedUrl(trimmedUrl.replace(/^stremio:\/\//, 'https://'))
     }, 500)
     return () => clearTimeout(timer)
-  }, [addonUrl, isOpen])
+  }, [previewable, trimmedUrl])
 
   const { data: previewDescriptor, isFetching: previewFetching } = useAddonManifest(isOpen ? debouncedUrl : null)
   const previewManifest: AddonManifest | null = debouncedUrl ? previewDescriptor?.manifest ?? null : null

@@ -256,7 +256,7 @@ export function SettingsSearch({ onNavigate, onQueryChange, className, popoverCl
     const [installable, setInstallable] = useState(canInstall())
     const [query, setQuery] = useState('')
     const [open, setOpen] = useState(false)
-    const [activeIndex, setActiveIndex] = useState(0)
+    const [rawActiveIndex, setActiveIndex] = useState(0)
     const inputRef = useRef<HTMLInputElement>(null)
     const listRef = useRef<HTMLUListElement>(null)
 
@@ -264,10 +264,7 @@ export function SettingsSearch({ onNavigate, onQueryChange, className, popoverCl
     const results = useMemo(() => searchSettings(query, SETTINGS_INDEX.length)
         .filter(match => installable || match.entry.id !== 'install-app').slice(0, 8), [query, installable])
     const showResults = open && normalize(query).length > 0
-
-    useEffect(() => {
-        setActiveIndex(0)
-    }, [query])
+    const activeIndex = rawActiveIndex >= results.length ? 0 : rawActiveIndex
 
     useEffect(() => {
         if (!showResults) return
@@ -322,6 +319,7 @@ export function SettingsSearch({ onNavigate, onQueryChange, className, popoverCl
                     setQuery(e.target.value)
                     onQueryChange?.(e.target.value)
                     setOpen(true)
+                    setActiveIndex(0)
                 }}
                 onFocus={() => setOpen(true)}
                 onBlur={() => setOpen(false)}
