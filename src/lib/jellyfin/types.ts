@@ -56,6 +56,12 @@ export interface JellyfinSystemInfo {
     ProductName?: string
     Id?: string
     OperatingSystem?: string
+    /** AIOMetadata exposes its addon release as aiostreams.version.tag. */
+    aiostreams?: {
+        version?: {
+            tag?: string
+        }
+    }
     [key: string]: unknown
 }
 
@@ -72,6 +78,8 @@ export interface JellyfinServerDetails {
     serverName?: string
     version?: string
     packageName?: string
+    /** Product release reported by a facade-specific version field, when verified. */
+    addonVersion?: string
 }
 
 /** Per-item user data relevant to watched/resume state. */

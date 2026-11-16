@@ -118,6 +118,11 @@ function optionalString(value: unknown): string | undefined {
     return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+function optionalAddonVersion(value: unknown): string | undefined {
+    if (!isRecord(value) || !isRecord(value.version)) return undefined
+    return optionalString(value.version.tag)
+}
+
 function expectRecord(value: unknown, label: string): Record<string, unknown> {
     if (!isRecord(value)) throw new JellyfinError('invalid-response', `${label} returned an unexpected shape`)
     return value
@@ -589,6 +594,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                     serverId: optionalString(pub.Id),
                     serverName: optionalString(pub.ServerName),
                     version: optionalString(pub.Version),
+                    addonVersion: product === 'aiometadata' ? optionalAddonVersion(pub.aiostreams) : undefined,
                 }
             }
             throw err
@@ -601,6 +607,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             serverName: optionalString(info.ServerName),
             version: optionalString(info.Version),
             packageName: optionalString(info.PackageName),
+            addonVersion: product === 'aiometadata' ? optionalAddonVersion(info.aiostreams) : undefined,
         }
     }
 

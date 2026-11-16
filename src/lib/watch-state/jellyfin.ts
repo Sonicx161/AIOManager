@@ -87,22 +87,41 @@ async function reverifyJellyfinScope(binding: JellyfinBinding, signal: AbortSign
     const details = await binding.client.inspect(binding.secret.accessToken, user, signal)
     await verifySessionUser(binding.client, binding.secret, details.product, signal)
     if (details.product !== binding.details.product) throw new Error('The remote server product changed. Preview again.')
+    if (details.product === 'aiometadata' && details.addonVersion !== binding.details.addonVersion) {
+        throw new Error('The AIOMetadata version changed. Preview again.')
+    }
     if ((details.serverId ?? undefined) !== (binding.details.serverId ?? undefined)) throw new Error('The remote server changed. Preview again.')
     if (await jellyfinScope(binding.secret.baseUrl, binding.secret.userId, details) !== binding.scope) {
         throw new Error('The remote server or user changed. Preview again.')
     }
 }
 
-function capabilitiesForProduct(product: JellyfinProduct): WatchStateDestination['capabilities'] {
-    if (product === 'jellyfin') {
+function aiometadataDatesSupported(version: string | undefined): boolean {
+    if (version === undefined) return false
+    const match = /^v?(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim())
+    if (match === null) return false
+    const major = Number(match[1])
+    const minor = Number(match[2])
+    const patch = Number(match[3])
+    return Number.isSafeInteger(major) && Number.isSafeInteger(minor) && Number.isSafeInteger(patch)
+        && (major > 4 || (major === 4 && (minor > 0 || (minor === 0 && patch >= 0))))
+}
+
+function capabilitiesForProduct(details: JellyfinServerDetails): WatchStateDestination['capabilities'] {
+    if (details.product === 'jellyfin') {
         return { watched: true, resume: true, dates: true, counts: true, combined: true, ratings: true, favorites: true, notes: [] }
     }
     const notes: string[] = [EPISODE_LIMIT_NOTE]
-    if (product === 'aiostreams') {
+    if (details.product === 'aiostreams') {
         notes.push('AIOStreams keeps exact watch dates only for titles with a known runtime, and cannot store play counts.')
         notes.push('Watched marks may be forwarded to the watch-state sinks this AIOStreams server reports to.')
         return { watched: true, resume: true, dates: true, counts: false, combined: false, ratings: true, favorites: true, notes }
-    } else if (product === 'aiometadata') {
+    } else if (details.product === 'aiometadata' && aiometadataDatesSupported(details.addonVersion)) {
+        notes.push('AIOMetadata v4+ keeps original watch dates but cannot store play counts.')
+        notes.push('Watched marks may be forwarded to the trackers this AIOMetadata profile reports to.')
+        notes.push('Favorites can only be stored for movies and series, not for episodes.')
+        return { watched: true, resume: true, dates: true, counts: false, combined: false, ratings: true, favorites: true, notes }
+    } else if (details.product === 'aiometadata') {
         notes.push('AIOMetadata keeps watched flags and resume points but ignores original watch dates and cannot store play counts.')
         notes.push('Watched marks may be forwarded to the trackers this AIOMetadata profile reports to.')
         notes.push('Favorites can only be stored for movies and series, not for episodes.')
@@ -240,7 +259,7 @@ async function buildJellyfinLibraryIndex(binding: JellyfinBinding, signal: Abort
 export async function createJellyfinWatchDestination(connection: Connection, open: (value: string) => Promise<string>, signal: AbortSignal, assertCurrent: () => void = () => {}): Promise<WatchStateDestination> {
     const binding = await verifyJellyfinBinding(connection, open, signal)
     signal.throwIfAborted()
-    const capabilities = capabilitiesForProduct(binding.details.product)
+    const capabilities = capabilitiesForProduct(binding.details)
     const useNativeInventory = binding.details.product === 'jellyfin' || binding.details.product === 'compatible'
     const facadeGate = useNativeInventory ? null : createWatchStateRequestGate()
     const client = facadeGate === null ? binding.client : {
