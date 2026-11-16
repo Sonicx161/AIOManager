@@ -7,7 +7,6 @@ import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth,
 import { timingSafeEqual } from '../auth.js'
 import { hashApiKey } from '../api-keys.js'
 import { isSessionDevice } from '../lib/session-key.js'
-import { writeEncryptedIfChanged } from '../db-guards.js'
 import { invalidateCanonicalAddons } from './hydra.js'
 import { invalidateCanonicalForOwner } from '../hydra/canonical-cache.js'
 import { invalidateUserKeys } from '../lib/user-key-cache.js'
@@ -38,9 +37,26 @@ function buildMultiRowPlaceholders(numRows, numCols) {
 const KV_HISTORY_KEEP = 3
 
 async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
-    const existingKeyAccounts = new Set(
-        (await tx.query('SELECT DISTINCT account_id FROM account_api_keys WHERE sync_user = $1', [id])).map(r => r.account_id),
+    const existingRows = await tx.query(
+        'SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1',
+        [id],
     )
+    const existingKeyAccounts = new Set(existingRows.map(r => r.account_id))
+    const apiKeyRows = []
+    const seenHashes = new Map()
+    for (const [accountId, apiKey] of Object.entries(apiKeys)) {
+        if (typeof apiKey !== 'string' || !apiKey) continue
+        const h = hashApiKey(apiKey)
+        const existing = seenHashes.get(h)
+        if (existing !== undefined) apiKeyRows[existing] = null
+        seenHashes.set(h, apiKeyRows.length)
+        apiKeyRows.push([accountId, id, h, Date.now()])
+    }
+    const dedupedRows = apiKeyRows.filter(Boolean)
+    const existingPairs = existingRows.map(row => `${row.account_id}\u0000${row.api_key_hash}`).sort()
+    const incomingPairs = dedupedRows.map(row => `${row[0]}\u0000${row[2]}`).sort()
+    if (existingPairs.length === incomingPairs.length && existingPairs.every((pair, i) => pair === incomingPairs[i])) return
+
     if (pushedAccounts) {
         const presentIds = new Set(pushedAccounts.map(a => a && a.id).filter(Boolean))
         const retained = [...existingKeyAccounts].filter(accId => presentIds.has(accId) && !(accId in apiKeys))
@@ -56,17 +72,6 @@ async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
     } else {
         await tx.run('DELETE FROM account_api_keys WHERE sync_user = $1', [id])
     }
-    const apiKeyRows = []
-    const seenHashes = new Map()
-    for (const [accountId, apiKey] of Object.entries(apiKeys)) {
-        if (typeof apiKey !== 'string' || !apiKey) continue
-        const h = hashApiKey(apiKey)
-        const existing = seenHashes.get(h)
-        if (existing !== undefined) apiKeyRows[existing] = null
-        seenHashes.set(h, apiKeyRows.length)
-        apiKeyRows.push([accountId, id, h, Date.now()])
-    }
-    const dedupedRows = apiKeyRows.filter(Boolean)
     const API_KEY_CHUNK = 100
     for (let i = 0; i < dedupedRows.length; i += API_KEY_CHUNK) {
         const chunk = dedupedRows.slice(i, i + API_KEY_CHUNK)
@@ -77,7 +82,6 @@ async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
         await tx.run(sql, params)
     }
 }
-
 async function hasNewApiKey(tx, id, apiKeys) {
     const existing = await tx.query('SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1', [id])
     const keys = new Map()
@@ -94,7 +98,14 @@ async function hasNewApiKey(tx, id, apiKeys) {
 async function archiveCurrentKV(tx, key, authUser) {
     try {
         const now = Date.now()
+        let archived = false
         await tx.bestEffort(async () => {
+            const newest = await tx.get(
+                'SELECT archived_at FROM kv_store_history WHERE key = $1 ORDER BY archived_at DESC LIMIT 1',
+                [key],
+            )
+            if (newest && now - Number(newest.archived_at) < 10 * 60 * 1000) return
+            archived = true
             await tx.run(
                 `INSERT INTO kv_store_history (key, value, password, updated_at, content_hash, archived_at)
                  SELECT key, value, password, updated_at, content_hash, $1 FROM kv_store WHERE key = $2`,
@@ -107,7 +118,7 @@ async function archiveCurrentKV(tx, key, authUser) {
                 [key, key, KV_HISTORY_KEEP]
             )
         })
-        trace('syncRoute', 'kv.archived', { accountId: key, by: authUser || 'system' })
+        if (archived) trace('syncRoute', 'kv.archived', { accountId: key, by: authUser || 'system' })
     } catch (err) {
         trace('syncRoute', 'kv.archive.failed', { accountId: key, error: err && err.message })
     }
@@ -461,7 +472,13 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
         const clientBase = typeof data.baseContentHash === 'string' && data.baseContentHash ? data.baseContentHash : null
         const serverTime = new Date().toISOString()
         data.syncedAt = serverTime
-        const storedStr = JSON.stringify(data)
+        const storedData = { ...data }
+        delete storedData.canonicalAddons
+        delete storedData.force
+        delete storedData.emptiedHubs
+        delete storedData.baseContentHash
+        delete storedData.contentHint
+        const storedStr = JSON.stringify(storedData)
 
         const serverStremioCredentialedAccounts = await listStremioCredentialedAccountIds(id)
 
@@ -791,26 +808,42 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                     fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: canonicalWrites[i][0], reason: 'other-workspace' }, `Canonical write skipped: account ${maskContext(canonicalWrites[i][0])} belongs to another workspace.`)
                     canonicalWrites.splice(i, 1)
                 }
+                const storedCanonical = new Map()
+                for (let i = 0; i < canonicalWrites.length; i += CANONICAL_CHUNK) {
+                    const ids = canonicalWrites.slice(i, i + CANONICAL_CHUNK).map(([accountId]) => accountId)
+                    if (ids.length === 0) continue
+                    const inList = ids.map((_, j) => `$${j + 2}`).join(', ')
+                    const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
+                    const rows = await tx.query(
+                        `SELECT account_id, addon_list FROM account_canonical_addons WHERE sync_user = $1 AND account_id IN (${inList})${lock}`,
+                        [id, ...ids],
+                    )
+                    for (const row of rows) storedCanonical.set(row.account_id, row.addon_list)
+                }
                 for (const [accountId, addons] of canonicalWrites) {
                     const stored = JSON.stringify(addons)
-                    const { outcome, plaintext } = await writeEncryptedIfChanged(
-                        'account_canonical_addons',
-                        { sql: 'account_id = $1 AND sync_user = $2', params: [accountId, id] },
-                        'addon_list',
-                        stored,
-                        { alsoSet: { sync_user: id, updated_at: now }, runner: tx },
+                    const currentEncrypted = storedCanonical.get(accountId)
+                    let currentPlaintext = null
+                    if (currentEncrypted) {
+                        try { currentPlaintext = decrypt(currentEncrypted, FALLBACK_KEYS) } catch {}
+                    }
+                    if (currentPlaintext === stored) {
+                        canonicalReceipts[accountId] = 'unchanged'
+                        canonicalVersions[accountId] = crypto.createHash('sha256').update(stored).digest('hex')
+                        continue
+                    }
+                    const result = await tx.run(
+                        'UPDATE account_canonical_addons SET addon_list = $1, sync_user = $2, updated_at = $3 WHERE account_id = $4 AND sync_user = $5',
+                        [encrypt(stored, PRIMARY_KEY), id, now, accountId, id],
                     )
-                    if (outcome === 'written') canonicalReceipts[accountId] = 'applied'
-                    else if (outcome === 'unchanged') canonicalReceipts[accountId] = 'unchanged'
-                    else {
-                        // Zero-row write: the selector stopped matching between the
-                        // claim above and this statement. Never acknowledge it; the
-                        // server does not hold this workspace's snapshot.
+                    if ((result?.changes || 0) > 0) {
+                        canonicalReceipts[accountId] = 'applied'
+                        canonicalVersions[accountId] = crypto.createHash('sha256').update(stored).digest('hex')
+                    } else {
                         canonicalReceipts[accountId] = 'rejected'
                         canonicalReasons[accountId] = 'not-applied'
                         fastify.log.warn({ category: 'Sync', fmt: 'sync.canonical_skip', acct: accountId, reason: 'not-matched' }, `Canonical write matched no row for ${maskContext(accountId)}; the hub changed ownership during this push.`)
                     }
-                    if (plaintext) canonicalVersions[accountId] = crypto.createHash('sha256').update(plaintext).digest('hex')
                 }
             }
 
