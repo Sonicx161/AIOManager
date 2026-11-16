@@ -67,10 +67,11 @@ export function registerDeviceCredentialRoutes(fastify) {
         if (!/^[A-Za-z0-9_-]{43,512}$/.test(deviceToken)) { reply.status(400); return { error: 'deviceToken must be 43-512 base64url chars' } }
 
         try {
-            const account = await db.get('SELECT credential_epoch FROM kv_store WHERE key = $1', [authUser])
+            const account = await db.get('SELECT password, credential_epoch FROM kv_store WHERE key = $1', [authUser])
             if (!account) { reply.status(404); return { error: 'Account not found' } }
             const self = request.deviceAuth ? await authenticateDeviceCredential(authUser, deviceId, request.headers['x-sync-password']) : null
             if (request.deviceAuth && !self?.ok) { reply.status(401); return { error: 'Unauthorized' } }
+            const preVerified = request.deviceAuth ? false : await passwordMatchesLockedRow(request, authUser, account)
             const now = Date.now()
             const expiresAt = now + DEVICE_LIFETIME_DAYS * DAY_MS
             const epoch = Number(account.credential_epoch) || 1
@@ -84,7 +85,7 @@ export function registerDeviceCredentialRoutes(fastify) {
                 if (isSessionDevice(deviceId.toLowerCase()) && !existing) return { reserved: true }
                 if (self) {
                     if (!existing || existing.id !== self.row.id || existing.token_hash !== self.row.token_hash || Number(existing.revoked) === 1 || Number(existing.expires_at) <= Date.now() || Number(existing.credential_epoch) !== Number(current.credential_epoch)) return { unauthorized: true }
-                } else if (!(await passwordMatchesLockedRow(request, authUser, current))) return { unauthorized: true }
+                } else if (current.password !== account.password || !preVerified) return { unauthorized: true }
                 if (existing) {
                     const liveCondition = self ? ' AND revoked = 0 AND expires_at > $11 AND credential_epoch = $12' : ''
                     const params = [tokenHash, tier, label, now, expiresAt, Number(current.credential_epoch) || 1, existing.id, authUser, deviceId, existing.token_hash]
@@ -130,6 +131,7 @@ export function registerDeviceCredentialRoutes(fastify) {
         try {
             const account = await db.get('SELECT password, credential_epoch FROM kv_store WHERE key = $1', [authUser])
             if (!account) { reply.status(404); return { error: 'Account not found' } }
+            const preVerified = await passwordMatchesLockedRow(request, authUser, account)
             const now = Date.now()
             const expiresAt = now + SESSION_KEY_LIFETIME_MS
             const deviceId = SESSION_DEVICE_PREFIX + crypto.randomUUID()
@@ -138,7 +140,7 @@ export function registerDeviceCredentialRoutes(fastify) {
             const issued = await db.tx(async (tx) => {
                 const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
                 const current = await tx.get('SELECT password, credential_epoch FROM kv_store WHERE key = $1' + lock, [authUser])
-                if (!current || current.password !== account.password || Number(current.credential_epoch) !== Number(account.credential_epoch) || !(await passwordMatchesLockedRow(request, authUser, current))) return false
+                if (!current || current.password !== account.password || Number(current.credential_epoch) !== Number(account.credential_epoch) || !preVerified) return false
                 await tx.run(
                     // Keeps this account's newest live keys; its expired ones and anything over the cap go with this sign-in.
                     `DELETE FROM device_credentials WHERE account_uuid = $1 AND substr(device_id, 1, 8) = $2 AND id NOT IN (
