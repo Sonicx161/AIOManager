@@ -96,7 +96,7 @@ const CINEMETA_TTL = 24 * 60 * 60 * 1000
 const CINEMETA_NULL_TTL = 5 * 60 * 1000
 const CINEMETA_TRANSIENT_BACKOFF_MS = 15_000
 
-interface CinemetaLookup { meta: CinemetaMeta | null; transient: boolean }
+interface CinemetaLookup { meta: CinemetaMeta | null; transient: boolean; skipped?: boolean }
 // A large feed (tens of thousands of events, mostly distinct ids) walks far more
 // metas than a few hundred; the fat cache holds the ones the session actually
 // revisits while the slim persisted store carries the long tail.
@@ -189,13 +189,19 @@ const CINEMETA_BATCH_SIZE = 100
 const CINEMETA_BATCH_INFLIGHT_MAX = 2
 const CINEMETA_BATCH_FLUSH_MS = 15
 const CINEMETA_DIRECT_BASE = 'https://cinemeta-live.strem.io'
+const CINEMETA_DIRECT_CONCURRENCY = 6
+const CINEMETA_TRANSPORT_RETRY_MS = 1500
+const CINEMETA_FALLBACK_PAUSE_MS = 60_000
 
-interface CinemetaBatchResult { status: number; meta: Record<string, unknown> | null; transient?: boolean }
+// `skipped` means the queue deliberately did no network work (for example while
+// the shared fallback pause was active), so consumers can retry without counting it.
+interface CinemetaBatchResult { status: number; meta: Record<string, unknown> | null; transient?: boolean; skipped?: boolean }
 
 interface CinemetaBatchEntry {
     imdbId: string
     mediaType: string
     attempts: number
+    transportRetried?: boolean
     resolve: (entry: CinemetaBatchResult) => void
 }
 
@@ -203,6 +209,7 @@ const cinemetaBatchQueue: CinemetaBatchEntry[] = []
 let cinemetaBatchTimer: ReturnType<typeof setTimeout> | null = null
 let cinemetaBatchInflight = 0
 let cinemetaBatchBlockedUntil = 0
+let cinemetaFallbackPausedUntil = 0
 const CINEMETA_BATCH_MAX_ATTEMPTS = 3
 const CINEMETA_RETRY_AFTER_MAX_MS = 30_000
 
@@ -235,6 +242,30 @@ const directCinemetaMeta = async (imdbId: string, mediaType: string): Promise<{ 
     const data = await res.json()
     const raw = data?.meta ?? null
     return raw && typeof raw === 'object' ? { status: 200, meta: raw as Record<string, unknown> } : { status: 404, meta: null }
+}
+
+// Direct fetches run through a small pool. When every request of a full round fails the
+// network is down, so the rest of the batch resolves as transient instead of timing out one by one.
+async function directCinemetaPool(entries: CinemetaBatchEntry[]): Promise<void> {
+    let next = 0
+    let consecutiveFailures = 0
+    const worker = async () => {
+        while (next < entries.length) {
+            const entry = entries[next++]
+            if (consecutiveFailures >= CINEMETA_DIRECT_CONCURRENCY) {
+                entry.resolve({ status: 0, meta: null, transient: true, skipped: true })
+                continue
+            }
+            try {
+                entry.resolve(await directCinemetaMeta(entry.imdbId, entry.mediaType))
+                consecutiveFailures = 0
+            } catch {
+                consecutiveFailures++
+                entry.resolve({ status: 0, meta: null })
+            }
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(CINEMETA_DIRECT_CONCURRENCY, entries.length) }, worker))
 }
 
 const scheduleCinemetaFlush = () => {
@@ -291,18 +322,30 @@ async function postCinemetaBatch(batch: CinemetaBatchEntry[]): Promise<void> {
         const status = (error as { status?: number })?.status
         // Only an absent route (older server), a missing session, or no response at
         // all breaks the batch transport; those fall back to the exact direct fetch
-        // the batch replaced. A bad payload is retried like an overloaded server.
+        // the batch replaced, through a small pool. A bad payload is retried like an
+        // overloaded server.
         if (posted && status !== 404 && status !== 401) {
             requeueCinemetaBatch(batch, 5000)
             return
         }
-        await Promise.all(batch.map(async entry => {
-            try {
-                entry.resolve(await directCinemetaMeta(entry.imdbId, entry.mediaType))
-            } catch {
-                entry.resolve({ status: 0, meta: null })
+        let fallback = batch
+        if (!posted) {
+            // No response: retry once after a short delay, then fall back at most once a minute.
+            const fresh = batch.filter(entry => !entry.transportRetried)
+            for (const entry of fresh) entry.transportRetried = true
+            if (fresh.length > 0) {
+                cinemetaBatchBlockedUntil = Math.max(cinemetaBatchBlockedUntil, Date.now() + CINEMETA_TRANSPORT_RETRY_MS)
+                cinemetaBatchQueue.unshift(...fresh)
             }
-        }))
+            fallback = batch.filter(entry => !fresh.includes(entry))
+            if (fallback.length === 0) return
+            if (Date.now() < cinemetaFallbackPausedUntil) {
+                for (const entry of fallback) entry.resolve({ status: 0, meta: null, transient: true, skipped: true })
+                return
+            }
+            cinemetaFallbackPausedUntil = Date.now() + CINEMETA_FALLBACK_PAUSE_MS
+        }
+        await directCinemetaPool(fallback)
     }
 }
 
@@ -320,9 +363,10 @@ const markTransient = (imdbId: string, mediaType: string): CinemetaLookup => {
 
 async function fetchCinemetaUncached(imdbId: string, mediaType: string): Promise<CinemetaLookup> {
     try {
-        const { status, meta: raw, transient } = await queueCinemetaMeta(imdbId, mediaType)
+        const { status, meta: raw, transient, skipped } = await queueCinemetaMeta(imdbId, mediaType)
         if (!raw) {
             if (import.meta.env?.DEV) console.warn(`[Cinemeta] ${status} for ${imdbId} (${mediaType})`)
+            if (skipped) return { meta: null, transient: false, skipped: true }
             if (transient || status !== 404) return markTransient(imdbId, mediaType)
             miss(imdbId, mediaType)
             persistAbsent(imdbId, mediaType)
@@ -433,6 +477,7 @@ async function lookupCinemetaDetail(imdbId: string, type?: string): Promise<Cine
         return { meta: cached.meta, transient: false }
     }
     let transient = false
+    let skipped = false
     for (const mediaType of cinemetaMediaTypes(type)) {
         const missedAt = cinemetaMisses.get(`${mediaType}:${imdbId}`)
         if (missedAt !== undefined && Date.now() - missedAt < CINEMETA_NULL_TTL) continue
@@ -451,9 +496,10 @@ async function lookupCinemetaDetail(imdbId: string, type?: string): Promise<Cine
         }
         const result = await flight
         if (result.meta) return result
-        if (result.transient) transient = true
+        if (result.skipped) skipped = true
+        if (result.transient && !result.skipped) transient = true
     }
-    return { meta: null, transient }
+    return { meta: null, transient, skipped: skipped && !transient }
 }
 
 /** Name, poster and genres only: memory, then the encrypted persisted record, then the network. */
@@ -462,7 +508,7 @@ export async function fetchCinemetaSlim(imdbId: string, type?: string): Promise<
 }
 
 /** Like fetchCinemetaSlim, but says whether a null came from a failure worth retrying. */
-export async function fetchCinemetaSlimResult(imdbId: string, type?: string): Promise<{ slim: SlimCinemeta | null; transient: boolean }> {
+export async function fetchCinemetaSlimResult(imdbId: string, type?: string): Promise<{ slim: SlimCinemeta | null; transient: boolean; skipped?: boolean }> {
     if (!imdbId || !imdbId.startsWith('tt')) return { slim: null, transient: false }
     const cached = cinemetaCache.get(imdbId)
     if (cached && Date.now() - cached.fetchedAt < CINEMETA_TTL) {
@@ -482,8 +528,8 @@ export async function fetchCinemetaSlimResult(imdbId: string, type?: string): Pr
     } catch {
         // Persistence is an optimization: fall through to the network.
     }
-    const { meta, transient } = await lookupCinemetaDetail(imdbId, type)
-    return { slim: toSlimCinemeta(meta), transient: !meta && transient }
+    const { meta, transient, skipped } = await lookupCinemetaDetail(imdbId, type)
+    return { slim: toSlimCinemeta(meta), transient: !meta && transient, skipped: !meta && skipped }
 }
 
 // A hit promotes the entry (recency) without touching fetchedAt (the TTL never slides).

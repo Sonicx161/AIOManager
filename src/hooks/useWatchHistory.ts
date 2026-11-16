@@ -31,6 +31,12 @@ let _genreCache: Map<string, string[]> | null = null
 // the final state immediately, so partial results stay usable and incremental
 // single-change publications outside a load are unaffected.
 const HISTORY_LOAD_PACE_MS = 1200
+const GENRE_RETRY_BASE_MS = 30_000
+const GENRE_RETRY_MAX_MS = 300_000
+const GENRE_GIVE_UP_AFTER = 4
+const GENRE_SKIPPED_RETRY_MS = 60_000
+// Exhausted titles get one visible probe per window so a mounted history can recover.
+const GENRE_EXHAUSTED_PROBE_MS = 10 * 60_000
 const NO_WATCH_EVENTS: ReturnType<typeof useWatchEventStore.getState>['events'] = []
 const NO_LIBRARY_ITEMS: ReturnType<typeof useLibraryCache.getState>['items'] = []
 const NO_HISTORY_ACCOUNTS: ReturnType<typeof useAccountStore.getState>['accounts'] = []
@@ -199,6 +205,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         : { events: rawEvents, liveItems: rawLiveItems }
     const [genreMap, setGenreMap] = useState<Map<string, string[]>>(loadGenreCache)
     const [genreRetryTick, setGenreRetryTick] = useState(0)
+    const genreFailuresRef = useRef(new Map<string, { count: number; nextAt: number }>())
 
     // Canonical-aware origin context: the CURRENT canonical login's items/events share the
     // bare account scope with legacy and server-merged canonical rows (so one watch never
@@ -504,23 +511,72 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
     }, [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents, ctxOf])
 
     useEffect(() => {
-        const { seen, needs: needsGenres, typeByItemId } = genreCrawlTargets(events, genreMap, genresEnabled)
-        if (needsGenres.length === 0) return
+        const { seen, needs: allNeeds, typeByItemId } = genreCrawlTargets(events, genreMap, genresEnabled)
+        const failures = genreFailuresRef.current
+        const startedAt = Date.now()
+        const visible = typeof document === 'undefined' || !document.hidden
+        const needsGenres: string[] = []
+        // Event publications may restart this effect while a retry is due in a
+        // hidden tab. New titles still follow discovery behaviour below.
+        for (const id of allNeeds) {
+            const failure = failures.get(id)
+            if (!failure) {
+                needsGenres.push(id)
+            } else if (visible && failure.nextAt <= startedAt) {
+                needsGenres.push(id)
+            }
+        }
         let cancelled = false
         let retryTimer: ReturnType<typeof setTimeout> | undefined
-        let anyTransient = false
+        let onVisible: (() => void) | undefined
+        const armRetry = () => {
+            let nextAt = Infinity
+            for (const id of allNeeds) {
+                const failure = failures.get(id)
+                if (failure) nextAt = Math.min(nextAt, failure.nextAt)
+            }
+            if (nextAt === Infinity) return
+            const fire = () => {
+                if (cancelled) return
+                if (typeof document !== 'undefined' && document.hidden) {
+                    onVisible = () => {
+                        if (document.hidden) return
+                        document.removeEventListener('visibilitychange', onVisible!)
+                        onVisible = undefined
+                        fire()
+                    }
+                    document.addEventListener('visibilitychange', onVisible)
+                    return
+                }
+                setGenreRetryTick(t => t + 1)
+            }
+            retryTimer = setTimeout(fire, Math.max(0, nextAt - Date.now()))
+        }
+        if (needsGenres.length === 0) {
+            armRetry()
+            return () => {
+                cancelled = true
+                if (retryTimer) clearTimeout(retryTimer)
+                if (onVisible) document.removeEventListener('visibilitychange', onVisible)
+            }
+        }
         const BATCH = 100
         const results = new Map<string, string[]>()
         const failed = new Set<string>()
+        const transientIds = new Set<string>()
+        // A shared fallback pause can suppress work without representing a failed
+        // request. Keep it on the retry schedule without spending the failure budget.
+        const skippedIds = new Set<string>()
         ;(async () => {
             if (import.meta.env?.DEV) console.log('[GenreResolve] processing', needsGenres.length, 'items,', seen.size, 'tt items found')
             for (let i = 0; i < needsGenres.length; i += BATCH) {
                 if (cancelled) return
                 const batch = needsGenres.slice(i, i + BATCH)
                 await Promise.all(batch.map(async id => {
-                    const { slim: meta, transient } = await fetchCinemetaSlimResult(id, typeByItemId.get(id))
+                    const { slim: meta, transient, skipped } = await fetchCinemetaSlimResult(id, typeByItemId.get(id))
                     if (meta?.genres?.length) results.set(id, meta.genres)
-                    else if (transient) anyTransient = true
+                    else if (skipped) skippedIds.add(id)
+                    else if (transient) transientIds.add(id)
                     else failed.add(id)
                 }))
             }
@@ -528,22 +584,35 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
                 if (import.meta.env?.DEV) console.log('[GenreResolve] resolved', results.size, 'failed', failed.size, 'of', needsGenres.length)
                 const merged = new Map(genreMap)
                 let changed = false
-                for (const [id, g] of results) { merged.set(id, g); changed = true }
-                for (const id of failed) if (!merged.has(id)) { merged.set(id, []); changed = true }
+                for (const [id, g] of results) { merged.set(id, g); changed = true; failures.delete(id) }
+                for (const id of failed) { failures.delete(id); if (!merged.has(id)) { merged.set(id, []); changed = true } }
                 for (const id of merged.keys()) {
                     if (!seen.has(id)) { merged.delete(id); changed = true }
+                }
+                const finishedAt = Date.now()
+                for (const id of transientIds) {
+                    const count = (failures.get(id)?.count ?? 0) + 1
+                    const delay = count >= GENRE_GIVE_UP_AFTER
+                        ? GENRE_EXHAUSTED_PROBE_MS
+                        : Math.min(GENRE_RETRY_BASE_MS * 2 ** (count - 1), GENRE_RETRY_MAX_MS)
+                    failures.set(id, { count, nextAt: finishedAt + delay })
+                }
+                for (const id of skippedIds) {
+                    const count = failures.get(id)?.count ?? 0
+                    failures.set(id, { count, nextAt: finishedAt + GENRE_SKIPPED_RETRY_MS })
                 }
                 // Publishing an unchanged map re-runs this effect, which would spin while transient ids sit in backoff.
                 if (changed) {
                     saveGenreCache(merged)
                     setGenreMap(merged)
                 }
-                if (anyTransient) retryTimer = setTimeout(() => setGenreRetryTick(t => t + 1), 30_000)
+                armRetry()
             }
         })()
         return () => {
             cancelled = true
             if (retryTimer) clearTimeout(retryTimer)
+            if (onVisible) document.removeEventListener('visibilitychange', onVisible)
         }
     }, [events, genreMap, genresEnabled, genreRetryTick])
 
