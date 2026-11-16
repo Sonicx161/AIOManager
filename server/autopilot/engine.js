@@ -35,6 +35,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
     const AUTOPILOT_SCAN_CHUNK_SIZE = Math.max(100, parseInt(process.env.AUTOPILOT_SCAN_CHUNK_SIZE || '500', 10) || 500)
     const AUTOPILOT_MAX_RULES_PER_CYCLE = Math.max(AUTOPILOT_SCAN_CHUNK_SIZE, parseInt(process.env.AUTOPILOT_MAX_RULES_PER_CYCLE || '10000', 10) || 10000)
     const AUTOPILOT_CYCLE_BUDGET_MS = Math.max(5000, parseInt(process.env.AUTOPILOT_CYCLE_BUDGET_MS || '120000', 10) || 120000)
+    const AUTOPILOT_CYCLE_WATCHDOG_MS = Math.max(1, parseInt(process.env.AUTOPILOT_CYCLE_WATCHDOG_MS, 10) || Math.max(3 * AUTOPILOT_CYCLE_BUDGET_MS, 300000))
     const RULE_RECHECK_MS = Math.max(10000, parseInt(process.env.AUTOPILOT_RULE_RECHECK_MS || '30000', 10) || 30000)
     // Steady-rule heartbeat cadence; keeps persisted last_check fresh well under the client's 15-min staleness threshold
     const RULE_HEARTBEAT_MS = Math.max(30_000, parseInt(process.env.AUTOPILOT_HEARTBEAT_MS || '300000', 10) || 300000)
@@ -1093,14 +1094,30 @@ export function createAutopilotEngine(fastify, reconciler = null) {
         }
     }
 
+    let cycleGeneration = 0
+    let cycleStartedAt = 0
+    const inFlightRules = new Set()
+    let watchdogTrips = 0
+
     const runAutopilot = async () => {
+        if (serverState.isWorkerRunning && Date.now() - cycleStartedAt >= AUTOPILOT_CYCLE_WATCHDOG_MS) {
+            const stalledMs = Date.now() - cycleStartedAt
+            cycleGeneration++
+            cycleStartedAt = 0
+            serverState.isWorkerRunning = false
+            watchdogTrips++
+            fastify.log.error({ category: 'Autopilot' }, `Autonomous Engine: cycle stalled for ${stalledMs}ms; abandoned with ${inFlightRules.size} in-flight rule(s) (watchdog trip ${watchdogTrips}).`)
+        }
         if (serverState.isWorkerRunning) {
             fastify.log.warn({ category: 'Autopilot' }, 'Autonomous Engine: Previous run still in progress. Skipping cycle.')
             return
         }
 
         serverState.isWorkerRunning = true
-        serverState.lastWorkerRun = Date.now()
+        const generation = ++cycleGeneration
+        const live = () => generation === cycleGeneration
+        cycleStartedAt = Date.now()
+        serverState.lastWorkerRun = cycleStartedAt
 
         fastify.log.debug({ category: 'Autopilot' }, `Autonomous Engine: Starting budgeted scaling-aware scan.`)
 
@@ -1114,7 +1131,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
             const staleCutoff = cycleStart - RULE_RECHECK_MS
             const scanDeadline = cycleStart + AUTOPILOT_CYCLE_BUDGET_MS
 
-            while (hasMore && totalProcessed < AUTOPILOT_MAX_RULES_PER_CYCLE && Date.now() < scanDeadline) {
+            while (live() && hasMore && totalProcessed < AUTOPILOT_MAX_RULES_PER_CYCLE && Date.now() < scanDeadline) {
                 const candidateLimit = Math.min(CHUNK_SIZE, AUTOPILOT_MAX_RULES_PER_CYCLE - totalProcessed)
                 const candidateRules = await db.query(
                     `SELECT r.id, r.account_id, r.is_automatic, r.updated_at,
@@ -1131,6 +1148,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                     [lastId, staleCutoff, candidateLimit]
                 )
 
+                if (!live()) return
                 if (candidateRules.length === 0) {
                     if (lastId && !wrappedScan) {
                         lastId = ''
@@ -1148,7 +1166,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                 lastId = candidateRules[candidateRules.length - 1].id
                 serverState.autopilotScanCursor = lastId
 
-                const dueRules = candidateRules.filter(rule => !shouldSkipRuleCheck(rule.id, staleCutoff))
+                const dueRules = candidateRules.filter(rule => !inFlightRules.has(rule.id) && !shouldSkipRuleCheck(rule.id, staleCutoff))
 
                 if (dueRules.length === 0) {
                     if (totalProcessed >= AUTOPILOT_MAX_RULES_PER_CYCLE || Date.now() >= scanDeadline) break
@@ -1236,7 +1254,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
 
                 const BATCH_SIZE = 20
                 const dirtyUpdates = []
-                for (let i = 0; i < rules.length; i += BATCH_SIZE) {
+                for (let i = 0; live() && i < rules.length; i += BATCH_SIZE) {
                     const batch = rules.slice(i, i + BATCH_SIZE)
                     const byAccount = new Map()
                     for (const rule of batch) {
@@ -1246,8 +1264,14 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                     }
                     const accountPromises = []
                     const processRule = async (rule) => {
-                        const result = await processAutopilotRule(rule)
-                        if (result) dirtyUpdates.push(result)
+                        if (!live() || inFlightRules.has(rule.id)) return
+                        inFlightRules.add(rule.id)
+                        try {
+                            const result = await processAutopilotRule(rule)
+                            if (result && live()) dirtyUpdates.push(result)
+                        } finally {
+                            inFlightRules.delete(rule.id)
+                        }
                     }
                     for (const [, accountRules] of byAccount) {
                         if (accountRules.length === 1) {
@@ -1271,16 +1295,20 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                     await Promise.all(accountPromises)
                 }
 
+                if (!live()) return
                 if (dirtyUpdates.length > 0) {
                     const fullUpdates = dirtyUpdates.filter(u => u.type === 'full')
                     const heartbeatUpdates = dirtyUpdates.filter(u => u.type === 'heartbeat')
                     await db.tx(async (conn) => {
+                        const assertLive = () => { if (!live()) throw new Error('Autopilot cycle abandoned') }
+                        assertLive()
                         for (const update of fullUpdates) {
                             await conn.run(`
                                 UPDATE autopilot_rules 
                                 SET active_url = COALESCE($1, active_url), addon_list = $2, updated_at = $3
                                 WHERE id = $4
                             `, update.ruleParams)
+                            assertLive()
                         }
                         const allStats = [...fullUpdates, ...heartbeatUpdates]
                         for (let si = 0; si < allStats.length; si += 100) {
@@ -1296,6 +1324,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                                     last_notification = EXCLUDED.last_notification,
                                     updated_at = EXCLUDED.updated_at
                             `, statParams)
+                            assertLive()
                         }
                     })
                 }
@@ -1303,6 +1332,7 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                 if (totalProcessed >= AUTOPILOT_MAX_RULES_PER_CYCLE || Date.now() >= scanDeadline) break
             }
 
+            if (!live()) return
             const budgetHit = totalProcessed >= AUTOPILOT_MAX_RULES_PER_CYCLE || Date.now() >= scanDeadline
             serverState.autopilotLastCycleStats = {
                 scanned: totalProcessed,
@@ -1336,7 +1366,10 @@ export function createAutopilotEngine(fastify, reconciler = null) {
                 ruleCacheStats.windowStart = Date.now()
             }
         } finally {
-            serverState.isWorkerRunning = false
+            if (live()) {
+                cycleStartedAt = 0
+                serverState.isWorkerRunning = false
+            }
         }
     }
 
