@@ -84,6 +84,8 @@ export const CUSTOM_ENTRY: RegistryProvider = {
 
 export const PROVIDER_REGISTRY: RegistryProvider[] = [AIOSTREAMS_ENTRY, ...catalog, CUSTOM_ENTRY]
 
+export const PICKER_PROVIDERS: RegistryProvider[] = PROVIDER_REGISTRY.filter((p) => p !== AIOSTREAMS_ENTRY)
+
 export const PROVIDER_REGISTRY_BY_ID: Record<string, RegistryProvider> = Object.fromEntries(
     PROVIDER_REGISTRY.map((p) => [p.id, p])
 )

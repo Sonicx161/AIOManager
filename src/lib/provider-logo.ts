@@ -1,5 +1,7 @@
 export const PROVIDER_LOGO_PATHS: Record<string, string> = {
   'abnzb': '/vault-logos/abnzb.webp',
+  'aiometadata': '/vault-logos/aiometadata.webp',
+  'aiostreams': '/vault-logos/aiostreams.webp',
   'alldebrid': '/vault-logos/alldebrid.webp',
   'althub': '/vault-logos/althub.webp',
   'anilist': '/vault-logos/anilist.webp',

@@ -25,7 +25,7 @@ import {
     Cloud, Layers, Cable, Database, Magnet, Type, Activity, Sparkles, ShieldCheck, Wrench,
 } from 'lucide-react'
 import { PROVIDERS, deriveGroup, getKeyAbbr, resolveVaultGroup, VAULT_GROUPS } from '@/lib/constants'
-import { PROVIDER_REGISTRY, registryForKey, RegistryProvider } from '@/lib/provider-registry'
+import { PICKER_PROVIDERS, registryForKey, RegistryProvider } from '@/lib/provider-registry'
 import { toast } from '@/hooks/use-toast'
 import { VaultKey } from '@/types/vault'
 import { cn, getTimeAgo } from '@/lib/utils'
@@ -222,7 +222,7 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
             setGroup(resolveVaultGroup(editingKey.provider, editingKey.group))
         } else {
             setSelected(null)
-            setPickerCategory(defaultGroup ?? null)
+            setPickerCategory(defaultGroup && PICKER_PROVIDERS.some((p) => p.group === defaultGroup) ? defaultGroup : null)
             setName('')
             setValue('')
             setServerUrl('')
@@ -249,7 +249,7 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
         const q = providerSearch.trim().toLowerCase()
         if (!q) return []
         const byGroup = new Map<string, RegistryProvider[]>()
-        for (const p of PROVIDER_REGISTRY) {
+        for (const p of PICKER_PROVIDERS) {
             if (!(p.name.toLowerCase().includes(q) || p.group.toLowerCase().includes(q))) continue
             if (!byGroup.has(p.group)) byGroup.set(p.group, [])
             byGroup.get(p.group)!.push(p)
@@ -259,14 +259,14 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
 
     const categories = useMemo(() => {
         const counts = new Map<string, number>()
-        for (const p of PROVIDER_REGISTRY) counts.set(p.group, (counts.get(p.group) || 0) + 1)
+        for (const p of PICKER_PROVIDERS) counts.set(p.group, (counts.get(p.group) || 0) + 1)
         return GROUP_ORDER
             .filter((g, i) => GROUP_ORDER.indexOf(g) === i && counts.has(g))
             .map((g) => ({ group: g, count: counts.get(g)! }))
     }, [])
 
     const categoryEntries = useMemo(
-        () => (pickerCategory ? PROVIDER_REGISTRY.filter((p) => p.group === pickerCategory) : []),
+        () => (pickerCategory ? PICKER_PROVIDERS.filter((p) => p.group === pickerCategory) : []),
         [pickerCategory]
     )
 
