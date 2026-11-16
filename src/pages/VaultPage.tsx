@@ -783,13 +783,13 @@ export function VaultPage() {
 
                             <div className="px-5 pt-4 pb-3 border-b border-border/40 shrink-0">
                                 <div className="flex items-center gap-2">
-                                    <div data-theme-part="input" className="h-8 rounded-lg bg-muted/30 border border-border/40 flex items-center px-2.5 gap-2 hover:border-border transition-colors flex-1">
+                                    <div data-theme-part="input" className="h-8 rounded-lg bg-muted/30 border border-border/40 flex items-center px-2.5 gap-2 hover:border-border transition-colors flex-1 min-w-0">
                                         <Search className="w-3.5 h-3.5 text-muted-foreground" />
                                         <input
                                             value={search}
                                             onChange={e => setSearch(e.target.value)}
                                             placeholder="Search vault..."
-                                            className="bg-transparent outline-none flex-1 text-xs text-foreground placeholder-muted-foreground"
+                                            className="bg-transparent outline-none flex-1 min-w-0 text-xs text-foreground placeholder-muted-foreground"
                                         />
                                         {search && (
                                             <button data-theme-part="button" onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground" aria-label="Clear search">
@@ -943,13 +943,13 @@ export function VaultPage() {
                 {!mobileFilterOpen && !mobileDetailId && (
                     <div className="px-4 pt-3 pb-2 border-b border-border/40 shrink-0">
                         <div className="flex items-center gap-2">
-                            <div data-theme-part="input" className="h-8 rounded-lg bg-muted/30 border border-border/40 flex items-center px-2.5 gap-2 flex-1">
+                            <div data-theme-part="input" className="h-8 rounded-lg bg-muted/30 border border-border/40 flex items-center px-2.5 gap-2 flex-1 min-w-0">
                                 <Search className="w-3.5 h-3.5 text-muted-foreground" />
                                 <input
                                     value={search}
                                     onChange={e => setSearch(e.target.value)}
                                     placeholder="Search vault..."
-                                    className="bg-transparent outline-none flex-1 text-xs text-foreground placeholder-muted-foreground"
+                                    className="bg-transparent outline-none flex-1 min-w-0 text-xs text-foreground placeholder-muted-foreground"
                                 />
                                 {search && (
                                     <button data-theme-part="button" onClick={() => setSearch('')} className="text-muted-foreground hover:text-foreground" aria-label="Clear search">
