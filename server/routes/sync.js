@@ -94,17 +94,19 @@ async function hasNewApiKey(tx, id, apiKeys) {
 async function archiveCurrentKV(tx, key, authUser) {
     try {
         const now = Date.now()
-        await tx.run(
-            `INSERT INTO kv_store_history (key, value, password, updated_at, content_hash, archived_at)
-             SELECT key, value, password, updated_at, content_hash, $1 FROM kv_store WHERE key = $2`,
-            [now, key]
-        )
-        await tx.run(
-            `DELETE FROM kv_store_history WHERE key = $1 AND archived_at NOT IN (
-                 SELECT archived_at FROM kv_store_history WHERE key = $2 ORDER BY archived_at DESC LIMIT $3
-             )`,
-            [key, key, KV_HISTORY_KEEP]
-        )
+        await tx.bestEffort(async () => {
+            await tx.run(
+                `INSERT INTO kv_store_history (key, value, password, updated_at, content_hash, archived_at)
+                 SELECT key, value, password, updated_at, content_hash, $1 FROM kv_store WHERE key = $2`,
+                [now, key]
+            )
+            await tx.run(
+                `DELETE FROM kv_store_history WHERE key = $1 AND archived_at NOT IN (
+                     SELECT archived_at FROM kv_store_history WHERE key = $2 ORDER BY archived_at DESC LIMIT $3
+                 )`,
+                [key, key, KV_HISTORY_KEEP]
+            )
+        })
         trace('syncRoute', 'kv.archived', { accountId: key, by: authUser || 'system' })
     } catch (err) {
         trace('syncRoute', 'kv.archive.failed', { accountId: key, error: err && err.message })

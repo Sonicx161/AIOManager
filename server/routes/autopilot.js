@@ -90,21 +90,30 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             const canonicalConnectionId = previous?.canonical_connection_id
                 && decrypt(previous.auth_key, FALLBACK_KEYS) === decrypt(encryptedAuthKey, FALLBACK_KEYS)
                 ? previous.canonical_connection_id : null
-            if (conn.type === 'postgres') {
+            await (conn.bestEffort ? conn.bestEffort(async () => {
+                if (conn.type === 'postgres') {
+                    await conn.run(
+                        `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         ON CONFLICT (id) DO UPDATE SET auth_key = EXCLUDED.auth_key, updated_at = EXCLUDED.updated_at, credential_type = EXCLUDED.credential_type, connection_id = EXCLUDED.connection_id, canonical_connection_id = EXCLUDED.canonical_connection_id, connection_generation = COALESCE(EXCLUDED.connection_generation, server_credentials.connection_generation)`,
+                        [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
+                    )
+                } else {
+                    await conn.run(
+                        `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                         ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, connection_generation)`,
+                        [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
+                    )
+                }
+            }) : (async () => {
                 await conn.run(
                     `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (id) DO UPDATE SET auth_key = EXCLUDED.auth_key, updated_at = EXCLUDED.updated_at, credential_type = EXCLUDED.credential_type, connection_id = EXCLUDED.connection_id, canonical_connection_id = EXCLUDED.canonical_connection_id, connection_generation = COALESCE(EXCLUDED.connection_generation, server_credentials.connection_generation)`,
+                     ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, ${conn.type === 'postgres' ? 'server_credentials.connection_generation' : 'connection_generation'})`,
                     [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
                 )
-            } else {
-                await conn.run(
-                    `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, connection_generation)`,
-                    [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
-                )
-            }
+            })())
             const { invalidateConnectionCache } = await import('../providers/reconciler.js')
             invalidateConnectionCache(owner)
         } catch (credErr) {

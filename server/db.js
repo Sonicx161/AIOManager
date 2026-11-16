@@ -202,11 +202,26 @@ class DB {
             const client = await this.pool.connect()
             try {
                 await client.query(isolation ? `BEGIN ISOLATION LEVEL ${isolation}` : 'BEGIN')
-                const result = await fn({
+                const tx = {
+                    type: 'postgres',
                     query: (sql, params) => client.query(sql, params).then(r => r.rows),
                     get: (sql, params) => client.query(sql, params).then(r => r.rows[0]),
                     run: (sql, params) => client.query(sql, params).then(r => ({ changes: r.rowCount })),
-                })
+                    bestEffort: async (work) => {
+                        const name = `best_effort_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+                        await client.query(`SAVEPOINT ${name}`)
+                        try {
+                            const result = await work()
+                            await client.query(`RELEASE SAVEPOINT ${name}`)
+                            return result
+                        } catch (err) {
+                            await client.query(`ROLLBACK TO SAVEPOINT ${name}`)
+                            await client.query(`RELEASE SAVEPOINT ${name}`).catch(() => {})
+                            throw err
+                        }
+                    },
+                }
+                const result = await fn(tx)
                 await client.query('COMMIT')
                 return result
             } catch (err) {
@@ -223,9 +238,11 @@ class DB {
                 this._sqliteTxOpen = true
                 try {
                     const sqliteFns = {
+                        type: 'sqlite',
                         query: (sql, params = []) => this._prepare(sql).all(params),
                         get: (sql, params = []) => this._prepare(sql).get(params),
                         run: (sql, params = []) => ({ changes: this._prepare(sql).run(params).changes }),
+                        bestEffort: async (work) => work(),
                     }
                     const result = await sqliteTxContext.run(token, () => fn(sqliteFns))
                     this.client.exec('COMMIT')
