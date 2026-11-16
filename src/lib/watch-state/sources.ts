@@ -6,6 +6,7 @@ import { createStremioWatchSource, type StremioWatchSourceOptions } from './sour
 import { createNuvioWatchSource, type NuvioWatchSourceOptions } from './source-nuvio.ts'
 import { createRealStreamWatchSource, type RealStreamWatchSourceOptions } from './source-realstream.ts'
 import { createStremioWatchRequest } from './stremio-request.ts'
+import { WatchMigrationError, WatchTransportError, transportFetch } from './failures.ts'
 
 const SOURCE_PLATFORMS = ['stremio', 'nuvio', 'realstream', 'jellyfin']
 const SOURCE_LABELS: Record<string, string> = { stremio: 'Stremio', nuvio: 'Nuvio', realstream: 'RealStream', jellyfin: 'Jellyfin-compatible server' }
@@ -21,6 +22,7 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 function sanitizedError(error: unknown, fallback: string): Error {
+    if (error instanceof WatchMigrationError || error instanceof WatchTransportError) return error
     const message = error instanceof Error && error.message ? error.message : ''
     return new Error(!message || /https?:\/\//.test(message) || message.length > 200 ? fallback : message)
 }
@@ -191,7 +193,7 @@ export async function nuvioWatchSession(account: Account, connection: Connection
     const post = async (accessToken: string, fn: string, body: Record<string, unknown>, requestSignal: AbortSignal): Promise<Response> => {
         assertCurrent()
         requestSignal.throwIfAborted()
-        return fetch(`${base}/rest/v1/rpc/${fn}`, {
+        return transportFetch(`${base}/rest/v1/rpc/${fn}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', apikey: publishableKey, Authorization: `Bearer ${accessToken}` },
             body: JSON.stringify(body),
@@ -343,7 +345,7 @@ export async function realStreamWatchSession(account: Account, connection: Conne
         const token = await fetchConnectionToken(account.id, connection.id, 'realstream', connection.credentials.baseUrl)
         assertCurrent()
         openSignal.throwIfAborted()
-        const response = await fetch(`${base}${REALSTREAM_AUTH_REFRESH_PATH}`, {
+        const response = await transportFetch(`${base}${REALSTREAM_AUTH_REFRESH_PATH}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token.accessToken}` },
             signal: AbortSignal.any([openSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
@@ -361,7 +363,7 @@ export async function realStreamWatchSession(account: Account, connection: Conne
             assertCurrent()
             requestSignal.throwIfAborted()
             const filter = encodeURIComponent(`user='${userId}'`)
-            const pageResponse = await fetch(`${base}/api/collections/progress/records?filter=${filter}&page=${page}&perPage=${perPage}`, {
+            const pageResponse = await transportFetch(`${base}/api/collections/progress/records?filter=${filter}&page=${page}&perPage=${perPage}`, {
                 headers: { Authorization: `Bearer ${accessToken}` },
                 signal: AbortSignal.any([requestSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
                 credentials: 'omit',
@@ -377,7 +379,7 @@ export async function realStreamWatchSession(account: Account, connection: Conne
             assertCurrent()
             if (recordId !== null && !/^[a-zA-Z0-9_-]{1,128}$/.test(recordId)) throw new Error('The destination progress record could not be identified.')
             writeSignal.throwIfAborted()
-            const result = await fetch(`${base}/api/collections/progress/records${recordId ? `/${encodeURIComponent(recordId)}` : ''}`, {
+            const result = await transportFetch(`${base}/api/collections/progress/records${recordId ? `/${encodeURIComponent(recordId)}` : ''}`, {
                 method: recordId ? 'PATCH' : 'POST',
                 headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ user: userId, data: entries }),

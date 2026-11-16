@@ -13,6 +13,20 @@ export class WatchMigrationError extends Error {
     }
 }
 
+export class WatchTransportError extends Error {
+    constructor() {
+        super('The connection was interrupted. Check both connections, then preview again.')
+        this.name = 'WatchTransportError'
+    }
+}
+
+export async function transportFetch(input: string, init: RequestInit): Promise<Response> {
+    try { return await fetch(input, init) } catch (error) {
+        if (error instanceof TypeError) throw new WatchTransportError()
+        throw error
+    }
+}
+
 export class GlobalMatchFailure extends Error {
     constructor(message: string) {
         super(message)
@@ -23,8 +37,9 @@ export class GlobalMatchFailure extends Error {
 export function migrationFailure(error: unknown, stage: MigrationFailure['stage'] = 'write'): MigrationFailure {
     if (error instanceof WatchMigrationError) return { ...error.failure }
     if (error instanceof SeriesLookupRateLimitError) return { stage, reason: 'rate_limited', httpStatus: 429 }
+    if (error instanceof WatchTransportError) return { stage, reason: 'network' }
     const name = error instanceof Error ? error.name : ''
-    return { stage, reason: name === 'TimeoutError' ? 'timeout' : name === 'TypeError' ? 'network' : 'unknown' }
+    return { stage, reason: name === 'TimeoutError' ? 'timeout' : 'unknown' }
 }
 
 export async function migrationStage<T>(stage: MigrationFailure['stage'], operation: () => Promise<T>): Promise<T> {
@@ -40,6 +55,7 @@ export async function migrationStage<T>(stage: MigrationFailure['stage'], operat
 }
 
 export function migrationFailureMessage(failure: MigrationFailure): string {
+    if (failure.reason === 'proxy_redirect') return 'AIOManager returned a redirect while checking Stremio. Check the reverse proxy or sign-in gate, then preview again.'
     const step = { identity: 'verifying the sign-in', prewrite: 'checking the title before saving', write: 'saving the title', readback: 'reading the title back', verification: 'checking the saved state' }[failure.stage]
     const detail = failure.reason === 'rate_limited' ? 'The connection temporarily limited requests'
         : failure.reason === 'timeout' ? 'The connection timed out'

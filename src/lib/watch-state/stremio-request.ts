@@ -152,7 +152,7 @@ export function createStremioWatchRequest(options: RequestOptions) {
                     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'x-account-context': options.accountId },
                     body: JSON.stringify({ ...body, type, authKey: options.authKey }),
                     signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
-                    credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error',
+                    credentials: 'same-origin', referrerPolicy: 'no-referrer', redirect: 'manual',
                 })
             } catch (error) {
                 signal.throwIfAborted()
@@ -162,6 +162,9 @@ export function createStremioWatchRequest(options: RequestOptions) {
                     continue
                 }
                 throw new WatchMigrationError({ stage, reason, attempts: attempt + 1 })
+            }
+            if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+                throw new WatchMigrationError({ stage, reason: 'proxy_redirect' })
             }
             if (!response.ok) {
                 const retryable = response.status === 429 || response.status >= 500

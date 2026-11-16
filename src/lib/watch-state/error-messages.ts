@@ -1,6 +1,6 @@
 import { JellyfinError } from '../jellyfin/client.ts'
 import { PROFILE_MISMATCH_MESSAGE } from '../jellyfin/session.ts'
-import { GlobalMatchFailure, WatchMigrationError, migrationFailureMessage } from './failures.ts'
+import { GlobalMatchFailure, WatchMigrationError, WatchTransportError, migrationFailureMessage } from './failures.ts'
 
 export const AUTH_EXPIRED_MATCH_MESSAGE = 'The destination sign-in expired. Reconnect and preview again.'
 export const STREMIO_AUTH_EXPIRED_MESSAGE = 'The Stremio sign-in expired. Reconnect and preview again.'
@@ -76,6 +76,7 @@ export function repeatedMatchFailureMessage(error: unknown): string {
 }
 
 const KNOWN_MESSAGES = [
+    'AIOManager redirected the connection sign-in request. Check the reverse proxy or sign-in gate, then preview again.',
     PROFILE_MISMATCH_MESSAGE,
     'The destination library could not be read completely, so matches cannot be verified safely. Try the preview again.',
     'The destination sign-in expired. Reconnect and preview again.',
@@ -96,7 +97,13 @@ const KNOWN_MESSAGES = [
 
 export function migrationErrorMessage(error: unknown, fallback: string): string {
     if (error instanceof WatchMigrationError) return migrationFailureMessage(error.failure)
+    if (error instanceof WatchTransportError) return error.message
     if (!(error instanceof Error) || !error.message) return fallback
+    if (error.message === 'Session expired, re-authenticate this connection') return 'A connection sign-in expired. Reconnect it, then preview again.'
+    if (error.message === 'Token fetch failed (404)') return 'The server could not find the saved connection sign-in. Reconnect the connection, then preview again.'
+    const tokenStatus = /^Token fetch failed \((\d{3})\)$/.exec(error.message)
+    if (tokenStatus) return `The server could not retrieve the connection sign-in (HTTP ${tokenStatus[1]}). Check the server and preview again.`
+    if (error.message === 'Connection changed' || error.message === 'Connection disabled') return 'A connection changed or was disabled. Check the selected connections, then preview again.'
     if (KNOWN_MESSAGES.includes(error.message)) return error.message
     if (error instanceof GlobalMatchFailure) return error.message
     if (error.message.startsWith(REPEATED_MATCH_PREFIX) || error.message.startsWith(ACCESS_REFUSED_PREFIX)) return error.message

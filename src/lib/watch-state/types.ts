@@ -118,7 +118,7 @@ export interface WatchMigrationPlan {
 
 export interface MigrationFailure {
     stage: 'identity' | 'prewrite' | 'write' | 'readback' | 'verification'
-    reason: 'rate_limited' | 'timeout' | 'network' | 'http' | 'invalid_response' | 'remote_declined' | 'acknowledgement' | 'state_mismatch' | 'unknown'
+    reason: 'rate_limited' | 'timeout' | 'network' | 'proxy_redirect' | 'http' | 'invalid_response' | 'remote_declined' | 'acknowledgement' | 'state_mismatch' | 'unknown'
     httpStatus?: number
     attempts?: number
 }

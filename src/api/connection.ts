@@ -108,6 +108,12 @@ function credentialHealSessionScope(): string {
 // still holds the connection's credentials, re-register them under the same id
 // and generation once per session and retry the fetch once; the original error
 // surfaces when either step fails or no credentials are held.
+const TOKEN_REDIRECT_MESSAGE = 'AIOManager redirected the connection sign-in request. Check the reverse proxy or sign-in gate, then preview again.'
+
+function assertTokenNotRedirected(response: Response): void {
+    if (response.redirected && !(response.headers.get('content-type') || '').includes('json')) throw new Error(TOKEN_REDIRECT_MESSAGE)
+}
+
 async function reRegisterCredentialAndRefetchToken(
     accountId: string,
     connectionId: string,
@@ -133,9 +139,11 @@ async function reRegisterCredentialAndRefetchToken(
             body: JSON.stringify({ accountId, platform: connection.platform, ...(baseUrl ? { baseUrl } : {}), ...(rejectedTokenHash ? { rejectedTokenHash } : {}) }),
             timeout: 10000,
         })
+        assertTokenNotRedirected(res)
         if (!res.ok) return null
         return res.json()
-    } catch {
+    } catch (error) {
+        if (error instanceof Error && error.message === TOKEN_REDIRECT_MESSAGE) throw error
         return null
     }
 }
@@ -157,6 +165,7 @@ export async function fetchConnectionToken(
         body: JSON.stringify({ accountId, platform, ...(baseUrl ? { baseUrl } : {}), ...(rejectedTokenHash ? { rejectedTokenHash } : {}) }),
         timeout: 10000,
     })
+    assertTokenNotRedirected(res)
     if (res.status === 404) {
         const healed = await reRegisterCredentialAndRefetchToken(accountId, connectionId, baseUrl, rejectedTokenHash)
         if (healed) return healed
