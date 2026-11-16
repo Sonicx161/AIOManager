@@ -3,7 +3,7 @@
   "info": {
     "title": "AIOManager API",
     "description": "Hybrid sync server for AIOManager. Served same-origin under /api/*.",
-    "version": "2.0.0"
+    "version": "2.0.1"
   },
   "components": {
     "schemas": {}
