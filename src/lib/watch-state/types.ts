@@ -84,6 +84,8 @@ export interface MigrationWriteResult {
 export interface WatchStateDestination extends WatchStateEndpoint {
     capabilities: { watched: boolean; resume: boolean; dates: boolean; counts?: boolean; combined?: boolean; requiresDates?: boolean; requiresDuration?: boolean; ratings?: boolean; favorites?: boolean; notes: string[] }
     preflight?(record: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<string | null>
+    /** Called once before matching with every record that will be resolved, so lookups can be batched. */
+    prime?(records: WatchStateRecord[], signal: AbortSignal): Promise<void>
     resolve(record: WatchStateRecord, signal: AbortSignal): Promise<WatchStateRecord[]>
     apply(expected: WatchStateRecord, patch: WatchStatePatch, signal: AbortSignal): Promise<MigrationWriteResult>
     /** Called once before the first write of an import run: drops per-run caches and re-verifies the session. */

@@ -4,7 +4,9 @@ import { openJellyfinSecret } from './connection-data.ts'
 import type { JellyfinItem, JellyfinItemQuery, JellyfinProduct } from './types.ts'
 import { JELLYFIN_CAPABILITIES } from './capabilities.ts'
 import { canonicalWatchIdentity } from '../watch-state/records.ts'
-import { providerIdsOf, parseWatchIdentity, packedFacadeItemId, packedFacadeSeriesId, looksLikeFacadeStub } from '../watch-state/jellyfin-records.ts'
+import { providerIdsOf, parseWatchIdentity, looksLikeFacadeStub } from '../watch-state/jellyfin-records.ts'
+import { aiostreamsLeafItemId, aiostreamsSeriesItemId } from '../watch-state/aiostreams-item-ids.ts'
+import { createProviderIdLookup, ProviderFilterIgnoredError } from './provider-lookup.ts'
 
 
 type Cipher = (value: string) => Promise<string>
@@ -13,6 +15,8 @@ export interface JellyfinFavoriteLookup {
     canonicalIds: string[]
     series: boolean
 }
+
+export type JellyfinFavoriteLookupMode = 'native' | 'provider-ids' | 'aiostreams'
 
 export type JellyfinFavoriteStatus =
     | { state: 'found'; itemId: string; favorite: boolean }
@@ -143,14 +147,14 @@ function assertCapable(product: JellyfinProduct | undefined): void {
     }
 }
 
-function facadePackedIdentities(wanted: JellyfinFavoriteLookup): Array<{ id: string; identity: string }> {
+function aiostreamsItemIdentities(wanted: JellyfinFavoriteLookup): Array<{ id: string; identity: string }> {
     const packed: Array<{ id: string; identity: string }> = []
     const seen = new Set<string>()
     for (const canonical of wanted.canonicalIds) {
         const identity = canonicalWatchIdentity('movie', canonical)
         if (identity === null) continue
         if (!wanted.series) {
-            const id = packedFacadeItemId(identity)
+            const id = aiostreamsLeafItemId(identity)
             if (id !== null && !seen.has(id)) {
                 seen.add(id)
                 packed.push({ id, identity })
@@ -158,7 +162,7 @@ function facadePackedIdentities(wanted: JellyfinFavoriteLookup): Array<{ id: str
             continue
         }
         const episodeIdentity = `episode:${identity.slice('movie:'.length)}`
-        const id = packedFacadeSeriesId(episodeIdentity)
+        const id = aiostreamsSeriesItemId(episodeIdentity)
         if (id !== null && !seen.has(id)) {
             seen.add(id)
             packed.push({ id, identity: episodeIdentity })
@@ -175,7 +179,7 @@ export interface JellyfinLookupClient {
     readAllLibrary(accessToken: string, userId: string, options?: unknown, signal?: AbortSignal): Promise<{ items: JellyfinItem[]; total: number | null; complete: boolean }>
 }
 
-async function facadeLookup(
+async function aiostreamsLookup(
     client: JellyfinLookupClient,
     auth: { accessToken: string; userId: string },
     wanted: JellyfinFavoriteLookup,
@@ -183,7 +187,7 @@ async function facadeLookup(
     signal?: AbortSignal
 ): Promise<JellyfinFavoriteStatus> {
     const includeItemTypes = wanted.series ? 'Series' : 'Movie'
-    for (const { id, identity } of facadePackedIdentities(wanted)) {
+    for (const { id, identity } of aiostreamsItemIdentities(wanted)) {
         const candidates = await client.queryUserItems(
             auth.accessToken,
             auth.userId,
@@ -207,6 +211,44 @@ async function facadeLookup(
             }
             return { state: 'found', itemId: fresh.Id, favorite: fresh.UserData?.IsFavorite === true }
         }
+    }
+    return { state: 'absent' }
+}
+
+async function providerIdLookup(
+    client: JellyfinLookupClient,
+    auth: { accessToken: string; userId: string },
+    wanted: JellyfinFavoriteLookup,
+    wantedIds: JellyfinProviderIds,
+    signal?: AbortSignal
+): Promise<JellyfinFavoriteStatus> {
+    const values = providerIdEqualsValues(wantedIds)
+    if (values.length === 0) return { state: 'absent' }
+    let candidates: JellyfinItem[] | null
+    try {
+        candidates = await createProviderIdLookup(client, auth).find(wanted.series ? 'Series' : 'Movie', values, signal ?? new AbortController().signal)
+    } catch (error) {
+        if (error instanceof ProviderFilterIgnoredError) throw new JellyfinError('unsupported', 'This server cannot look titles up by IMDb, TMDB or TVDB id')
+        throw error
+    }
+    if (candidates === null) throw new JellyfinError('server', 'The title lookup could not be verified as complete, so the title could not be matched safely')
+    for (const candidate of candidates) {
+        if (!isTargetType(candidate, wanted.series) || !providerIdsOverlap(candidate, wantedIds)) continue
+        let item = candidate
+        if (typeof candidate.UserData !== 'object' || candidate.UserData === null) {
+            try {
+                item = await client.readWatchItem(auth.accessToken, auth.userId, candidate.Id, signal)
+            } catch (error) {
+                if (error instanceof JellyfinError && error.status === 404) continue
+                throw error
+            }
+            if (!isTargetType(item, wanted.series) || !providerIdsOverlap(item, wantedIds)) continue
+        }
+        if (!wanted.series && wanted.canonicalIds.some(canonical => {
+            const parsed = parseWatchIdentity(canonicalWatchIdentity('movie', canonical) ?? '')
+            return parsed !== null && looksLikeFacadeStub(item, parsed)
+        })) continue
+        return { state: 'found', itemId: item.Id, favorite: item.UserData?.IsFavorite === true }
     }
     return { state: 'absent' }
 }
@@ -274,7 +316,7 @@ export async function lookupFavoriteWithClient(
     client: JellyfinLookupClient,
     auth: { accessToken: string; userId: string },
     wanted: JellyfinFavoriteLookup,
-    options: { facade: boolean; cache?: FavoriteCacheScope },
+    options: { lookup: JellyfinFavoriteLookupMode; cache?: FavoriteCacheScope },
     signal?: AbortSignal
 ): Promise<JellyfinFavoriteStatus> {
     if (options.cache !== undefined) {
@@ -282,9 +324,11 @@ export async function lookupFavoriteWithClient(
         if (cached) return cached
     }
     const wantedIds = wantedProviderIds(wanted.canonicalIds)
-    const status = options.facade
-        ? await facadeLookup(client, auth, wanted, wantedIds, signal)
-        : await nativeLookup(client, auth, wanted, wantedIds, signal)
+    const status = options.lookup === 'aiostreams'
+        ? await aiostreamsLookup(client, auth, wanted, wantedIds, signal)
+        : options.lookup === 'provider-ids'
+            ? await providerIdLookup(client, auth, wanted, wantedIds, signal)
+            : await nativeLookup(client, auth, wanted, wantedIds, signal)
     if (options.cache !== undefined) favoriteCachePut(favoriteCacheKey(options.cache, wanted), status)
     return status
 }
@@ -326,12 +370,12 @@ export async function readJellyfinFavorite(
     const product = connection.mediaServer?.product
     assertCapable(product)
     const binding = await bind(connection, open)
-    const facade = product === 'aiostreams' || product === 'aiometadata'
+    const lookup: JellyfinFavoriteLookupMode = product === 'aiostreams' ? 'aiostreams' : product === 'aiometadata' ? 'provider-ids' : 'native'
     return lookupFavoriteWithClient(
         binding.client,
         binding.auth,
         wanted,
-        { facade, cache: favoriteCacheScope(connection, workspaceId) },
+        { lookup, cache: favoriteCacheScope(connection, workspaceId) },
         signal
     )
 }

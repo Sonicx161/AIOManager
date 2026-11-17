@@ -12,14 +12,15 @@ import {
     looksLikeFacadeStub,
     movieWatchIdentities,
     msToTicks,
-    packedFacadeItemId,
-    packedFacadeSeriesId,
     parseWatchIdentity,
     seriesKeyOf,
     watchRating,
     watchRecordFromItem,
 } from './jellyfin-records.ts'
 import type { ParsedWatchIdentity } from './jellyfin-records.ts'
+import { aiostreamsLeafItemId, aiostreamsSeriesItemId } from './aiostreams-item-ids.ts'
+import { createProviderIdLookup, ProviderFilterIgnoredError, providerLookupValue } from '../jellyfin/provider-lookup.ts'
+import type { ProviderLookupKind } from '../jellyfin/provider-lookup.ts'
 import { createWatchStateRequestGate } from './request-gate.ts'
 import { PROFILE_MISMATCH_MESSAGE } from '../jellyfin/session.ts'
 import { assertFreshChecks, StaleChecksError } from './prewrite-fresh.ts'
@@ -319,10 +320,18 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         }
         return parentProviders.get(key)
     }
-    const seriesChildren = new Map<string, { episodes: JellyfinItem[]; complete: boolean }>()
-    const listEpisodeChildren = async (seriesId: string, listSignal: AbortSignal): Promise<{ episodes: JellyfinItem[]; complete: boolean }> => {
+    const seriesChildren = new Map<string, Promise<{ episodes: JellyfinItem[]; complete: boolean }>>()
+    const listEpisodeChildren = (seriesId: string, listSignal: AbortSignal): Promise<{ episodes: JellyfinItem[]; complete: boolean }> => {
         const cached = seriesChildren.get(seriesId)
         if (cached !== undefined) return cached
+        const listing = readEpisodeChildren(seriesId, listSignal)
+        seriesChildren.set(seriesId, listing)
+        listing.catch(() => {
+            if (seriesChildren.get(seriesId) === listing) seriesChildren.delete(seriesId)
+        })
+        return listing
+    }
+    const readEpisodeChildren = async (seriesId: string, listSignal: AbortSignal): Promise<{ episodes: JellyfinItem[]; complete: boolean }> => {
         const seen = new Set<string>()
         const episodes: JellyfinItem[] = []
         let cursor = 0
@@ -363,9 +372,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
                 break
             }
         }
-        const listing = { episodes, complete: complete && !sawDuplicate && !limitIgnored && !truncatedByCap }
-        seriesChildren.set(seriesId, listing)
-        return listing
+        return { episodes, complete: complete && !sawDuplicate && !limitIgnored && !truncatedByCap }
     }
     const seriesProvidersOfItem = async (item: JellyfinItem, itemSignal: AbortSignal): Promise<unknown> => {
         const key = seriesKeyOf(item)
@@ -409,14 +416,14 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         }
         return resolved
     }
-    const resolveFacade = async (record: WatchStateRecord, resolveSignal: AbortSignal): Promise<WatchStateRecord[]> => {
+    const resolveAIOStreams = async (record: WatchStateRecord, resolveSignal: AbortSignal): Promise<WatchStateRecord[]> => {
         if (record.identities.length === 0) return []
         const verified = new Map<string, WatchStateRecord>()
         for (const identity of record.identities) {
             const parsed = parseWatchIdentity(identity)
             if (parsed === null) continue
             if (parsed.type === 'movie') {
-                const id = packedFacadeItemId(identity)
+                const id = aiostreamsLeafItemId(identity)
                 if (id === null) continue
                 const items = await gatedBinding.client.queryUserItems(
                     gatedBinding.secret.accessToken,
@@ -429,7 +436,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
                     if (checked !== null) verified.set(checked.id, checked)
                 }
             } else {
-                const seriesId = packedFacadeSeriesId(identity)
+                const seriesId = aiostreamsSeriesItemId(identity)
                 if (seriesId === null || parsed.season === undefined || parsed.episode === undefined) continue
                 let listing: { episodes: JellyfinItem[]; complete: boolean }
                 try {
@@ -439,7 +446,7 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
                     if (!(error instanceof JellyfinError)) throw error
                     const status = error.status ?? 0
                     if (![400, 404, 405, 501].includes(status)) throw error
-                    const leafId = packedFacadeItemId(identity)
+                    const leafId = aiostreamsLeafItemId(identity)
                     if (leafId === null) throw error
                     listing = {
                         episodes: await gatedBinding.client.queryUserItems(
@@ -457,6 +464,100 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
                     const checked = await verifyFacadeCandidate(candidate, identity, parsed, resolveSignal)
                     if (checked !== null) verified.set(checked.id, checked)
                 }
+            }
+        }
+        return [...verified.values()]
+    }
+    const providerLookup = createProviderIdLookup(gatedBinding.client, { accessToken: gatedBinding.secret.accessToken, userId: gatedBinding.secret.userId })
+    const providerLookupUnsupported = binding.details.product === 'aiometadata' && !aiometadataDatesSupported(binding.details.addonVersion)
+    const providerFilterFailure = () => new GlobalMatchFailure(binding.details.product === 'aiometadata'
+        ? 'This AIOMetadata server cannot look titles up by IMDb, TMDB or TVDB id, so matches cannot be verified. Update AIOMetadata to v4 or later, then preview again.'
+        : 'This server cannot look titles up by IMDb, TMDB or TVDB id, so matches cannot be verified.')
+    const lookupValues = (record: Pick<WatchStateRecord, 'identities'>): { kind: ProviderLookupKind; values: string[]; parsed: Array<{ identity: string; parsed: ParsedWatchIdentity }> } | null => {
+        const parsed: Array<{ identity: string; parsed: ParsedWatchIdentity }> = []
+        for (const identity of record.identities) {
+            const one = parseWatchIdentity(identity)
+            if (one !== null) parsed.push({ identity, parsed: one })
+        }
+        if (parsed.length === 0) return null
+        const kind: ProviderLookupKind = parsed[0].parsed.type === 'movie' ? 'Movie' : 'Series'
+        const values = [...new Set(parsed.map(entry => providerLookupValue(entry.parsed.provider, entry.parsed.value)))]
+        return { kind, values, parsed }
+    }
+    const findByProviderIds = async (kind: ProviderLookupKind, values: string[], findSignal: AbortSignal): Promise<JellyfinItem[] | null> => {
+        if (providerLookupUnsupported) throw providerFilterFailure()
+        try {
+            return await providerLookup.find(kind, values, findSignal)
+        } catch (error) {
+            if (error instanceof ProviderFilterIgnoredError) throw providerFilterFailure()
+            throw error
+        }
+    }
+    const withUserData = async (candidate: JellyfinItem, readSignal: AbortSignal): Promise<JellyfinItem | null> => {
+        if (typeof candidate.UserData === 'object' && candidate.UserData !== null) return candidate
+        try {
+            return await gatedBinding.client.readWatchItem(gatedBinding.secret.accessToken, gatedBinding.secret.userId, candidate.Id, readSignal)
+        } catch (error) {
+            if (error instanceof JellyfinError && error.status === 404) return null
+            throw error
+        }
+    }
+    const primeByProviderIds = async (records: WatchStateRecord[], primeSignal: AbortSignal): Promise<void> => {
+        providerLookup.clear()
+        if (providerLookupUnsupported) throw providerFilterFailure()
+        const byKind: Record<ProviderLookupKind, string[]> = { Movie: [], Series: [] }
+        for (const record of records) {
+            const lookup = lookupValues(record)
+            if (lookup !== null) byKind[lookup.kind].push(...lookup.values)
+        }
+        try {
+            await Promise.all([
+                byKind.Movie.length ? providerLookup.prime('Movie', byKind.Movie, primeSignal) : undefined,
+                byKind.Series.length ? providerLookup.prime('Series', byKind.Series, primeSignal) : undefined,
+            ])
+        } catch (error) {
+            primeSignal.throwIfAborted()
+            if (error instanceof ProviderFilterIgnoredError) throw providerFilterFailure()
+        }
+    }
+    const resolveByProviderIds = async (record: WatchStateRecord, resolveSignal: AbortSignal): Promise<WatchStateRecord[]> => {
+        const lookup = lookupValues(record)
+        if (lookup === null) return []
+        const verified = new Map<string, WatchStateRecord>()
+        const accepts = (candidate: WatchStateRecord) => lookup.parsed.some(entry => candidate.identities.includes(entry.identity))
+        const candidates = await findByProviderIds(lookup.kind, lookup.values, resolveSignal)
+        if (candidates === null) return []
+        if (lookup.kind === 'Movie') {
+            for (const candidate of candidates) {
+                if (!isWatchableLeaf(candidate) || lookup.parsed.some(entry => looksLikeFacadeStub(candidate, entry.parsed))) continue
+                const item = await withUserData(candidate, resolveSignal)
+                if (item === null || !isWatchableLeaf(item) || lookup.parsed.some(entry => looksLikeFacadeStub(item, entry.parsed))) continue
+                const checked = await watchRecordFromItem(item)
+                if (accepts(checked)) verified.set(checked.id, checked)
+            }
+            return [...verified.values()]
+        }
+        const { season, episode } = lookup.parsed[0].parsed
+        if (season === undefined || episode === undefined) return []
+        for (const series of candidates) {
+            if (series.Type !== 'Series' || series.Id === '') continue
+            if (!lookup.parsed.some(entry => episodeWatchIdentities(series.ProviderIds, season, episode).includes(entry.identity))) continue
+            let listing: { episodes: JellyfinItem[]; complete: boolean }
+            try {
+                listing = await listEpisodeChildren(series.Id, resolveSignal)
+            } catch (error) {
+                if (error instanceof JellyfinError && [400, 404, 405, 501].includes(error.status ?? 0)) continue
+                throw error
+            }
+            if (!listing.complete) continue
+            for (const candidate of listing.episodes) {
+                if (candidate.ParentIndexNumber !== season || candidate.IndexNumber !== episode) continue
+                if (seriesKeyOf(candidate) !== series.Id) continue
+                if (lookup.parsed.some(entry => looksLikeFacadeStub(candidate, entry.parsed))) continue
+                const item = await withUserData(candidate, resolveSignal)
+                if (item === null || item.Type !== 'Episode' || seriesKeyOf(item) !== series.Id) continue
+                const checked = await watchRecordFromItem(item, series.ProviderIds)
+                if (accepts(checked)) verified.set(checked.id, checked)
             }
         }
         return [...verified.values()]
@@ -772,7 +873,8 @@ export async function createJellyfinWatchDestination(connection: Connection, ope
         subject: binding.subject,
         scope: binding.scope,
         capabilities,
-        resolve: useNativeInventory ? resolveNative : resolveFacade,
+        resolve: useNativeInventory ? resolveNative : binding.details.product === 'aiostreams' ? resolveAIOStreams : resolveByProviderIds,
+        ...(useNativeInventory || binding.details.product === 'aiostreams' ? {} : { prime: primeByProviderIds }),
         apply,
         beginRun,
     }

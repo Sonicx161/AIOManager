@@ -15,11 +15,6 @@ const PROVIDER_VALUE_PATTERNS: Record<WatchProvider, RegExp> = {
     tvdb: /^\d+$/,
 }
 const TICKS_PER_MS = 10_000
-const FACADE_NONE16 = 0xffff
-const FACADE_MAX48 = 2 ** 48 - 1
-const FACADE_KIND = { movie: 1, series: 2, episode: 4 }
-const FACADE_PROVIDER: Record<WatchProvider, number> = { imdb: 1, tmdb: 2, tvdb: 3 }
-const FACADE_MEDIA = { movie: 1, series: 2 }
 
 export interface ParsedWatchIdentity {
     type: 'movie' | 'episode'
@@ -179,41 +174,6 @@ export function parseWatchIdentity(identity: string): ParsedWatchIdentity | null
     const episode = match[5] !== undefined ? Number(match[5]) : undefined
     if (episode !== undefined && episode < 1) return null
     return { type: match[1] as 'movie' | 'episode', provider, value, season, episode }
-}
-
-function facadeNumeric(provider: WatchProvider, value: string): number | null {
-    const digits = provider === 'imdb' ? value.replace(/^tt/, '') : value
-    if (!/^\d+$/.test(digits)) return null
-    const numeric = Number(digits)
-    return Number.isSafeInteger(numeric) && numeric <= FACADE_MAX48 ? numeric : null
-}
-
-function facadePackedId(parsed: ParsedWatchIdentity, form: 'leaf' | 'series'): string | null {
-    const numeric = facadeNumeric(parsed.provider, parsed.value)
-    if (numeric === null) return null
-    const kind = form === 'series' ? FACADE_KIND.series : FACADE_KIND[parsed.type]
-    const media = parsed.type === 'movie' ? FACADE_MEDIA.movie : FACADE_MEDIA.series
-    let season = FACADE_NONE16
-    let episode = FACADE_NONE16
-    if (form === 'leaf' && parsed.type === 'episode') {
-        if (parsed.season === undefined || parsed.episode === undefined) return null
-        if (!Number.isSafeInteger(parsed.season) || parsed.season < 0 || parsed.season >= FACADE_NONE16) return null
-        if (!Number.isSafeInteger(parsed.episode) || parsed.episode < 0 || parsed.episode >= FACADE_NONE16) return null
-        season = parsed.season
-        episode = parsed.episode
-    }
-    const byte1 = ((kind << 4) | FACADE_PROVIDER[parsed.provider]).toString(16).padStart(2, '0')
-    return `a1${byte1}${media.toString(16).padStart(2, '0')}${numeric.toString(16).padStart(12, '0')}${season.toString(16).padStart(4, '0')}${episode.toString(16).padStart(4, '0')}000000`
-}
-
-export function packedFacadeItemId(identity: string): string | null {
-    const parsed = parseWatchIdentity(identity)
-    return parsed === null ? null : facadePackedId(parsed, 'leaf')
-}
-
-export function packedFacadeSeriesId(identity: string): string | null {
-    const parsed = parseWatchIdentity(identity)
-    return parsed === null || parsed.type !== 'episode' ? null : facadePackedId(parsed, 'series')
 }
 
 export function looksLikeFacadeStub(item: Pick<JellyfinItem, 'Name'>, expected: ParsedWatchIdentity): boolean {

@@ -161,6 +161,13 @@ export async function planWatchMigration(source: WatchStateSnapshot, destination
         }
     }
     try {
+        if (destination.prime) {
+            const matchable = source.records.filter(record => record.identities.length > 0 && record.type !== 'unknown' && !record.identities.some(id => identities.get(id)! > 1))
+            if (matchable.length > 0) {
+                progress?.('Looking up titles on the destination…')
+                await destination.prime(matchable, matchingSignal)
+            }
+        }
         await Promise.all(Array.from({ length: Math.min(4, source.records.length) }, worker))
     } catch (error) {
         controller.abort()
