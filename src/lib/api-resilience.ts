@@ -5,6 +5,8 @@ export interface ResilientFetchOptions extends RequestInit {
     // Override for POST/PATCH that are safe to repeat (a read-shaped RPC, or one carrying an
     // idempotency key). By default only spec-idempotent methods are retried on ambiguous failures.
     idempotent?: boolean;
+    // Checked before every retry; returning false stops retrying and returns the last response.
+    shouldRetry?: () => boolean;
 }
 
 // Sync uploads carry multi-MB encrypted envelopes (avatars, backfill events); the 10 s
@@ -32,6 +34,7 @@ export async function resilientFetch(
         retries = 2,
         retryDelay = 1000,
         idempotent,
+        shouldRetry,
         ...fetchOptions
     } = options;
 
@@ -44,7 +47,12 @@ export async function resilientFetch(
 
     let lastError: Error | null = null;
 
+    let lastResponse: Response | null = null;
     for (let attempt = 0; attempt <= retries; attempt++) {
+        if (attempt > 0 && shouldRetry && !shouldRetry()) {
+            if (lastResponse) return lastResponse;
+            throw lastError ?? new Error('Request retry cancelled');
+        }
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(new DOMException(`Request timed out after ${Math.round(timeout / 1000)}s`, 'TimeoutError')), timeout);
 
@@ -69,6 +77,7 @@ export async function resilientFetch(
             clearTimeout(id);
 
             if (response.status === 429 && attempt < retries) {
+                lastResponse = response;
                 const retryAfter = response.headers.get('Retry-After');
                 let delay = retryDelay * Math.pow(2, attempt);
                 if (retryAfter) {
@@ -88,6 +97,7 @@ export async function resilientFetch(
             }
 
             if (response.status >= 500 && attempt < retries && isIdempotent) {
+                lastResponse = response;
                 if (import.meta.env.DEV) console.warn(`[API] Server Error ${response.status}. Retrying in ${retryDelay * Math.pow(2, attempt)}ms...`);
                 await new Promise(resolve => setTimeout(resolve, retryDelay * Math.pow(2, attempt)));
                 continue;

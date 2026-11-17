@@ -1713,6 +1713,7 @@ export const useSyncStore = create<SyncState>()(
                             body: pushBody,
                             // Multi-MB envelopes need minutes, not the 10 s default, on a slow uplink.
                             timeout: syncUploadTimeoutMs(pushBody.length),
+                            shouldRetry: pushCurrent,
                         })
                         if (!pushCurrent()) return null
 
@@ -2331,7 +2332,7 @@ function retryPendingVaultPush() {
             || !syncRuntime.vaultImportReady || syncRuntime.vaultImportAccount !== current.auth.id
             || syncRuntime.vaultImportWorkspace !== getActiveWorkspaceId()) return
         syncRuntime.pendingVaultRetry = false
-        syncRuntime.pendingRetry = false
+        syncRuntime.pendingRetry = true
         current.syncToRemote(true).catch(() => {})
     }, 0)
 }
