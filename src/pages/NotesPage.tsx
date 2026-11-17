@@ -1547,10 +1547,7 @@ function NoteCard({
             data-theme-part="nav-item"
             data-theme-inset
             data-state={isActive && !selectionMode ? 'active' : 'inactive'}
-            className={cn('w-full text-left px-3 py-3 border-b border-border/40 transition-[transform,opacity,box-shadow] hover:bg-muted/40 group relative', isActive && !selectionMode && 'bg-primary/12', isSelected && 'bg-primary/8')}>
-            {isActive && !selectionMode && (
-                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r" />
-            )}
+            className={cn('w-full text-left px-3 py-3 border-b border-border/40 transition-[transform,opacity,box-shadow] hover:bg-muted/40 group relative', isActive && !selectionMode && 'bg-foreground/[0.08] ring-1 ring-inset ring-foreground/10', isSelected && 'bg-primary/8')}>
             <div className="flex items-start gap-2 min-w-0 pl-1">
                 {selectionMode && (
                     <div className={cn(
