@@ -30,9 +30,11 @@ const isEntryShape = (value: unknown): value is CanonicalBaseEntry =>
 const normalize = (value: CanonicalBaseEntry | AddonDescriptor[]): CanonicalBaseEntry =>
     Array.isArray(value) ? { addons: value } : value
 
-function load(): Record<string, CanonicalBaseEntry> {
+let cachedRaw: string | null | undefined
+let cachedMap: Record<string, CanonicalBaseEntry> = {}
+
+function parseMap(raw: string | null): Record<string, CanonicalBaseEntry> {
     try {
-        const raw = localStorage.getItem(KEY)
         const parsed = raw ? JSON.parse(raw) : {}
         if (!parsed || typeof parsed !== 'object') return {}
         const out: Record<string, CanonicalBaseEntry> = {}
@@ -45,16 +47,36 @@ function load(): Record<string, CanonicalBaseEntry> {
     }
 }
 
+function invalidate(): void {
+    cachedRaw = undefined
+    cachedMap = {}
+}
+
+function load(): Record<string, CanonicalBaseEntry> {
+    let raw: string | null
+    try { raw = localStorage.getItem(KEY) } catch { return {} }
+    if (cachedRaw === raw) return cachedMap
+    cachedMap = parseMap(raw)
+    cachedRaw = raw
+    return cachedMap
+}
+
+if (typeof window !== 'undefined') {
+    window.addEventListener('storage', event => {
+        if (event.key === KEY) invalidate()
+    })
+}
+
 /** The recorded base for an account, or null if none has been committed yet. */
 export function getCanonicalBase(accountId: string): AddonDescriptor[] | null {
     const map = load()
-    return Object.prototype.hasOwnProperty.call(map, accountId) ? map[accountId].addons : null
+    return Object.prototype.hasOwnProperty.call(map, accountId) ? structuredClone(map[accountId].addons) : null
 }
 
 /** The recorded base entry (addons plus the server-reported hash) or null. */
 export function getCanonicalBaseEntry(accountId: string): CanonicalBaseEntry | null {
     const map = load()
-    return Object.prototype.hasOwnProperty.call(map, accountId) ? map[accountId] : null
+    return Object.prototype.hasOwnProperty.call(map, accountId) ? structuredClone(map[accountId]) : null
 }
 
 /**
@@ -62,7 +84,7 @@ export function getCanonicalBaseEntry(accountId: string): CanonicalBaseEntry | n
  * (zero-I/O ethos: no write per sync cycle when nothing moved).
  */
 export function setCanonicalBases(entries: Record<string, CanonicalBaseEntry>): void {
-    const map = load()
+    const map = { ...load() }
     let changed = false
     for (const [id, entry] of Object.entries(entries)) {
         if (JSON.stringify(map[id]) !== JSON.stringify(entry)) {
@@ -71,13 +93,19 @@ export function setCanonicalBases(entries: Record<string, CanonicalBaseEntry>): 
         }
     }
     if (changed) {
-        try { localStorage.setItem(KEY, JSON.stringify(map)) } catch {}
+        try {
+            localStorage.setItem(KEY, JSON.stringify(map))
+            invalidate()
+        } catch {}
     }
 }
 
 /** Drop all bases (logout; the next login re-establishes them on first push). */
 export function clearCanonicalBases(): void {
-    try { localStorage.removeItem(KEY) } catch {}
+    try {
+        localStorage.removeItem(KEY)
+        invalidate()
+    } catch {}
 }
 
 /**
