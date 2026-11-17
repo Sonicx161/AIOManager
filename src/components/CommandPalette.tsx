@@ -792,13 +792,10 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
                 onTouchStart={() => { if (item.target) preloadRouteChunk(item.target) }}
                 aria-disabled={item.disabled || undefined}
                 className={`relative mx-3 flex w-[calc(100%-1.5rem)] items-center gap-3 rounded-2xl px-3 py-3 text-left transition-[background-color,box-shadow,color,transform] duration-150 ${item.disabled ? 'opacity-60' : ''} ${isSelected
-                    ? 'bg-primary/10 text-foreground shadow-sm ring-1 ring-primary/20'
+                    ? 'bg-foreground/[0.08] text-foreground ring-1 ring-inset ring-foreground/10'
                     : 'text-foreground hover:bg-muted/30'
                     }`}
             >
-                {isSelected && (
-                    <span className="absolute inset-y-2 left-0 w-1 rounded-r-full bg-primary" />
-                )}
                     {item.avatarUrl ? (
                         <span data-theme-part="avatar" className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl overflow-hidden transition-colors">
                             <img src={item.avatarUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
@@ -885,8 +882,8 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
                                 {resultsLoadFailed ? <>Could not load search results. <button type="button" className="underline" onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation() }} onClick={() => setResultsLoadAttempt(attempt => attempt + 1)}>Retry</button></> : 'Loading search results...'}
                             </div>) : groups.map(({ category, items }) => (
                             <div key={category} className="space-y-1">
-                                <div className="px-6 pt-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground/80">
-                                    {category}
+                                <div className="px-6 pt-3 pb-1 text-xs font-medium text-muted-foreground">
+                                    {category.charAt(0) + category.slice(1).toLowerCase()}
                                 </div>
                                 {items.map(item => renderCommandItem(item))}
                             </div>
