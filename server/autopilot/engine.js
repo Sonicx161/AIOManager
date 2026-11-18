@@ -9,7 +9,6 @@ import { createSiblings } from './v1/siblings.js'
 import { createNotify, guardedWebhookFetch } from './v1/notify.js'
 import { createHistory } from './v1/history.js'
 import { createWriters } from './v1/writers.js'
-import { createDeepAudit } from './v1/deep-audit.js'
 import { createCommit } from './v1/commit.js'
 import { createProcessRule } from './v1/process-rule.js'
 import { createScheduler } from './v1/scheduler.js'
@@ -24,11 +23,10 @@ const envMs = (name, fallback, min) => Math.max(min, parseInt(process.env[name] 
 
 // Read-only provider methods; every other method is refused while the write tripwire holds safe mode.
 const STREMIO_READS = ['readAddons']
-const RECONCILER_READS = ['resolveConnections', 'auditConnections', 'getConnectionStates', 'getState']
+const RECONCILER_READS = ['resolveConnections', 'getConnectionStates', 'getState']
 
 export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) {
     const nowMs = deps.now ?? (() => Date.now())
-    const rand = deps.random ?? (() => Math.random())
     // Webhooks default to the connect-time guarded transport; an injected deps.fetch (golden harness) replaces it.
     const fetchImpl = guardFetch(deps.fetch ?? guardedWebhookFetch)
     autopilotTripwire.attachLogger(fastify.log)
@@ -48,14 +46,6 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     const RULE_RECHECK_MS = envMs('AUTOPILOT_RULE_RECHECK_MS', 30000, 10000)
     // Steady-rule heartbeat cadence; keeps persisted last_check fresh well under the client's 15-min staleness threshold
     const RULE_HEARTBEAT_MS = envMs('AUTOPILOT_HEARTBEAT_MS', 300000, 30_000)
-    // How often a steady rule re-checks the live collection for drift
-    const RULE_DEEP_AUDIT_MS = envMs('AUTOPILOT_DEEP_AUDIT_MS', 3600000, 300_000)
-    // A rule that predates this process and has no runtime state yet gets a random phase, so its
-    // first audit lands within this window instead of every rule auditing in one cycle; later
-    // audits keep that phase. Rules created or edited after boot (updated_at past bootAt) still
-    // audit on their next scan.
-    const RULE_FIRST_DEEP_AUDIT_MAX_MS = Math.min(RULE_DEEP_AUDIT_MS, 10 * 60 * 1000)
-    const bootAt = nowMs()
     const runtimeState = createRuntimeState({ nowMs, RULE_RUNTIME_TTL_MS, MAX_RULE_RUNTIME_ENTRIES })
     const { getRuleRuntimeState, clearRuleRuntimeState, clearAccountRuleRuntimeState, shouldSkipRuleCheck, setRuleRuntimeState } = runtimeState
 
@@ -68,7 +58,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     // Probes default to the connect-time guarded transport; an injected deps.fetch (golden harness) replaces it.
     // Pings get two thirds of the recheck interval; an overdue ping defers to the next cycle.
     const healthPingBudgetMs = deps.healthPingBudgetMs ?? Math.min(Math.floor(RULE_RECHECK_MS * 2 / 3), AUTOPILOT_CYCLE_BUDGET_MS)
-    const { checkAddonHealthInternal, getHealthLatency, checkCustomUrlsHealth, memberStatus, beginProbeCycle, endProbeCycle } = (deps.createHealthChecker ?? createHealthChecker)(fastify, {
+    const { checkAddonHealthInternal, getHealthLatency, memberStatus, beginProbeCycle, endProbeCycle } = (deps.createHealthChecker ?? createHealthChecker)(fastify, {
         fetch: deps.fetch, now: nowMs, pingBudgetMs: healthPingBudgetMs,
         ...(deps.healthRetryDelayMs != null ? { retryDelayMs: deps.healthRetryDelayMs } : {}),
     })
@@ -86,17 +76,13 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
 
     const { sendNotification, notifyTransition } = createNotify({ fastify, nowMs, fetchImpl, decryptRuleField })
 
-    const deepAudit = createDeepAudit({
-        fastify, nowMs, rand, bootAt, reconciler, stremioDriver, checkAddonHealthInternal, checkCustomUrlsHealth,
-        RULE_DEEP_AUDIT_MS, RULE_FIRST_DEEP_AUDIT_MAX_MS,
-    })
     const { planCommit, flushUpdates } = createCommit({ nowMs, setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState, onTransitionError: (err, id) => fastify.log.error({ category: 'Autopilot' }, `Transition effects failed for rule ${id}: ${scrubUrls(err?.message || String(err))}`), RULE_HEARTBEAT_MS })
     const connectionRetry = createConnectionRetry({ nowMs })
     const { processAutopilotRule: processRuleUnguarded } = createProcessRule({
         fastify, nowMs, reconciler, decryptRuleField, runtimeState, cycleTargets, siblingChainPlans,
         memberStatus, getHealthLatency, isSubstantial, fetchManifestRaw,
         buildReconciledList, writeStremioCollection, enforceConnectionOnly, syncStremioLive,
-        recordFailoverHistory, notifyTransition, deepAudit, planCommit,
+        recordFailoverHistory, notifyTransition, planCommit,
         ruleSnapshots: { get: ruleCache.ruleSnapshotGet, set: ruleCache.ruleSnapshotSet, getList: ruleCache.ruleListGet, holdList: ruleCache.ruleListHold, releaseList: ruleCache.ruleListRelease },
         connectionRetry, stremioDriver,
     })
@@ -148,7 +134,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
             const retried = runtimeState.conflicts.retry(ruleId)
             if (retried) {
                 const state = getRuleRuntimeState(ruleId)
-                if (state) setRuleRuntimeState(ruleId, { ...state, lastCheck: 0, lastDeepAudit: 0 })
+                if (state) setRuleRuntimeState(ruleId, { ...state, lastCheck: 0 })
                 runtimeState.clearRuleCheckError(ruleId)
             }
             return retried

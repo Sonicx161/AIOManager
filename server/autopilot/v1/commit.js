@@ -34,7 +34,7 @@ export async function runFullRuleUpdate(conn, [activeUrlToSave, addonListToSave,
 
 export function createCommit({ nowMs, setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState, onTransitionError, RULE_HEARTBEAT_MS }) {
     // Publishes the runtime state and returns the pending write (or null when nothing is due).
-    const planCommit = ({ rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl, targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey, shouldUpdateNotificationTime, lastDeepAuditToSave }) => {
+    const planCommit = ({ rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl, targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey, shouldUpdateNotificationTime }) => {
         const stabilizationJson = JSON.stringify(stabilization)
         const now = nowMs()
         // Counters live per target in memory; the stored snapshot is written only with a decision.
@@ -48,7 +48,6 @@ export function createCommit({ nowMs, setRuleRuntimeState, getRuleRuntimeState, 
             lastNotification: lastNotificationToSave,
             stabilization,
             activeUrl: needsSync && !syncSucceeded ? decryptedActiveUrl : targetActiveUrl,
-            ...(lastDeepAuditToSave != null ? { lastDeepAudit: lastDeepAuditToSave } : {})
         })
 
         if (!needsColdUpdate && !needsStatsUpdate) {

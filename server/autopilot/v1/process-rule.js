@@ -26,7 +26,7 @@ export function createProcessRule({
     fastify, nowMs, reconciler, decryptRuleField, runtimeState, cycleTargets, siblingChainPlans,
     memberStatus, getHealthLatency, isSubstantial, fetchManifestRaw,
     buildReconciledList, writeStremioCollection, enforceConnectionOnly, syncStremioLive,
-    recordFailoverHistory, notifyTransition, deepAudit, planCommit,
+    recordFailoverHistory, notifyTransition, planCommit,
     ruleSnapshots = null, connectionRetry = null, stremioDriver = null,
 }) {
     const { setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState } = runtimeState
@@ -377,37 +377,8 @@ export function createProcessRule({
 
         let hasChanged = normalizedTarget !== decryptedNormalizedActive
 
-        const snapshotLooksClean = !hasChanged && !violationDetected
-        const audit = await deepAudit.runDeepAudit({
-            rule,
-            lastDeepAudit: getRuleRuntimeState(rule.id)?.lastDeepAudit,
-            authKey: decryptedAuthKey,
-            hasConnectionTarget,
-            snapshotLooksClean,
-            chain,
-            normalizedChainUrls,
-            normalizedChainSet,
-            customChecks,
-            currentActiveNorm,
-            normalizedTarget,
-            preserveUrls,
-        })
-        const lastDeepAuditToSave = audit.lastDeepAudit
-        const held = runtimeState.conflicts?.observe(rule, audit.observations)
-        if (held) {
-            const newlyHeld = held.urls.some(url => !preserveUrls.includes(url))
-            preserveUrls = [...new Set([...preserveUrls, ...held.urls])]
-            showConflict(held)
-            if (newlyHeld || preserveUrls.includes(normalizedTarget)) return conflictHeartbeat({ stabilization, lastDeepAudit: lastDeepAuditToSave })
-        }
-        const deepAuditDrift = audit.drift
-        if (audit.drift && audit.canonicalTarget && audit.canonicalTarget !== normalizedTarget) {
-            targetActiveUrl = chain[normalizedChainUrls.indexOf(audit.canonicalTarget)] || targetActiveUrl
-            normalizedTarget = audit.canonicalTarget
-            hasChanged = normalizedTarget !== decryptedNormalizedActive
-        }
-
-        const needsSync = hasChanged || violationDetected || deepAuditDrift
+        // Platform drift is not audited during the health cycle.
+        const needsSync = hasChanged || violationDetected
 
         let reconciledList = null
         let syncSucceeded = !needsSync
@@ -416,7 +387,7 @@ export function createProcessRule({
         let confirmedScopes = []
         let pushedPlatforms = null
         if (needsSync) await ensureUpdatedAddonList()
-        if (skipContestedTarget(targetActiveUrl)) { showConflict(); return conflictHeartbeat({ stabilization, lastDeepAudit: lastDeepAuditToSave }) }
+        if (skipContestedTarget(targetActiveUrl)) { showConflict(); return conflictHeartbeat({ stabilization }) }
         if (needsSync) {
             // A rule deleted mid-cycle (its account was removed) must never push its stored list.
             // The owner-state assert beside it covers a block that landed mid-cycle.
@@ -610,9 +581,6 @@ export function createProcessRule({
             if (connectionRetry) connectionRetry.clear(rule.id)
             return null
         }
-        if (connectionRetry && audit.connectionDrift?.length > 0 && !hasChanged) {
-            connectionRetry.schedule(rule.id, { accountId: rule.account_id, target: normalizedTarget, connectionIds: audit.connectionDrift, due: true })
-        }
         if (connectionRetry && syncSucceeded && !hasChanged) {
             const entry = connectionRetry.takeDue(rule.id, normalizedTarget)
             if (entry) await retryConnectionPush(rule, entry, { decryptedAuthKey, chain, targetActiveUrl, normalizedTarget, normalizedChain, siblingPlans, preserveUrls, ensureUpdatedAddonList, getMirrorChainUrls: () => mirrorChainUrls })
@@ -624,7 +592,7 @@ export function createProcessRule({
 
         const update = planCommit({
             rule, stabilization, needsSync, syncSucceeded, hasChanged, decryptedActiveUrl,
-            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey: needsSync && syncSucceeded ? storedAddonListKey() : null, shouldUpdateNotificationTime: false, lastDeepAuditToSave
+            targetActiveUrl, reconciledList, updatedAddonList, storedAddonListKey: needsSync && syncSucceeded ? storedAddonListKey() : null, shouldUpdateNotificationTime: false
         })
         // Owner identity rides the dirty update so the scheduler can drop commits for
         // owners blocked between processing and the flush (snapshot check, no DB read).
