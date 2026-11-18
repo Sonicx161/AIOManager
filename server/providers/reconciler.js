@@ -472,7 +472,7 @@ function enqueuePlatformWrite(connection, run) {
 // resurrect a deletion this write is supposed to land.
 // `excludedUrls` (normalized) are this connection's destination-policy removals: a
 // deliberately excluded member must never be mirrored back as a foreign row either.
-async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null, managedChains = null, preserveUrls = null) {
+async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null, managedChains = null, preserveUrls = null, observeLive = null) {
     const foreign = new Set((Array.isArray(foreignChainUrls) ? foreignChainUrls : []).map(u => normalizeUrl(u)))
     const own = new Set((Array.isArray(requiredUrls) ? requiredUrls : []).map(u => normalizeUrl(u)))
     const preserved = new Set((Array.isArray(preserveUrls) ? preserveUrls : []).map(normalizeUrl).filter(Boolean))
@@ -489,6 +489,8 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
         return canonical
     }
     if (!Array.isArray(live)) return preserved.size > 0 ? null : canonical
+    const conflict = typeof observeLive === 'function' ? observeLive(connection.id, live, [...(excluded || []), ...preserved]) : null
+    if (conflict) return { conflict }
     if (live.length === 0 && preserved.size === 0) return canonical
 
     let out = canonical.filter(a => !foreign.has(urlOf(a)))
@@ -865,6 +867,7 @@ export function createReconciler(fastify) {
             .map(chain => ({ ...chain, urls: (chain.urls || []).filter(url => !preserved.has(normalizeUrl(url))) }))
         let chainGuardSkipped = false
         let recoveredAddons = []
+        const conflictHolds = {}
 
         for (const connection of (connections || []).filter(c => c.enabled)) {
             const connId = connection.id
@@ -881,7 +884,7 @@ export function createReconciler(fastify) {
                 // explanation ("every canon-carried member was deliberately
                 // excluded HERE") is only derivable against the pre-projection set.
                 let effective = connectionEffectiveAddons(canon, connection)
-                const excludedUrls = connectionExcludedUrls(canon, connection)
+                const excludedUrls = connectionExcludedUrls(canonical, connection)
                 const foreignUrls = new Set((Array.isArray(opts.foreignChainUrls) ? opts.foreignChainUrls : []).map(normalizeUrl).filter(Boolean))
                 // A chain that is completely absent from the canonical snapshot
                 // may be rehydrated by the in-slot live mirror. Keep the early
@@ -906,13 +909,26 @@ export function createReconciler(fastify) {
                 // e.g. an AIOMetadata "sync to all" push — can never silently skip Stremio.
                 if (connection.platform === 'stremio' && !isHydraOutbound(connection) && stremioWriter) {
                     if (opts.canWrite && !await opts.canWrite()) { chainGuardSkipped = true; continue }
-                    await stremioWriter(connection)
+                    try {
+                        await stremioWriter(connection)
+                    } catch (err) {
+                        if (err?.code === 'contested_by_other_writer') {
+                            conflictHolds[connId] = err.conflict
+                            chainGuardSkipped = true
+                            break
+                        }
+                        throw err
+                    }
                 } else {
                     if (canon.length === 0) continue
                     const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
                     if (!driver) continue
                     const outcome = await writePlatformAddons(driver, connection, effective, 'enforce', async (list) => {
-                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls, managedChains, opts.preserveUrls)
+                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls, managedChains, opts.preserveUrls, opts.observeLive)
+                        if (merged?.conflict) {
+                            conflictHolds[connId] = merged.conflict
+                            return { skip: true, reason: 'contested_by_other_writer' }
+                        }
                         if (merged === null) return { skip: true, reason: 'The live collection could not be read to preserve contested addons.' }
                         // Belt-and-braces: no merge step may ride an excluded row
                         // back onto this connection's write (E2).
@@ -944,7 +960,11 @@ export function createReconciler(fastify) {
                         if (opts.canWrite && !await opts.canWrite()) return { skip: true, reason: 'Rule was paused or removed.' }
                         return { list: finalList }
                     })
-                    if (outcome && outcome.skipped) { chainGuardSkipped = true; continue }
+                    if (outcome && outcome.skipped) {
+                        chainGuardSkipped = true
+                        if (conflictHolds[connId]) break
+                        continue
+                    }
                 }
                 recordSuccess(accountId, connId)
                 synced.push(connection.platform)
@@ -957,7 +977,7 @@ export function createReconciler(fastify) {
         }
 
         trace('reconciler', 'enforceAccount.complete', { accountId, synced, timing: Date.now() - start })
-        return { synced, syncedIds, connectionStates: getConnectionStates(accountId), chainGuardSkipped, recoveredAddons }
+        return { synced, syncedIds, connectionStates: getConnectionStates(accountId), chainGuardSkipped, recoveredAddons, conflictHolds }
     }
 
     // Nuvio instances that reject the optional plugins table; skip after the first 401

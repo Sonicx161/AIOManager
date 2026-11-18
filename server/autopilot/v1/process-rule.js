@@ -188,7 +188,7 @@ export function createProcessRule({
             noteCheckError(rule.id, rule.account_id, 'sync_failed', 'Sibling rule state could not be read safely. Enforcement will retry.')
             return conflictHeartbeat()
         }
-        if (skipContestedTarget(decryptedActiveUrl || chain[0])) {
+        if (skipContestedTarget(decryptedActiveUrl || chain[0]) && (!runtimeState.conflicts?.getHold(rule.id) || overlapUrls.length > 0)) {
             showConflict()
             return conflictHeartbeat()
         }
@@ -318,6 +318,11 @@ export function createProcessRule({
                     }
                 }
             }
+        }
+        if (decision.reason === 'active-dead' && runtimeState.conflicts?.resetForIncident(rule, targetActiveUrl, chain.filter((_, i) => members[i].state === 'DOWN'))) {
+            siblingPlans = await siblingChainPlans(rule.account_id, rule.id, chain, rule.owner_sync_user, siblingPlans.sourceRows || siblingRows)
+            preserveUrls = siblingPlans.contestedUrls || []
+            overlapUrls = siblingPlans.overlapUrls || []
         }
         const stabilization = stabilizationFrom(normalizedChainUrls, members)
         if (skipContestedTarget(targetActiveUrl)) { showConflict(); return conflictHeartbeat({ stabilization }) }
@@ -464,6 +469,13 @@ export function createProcessRule({
                     }
 
                     const result = await reconciler.enforceAccount(rule.account_id, [stremioConn, ...connectionTargets], built.canonical, { stremioWriter, canWrite: () => canWrite(rule), ...(preserveUrls.length > 0 ? { preserveUrls } : {}) })
+                    const heldFromWrite = Object.values(result.conflictHolds || {})[0]
+                    if (heldFromWrite) {
+                        throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
+                            code: 'contested_by_other_writer',
+                            conflict: heldFromWrite,
+                        })
+                    }
                     if (!result.synced.includes('stremio')) throw new Error('Stremio enforcement failed')
                     syncSucceeded = true
                     const syncedPlatforms = result.synced.map(p => p === 'stremio' ? 'Stremio' : p)

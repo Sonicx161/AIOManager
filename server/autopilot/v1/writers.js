@@ -74,6 +74,19 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
 
         if (areCollectionsDifferent(finalAddons, remoteAddons)) {
             if (!await canWriteRule(ruleId, accountId, syncUser)) throw Object.assign(new Error('Rule was paused or removed during the check'), { code: 'rule_changed' })
+            const held = runtimeState?.conflicts.observeLive(
+                { id: ruleId, account_id: accountId, owner_sync_user: syncUser },
+                'stremio',
+                remoteAddons,
+                normalizedActive,
+                [...stremioExcluded, ...preserveUrls],
+            )
+            if (held) {
+                throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
+                    code: 'contested_by_other_writer',
+                    conflict: held,
+                })
+            }
             try {
                 await stremioDriver.writeAddons(authKey, finalAddons)
             } finally {
@@ -120,6 +133,7 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
         const result = await reconciler.enforceAccount(rule.account_id, targets, currentAddons, {
             ...guardOpts,
             canWrite: () => canWriteRule(rule.id, rule.account_id, rule.owner_sync_user),
+            observeLive: (scope, live, ignored) => runtimeState?.conflicts?.observeLive(rule, scope, live, activeUrl, ignored),
             ...(preserveUrls.length > 0 ? { preserveUrls } : {}),
             // Only the chains this rule cannot derive are mirrored from the platform: a decided
             // target outranks a platform list that has not caught up with it yet, and mirroring a
@@ -133,6 +147,13 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             // Guard scope: every chain this account manages, not just this rule's.
             managedChains: [{ urls: chain, target: activeUrl }, ...plans],
         })
+        const heldFromLive = Object.values(result.conflictHolds || {})[0]
+        if (heldFromLive) {
+            throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
+                code: 'contested_by_other_writer',
+                conflict: heldFromLive,
+            })
+        }
         if (result.synced.length > 0) {
             const confirmed = result.syncedIds || targets.filter(c => !unpushedConnectionIds(targets, result).includes(c.id)).map(c => c.id)
             runtimeState?.conflicts.recordWrite(rule, chain.filter(url => !preserveUrls.includes(normalizeAddonUrl(url))), activeUrl, confirmed)

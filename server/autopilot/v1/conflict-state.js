@@ -2,6 +2,9 @@ import { normalizeAddonUrl } from '../../utils/addon-url.js'
 import { urlRef } from './url-ref.js'
 
 const BACKOFF_HOURS = [1, 4, 24]
+const CONVERGENCE_MS = 5 * 60 * 1000
+const INCIDENT_MEMORY_MS = BACKOFF_HOURS[BACKOFF_HOURS.length - 1] * 60 * 60 * 1000
+const MAX_INCIDENTS = 16
 
 export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60 * 60 * 1000 }) {
     const entries = new Map()
@@ -24,7 +27,7 @@ export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60
             remove(rule.id)
             entry = null
         }
-        if (!entry) entry = { accountId: rule.account_id, owner: rule.owner_sync_user, scopes: new Map(), step: -1, held: [], heldScopes: new Set(), retryAt: 0 }
+        if (!entry) entry = { accountId: rule.account_id, owner: rule.owner_sync_user, scopes: new Map(), incidents: new Map(), step: -1, held: [], heldScopes: new Set(), retryAt: 0 }
         entry.lastSeen = nowMs()
         entries.delete(rule.id)
         entries.set(rule.id, entry)
@@ -45,8 +48,10 @@ export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60
         const expected = JSON.stringify([members, active])
         for (const scope of scopes) {
             const previous = entry.scopes.get(scope)
+            const prior = previous && previous.expected !== expected
+                ? { active: previous.active, members: previous.members, at: nowMs() } : null
             entry.scopes.set(scope, {
-                expected, members, active, version: (previous?.version || 0) + 1,
+                expected, members, active, prior, version: (previous?.version || 0) + 1,
                 observedVersion: previous?.expected === expected ? previous.observedVersion : 0,
                 reverted: previous?.expected === expected ? previous.reverted : '',
                 count: previous?.expected === expected ? previous.count : 0,
@@ -82,6 +87,7 @@ export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60
                 expected.observedVersion = expected.version
                 if (entry.retryAt <= nowMs() && entry.heldScopes.has(audit.scope)) entry.heldScopes.delete(audit.scope)
                 if (entry.retryAt <= nowMs() && entry.heldScopes.size === 0) {
+                    if (entry.held.length) entry.incidents.clear()
                     entry.held = []
                     entry.retryAt = 0
                     entry.step = -1
@@ -105,6 +111,38 @@ export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60
         }
         return getHold(rule.id)
     }
+    const observeLive = (rule, scope, addons, target, ignoredUrls = []) => {
+        const entry = entries.get(rule.id)
+        const expected = entry?.scopes.get(scope)
+        if (!expected) return null
+        const ignored = new Set(normalized([...ignoredUrls]))
+        const members = new Set(expected.members.filter(url => !ignored.has(url)))
+        const proposed = normalizeAddonUrl(target || expected.active)
+        const reverted = []
+        for (const addon of Array.isArray(addons) ? addons : []) {
+            const url = normalizeAddonUrl(addon?.transportUrl || addon?.url)
+            if (!members.has(url)) continue
+            const enabled = (addon?.flags?.enabled ?? addon?.enabled) !== false
+            if (enabled !== (url === expected.active)) reverted.push(url)
+        }
+        const matches = active => (Array.isArray(addons) ? addons : []).every(addon => {
+            const url = normalizeAddonUrl(addon?.transportUrl || addon?.url)
+            return !members.has(url) || ((addon?.flags?.enabled ?? addon?.enabled) !== false) === (url === active)
+        })
+        if (matches(proposed)) return observe(rule, [{ scope, target: expected.active, reverted: [], complete: true }])
+        const prior = expected.prior
+        const priorMatch = prior && nowMs() - prior.at < CONVERGENCE_MS
+            && JSON.stringify(prior.members.filter(url => !ignored.has(url))) === JSON.stringify([...members])
+            && matches(prior.active)
+        if (priorMatch) {
+            expected.prior = null
+            // Allow one old observation, but count it so a second reversal holds.
+            expected.count = 0
+            expected.reverted = ''
+            return observe(rule, [{ scope, target: expected.active, reverted, complete: true }])
+        }
+        return observe(rule, [{ scope, target: expected.active, reverted, complete: true }])
+    }
     const getHold = ruleId => {
         const entry = entries.get(ruleId)
         if (!entry?.held.length || entry.retryAt <= nowMs()) return null
@@ -127,9 +165,21 @@ export function createConflictState({ nowMs, maxEntries = 10000, ttlMs = 48 * 60
         entry.retryAt = 0
         return true
     }
+    const resetForIncident = (rule, target, downUrls) => {
+        const entry = touch(rule)
+        const identity = JSON.stringify([normalized(downUrls), normalizeAddonUrl(target)])
+        // Remember incidents even before a hold, so the same failure cannot release it later.
+        for (const [key, at] of entry.incidents) if (nowMs() - at > INCIDENT_MEMORY_MS) entry.incidents.delete(key)
+        if (entry.incidents.has(identity)) return false
+        entry.incidents.set(identity, nowMs())
+        if (entry.incidents.size > MAX_INCIDENTS) entry.incidents.delete(entry.incidents.keys().next().value)
+        if (!getHold(rule.id)) return false
+        entry.retryAt = 0
+        return true
+    }
     const clear = ruleId => remove(ruleId)
     const clearAccount = accountId => {
         for (const [id, entry] of entries) if (entry.accountId === accountId) remove(id)
     }
-    return { recordWrite, observe, getHold, getAccountProtectedUrls, retry, clear, clearAccount }
+    return { recordWrite, observe, observeLive, getHold, getAccountProtectedUrls, retry, resetForIncident, clear, clearAccount }
 }
