@@ -800,7 +800,7 @@ async function runActivityCycle(fastify) {
             ).catch(() => [])
             if (nonStremio.length > 0) {
                 nonStremioSkipWarned = true
-                fastify.log.warn({ category: 'Activity' }, 'Non-Stremio accounts (Nuvio/RealStream/Hydra) are present but not tracked by the activity scanner; only Stremio credentials are scanned.')
+                fastify.log.warn({ category: 'Activity' }, 'Non-Stremio accounts (Nuvio/Hydra) are present but not tracked by the activity scanner; only Stremio credentials are scanned.')
             }
         }
 

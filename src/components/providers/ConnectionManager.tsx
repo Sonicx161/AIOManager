@@ -7,7 +7,6 @@ import { StatusChip } from '@/components/ui/status-chip'
 import { EmptyState } from '@/components/common/EmptyState'
 import { ProviderSetupDialog } from '@/components/providers/ProviderSetupDialog'
 import { NuvioSetupDialog, type NuvioBackend } from '@/components/providers/NuvioSetupDialog'
-import { RealStreamSetupDialog, type RealStreamTokens } from '@/components/providers/RealStreamSetupDialog'
 import { JellyfinSetupDialog } from './JellyfinSetupDialog'
 import { StremioSetupDialog, type StremioSignIn } from './StremioSetupDialog'
 import { HouseholdSetupDialog } from './HouseholdSetupDialog'
@@ -76,7 +75,6 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
     const [addDialogOpen, setAddDialogOpen] = useState(false)
     const [hydraDialogOpen, setHydraDialogOpen] = useState(false)
     const [nuvioDialogOpen, setNuvioDialogOpen] = useState(false)
-    const [realstreamDialogOpen, setRealstreamDialogOpen] = useState(false)
     const [jellyfinDialogOpen, setJellyfinDialogOpen] = useState(false)
     const [stremioDialogOpen, setStremioDialogOpen] = useState(false)
     const [personSaving, setPersonSaving] = useState(false)
@@ -227,7 +225,7 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
     }, [accountId])
 
     const resolvedConnections = connections
-    const activeCount = countActiveConnections(resolvedConnections, id => accountStates[id]?.status)
+    const activeCount = countActiveConnections(resolvedConnections.filter(c => c.platform !== 'realstream'), id => accountStates[id]?.status)
 
     const handleSync = async () => {
         await syncConnections(accountId)
@@ -258,9 +256,6 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
         } else if (platform === 'nuvio') {
             setAddDialogOpen(false)
             setNuvioDialogOpen(true)
-        } else if (platform === 'realstream') {
-            setAddDialogOpen(false)
-            setRealstreamDialogOpen(true)
         } else if (platform === 'hydra-outbound') {
             setAddDialogOpen(false)
             setHydraDialogOpen(true)
@@ -352,7 +347,7 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
     const refreshResignedConnection = async (
         resign: Connection,
         credentials: Record<string, string>,
-        platform: 'nuvio' | 'realstream',
+        platform: 'nuvio',
     ) => {
         await useConnectionStore.getState().updateConnection(accountId, resign.id, { credentials, status: 'active' })
         const { storeConnectionCredential } = await import('@/api/hydra-providers')
@@ -361,7 +356,7 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
         } catch (err) {
             toast({ title: 'Saved locally, but the server did not store the new session', description: errMsg(err), variant: 'destructive' })
         }
-        toast({ title: platform === 'nuvio' ? 'Nuvio session refreshed' : 'RealStream session refreshed' })
+        toast({ title: 'Nuvio session refreshed' })
         useConnectionStore.getState().syncConnections(accountId).catch(() => {})
     }
 
@@ -397,34 +392,6 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
             status: 'active',
             credentials,
             capabilities: ['addons', 'plugins', 'profiles'],
-        })
-    }
-
-    const handleRealStreamComplete = async (tokens: RealStreamTokens, email: string, password: string) => {
-        const credentials = {
-            accessToken: tokens.accessToken,
-            userId: tokens.userId || '',
-            expiresAt: String(tokens.expiresAt),
-            // Stored E2E-encrypted so the server can silently re-authenticate if the token expires.
-            email,
-            password,
-        }
-        const resign = findResignTarget(resolvedConnections, {
-            platform: 'realstream',
-            email,
-            userId: tokens.userId || null,
-        })
-        if (resign) {
-            await refreshResignedConnection(resign, { ...resign.credentials, ...credentials }, 'realstream')
-            return
-        }
-        await addConnection(accountId, {
-            platform: 'realstream',
-            connectionType: 'native',
-            enabled: true,
-            status: 'active',
-            credentials,
-            capabilities: ['addons'],
         })
     }
 
@@ -466,12 +433,6 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
                     const existing = resolvedConnections.find(c => c.platform === 'nuvio')
                     return existing ? { baseUrl: existing.credentials?.baseUrl, publishableKey: existing.credentials?.publishableKey } : undefined
                 })()}
-            />
-            <RealStreamSetupDialog
-                open={realstreamDialogOpen}
-                onOpenChange={(open) => { setRealstreamDialogOpen(open) }}
-                onComplete={handleRealStreamComplete}
-                onBackToPicker={backToPicker(setRealstreamDialogOpen)}
             />
         </>
     )
@@ -669,6 +630,7 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
                                     lastSync={liveLastSync}
                                     lastError={liveLastError}
                                     syncing={isSyncing === accountId}
+                                    onRemove={() => useConnectionStore.getState().removeConnection(accountId, conn.id).catch(err => toast({ title: 'Could not remove connection', description: errMsg(err), variant: 'destructive' }))}
                                     onEdit={() => openConnectionPanel(conn.id, null)}
                                     onToggle={() => useConnectionStore.getState().toggleConnection(accountId, conn.id)}
                                     email={connEmail}
@@ -749,6 +711,14 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
                     // whole; the stored connection fields only serve when it is absent.
                     const editState = accountStates[editing.id]
                     const editingIsPrimaryStremio = workspaceKind(editing) === 'stremio' && !!statusAccount && getStremioConnection(statusAccount)?.id === editing.id
+                    if (editing.platform === 'realstream') return (
+                        <div className="space-y-4">
+                            <Button variant="ghost" onClick={panelBack}>Connections</Button>
+                            <ConnectionCard connection={editing} status={editing.status} onEdit={() => {}} onToggle={() => {}} onRemove={() => {
+                                void useConnectionStore.getState().removeConnection(accountId, editing.id).then(panelBack).catch(err => toast({ title: 'Could not remove connection', description: errMsg(err), variant: 'destructive' }))
+                            }} />
+                        </div>
+                    )
                     return (
                         <ConnectionEditPanel
                             key={editing.id}

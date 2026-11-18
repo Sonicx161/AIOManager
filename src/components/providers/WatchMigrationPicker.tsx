@@ -76,19 +76,10 @@ export function WatchMigrationPicker({ accountId, embedded = false }: { accountI
             <aside data-theme-part="panel" className="min-w-0 space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
                 <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">What an import writes</p>
                 <ul className="space-y-1.5 text-xs leading-relaxed text-muted-foreground">
-                    <li className="flex items-start gap-2"><Check aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />{selected?.platform === 'realstream' ? 'Movie progress with a verified TMDB match' : 'Watched titles'}</li>
+                    <li className="flex items-start gap-2"><Check aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />Watched titles</li>
                     <li className="flex items-start gap-2"><Check aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />Continue-watching positions</li>
                     <li className="flex items-start gap-2"><ShieldCheck aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />Nothing else. Existing history is kept.</li>
                 </ul>
-                {selected?.platform === 'realstream' && <div className="rounded-lg border border-border/40 bg-muted/30 p-3">
-                    <div className="flex items-start gap-2.5">
-                        <PlatformLogo platform="realstream" className="h-8 w-8 shrink-0 rounded-lg" />
-                        <div className="min-w-0">
-                            <p className="text-sm font-semibold leading-tight">RealStream</p>
-                            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">Import movie progress into Continue Watching. RealStream may still start playback from the beginning. Episodes and watched flags are not supported.</p>
-                        </div>
-                    </div>
-                </div>}
             </aside>
         </div>
     </div>

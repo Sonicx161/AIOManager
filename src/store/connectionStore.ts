@@ -10,9 +10,8 @@ import { toast } from '@/hooks/use-toast'
 import { triggerSync } from '@/lib/sync-trigger'
 import { canApplyMediaReadFailure, type MediaReadSession } from '@/lib/jellyfin/connection-health'
 import { stremioAuthKeyMirrorAfterRemoval, stremioConnectionsOf } from '@/lib/connection-identity'
-import { acknowledgeConnectionRestores, addConnectionRemovals } from '@/lib/connection-removals'
+import { acknowledgeConnectionRestores, addConnectionRemovals, PERMANENT_CONNECTION_REMOVAL } from '@/lib/connection-removals'
 import { noteStremioCanonicalRepoint, noteStremioLoginsRemoved } from '@/lib/stremio-repoint'
-import { invalidateRealStreamToken } from '@/lib/realstream-token-cache'
 
 /**
  * Canonical Stremio identity transitions: returns the demoted canonical connection id
@@ -111,7 +110,7 @@ async function reportDisabledNativeConnections() {
     const pending: Array<Promise<void>> = []
     for (const account of useAccountStore.getState().accounts) {
         for (const c of account.connections || []) {
-            if (c.enabled !== false || (c.platform !== 'nuvio' && c.platform !== 'realstream')) continue
+            if (c.enabled !== false || c.platform !== 'nuvio') continue
             const key = `${context.scope}|${account.id}|${c.id}|${c.generation || ''}`
             if (reportedDisabled.has(key) || migrationsInFlight.has(key)) continue
             migrationsInFlight.add(key)
@@ -213,7 +212,7 @@ const nativeEnabledRev = new Map<string, number>()
 // Latest queued intent per connection: only that connection's own newer toggle may
 // suppress reconciling its response, never an unrelated connection's timestamp.
 const nativeToggleIntent = new Map<string, number>()
-function sendNativeEnabled(accountId: string, connectionId: string, platform: 'nuvio' | 'realstream', enabled: boolean, generation?: string) {
+function sendNativeEnabled(accountId: string, connectionId: string, platform: 'nuvio', enabled: boolean, generation?: string) {
     const key = `${accountId}|${connectionId}`
     const seq = (nativeToggleIntent.get(key) || 0) + 1
     nativeToggleIntent.set(key, seq)
@@ -345,8 +344,8 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         // is left in the sign-in-required state ('expired' + lastError) the app renders
         // for expired sessions.
         let serverCredentialSaveFailed = false
-        const storeServerCredentialWithRetry = async (bundle: Record<string, unknown>, credentialType: 'nuvio' | 'realstream') => {
-            const label = credentialType === 'nuvio' ? 'Nuvio' : 'RealStream'
+        const storeServerCredentialWithRetry = async (bundle: Record<string, unknown>, credentialType: 'nuvio') => {
+            const label = 'Nuvio'
             const { storeConnectionCredential } = await import('@/api/hydra-providers')
             try {
                 await storeConnectionCredential(accountId, connection.id, bundle, credentialType, connection.generation)
@@ -378,18 +377,6 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 publishableKey: connection.credentials?.publishableKey || null,
             }
             await storeServerCredentialWithRetry(bundle, 'nuvio')
-        }
-
-        if (connection.platform === 'realstream' && connection.credentials?.accessToken) {
-            const bundle = {
-                accessToken: connection.credentials.accessToken,
-                userId: connection.credentials.userId || null,
-                expiresAt: connection.credentials.expiresAt,
-                baseUrl: connection.credentials.baseUrl || null,
-                email: connection.credentials.email || null,
-                password: connection.credentials.password || null,
-            }
-            await storeServerCredentialWithRetry(bundle, 'realstream')
         }
 
         if (connection.platform === 'stremio' && connection.credentials?.authKey) {
@@ -443,7 +430,6 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
         const { accounts } = useAccountStore.getState()
         const account = accounts.find(a => a.id === accountId)
         const conn = account?.connections?.find(c => c.id === connectionId)
-        if (conn?.platform === 'realstream') invalidateRealStreamToken(connectionId)
         // Autopilot prerequisite: removing the LAST Stremio login strands the rules that
         // run on it. The removal flow pauses or deletes them server-first and acknowledges
         // via options; any other caller fails loudly here instead of bypassing silently.
@@ -515,7 +501,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 // Removal marker: the version outranks any earlier acknowledgement and
                 // survives sync merges, so a stale copy cannot merge this connection
                 // back (issue #89).
-                ...addConnectionRemovals(account, [connectionId]),
+                ...addConnectionRemovals(account, [connectionId], conn?.platform === 'realstream' ? PERMANENT_CONNECTION_REMOVAL : Date.now()),
                 // account.authKey is the legacy mirror of the CANONICAL Stremio login:
                 // unlinking a secondary login must not clear it, and unlinking the
                 // canonical one re-points it at the surviving canonical login instead
@@ -566,7 +552,6 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 return { ...c, ...updates }
             }),
         }))
-        if (matched && updates.credentials) invalidateRealStreamToken(connectionId)
         if (!matched && (updates.mediaServer || updates.credentials?.jellyfin)) {
             throw new Error('This media connection no longer exists. Add a new connection instead.')
         }
@@ -615,7 +600,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
                 enabled: toggled.enabled,
             }, 'hydra', toggled.generation).catch(() => {})
         }
-        if (toggled && (toggled.platform === 'nuvio' || toggled.platform === 'realstream')) {
+        if (toggled && toggled.platform === 'nuvio') {
             sendNativeEnabled(accountId, connectionId, toggled.platform, toggled.enabled !== false, toggled.generation)
         }
         // The enabled flag is part of the encrypted envelope for every platform.

@@ -354,7 +354,7 @@ export const mockFixtures = {
                 total: 1248,
                 active: 1031,
                 automatic: 310,
-                byPlatform: { stremio: { total: 902, active: 748 }, nuvio: { total: 231, active: 192 }, realstream: { total: 115, active: 91 } },
+                byPlatform: { stremio: { total: 902, active: 748 }, nuvio: { total: 231, active: 192 } },
             },
             failovers24h: { 'service-down': 11, 'token-refresh': 3 },
             tripwire: {
@@ -388,7 +388,7 @@ export const mockFixtures = {
             },
             breakerEntries: 2,
             config: { enabled: true, intervalMs: 5 * MIN, jitterMs: 20_000, maxAccountsPerCycle: 50 },
-            scope: 'Server-side activity capture scans Stremio connections only. Nuvio, RealStream and Hydra activity is tracked by the app on the device.',
+            scope: 'Server-side activity capture scans Stremio connections only. Nuvio and Hydra activity is tracked by the app on the device.',
             computedAt: now(),
         }
     },

@@ -84,7 +84,7 @@ export interface NativeToggleRequestContext {
 export async function setConnectionCredentialEnabled(
     accountId: string,
     connectionId: string,
-    credentialType: 'nuvio' | 'realstream',
+    credentialType: 'nuvio',
     enabled: boolean,
     options: { knownRev?: number; migrate?: boolean; context?: NativeToggleRequestContext } = {},
 ): Promise<NativeEnabledResult> {
@@ -133,24 +133,6 @@ export async function nuvioAuth(
     return res.json()
 }
 
-export async function realstreamAuth(
-    email: string,
-    password: string,
-    baseUrl?: string,
-): Promise<{ tokens: { accessToken: string; userId: string | null; expiresAt: number } }> {
-    const base = getSyncApiPath(useSyncStore.getState().serverUrl)
-    const res = await resilientFetch(`${base}/providers/realstream/auth`, {
-        method: 'POST',
-        headers: await getAuthHeaders(),
-        body: JSON.stringify({ email, password, baseUrl }),
-        timeout: 15000,
-    })
-    if (!res.ok) {
-        throw new Error(await readApiErrorMessage(res))
-    }
-    return res.json()
-}
-
 export async function nuvioSignup(
     email: string,
     password: string,
@@ -162,25 +144,6 @@ export async function nuvioSignup(
         method: 'POST',
         headers: await getAuthHeaders(),
         body: JSON.stringify({ email, password, publishableKey, baseUrl }),
-        timeout: 20000,
-    })
-    if (!res.ok) {
-        throw new Error(await readApiErrorMessage(res))
-    }
-    return res.json()
-}
-
-export async function realstreamSignup(
-    email: string,
-    password: string,
-    name?: string,
-    baseUrl?: string,
-): Promise<{ tokens: { accessToken: string; userId: string | null; expiresAt: number } }> {
-    const base = getSyncApiPath(useSyncStore.getState().serverUrl)
-    const res = await resilientFetch(`${base}/providers/realstream/signup`, {
-        method: 'POST',
-        headers: await getAuthHeaders(),
-        body: JSON.stringify({ email, password, name, baseUrl }),
         timeout: 20000,
     })
     if (!res.ok) {

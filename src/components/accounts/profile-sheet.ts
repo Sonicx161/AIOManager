@@ -19,7 +19,7 @@ export function cardVisibilitySummary(visibility: CardVisibility): string {
 }
 
 /** "N active" row summary; paused connections (enabled === false) do not count. */
-export function activeConnectionsLabel(connections: ReadonlyArray<{ enabled?: boolean }>): string {
-    const count = connections.filter(connection => connection.enabled !== false).length
+export function activeConnectionsLabel(connections: ReadonlyArray<{ enabled?: boolean; platform?: string }>): string {
+    const count = connections.filter(connection => connection.enabled !== false && connection.platform !== 'realstream').length
     return count === 0 ? 'None' : `${count} active`
 }

@@ -168,72 +168,6 @@ async function deleteNuvioWatchItems(account: Account, items: ActivityItem[]): P
     return { ok, keptItems }
 }
 
-async function deleteRealStreamWatchItems(account: Account, items: ActivityItem[]): Promise<{ ok: boolean; keptItems: ActivityItem[] }> {
-    const rsConns = (account.connections || []).filter(c => c.enabled && c.platform === 'realstream')
-    if (rsConns.length === 0) return { ok: false, keptItems: items }
-    const [{ fetchConnectionToken, hashRejectedToken }, { realStreamDriverFor }, { getOrFetchRealStreamToken, refreshRealStreamToken, invalidateRealStreamToken }, { realStreamTokenOwner }, { isAuthError }] = await Promise.all([
-        import('@/api/connection'),
-        import('@/lib/drivers/factory'),
-        import('@/lib/realstream-token-cache'),
-        import('@/lib/realstream-token-owner'),
-        import('@/store/accountStore'),
-    ])
-
-    // Same exact-origin rule as Nuvio: one login's delete never touches a sibling's copy.
-    const groups = new Map<string, { conn?: typeof rsConns[number]; items: ActivityItem[] }>()
-    const keptItems: ActivityItem[] = []
-    for (const item of items) {
-        if (!item.sourceConnectionId) {
-            if (rsConns.length !== 1) { keptItems.push(item); continue }
-            const group = groups.get('') ?? { conn: rsConns[0], items: [] }
-            group.items.push(item)
-            groups.set('', group)
-            continue
-        }
-        const conn = rsConns.find(c => c.id === item.sourceConnectionId)
-        if (!conn) { keptItems.push(item); continue }
-        const group = groups.get(conn.id) ?? { conn, items: [] }
-        group.items.push(item)
-        groups.set(conn.id, group)
-    }
-
-    let ok = true
-    for (const group of groups.values()) {
-        if (!group.conn || group.items.length === 0) continue
-        const entries = group.items.map(i => ({
-            videoId: i.uniqueItemId || i.itemId,
-            contentId: i.itemId.startsWith('tt') ? i.itemId : undefined,
-            season: i.season ?? null,
-            episode: i.episode ?? null,
-        }))
-        try {
-            const conn = group.conn
-            const userId = conn.credentials?.userId || ''
-            if (!userId) throw new Error('RealStream user ID missing; re-authenticate this connection')
-            const tokenOwner = realStreamTokenOwner(account.id, conn)
-            const token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(account.id, conn.id, 'realstream'))
-            const driver = realStreamDriverFor(conn)
-            try {
-                await driver.deleteWatchProgress(token.accessToken, userId, entries)
-            } catch (err) {
-                // A cached token the server has since rejected heals once, like the push path.
-                if (!isAuthError(err)) throw err
-                const rejectedTokenHash = await hashRejectedToken(token.accessToken)
-                const fresh = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash }))
-                await driver.deleteWatchProgress(fresh.accessToken, userId, entries)
-            }
-            trace('activityDelete', 'realstream.connection.ok', { accountId: account.id, connectionId: conn.id, entries: entries.length })
-        } catch (e) {
-            if (group.conn) invalidateRealStreamToken(group.conn.id)
-            if (import.meta.env.DEV) console.error('[Activity] RealStream delete failed:', e)
-            trace('activityDelete', 'realstream.connection.error', { accountId: account.id, connectionId: group.conn.id, error: (e as Error)?.message })
-            ok = false
-            keptItems.push(...group.items)
-        }
-    }
-    return { ok, keptItems }
-}
-
 // Minimal ActivityItem for deep links (?detail=<id>): the watch-history
 // object is preferred when available, but on a cold load (or for films only
 // reachable via filmography/person URLs) we open with just the id and let the
@@ -696,7 +630,6 @@ export function ActivityPage() {
             if (!hasPlatformConnection(account)) return
 
             const nuvioItems = accItems.filter(i => !keptIds.has(i.id) && i.source === 'nuvio')
-            const realstreamItems = accItems.filter(i => !keptIds.has(i.id) && i.source === 'realstream')
             const stremioItems = accItems.filter(i => !keptIds.has(i.id) && !isReadOnlyMediaActivity(i) && i.source !== 'jellyfin' && i.source !== 'nuvio' && i.source !== 'realstream')
 
             if (stremioItems.length > 0) {
@@ -872,16 +805,7 @@ export function ActivityPage() {
                 }
             }
 
-            if (realstreamItems.length > 0) {
-                trace('activityDelete', 'realstream.account.start', { accountId, items: realstreamItems.length })
-                const outcome = await deleteRealStreamWatchItems(account, realstreamItems)
-                trace('activityDelete', 'realstream.account.done', { accountId, items: realstreamItems.length, ok: outcome.ok, kept: outcome.keptItems.length })
-                if (!outcome.ok || outcome.keptItems.length > 0) {
-                    failed = failed || !outcome.ok
-                    countKeep(outcome.ok ? 'ambiguous-origin' : 'platform-error', outcome.keptItems.length)
-                    for (const item of outcome.keptItems) keptIds.add(item.id)
-                }
-            }
+
         })
         return { failed, keptIds, keptReasons, noVideos }
     }, [accountById])

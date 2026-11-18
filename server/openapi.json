@@ -1671,25 +1671,7 @@
         }
       }
     },
-    "/api/providers/realstream/auth": {
-      "post": {
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
     "/api/providers/nuvio/signup": {
-      "post": {
-        "responses": {
-          "200": {
-            "description": "Default Response"
-          }
-        }
-      }
-    },
-    "/api/providers/realstream/signup": {
       "post": {
         "responses": {
           "200": {

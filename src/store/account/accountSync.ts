@@ -384,7 +384,7 @@ async function syncAccountCore(id: string, forceRefresh: boolean, intent: SyncIn
     let discoveryChanged = false
     let propagateDeletions = false
     let deletionConnIds = new Set<string>()
-    const nativeEnabled = (currentAccount.connections || []).filter(c => c.enabled && (c.platform === 'nuvio' || c.platform === 'realstream'))
+    const nativeEnabled = (currentAccount.connections || []).filter(c => c.enabled && c.platform === 'nuvio')
     if (currentAccount.connections?.some(c => c.enabled)) {
         const { absorbConnectionAddons } = await import('@/lib/connection-discovery')
         const absorb = await absorbConnectionAddons({ ...currentAccount, addons: finalAddons }, id)
@@ -526,7 +526,7 @@ async function syncAccountCore(id: string, forceRefresh: boolean, intent: SyncIn
                 const allowEmptyDeletionRetry = propagateDeletions && finalAddons.length === 0
                 const pushConnections = pushTargets.filter(c =>
                     !failedReadConnIds.has(c.id) && (!allowEmptyDeletionRetry || (
-                        c.connectionType !== 'hydra-outbound' && (c.platform === 'nuvio' || c.platform === 'realstream')
+                        c.connectionType !== 'hydra-outbound' && c.platform === 'nuvio'
                     ))
                 )
                 if (allowEmptyDeletionRetry && pushConnections.length === 0) return

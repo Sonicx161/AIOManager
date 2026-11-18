@@ -447,7 +447,6 @@ export function AddonList({ accountId }: AddonListProps) {
     for (const conn of account.connections || []) {
         if (!conn.enabled) continue
         if (conn.platform === 'nuvio' && !platforms.includes('Nuvio')) platforms.push('Nuvio')
-        else if (conn.platform === 'realstream' && !platforms.includes('RealStream')) platforms.push('RealStream')
         else if ((conn.connectionType === 'hydra-outbound' || conn.platform === 'hydra') && !platforms.includes('Hydra')) platforms.push('Hydra')
     }
     const platformText = platforms.length > 0 ? platforms.join(', ') : 'Stremio'

@@ -33,48 +33,11 @@ export const DELETED_ITEMS_KEY = 'aio_library_deleted'
 const CACHE_TTL = 5 * 60 * 1000
 const LIBRARY_FETCH_CONCURRENCY = 5
 const CACHE_VERSION = 4
-// A guest-read (revoked RealStream token) returns zero rows; only a drop this large from the last good read is suspicious.
-const REALSTREAM_SUSPICIOUS_EMPTY_MIN = 10
-const lastRealStreamProgressCounts = new Map<string, number>()
-
-// A revoked RealStream token reads as a guest: a 401 here, or an empty read where the last good
-// one had many. At most one forced revalidation per call (the server rejects a repeat force inside
-// its cooldown); never loops, and any failed suspicious-empty retry keeps the earlier result.
-async function readRealStreamProgressWithHeal<T>(heal: {
-    connId: string
-    accessToken: string
-    forcedToken: () => Promise<string>
-    read: (accessToken: string) => Promise<T[]>
-}): Promise<T[]> {
-    let progress: T[]
-    let forcedRetryUsed = false
-    try {
-        progress = await heal.read(heal.accessToken)
-    } catch (error) {
-        if (!isAuthError(error)) throw error
-        forcedRetryUsed = true
-        progress = await heal.read(await heal.forcedToken())
-    }
-    const lastGood = lastRealStreamProgressCounts.get(heal.connId) ?? 0
-    if (!forcedRetryUsed && progress.length === 0 && lastGood >= REALSTREAM_SUSPICIOUS_EMPTY_MIN) {
-        trace('libraryCache', 'realstream.suspicious-empty', { connectionId: heal.connId, lastGood })
-        try {
-            const retried = await heal.read(await heal.forcedToken())
-            if (retried.length > 0) progress = retried
-        } catch {
-            // ForcedToken rejected inside its cooldown lands here too: keep the earlier result.
-        }
-    }
-    if (progress.length > 0) lastRealStreamProgressCounts.set(heal.connId, progress.length)
-    return progress
-}
-
 let loadPromise: Promise<void> | null = null
 let loadPromiseGeneration = 0
 let cacheGeneration = 0
 let removeItemsLock: Promise<void> = Promise.resolve()
 const toastedNuvioFailures = new Set<string>()
-const toastedRealStreamFailures = new Set<string>()
 
 // Watch-history fetch failures get cause-specific copy: a lost or expired
 // sign-in points at the fix (amber toast plus an inbox action that opens that
@@ -522,19 +485,15 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                 const [
                     { useWatchEventStore },
                     { fetchConnectionToken, hashRejectedToken, isNuvioJwtAuthError },
-                    { nuvioDriverFor, realStreamDriverFor },
+                    { nuvioDriverFor },
                     { getCachedNuvioToken, setCachedNuvioToken, invalidateNuvioToken },
                     { invalidateNuvioProfileCache },
-                    { getOrFetchRealStreamToken, refreshRealStreamToken, invalidateRealStreamToken },
-                    { realStreamTokenOwner },
                 ] = await Promise.all([
                     import('@/store/watchEventStore'),
                     import('@/api/connection'),
                     import('@/lib/drivers/factory'),
                     import('@/lib/nuvio-token-cache'),
                     import('@/lib/nuvio-profile-cache'),
-                    import('@/lib/realstream-token-cache'),
-                    import('@/lib/realstream-token-owner'),
                 ])
                 await useWatchEventStore.getState().load()
                 // Registers the mappings already on hand; when that changes what is known,
@@ -1019,94 +978,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                 }
                             })
                         }
-                        const realstreamConns = (account.connections || []).filter(c => c.enabled && c.platform === 'realstream')
-                        if (realstreamConns.length > 0) {
-                            // Same sticky rule as Nuvio: never flip a survivor's attribution.
-                            const allRSNative = (account.connections || []).filter(c => c.platform === 'realstream')
-                            const multiRS = ensureMultiOrigin('realstream', account.id, allRSNative.length)
-                            await mapConcurrent(realstreamConns, 3, async (conn) => {
-                                try {
-                                    const userId = conn.credentials?.userId || ''
-                                    if (!userId) throw new Error('RealStream user ID missing; re-authenticate this connection')
-                                    const tokenOwner = realStreamTokenOwner(account.id, conn)
-                                    const token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(account.id, conn.id, 'realstream'))
-                                    const driver = realStreamDriverFor(conn)
-                                    const progress = await readRealStreamProgressWithHeal({
-                                        connId: conn.id,
-                                        accessToken: token.accessToken,
-                                        forcedToken: async () => {
-                                            const rejectedTokenHash = await hashRejectedToken(token.accessToken)
-                                            const fresh = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(account.id, conn.id, 'realstream', undefined, { rejectedTokenHash }))
-                                            return fresh.accessToken
-                                        },
-                                        read: accessToken => driver.readWatchProgress(accessToken, userId),
-                                    })
-                                    if (import.meta.env.DEV) console.info(`[LibraryCache] RealStream fetched ${progress.length} progress for ${account.name || account.id}`)
-                                    trace('libraryCache', 'realstream.fetch', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, progress: progress.length })
-                                    const cinemetaMemo = createCinemetaMemo()
-                                    const transformOpts = { ...(multiRS ? { connectionId: conn.id } : {}), cinemetaMemo }
-                                    const progressActivities = await mapConcurrent(progress, 5, async (row) => {
-                                        try {
-                                            const rsTitle = row.title
-                                            const rsPoster = row.posterPath
-                                            const activity = await transformNuvioProgressToActivityItem(row, account, accounts, rsTitle, transformOpts)
-                                            activity.id = multiRS
-                                                ? `${account.id}:realstream:${conn.id}:${activity.uniqueItemId}`
-                                                : `${account.id}:realstream:${activity.uniqueItemId}`
-                                            activity.source = 'realstream'
-                                            if (rsTitle && rsTitle.trim()) activity.name = rsTitle.trim()
-                                            if (rsPoster && rsPoster.trim()) activity.poster = rsPoster.trim()
-                                            return activity
-                                        } catch {
-                                            return null
-                                        }
-                                    })
-                                    const seenIds = new Set<string>()
-                                    for (const activity of progressActivities) {
-                                        if (!activity || seenIds.has(activity.uniqueItemId)) continue
-                                        const rk1 = originKey(activity, true)
-                                        const rk2 = originKey(activity, false)
-                                        if (existingKeys.has(rk1) || existingKeys.has(rk2)) continue
-                                        seenIds.add(activity.uniqueItemId)
-                                        // rk2 (show-level) is checked only — never added — so that
-                                        // later episodes of the same show in this batch survive.
-                                        existingKeys.add(rk1)
-                                        accountItems.push(activity)
-                                    }
-                                    const realstreamActivities = progressActivities.filter((a): a is ActivityItem => a !== null)
-                                    if (realstreamActivities.length > 0) {
-                                        useWatchEventStore.getState().mergeExternalWatchEvents(account.id, 'realstream', realstreamActivities.map(a => ({
-                                            itemId: a.itemId,
-                                            video_id: a.uniqueItemId,
-                                            type: a.type,
-                                            season: a.season,
-                                            episode: a.episode,
-                                            name: a.name,
-                                            poster: a.poster,
-                                            duration: a.duration,
-                                            progress: a.progress,
-                                            backfill: a.backfill,
-                                            timestamp: a.timestamp.getTime(),
-                                        })), multiRS ? { sourceConnectionId: conn.id } : undefined)
-                                    }
-                                } catch (err) {
-                                    invalidateRealStreamToken(conn.id)
-                                    if (import.meta.env.DEV) console.warn(`[LibraryCache] RealStream history fetch failed for ${account.name || account.id}, preserving last known items:`, err)
-                                    trace('libraryCache', 'realstream.fetch.error', { accountId: account.id, connectionId: multiRS ? conn.id : undefined, error: (err as Error)?.message })
-                                    if (!toastedRealStreamFailures.has(conn.id)) {
-                                        toastedRealStreamFailures.add(conn.id)
-                                        notifyHistoryFetchFailed(err, { accountId: account.id, profileName: account.name || 'account', platformId: conn.platform, connectionId: conn.id })
-                                        setTimeout(() => toastedRealStreamFailures.delete(conn.id), 3600000)
-                                    }
-                                    // Per-login fallback: only THIS connection's items are preserved.
-                                    const existingRealStream = currentItems.filter(item => item.accountId === account.id && item.source === 'realstream'
-                                        && (!multiRS || !item.sourceConnectionId || item.sourceConnectionId === conn.id))
-                                    if (existingRealStream.length > 0) {
-                                        accountItems.push(...existingRealStream)
-                                    }
-                                }
-                            })
-                        }
+                        accountItems.push(...currentItems.filter(item => item.accountId === account.id && item.source === 'realstream'))
                         if (!fetchedByAccount.has(account.id)) {
                             fetchedByAccount.set(account.id, accountItems)
                         }

@@ -115,7 +115,7 @@ async function resolveConnections(accountId, syncUser = null) {
     const generation = connectionCacheGeneration
 
     const rows = await db.query(
-        'SELECT connection_id, auth_key, credential_type FROM server_credentials WHERE account_id = $1 AND sync_user = $2 ORDER BY updated_at DESC',
+        "SELECT connection_id, auth_key, credential_type FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND (credential_type IS NULL OR credential_type <> 'realstream') ORDER BY updated_at DESC",
         [accountId, syncUser]
     )
     if (!rows || rows.length === 0) return []
@@ -156,7 +156,7 @@ async function resolveConnections(accountId, syncUser = null) {
             continue
         }
 
-        if (type === 'nuvio' || type === 'realstream') {
+        if (type === 'nuvio') {
             let bundle = null
             try { bundle = JSON.parse(decrypt(row.auth_key, FALLBACK_KEYS)) } catch { continue }
             if (!bundle?.accessToken) continue
@@ -315,36 +315,6 @@ async function loadDriver(platform, credentials, connection) {
             publishableKey: credentials.publishableKey
         })
     }
-    if (platform === 'realstream') {
-        const { createRealStreamDriver } = await import('./realstream-driver.js')
-        const driver = createRealStreamDriver({
-            baseUrl: credentials.baseUrl
-        })
-
-        if (connection?.id) {
-            const expiresAt = connection.credentials?.expiresAt
-            if (storedConnections.get(connection) !== connectionCacheGeneration || !expiresAt || expiresAt - Date.now() <= REFRESH_BUFFER_MS) {
-                try {
-                    const { refreshRealStreamToken } = await import('./token-refresh.js')
-                    const fresh = await refreshRealStreamToken(connection.id, connection.accountId, connection.syncUser)
-                    if (fresh) {
-                        connection.credentials = {
-                            ...connection.credentials,
-                            accessToken: fresh.accessToken,
-                            userId: fresh.userId ?? connection.credentials?.userId,
-                            expiresAt: fresh.expiresAt,
-                        }
-                    }
-                } catch (err) {
-                    if (err.isAuthError || err._authExpired || err._credentialSuperseded) {
-                        throw err
-                    }
-                }
-            }
-        }
-
-        return driver
-    }
     if (connection && isHydraOutbound(connection)) {
         let authValue = connection.credentials?.authValue
         let config = connection.driverConfig
@@ -378,9 +348,6 @@ async function readPlatformAddons(driver, connection) {
     }
     if (connection.platform === 'nuvio') {
         return driver.readAddons(c.accessToken, c.profileId)
-    }
-    if (connection.platform === 'realstream') {
-        return driver.readAddons(c.accessToken, c.userId)
     }
     if (isHydraOutbound(connection)) {
         return driver.readAddons()
@@ -601,18 +568,10 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
     return out
 }
 
-// An empty RealStream projection is never a clear in this beta (R2-08): the
-// authorized-clear path is removed, so an empty write skips at the driver and is
-// reported as a skipped outcome, never as a confirmed write. Autopilot and
-// reconcile share that behavior; the global empty-canonical guard above still
-// applies to every platform unchanged.
-
 // `prep` runs inside the per-connection queue slot, so the read it needs, the guard it
 // applies and the write that follows cannot interleave with another writer's (the read
 // target is the platform's own list, which a concurrent writer would otherwise change
 // between our read and our write). It returns { list } or { skip, reason }.
-// R2-08: a zero-row RealStream write is never an authorized clear anymore: the driver
-// resolves every empty projection as a skip, which the caller reports honestly.
 async function writePlatformAddons(driver, connection, addons, source, prep = null, beforeWrite = null) {
     const c = connection.credentials
     return enqueuePlatformWrite(connection, async () => {
@@ -622,13 +581,7 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
             if (outcome.skip) return { skipped: true, reason: outcome.reason || 'prep-skip' }
             if (Array.isArray(outcome.list)) list = outcome.list
         }
-        // RealStream stores collection membership as enabled state and ignores
-        // the internal flags field. Keep the existing one-active contract by
-        // omitting disabled rows on that wire; Nuvio/Hydra retain explicit
-        // enabled flags and receive the full projected list.
-        const wireList = connection.platform === 'realstream'
-            ? (list || []).filter(a => (a?.flags?.enabled ?? a?.enabled) !== false)
-            : (list || [])
+        const wireList = list || []
         const prepared = wireList.map(a => {
             const withMeta = applyCustomMetadata(a)
             // R9: drivers and the provider wire receive projected provider data only.
@@ -651,10 +604,6 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
         if (connection.platform === 'nuvio') {
             if (!c?.accessToken) { const e = new Error('Nuvio credentials not loaded, re-authenticate this connection'); e.isAuthError = true; throw e }
             return driver.writeAddons(c.accessToken, prepared, c.profileId)
-        }
-        if (connection.platform === 'realstream') {
-            if (!c?.accessToken) { const e = new Error('RealStream credentials not loaded, re-authenticate this connection'); e.isAuthError = true; throw e }
-            return driver.writeAddons(c.accessToken, prepared, c.userId)
         }
         if (isHydraOutbound(connection)) {
             return driver.writeAddons(prepared)
@@ -778,7 +727,7 @@ export function createReconciler(fastify) {
         trace('reconciler', 'reconcileAccount.start', { accountId, canonicalCount: canonical.length })
 
         // Stremio uses client-side sync pipeline, not server-side reconciliation
-        const targetConnections = connections.filter(c => c.enabled && (isHydraOutbound(c) || c.platform !== 'stremio'))
+        const targetConnections = connections.filter(c => c.enabled && c.platform !== 'realstream' && (isHydraOutbound(c) || c.platform !== 'stremio'))
         // Per-connection result: written | unchanged | skipped (reason) | failed (error).
         const outcomes = {}
         for (const c of connections) {
@@ -915,7 +864,7 @@ export function createReconciler(fastify) {
         let recoveredAddons = []
         const conflictHolds = {}
 
-        for (const connection of (connections || []).filter(c => c.enabled)) {
+        for (const connection of (connections || []).filter(c => c.enabled && c.platform !== 'realstream')) {
             const connId = connection.id
             if (shouldSkip(accountId, connId)) {
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): in backoff`)
@@ -1084,7 +1033,7 @@ export function createReconciler(fastify) {
     // skipped entries with no recordFailure — the audit observes, it does not punish.
     const auditConnections = async (accountId, connections) => {
         const results = []
-        for (const connection of (connections || []).filter(c => c.enabled)) {
+        for (const connection of (connections || []).filter(c => c.enabled && c.platform !== 'realstream')) {
             const connId = connection.id
             if (shouldSkip(accountId, connId)) {
                 results.push({ connectionId: connId, platform: connection.platform, skipped: 'backoff' })

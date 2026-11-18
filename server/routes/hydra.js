@@ -150,7 +150,7 @@ async function getCanonicalAddons(accountId, syncUser) {
     const cred = await getLatestStremioCredential(accountId, syncUser)
     if (cred?.auth_key) {
         const mixed = await db.get(
-            "SELECT 1 FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND credential_type IN ('nuvio', 'realstream', 'hydra') LIMIT 1",
+            "SELECT 1 FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND credential_type IN ('nuvio', 'hydra') LIMIT 1",
             [accountId, syncUser]
         )
         if (mixed) {
@@ -371,7 +371,7 @@ async function writeCanonicalAddons(account, addons, addonActions = [], migratio
     let stremioWriteThrough = false
     if (cred?.auth_key) {
         const mixed = await db.get(
-            "SELECT 1 FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND credential_type IN ('nuvio', 'realstream', 'hydra') LIMIT 1",
+            "SELECT 1 FROM server_credentials WHERE account_id = $1 AND sync_user = $2 AND credential_type IN ('nuvio', 'hydra') LIMIT 1",
             [accountId, syncUser]
         )
         if (mixed) {

@@ -1,5 +1,4 @@
 import { createNuvioDriver } from './nuvio'
-import { createRealStreamDriver } from './realstream'
 import type { Connection } from '@/types/connection'
 
 type ConnLike = Pick<Connection, 'credentials'>
@@ -9,9 +8,4 @@ type ConnLike = Pick<Connection, 'credentials'>
 export function nuvioDriverFor(conn: ConnLike) {
     const c = conn.credentials || {}
     return createNuvioDriver({ baseUrl: c.baseUrl, publishableKey: c.publishableKey })
-}
-
-export function realStreamDriverFor(conn: ConnLike) {
-    const c = conn.credentials || {}
-    return createRealStreamDriver({ baseUrl: c.baseUrl })
 }

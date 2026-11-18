@@ -12,7 +12,6 @@ export function autoUpdateIntervalLabel(hours: number): string {
 export const AUTO_UPDATE_PLATFORMS = [
     { id: 'stremio', label: 'Stremio' },
     { id: 'nuvio', label: 'Nuvio' },
-    { id: 'realstream', label: 'RealStream' },
 ] as const
 
 export interface AutoUpdateSettings {

@@ -89,7 +89,7 @@ Store encrypted credentials for a connection.
 }
 ```
 
-Valid `credentialType` values: `nuvio`, `realstream`, `hydra`.
+Valid `credentialType` values: `nuvio`, `hydra`.
 
 **Response (200):**
 ```json
@@ -135,7 +135,7 @@ Refresh and retrieve an access token for a connection. Server-side token custody
 }
 ```
 
-Valid `platform` values: `nuvio`, `realstream`.
+Valid `platform` values: `nuvio`.
 
 **Response (200):**
 ```json
@@ -219,51 +219,6 @@ Create a new Nuvio account.
     "refreshToken": "v1.xxx..."
   },
   "profiles": []
-}
-```
-
-### POST /api/providers/realstream/auth
-
-Authenticate with RealStream via email and password. Password is not stored.
-
-**Body:**
-```json
-{
-  "email": "user@example.com",
-  "password": "password",
-  "baseUrl": "https://optional-custom-instance.com"
-}
-```
-
-**Response (200):**
-```json
-{
-  "tokens": {
-    "accessToken": "eyJhbGci..."
-  }
-}
-```
-
-### POST /api/providers/realstream/signup
-
-Create a new RealStream account.
-
-**Body:**
-```json
-{
-  "email": "user@example.com",
-  "password": "password",
-  "name": "Display Name",
-  "baseUrl": "https://optional-custom-instance.com"
-}
-```
-
-**Response (200):**
-```json
-{
-  "tokens": {
-    "accessToken": "eyJhbGci..."
-  }
 }
 ```
 

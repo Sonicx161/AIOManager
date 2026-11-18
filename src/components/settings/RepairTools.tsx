@@ -280,7 +280,7 @@ export function RepairTools() {
                 <ActionRow
                     icon={<PlugZap className="h-4 w-4" />}
                     title="Re-check Connections"
-                    description="Re-validate native Nuvio / RealStream connection tokens and refresh their health status."
+                    description="Re-validate native Nuvio connection tokens and refresh their health status."
                     cta={connectionAccountCount > 0 ? `Re-check (${connectionAccountCount})` : 'Re-check'}
                     busy={running === 'connections'}
                     busyLabel={`Checking${pct}`}

@@ -63,10 +63,9 @@ The soul of AIOManager is giving you complete authority over your Stremio ecosys
 
 Mirror your addon configuration to external platforms and keep them in sync automatically.
 
-* **Multi-Platform Support**: Connect to Stremio, Nuvio, Hydra (inbound and outbound), and RealStream.
+* **Multi-Platform Support**: Connect to Stremio, Nuvio, and Hydra (inbound and outbound).
 * **Bidirectional Reconciler**: The sync engine detects changes on both sides and reconciles them. Addons added or removed on any connected platform propagate to all others.
 * **Connection API Keys**: Credentials are encrypted at rest on the server and never exposed to the client after initial setup.
-* **RealStream Driver**: Native RealStream integration with server-side token custody and automatic refresh.
 
 #### Platform Connections
 ![Platforms](public/screenshots/Platforms.png)
@@ -103,7 +102,7 @@ Browse and install addons from the community directory at stremio-addons.net. Se
 * **Email & Password**: Standard login with auto-registration. If the account doesn't exist it gets created instantly.
 * **Auth Key**: Add accounts directly via auth key for advanced setups.
 * **Local Accounts**: Manage addons locally with no external platform connection.
-* **Connections**: Link any account to Stremio, Nuvio, RealStream, or Hydra via the Connections tab. Each account can connect to multiple platforms at once.
+* **Connections**: Link any account to Stremio, Nuvio, or Hydra via the Connections tab. Each account can connect to multiple platforms at once.
 
 ### 🛡️ Privacy First Sync
 
@@ -149,7 +148,7 @@ Once the app is running:
 1. Open the app in your browser (usually `http://localhost:1610` or your server IP).
 2. You will be greeted by the **Login** screen. Stay on the **New Account** tab to generate your unique **Account UUID**.
 3. Choose a strong password. This is the **only key** to your encrypted data.
-4. Once inside, use the **Accounts** page to link your Stremio identities, add local accounts, or connect to platforms like Nuvio and RealStream. You can then go to **Settings** to customize your name for AIOManager or enable Auto-Save. (Note you still need to use your UUID to login)
+4. Once inside, use the **Accounts** page to link your Stremio identities, add local accounts, or connect to platforms like Nuvio. You can then go to **Settings** to customize your name for AIOManager or enable Auto-Save. (Note you still need to use your UUID to login)
 
 <div align="center">
   <h4>Initial Setup & Login</h4>

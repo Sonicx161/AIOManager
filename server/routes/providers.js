@@ -374,7 +374,7 @@ export function registerProviderRoutes(fastify, reconciler) {
         const { connectionId } = request.params
         const { accountId, credential, credentialType, connectionGeneration, createOnly, setEnabled, knownRev, migrate } = request.body || {}
         if (typeof setEnabled === 'boolean') {
-            if (!accountId || (credentialType !== 'nuvio' && credentialType !== 'realstream')) {
+            if (!accountId || credentialType !== 'nuvio') {
                 reply.code(400); return { error: 'Missing accountId or unsupported credential type' }
             }
             return withAccountWriteLock(authUser, [accountId], async (conn) => {
@@ -399,7 +399,7 @@ export function registerProviderRoutes(fastify, reconciler) {
             // (`stremio:${accountId}:${connectionId}`) ; the same id shape /api/credentials/sync
             // writes, one row per login, never collapsing and never touching the canonical
             // account-level row (the canonical login keeps the legacy account-level shape).
-            if (credentialType != null && !['nuvio', 'realstream', 'hydra', 'stremio'].includes(credentialType)) {
+            if (credentialType != null && !['nuvio', 'hydra', 'stremio'].includes(credentialType)) {
                 reply.code(400); return { error: 'Unsupported credential type' }
             }
 
@@ -415,7 +415,7 @@ export function registerProviderRoutes(fastify, reconciler) {
             if (type === 'nuvio') {
                 credentialValue = await preserveExistingNuvioBaseUrl(connectionId, credentialValue, accountId, authUser, conn)
             }
-            if (type === 'nuvio' || type === 'realstream') {
+            if (type === 'nuvio') {
                 credentialValue = await preserveExistingDisabled(connectionId, credentialValue, accountId, authUser, type, conn)
             }
             const encrypted = encrypt(credentialValue, PRIMARY_KEY)
@@ -427,11 +427,11 @@ export function registerProviderRoutes(fastify, reconciler) {
             }
 
             // The server is the single owner of the rotating session (nuvio: refresh
-            // token, realstream: access token); a device copy is written once at sign-in
+            // token); a device copy is written once at sign-in
             // and never updated, so after any rotation it is revoked at the provider. The
             // self-heal (createOnly) restores a MISSING row, which is what its 404 means:
             // it never touches an existing one. Sign-ins and re-signs overwrite as before.
-            const insertOnly = createOnly === true && (type === 'nuvio' || type === 'realstream')
+            const insertOnly = createOnly === true && type === 'nuvio'
             if (insertOnly) {
                 const existingRow = await conn.get(
                     'SELECT 1 AS ok FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND sync_user = $3 AND account_id = $4 LIMIT 1',
@@ -503,7 +503,7 @@ export function registerProviderRoutes(fastify, reconciler) {
 
         const { connectionId } = request.params
         const { accountId, platform, rejectedTokenHash } = request.body || {}
-        if (!accountId || !['nuvio', 'realstream'].includes(platform)) { reply.code(400); return { error: 'Missing accountId or unsupported platform' } }
+        if (!accountId || platform !== 'nuvio') { reply.code(400); return { error: 'Missing accountId or unsupported platform' } }
         const refreshOptions = typeof rejectedTokenHash === 'string' ? { rejectedTokenHash } : {}
 
         if (platform === 'nuvio') {
@@ -528,24 +528,7 @@ export function registerProviderRoutes(fastify, reconciler) {
             }
         }
 
-        // RealStream: server owns custody — refresh via PocketBase auth-refresh, falling back to
-        // full re-authentication using the stored email+password if the token has fully expired.
-        try {
-            const owned = await db.get(
-                "SELECT 1 FROM server_credentials WHERE connection_id = $1 AND sync_user = $2 AND credential_type = 'realstream' LIMIT 1",
-                [connectionId, authUser]
-            )
-            if (!owned) { reply.code(404); return { error: 'Connection not found' } }
 
-            const { refreshRealStreamToken } = await import('../providers/token-refresh.js')
-            const bundle = await refreshRealStreamToken(connectionId, accountId, authUser, refreshOptions)
-            if (!bundle?.accessToken) { reply.code(401); return { error: 'RealStream session expired, re-authenticate' } }
-            return { accessToken: bundle.accessToken, expiresAt: bundle.expiresAt, profileId: null }
-        } catch (err) {
-            if (err.isAuthError || err._authExpired) { reply.code(401); return { error: 'RealStream session expired, re-authenticate' } }
-            fastify.log.error({ err, connectionId, accountId, category: 'ConnectionToken' }, `RealStream token fetch failed: ${err.message}`)
-            reply.code(502); return { error: 'RealStream token refresh failed' }
-        }
     })
 
     // Switches which Nuvio profile a connection syncs to. Updates only profileId in the stored
@@ -747,40 +730,6 @@ export function registerProviderRoutes(fastify, reconciler) {
         }
     })
 
-    fastify.post('/api/providers/realstream/auth', {
-        bodyLimit: 1024 * 64,
-        config: { rateLimit: { max: 10, timeWindow: '1 minute' } }
-    }, async (request, reply) => {
-        const authUser = await verifyAuth(request)
-        if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
-        assertWritablePrimary()
-
-        const { email, password, baseUrl } = request.body || {}
-        if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
-
-        if (baseUrl && !(await isSafeUrlResolved(baseUrl))) { reply.code(400); return { error: 'Invalid or unsafe baseUrl' } }
-
-        try {
-            const { createRealStreamDriver } = await import('../providers/realstream-driver.js')
-            const driver = createRealStreamDriver(baseUrl ? { baseUrl } : {})
-            const tokens = await driver.authenticate(email, password)
-            // Password is NOT stored. Only the token bundle is returned for handoff.
-            return { tokens }
-        } catch (err) {
-            if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-                reply.code(504)
-                return { error: 'RealStream login timed out. Please try again in a few seconds.' }
-            }
-            if (err.status === 429) {
-                reply.code(429)
-                return { error: 'Too many login attempts. Please wait a few minutes before retrying.' }
-            }
-            const status = err.isAuthError ? 401 : 502
-            reply.code(status)
-            return { error: err.isAuthError ? 'Invalid email or password' : 'RealStream service unreachable' }
-        }
-    })
-
     fastify.post('/api/providers/nuvio/signup', {
         bodyLimit: 1024 * 64,
         config: { rateLimit: { max: 5, timeWindow: '1 minute' } }
@@ -807,32 +756,6 @@ export function registerProviderRoutes(fastify, reconciler) {
             const status = err.isAuthError ? 400 : 502
             reply.code(status)
             return { error: err.isAuthError ? (err.message || 'Could not create account') : 'Nuvio service unreachable' }
-        }
-    })
-
-    fastify.post('/api/providers/realstream/signup', {
-        bodyLimit: 1024 * 64,
-        config: { rateLimit: { max: 5, timeWindow: '1 minute' } }
-    }, async (request, reply) => {
-        const authUser = await verifyAuth(request)
-        if (!authUser) { reply.code(401); return { error: 'Unauthorized' } }
-        assertWritablePrimary()
-
-        const { email, password, name, baseUrl } = request.body || {}
-        if (!email || !password) { reply.code(400); return { error: 'Missing email or password' } }
-        if (baseUrl && !(await isSafeUrlResolved(baseUrl))) { reply.code(400); return { error: 'Invalid or unsafe baseUrl' } }
-
-        try {
-            const { createRealStreamDriver } = await import('../providers/realstream-driver.js')
-            const driver = createRealStreamDriver(baseUrl ? { baseUrl } : {})
-            const tokens = await driver.register(email, password, name)
-            return { tokens }
-        } catch (err) {
-            if (err.name === 'TimeoutError' || err.name === 'AbortError') { reply.code(504); return { error: 'RealStream signup timed out. Please try again.' } }
-            if (err.status === 429) { reply.code(429); return { error: 'Too many attempts. Please wait a few minutes.' } }
-            const status = err.isAuthError ? 400 : 502
-            reply.code(status)
-            return { error: err.isAuthError ? (err.message || 'Could not create account') : 'RealStream service unreachable' }
         }
     })
 

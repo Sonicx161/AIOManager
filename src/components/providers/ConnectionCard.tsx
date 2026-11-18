@@ -1,4 +1,5 @@
 import { Switch } from '@/components/ui/switch'
+import { Button } from '@/components/ui/button'
 import { ChevronRight } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -15,6 +16,7 @@ interface ConnectionCardProps {
     syncing?: boolean
     onEdit: () => void
     onToggle: () => void
+    onRemove: () => void
     email?: string
     contextLabel?: string
     badge?: React.ReactNode
@@ -29,6 +31,7 @@ export const ConnectionCard = memo(function ConnectionCard({
     syncing,
     onEdit,
     onToggle,
+    onRemove,
     email,
     badge,
     addonCount,
@@ -39,6 +42,18 @@ export const ConnectionCard = memo(function ConnectionCard({
 
     const [enabled, setEnabled] = useState(connection.enabled !== false)
     useEffect(() => { setEnabled(connection.enabled !== false) }, [connection.enabled])
+
+    if (connection.platform === 'realstream') {
+        return (
+            <div data-theme-part="card" className="flex flex-wrap items-center gap-3 rounded-xl border border-border/40 bg-card p-4">
+                <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold">RealStream</p>
+                    <p className="text-sm text-muted-foreground">RealStream was retired for RealFin, a Jellyfin app that works with regular Jellyfin servers and AIOStreams or AIOMetadata Jellyfin servers. This connection no longer syncs.</p>
+                </div>
+                <Button variant="outline" onClick={onRemove}>Remove</Button>
+            </div>
+        )
+    }
 
     const { pill, showLive } = connectionPresentation(enabled, display)
     const healthy = isHealthyConnection(enabled, display)

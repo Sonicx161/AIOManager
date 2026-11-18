@@ -134,38 +134,6 @@ async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId:
     }
 }
 
-async function pushRealStream(conn: Connection, addons: AddonDescriptor[], accountId: string, ownership?: SyncOwnership, signal?: AbortSignal) {
-    const { fetchConnectionToken, hashRejectedToken } = await import('@/api/connection')
-    const [{ getOrFetchRealStreamToken, refreshRealStreamToken }, { realStreamTokenOwner }] = await Promise.all([
-        import('@/lib/realstream-token-cache'),
-        import('@/lib/realstream-token-owner'),
-    ])
-    assertLive(ownership, signal)
-    const tokenOwner = realStreamTokenOwner(accountId, conn)
-    let token = await getOrFetchRealStreamToken(tokenOwner, () => fetchConnectionToken(accountId, conn.id, 'realstream'))
-    assertLive(ownership, signal)
-
-    const { realStreamDriverFor } = await import('@/lib/drivers/factory')
-    assertLive(ownership, signal)
-    // userId is a stable PocketBase identity set at auth time; it never changes between refreshes.
-    const userId = conn.credentials?.userId || ''
-    if (!userId) throw Object.assign(new Error('RealStream user ID missing; re-authenticate this connection'), { isAuthError: true })
-
-    // R9: strip internal destination policy before the provider wire.
-    // A rejected session heals only through a server-side forced revalidation: one retry, never more.
-    const write = () => realStreamDriverFor(conn).writeAddons(token.accessToken, stripDestinationsForWire(addons), userId)
-    try {
-        return await write()
-    } catch (err) {
-        if (!isAuthError(err)) throw err
-        assertLive(ownership, signal)
-        const rejectedTokenHash = await hashRejectedToken(token.accessToken)
-        token = await refreshRealStreamToken(tokenOwner, token.accessToken, () => fetchConnectionToken(accountId, conn.id, 'realstream', undefined, { rejectedTokenHash }))
-        assertLive(ownership, signal)
-        return await write()
-    }
-}
-
 // Hydra (CORS-fragile against arbitrary servers) + any client-side failure fall back to the server.
 async function serverReconcile(accountId: string, account: Account, connections: Connection[], options: { addons?: AddonDescriptor[]; allowCollectionShrink?: boolean; ownership?: SyncOwnership; signal?: AbortSignal } = {}) {
     try {
@@ -283,26 +251,13 @@ export async function pushToConnections(accountId: string, options: { addons?: A
 
     for (const conn of eligible) {
         if (stopped() || (ownership && !ownership.current())) return
-        if (conn.platform !== 'nuvio' && conn.platform !== 'realstream') {
+        if (conn.platform !== 'nuvio') {
             serverConnections.push(conn)
             continue
         }
         const payload = effectiveFor(conn)
         try {
-            if (conn.platform === 'nuvio') await pushNuvio(conn, payload, accountId, account.activeProfileId, ownership, options.signal)
-            else {
-                // R2-08: an empty projection to RealStream, authorized or not, is never
-                // a confirmed write. The driver resolves it as a skip with a plain
-                // reason; the connection keeps its prior confirmation and never falls
-                // back to the server reconciler as success.
-                const result = await pushRealStream(conn, payload, accountId, ownership, options.signal)
-                if (result?.skipped) {
-                    const reason = (result as { reason?: string }).reason || 'empty projection without clear authorization'
-                    trace('push', 'connection-skipped', { accountId, platform: conn.platform, connId: conn.id, reason })
-                    setStatus(conn.id, 'error', reason)
-                    continue
-                }
-            }
+            await pushNuvio(conn, payload, accountId, account.activeProfileId, ownership, options.signal)
             setStatus(conn.id, 'active')
         } catch (err) {
             if (stopped() || (ownership && !ownership.current())) return

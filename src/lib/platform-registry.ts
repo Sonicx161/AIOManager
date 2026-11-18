@@ -1,7 +1,6 @@
 import type { ConnectionType } from '@/types/connection'
 import stremioLogo from '@/assets/platforms/stremio.png'
 import nuvioLogo from '@/assets/platforms/nuvio.png'
-import realstreamLogo from '@/assets/platforms/realstream.png'
 import hydraLogo from '@/assets/platforms/hydra.png'
 // Official icon: https://github.com/jellyfin/jellyfin-ux/blob/master/branding/SVG/icon-transparent.svg
 import jellyfinLogo from '@/assets/platforms/jellyfin.svg'
@@ -64,17 +63,6 @@ export const PLATFORM_REGISTRY: PlatformRegistryEntry[] = [
         description: 'Nuvio addons and plugins',
         available: true,
         features: ['addons', 'plugins', 'profiles', 'library', 'collections', 'settings', 'watchHistory', 'watchProgress'],
-    },
-    {
-        id: 'realstream',
-        name: 'RealStream',
-        logo: realstreamLogo,
-        connectionType: 'native',
-        requiresAuth: true,
-        hasNativeDriver: true,
-        description: 'RealStream addon collection',
-        available: true,
-        features: ['addons'],
     },
     {
         id: 'hydra-outbound',

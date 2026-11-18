@@ -4,14 +4,11 @@ import type { WatchStateSource } from './types.ts'
 import { watchFingerprint } from './records.ts'
 import { createStremioWatchSource, type StremioWatchSourceOptions } from './source-stremio.ts'
 import { createNuvioWatchSource, type NuvioWatchSourceOptions } from './source-nuvio.ts'
-import { createRealStreamWatchSource, type RealStreamWatchSourceOptions } from './source-realstream.ts'
 import { createStremioWatchRequest } from './stremio-request.ts'
 import { WatchMigrationError, WatchTransportError, transportFetch } from './failures.ts'
 
-const SOURCE_PLATFORMS = ['stremio', 'nuvio', 'realstream', 'jellyfin']
-const SOURCE_LABELS: Record<string, string> = { stremio: 'Stremio', nuvio: 'Nuvio', realstream: 'RealStream', jellyfin: 'Jellyfin-compatible server' }
-const REALSTREAM_DEFAULT_BASE = 'https://realbase.fortheweak.cloud'
-const REALSTREAM_AUTH_REFRESH_PATH = '/api/collections/users/auth-refresh'
+const SOURCE_PLATFORMS = ['stremio', 'nuvio', 'jellyfin']
+const SOURCE_LABELS: Record<string, string> = { stremio: 'Stremio', nuvio: 'Nuvio', jellyfin: 'Jellyfin-compatible server' }
 const REQUEST_TIMEOUT_MS = 30_000
 const NUVIO_READ_RPCS = ['sync_pull_profiles', 'sync_pull_watched_items', 'sync_pull_watch_progress']
 const isNativeConnection = (connection: Connection) => !connection.connectionType || connection.connectionType === 'native'
@@ -321,90 +318,6 @@ export async function nuvioWatchSession(account: Account, connection: Connection
     }
 }
 
-export interface RealStreamWatchSession extends Omit<RealStreamWatchSourceOptions, 'open'> {
-    open(signal: AbortSignal): Promise<Awaited<ReturnType<RealStreamWatchSourceOptions['open']>> & {
-        writeRecord(recordId: string | null, entries: Record<string, unknown>[], signal: AbortSignal): Promise<unknown>
-    }>
-}
-
-// The subject label comes only from the verified auth-refresh record: its id must match the
-// bound connection user, and the email is shown only when RealStream itself returned one.
-// The opaque user id never feeds the visible label, and an email is never invented from it.
-export function realStreamSessionSubject(record: Record<string, unknown>, userId: string): string {
-    if (typeof record.id !== 'string' || record.id !== userId) throw new Error('The RealStream token belongs to a different remote user. Reconnect before importing watch state.')
-    const email = typeof record.email === 'string' ? record.email.trim() : ''
-    return email || 'Signed-in RealStream account'
-}
-
-export async function realStreamWatchSession(account: Account, connection: Connection, signal: AbortSignal, assertCurrent: () => void = () => {}): Promise<RealStreamWatchSession> {
-    const { fetchConnectionToken } = await import('../../api/connection.ts')
-    const userId = connection.credentials.userId
-    if (!userId) throw new Error('Reconnect RealStream to verify its remote user.')
-    const base = normalizedBaseUrl(connection.credentials.baseUrl || REALSTREAM_DEFAULT_BASE)
-    const open = async (openSignal: AbortSignal) => {
-        const token = await fetchConnectionToken(account.id, connection.id, 'realstream', connection.credentials.baseUrl)
-        assertCurrent()
-        openSignal.throwIfAborted()
-        const response = await transportFetch(`${base}${REALSTREAM_AUTH_REFRESH_PATH}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token.accessToken}` },
-            signal: AbortSignal.any([openSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-            credentials: 'omit',
-            referrerPolicy: 'no-referrer',
-            redirect: 'error',
-        })
-        if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'The RealStream session expired. Reconnect before importing watch state.' : `RealStream refused sign-in verification (HTTP ${response.status}). Reconnect and retry.`)
-        const data = object(await response.json())
-        const record = object(data.record)
-        if (typeof data.token !== 'string' || !data.token) throw new Error('RealStream did not confirm the sign-in. Reconnect and retry.')
-        const subject = realStreamSessionSubject(record, userId)
-        const accessToken = data.token
-        const fetchPage = async (page: number, perPage: number, requestSignal: AbortSignal) => {
-            assertCurrent()
-            requestSignal.throwIfAborted()
-            const filter = encodeURIComponent(`user='${userId}'`)
-            const pageResponse = await transportFetch(`${base}/api/collections/progress/records?filter=${filter}&page=${page}&perPage=${perPage}`, {
-                headers: { Authorization: `Bearer ${accessToken}` },
-                signal: AbortSignal.any([requestSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-                credentials: 'omit',
-                referrerPolicy: 'no-referrer',
-                redirect: 'error',
-            })
-            if (!pageResponse.ok) throw new Error(`RealStream refused this read (HTTP ${pageResponse.status}). Check the connection and retry.`)
-            const pageData = object(await pageResponse.json())
-            if (!Array.isArray(pageData.items)) throw new Error('RealStream returned an unexpected response shape; nothing was interpreted as data.')
-            return { items: pageData.items as Record<string, unknown>[], totalItems: typeof pageData.totalItems === 'number' ? pageData.totalItems : Number.NaN }
-        }
-        const writeRecord = async (recordId: string | null, entries: Record<string, unknown>[], writeSignal: AbortSignal) => {
-            assertCurrent()
-            if (recordId !== null && !/^[a-zA-Z0-9_-]{1,128}$/.test(recordId)) throw new Error('The destination progress record could not be identified.')
-            writeSignal.throwIfAborted()
-            const result = await transportFetch(`${base}/api/collections/progress/records${recordId ? `/${encodeURIComponent(recordId)}` : ''}`, {
-                method: recordId ? 'PATCH' : 'POST',
-                headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user: userId, data: entries }),
-                signal: AbortSignal.any([writeSignal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-                credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error',
-            })
-            if (!result.ok) throw new Error(`RealStream refused this update (HTTP ${result.status}). Preview again before retrying.`)
-            return result.json()
-        }
-        return { fetchPage, writeRecord, subject }
-    }
-    const initial = await open(signal)
-    signal.throwIfAborted()
-    return {
-        connectionId: connection.id,
-        label: migrationSourceLabel(connection),
-        subject: initial.subject,
-        scope: `realstream:${await watchFingerprint([base, userId])}`,
-        open: async openSignal => {
-            const fresh = await open(openSignal)
-            return { fetchPage: fresh.fetchPage, writeRecord: fresh.writeRecord }
-        },
-    }
-}
-
 async function createJellyfinMigrationSource(connection: Connection, key: CryptoKey, signal: AbortSignal): Promise<WatchStateSource> {
     const { createJellyfinWatchSource } = await import('./jellyfin.ts')
     const { decrypt } = await import('../crypto.ts')
@@ -466,7 +379,6 @@ export async function createWatchMigrationSource(account: Account, key: CryptoKe
             return createStremioWatchSource({ ...session, watchEvents, isDeletedItem })
         }
         if (connection.platform === 'nuvio') return createNuvioWatchSource(await nuvioWatchSession(account, connection, signal, [], assertCurrent))
-        if (connection.platform === 'realstream') return createRealStreamWatchSource(await realStreamWatchSession(account, connection, signal, assertCurrent))
         if (connection.platform === 'jellyfin') return await createJellyfinMigrationSource(connection, key, signal)
         throw new Error('This connection is not available as a watch-state source.')
     } catch (error) {

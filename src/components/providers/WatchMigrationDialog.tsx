@@ -133,7 +133,7 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
     const profileLevel = useUIStore(state => state.privacyLevelProfiles)
     const [sourceAccountId, setSourceAccountId] = useState(accountId)
     const [sourceId, setSourceId] = useState('')
-    const [watched, setWatched] = useState(connection.platform !== 'realstream')
+    const [watched, setWatched] = useState(true)
     const [resume, setResume] = useState(true)
     const [plan, setPlan] = useState<WatchMigrationPlan | null>(null)
     const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -466,10 +466,9 @@ export function WatchMigrationDialog({ open, onOpenChange, accountId, connection
                         <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
                         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">What to copy</p>
                         <div className="flex flex-wrap gap-x-5 gap-y-2">
-                            <div className="flex items-center gap-2"><Checkbox id="migration-watched" checked={watched} onCheckedChange={value => setWatched(value === true)} disabled={!!busy || connection.platform === 'realstream'} /><Label htmlFor="migration-watched">Watched titles</Label></div>
+                            <div className="flex items-center gap-2"><Checkbox id="migration-watched" checked={watched} onCheckedChange={value => setWatched(value === true)} disabled={!!busy} /><Label htmlFor="migration-watched">Watched titles</Label></div>
                             <div className="flex items-center gap-2"><Checkbox id="migration-resume" checked={resume} onCheckedChange={value => setResume(value === true)} disabled={!!busy} /><Label htmlFor="migration-resume">Continue watching</Label></div>
                         </div>
-                        {connection.platform === 'realstream' && <p className="text-xs leading-relaxed text-muted-foreground">RealStream accepts supported playback positions. Its API does not provide a verified watched-title import.</p>}
                         </div>
                         <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">Review the titles before copying. We’ll show what can be added and what’s already saved. Some services don’t share original watch dates or a full viewing history.</p>
                     </div> : <div className="space-y-4">

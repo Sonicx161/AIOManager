@@ -51,7 +51,6 @@ import { createStremioLink, pollStremioLink } from '@/api/stremio-link'
 import { buildResetPasswordUrl } from '@/api/stremio-relay'
 import { StremioSocialAuth } from './StremioSocialAuth'
 import { NuvioSetupDialog, type NuvioBackend } from '@/components/providers/NuvioSetupDialog'
-import { RealStreamSetupDialog, type RealStreamTokens } from '@/components/providers/RealStreamSetupDialog'
 import { JellyfinSetupDialog } from '@/components/providers/JellyfinSetupDialog'
 import type { JellyfinSession } from '@/lib/jellyfin/session'
 import { sealJellyfinSecret } from '@/lib/jellyfin/connection-data'
@@ -119,7 +118,6 @@ export function AccountForm() {
   const [connectedPlatforms, setConnectedPlatforms] = useState<Set<string>>(new Set())
   const [nuvioDialogOpen, setNuvioDialogOpen] = useState(false)
   const [qrDialogOpen, setQrDialogOpen] = useState(false)
-  const [realstreamDialogOpen, setRealstreamDialogOpen] = useState(false)
   const [jellyfinDialogOpen, setJellyfinDialogOpen] = useState(false)
   const [hydraDialogOpen, setHydraDialogOpen] = useState(false)
   const [mode, setMode] = useState<AccountAuthMode>('credentials')
@@ -503,49 +501,6 @@ export function AccountForm() {
     setWizardStep('connect-more')
   }
 
-  const handleRealStreamAccountComplete = async (tokens: RealStreamTokens, email: string, password: string) => {
-    let accountId: string | undefined
-    const isFirstConnection = !createdAccountId
-    try {
-      if (isFirstConnection) {
-        accountId = await addLocalAccount(name.trim() || 'RealStream Account', accentColor === 'none' ? undefined : accentColor, emoji.trim() || undefined, avatar || undefined)
-        setCreatedAccountId(accountId)
-      } else {
-        accountId = createdAccountId
-      }
-      await useConnectionStore.getState().addConnection(accountId, {
-        platform: 'realstream',
-        driverType: 'native',
-        connectionType: 'native',
-        enabled: true,
-        status: 'active',
-        credentials: {
-          accessToken: tokens.accessToken,
-          userId: tokens.userId || '',
-          expiresAt: String(tokens.expiresAt),
-          email,
-          password,
-        },
-        capabilities: ['addons'],
-      })
-      const { scheduleSyncAccount } = await import('@/store/account/accountSync')
-      scheduleSyncAccount(accountId, false, 'user')
-      setConnectedPlatforms(prev => new Set(prev).add('realstream'))
-      if (isFirstConnection) {
-        setWizardStep('connect-more')
-      } else {
-        setRealstreamDialogOpen(false)
-      }
-    } catch (err) {
-      if (isFirstConnection) {
-        if (accountId) removeAccount(accountId).catch(() => {})
-        setCreatedAccountId(null)
-      }
-      setError(err instanceof Error ? err.message : 'Failed to add RealStream connection')
-      throw err
-    }
-  }
-
   const handleHydraAccountComplete = async (config: HydraDriverConfig, credential: string) => {
     let accountId: string | undefined
     const isFirstConnection = !createdAccountId
@@ -867,8 +822,6 @@ export function AccountForm() {
               setPlatformStep('stremio-auth')
             } else if (p.id === 'nuvio') {
               setNuvioDialogOpen(true)
-            } else if (p.id === 'realstream') {
-              setRealstreamDialogOpen(true)
             } else if (p.id === 'jellyfin') {
               setJellyfinDialogOpen(true)
             } else if (p.id === 'hydra-outbound') {
@@ -1270,8 +1223,6 @@ export function AccountForm() {
             setError('')
             if (p.id === 'nuvio') {
               setNuvioDialogOpen(true)
-            } else if (p.id === 'realstream') {
-              setRealstreamDialogOpen(true)
             } else if (p.id === 'jellyfin') {
               setJellyfinDialogOpen(true)
             } else if (p.id === 'hydra-outbound') {
@@ -2020,12 +1971,6 @@ export function AccountForm() {
       onOpenChange={setJellyfinDialogOpen}
       onComplete={handleJellyfinAccountComplete}
     />}
-
-    <RealStreamSetupDialog
-      open={realstreamDialogOpen}
-      onOpenChange={setRealstreamDialogOpen}
-      onComplete={handleRealStreamAccountComplete}
-    />
 
     <ProviderSetupDialog
       open={hydraDialogOpen}

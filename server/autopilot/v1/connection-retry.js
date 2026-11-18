@@ -1,4 +1,4 @@
-// Failed native connection pushes (Nuvio, RealStream, Hydra) after a swap, kept in memory only and retried with
+// Failed native connection pushes (Nuvio, Hydra) after a swap, kept in memory only and retried with
 // backoff while the rule's target is unchanged. A restart drops them; the hourly connection audit re-finds any drift.
 export const CONNECTION_RETRY_BASE_MS = 60_000
 export const CONNECTION_RETRY_MAX_MS = 30 * 60_000

@@ -1307,7 +1307,6 @@ export const useSyncStore = create<SyncState>()(
                 import('@/lib/canonical-base').then(({ clearCanonicalBases }) => clearCanonicalBases()).catch(() => {})
                 import('@/lib/pmdb-list-publisher').then(({ _invalidateAuthCache }) => _invalidateAuthCache()).catch(() => {})
                 import('@/api/hydra-providers').then(({ _clearCanonicalCache }) => _clearCanonicalCache()).catch(() => {})
-                import('@/lib/realstream-token-cache').then(({ clearRealStreamTokens }) => clearRealStreamTokens()).catch(() => {})
                 set({
                     // Profile (name + avatar) survives sign-out on purpose: the login screen's
                     // Continue strip and avatar are driven from it, like every keep-me-signed-in app.

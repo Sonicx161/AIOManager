@@ -76,7 +76,7 @@ export function addonPlatformSources(account: PlatformSourceAccount | null | und
     const sources: string[] = []
     let hasExplicitStremio = false
     for (const conn of account.connections || []) {
-        if (conn.platform === 'jellyfin') continue
+        if (conn.platform === 'jellyfin' || conn.platform === 'realstream') continue
         const platform = connectionPlatform(conn)
         if (platform === 'stremio') hasExplicitStremio = true
         if (!sources.includes(platform)) sources.push(platform)
@@ -151,7 +151,7 @@ export function accountSyncTargets(account: PlatformSourceAccount | null | undef
     let hasExplicitStremio = false
 
     for (const conn of account.connections || []) {
-        if (conn.platform === 'jellyfin') continue
+        if (conn.platform === 'jellyfin' || conn.platform === 'realstream') continue
         const platform = connectionPlatform(conn)
         if (platform === 'stremio') hasExplicitStremio = true
         if (conn.enabled === false) {

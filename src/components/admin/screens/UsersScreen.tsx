@@ -36,7 +36,7 @@ const FILTERS: { id: UserFilterId; label: string }[] = [
   { id: 'inactive-180', label: 'Inactive 180 d+' },
 ]
 
-const SPLIT_PLATFORMS = ['stremio', 'nuvio', 'realstream', 'hydra']
+const SPLIT_PLATFORMS = ['stremio', 'nuvio', 'hydra']
 
 // No overflow-hidden here: the row menu opens inside the table and would be clipped.
 const USERS_SURFACE = 'rounded-2xl border border-border/45 bg-card shadow-sm'
@@ -149,8 +149,8 @@ function StatusButton({ user }: { user: UserRow }) {
   )
 }
 
-// Hydra and RealStream ship white logos: on light themes their image tile gets a dark plate.
-const WHITE_LOGOS = new Set(['hydra', 'realstream'])
+// Hydra ships a white logo: on light themes their image tile gets a dark plate.
+const WHITE_LOGOS = new Set(['hydra'])
 
 function PlatformIcon({ platform }: { platform: string }) {
   const { isLight } = useTheme()

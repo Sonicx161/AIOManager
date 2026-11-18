@@ -16,17 +16,6 @@ export function connectionCredentialBundle(connection: Connection): Record<strin
             enabled: connection.enabled !== false,
         }
     }
-    if (connection.platform === 'realstream') {
-        return {
-            accessToken: credentials.accessToken,
-            userId: credentials.userId || null,
-            expiresAt: credentials.expiresAt,
-            baseUrl: credentials.baseUrl || null,
-            email: credentials.email || null,
-            password: credentials.password || null,
-            enabled: connection.enabled !== false,
-        }
-    }
     return null
 }
 

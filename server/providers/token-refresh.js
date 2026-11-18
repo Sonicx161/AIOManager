@@ -4,33 +4,10 @@ import { decrypt, encrypt } from '../crypto.js'
 import { FALLBACK_KEYS, PRIMARY_KEY } from '../keys.js'
 import { trace } from '../utils/trace.js'
 import { assertAccountActive, gateCode } from '../admin/account-state.js'
-import { credentialBundleGeneration, getCachedCredentialBundle, setCachedCredentialBundle } from './credential-bundle-cache.js'
 
 export const REFRESH_BUFFER_MS = 5 * 60 * 1000
 export const FORCE_COOLDOWN_MS = 60 * 1000
 const FORCE_COOLDOWN_MAX_ENTRIES = 5000
-
-// Both refresh paths read the same credential shape; the bundle cache removes the
-// repeated read+decrypt when nothing was rotated. Only successful decrypts are cached.
-async function loadCredentialBundle(credentialType, connectionId, accountId, syncUser) {
-    const cached = getCachedCredentialBundle(credentialType, connectionId, accountId, syncUser)
-    if (cached) return { bundle: cached, reason: null }
-    const readGeneration = credentialBundleGeneration()
-    const cred = await db.get(
-        'SELECT auth_key FROM server_credentials WHERE connection_id = $1 AND credential_type = $2 AND account_id = $3 AND sync_user = $4 ORDER BY updated_at DESC LIMIT 1',
-        [connectionId, credentialType, accountId, syncUser]
-    )
-    if (!cred?.auth_key) return { bundle: null, reason: 'no-credential' }
-    let bundle
-    try {
-        bundle = JSON.parse(decrypt(cred.auth_key, FALLBACK_KEYS))
-    } catch {
-        return { bundle: null, reason: 'decrypt-failed' }
-    }
-    if (!bundle || typeof bundle !== 'object') return { bundle: null, reason: 'unreadable-bundle' }
-    setCachedCredentialBundle(credentialType, connectionId, accountId, syncUser, bundle, readGeneration)
-    return { bundle, reason: null }
-}
 
 // Duplicate-row policy for ONE sealed Nuvio login, shared by resolveConnections,
 // loadNuvioSealedBundle and the refresh path below so the three cannot drift: a
@@ -341,102 +318,6 @@ async function refreshNuvioTokenInner(connectionId, accountId, syncUser, key, re
             err._authExpired = true
         }
         trace('tokenRefresh', 'nuvio.error', { connectionId, accountId, isAuthError: !!err.isAuthError, error: err.message, timing: Date.now() - start })
-        throw err
-    }
-}
-
-export function refreshRealStreamToken(connectionId, accountId, syncUser, options = {}) {
-    const key = JSON.stringify(['realstream', connectionId, accountId ?? null, syncUser ?? null])
-    const rejectedTokenHash = normalizeRejectedTokenHash(options.rejectedTokenHash)
-    return singleFlightAfter(key, () => refreshRealStreamTokenInner(connectionId, accountId, syncUser, key, rejectedTokenHash), !!rejectedTokenHash)
-}
-
-async function refreshRealStreamTokenInner(connectionId, accountId, syncUser, key, rejectedTokenHash) {
-    const start = Date.now()
-    trace('tokenRefresh', 'realstream.start', { connectionId, accountId })
-    // Fail closed exactly like the nuvio path: no owner+account scope, no credential access.
-    if (!syncUser || !accountId) {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: syncUser ? 'no-account' : 'no-owner' })
-        return null
-    }
-    // Account state gate beside the scope guard, identical to the nuvio path.
-    try {
-        await assertAccountActive(syncUser)
-    } catch (stateErr) {
-        if (gateCode(stateErr)) {
-            trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: gateCode(stateErr) })
-            return null
-        }
-        throw stateErr
-    }
-    const loaded = await loadCredentialBundle('realstream', connectionId, accountId, syncUser)
-    if (loaded.reason) {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, accountId, reason: loaded.reason })
-        return null
-    }
-    const bundle = loaded.bundle
-
-    if (!bundle.accessToken) {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, reason: 'no-access-token' })
-        return null
-    }
-
-    // PocketBase reads a revoked token as a guest, so only a forced auth-refresh can detect it.
-    const plan = forcedRefreshPlan(key, bundle, rejectedTokenHash)
-    const expiring = !!bundle.expiresAt && bundle.expiresAt - Date.now() <= REFRESH_BUFFER_MS
-    // Near or past a known expiry a rejected token still gets a normal refresh, so it can rotate.
-    if (plan === 'reject' && !expiring) {
-        trace('tokenRefresh', 'realstream.reject', { connectionId, reason: 'rejected-token-cooldown' })
-        return null
-    }
-    if (bundle.expiresAt && bundle.expiresAt - Date.now() > REFRESH_BUFFER_MS && plan !== 'force') {
-        trace('tokenRefresh', 'realstream.skip', { connectionId, reason: 'not-expiring' })
-        return bundle
-    }
-
-    const { createRealStreamDriver } = await import('./realstream-driver.js')
-    const driver = createRealStreamDriver(bundle.baseUrl ? { baseUrl: bundle.baseUrl } : {})
-
-    try {
-        const refreshed = await driver.refreshAccessToken(bundle.accessToken)
-        const newBundle = {
-            ...bundle,
-            accessToken: refreshed.accessToken,
-            userId: refreshed.userId || bundle.userId,
-            expiresAt: refreshed.expiresAt,
-        }
-        const persisted = await persistRotatedToken(connectionId, 'realstream', newBundle, accountId, syncUser, bundle)
-        trace('tokenRefresh', 'realstream.success', { connectionId, path: 'refresh', timing: Date.now() - start })
-        return persisted
-    } catch (err) {
-        if (plan === 'force' && err.isAuthError && !(bundle.email && bundle.password)) markRenewalFailed(key, bundle)
-        if (!err.isAuthError) {
-            trace('tokenRefresh', 'realstream.error', { connectionId, isAuthError: false, error: err.message, timing: Date.now() - start })
-            throw err
-        }
-
-        if (bundle.email && bundle.password) {
-            try {
-                const reauthed = await driver.authenticate(bundle.email, bundle.password)
-                const newBundle = {
-                    ...bundle,
-                    accessToken: reauthed.accessToken,
-                    userId: reauthed.userId || bundle.userId,
-                    expiresAt: reauthed.expiresAt,
-                }
-                const persisted = await persistRotatedToken(connectionId, 'realstream', newBundle, accountId, syncUser, bundle)
-                trace('tokenRefresh', 'realstream.success', { connectionId, path: 'reauth', timing: Date.now() - start })
-                return persisted
-            } catch (reauthErr) {
-                if (plan === 'force' && reauthErr.isAuthError) markRenewalFailed(key, bundle)
-                reauthErr._authExpired = true
-                trace('tokenRefresh', 'realstream.error', { connectionId, path: 'reauth', error: reauthErr.message, timing: Date.now() - start })
-                throw reauthErr
-            }
-        }
-
-        err._authExpired = true
-        trace('tokenRefresh', 'realstream.error', { connectionId, isAuthError: true, error: err.message, timing: Date.now() - start })
         throw err
     }
 }

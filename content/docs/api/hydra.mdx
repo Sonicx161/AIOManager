@@ -245,7 +245,7 @@ A valid manifest requires: string `id`, string `name`, string `version`, non-emp
 
 ### POST /hydra/register
 
-Register your app as a pull subscriber. Makes your app appear in the account's **Connections** list as a first-class card alongside Stremio, Nuvio, and RealStream, marked with a **Pull** badge and showing its name, logo, a Synced/Stale indicator, and last-sync time.
+Register your app as a pull subscriber. Makes your app appear in the account's **Connections** list as a first-class card alongside Stremio and Nuvio, marked with a **Pull** badge and showing its name, logo, a Synced/Stale indicator, and last-sync time.
 
 **Request:**
 ```json
@@ -361,7 +361,7 @@ Your addon has a per-user manifest URL (e.g. `https://your-addon.example.com/str
 
 Without Hydra, the user has to manually copy the new manifest URL, go to AIOManager, remove the old addon, and add the new one. That's friction.
 
-With Hydra, you add a button to your configure page that calls one endpoint. The user's addon is updated in AIOManager and propagated to all their connected platforms (Stremio, Nuvio, RealStream, etc.) automatically.
+With Hydra, you add a button to your configure page that calls one endpoint. The user's addon is updated in AIOManager and propagated to all their connected platforms (Stremio, Nuvio, etc.) automatically.
 
 ### What you need from the user
 
@@ -420,4 +420,4 @@ AIOManager Integration
 └─────────────────────────────────────────────┘
 ```
 
-<Note>Need a native connector for your platform? Send your sync API docs (auth + addon read/write) and AIOManager can build a first-class native driver, the way Nuvio and RealStream are integrated.</Note>
+<Note>Need a native connector for your platform? Send your sync API docs (auth + addon read/write) and AIOManager can build a first-class native driver, the way Nuvio are integrated.</Note>

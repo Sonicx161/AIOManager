@@ -40,17 +40,12 @@ function normalizeRawEntry(platform: string, raw: Record<string, unknown>): { ur
         if (!url) return null
         return { url, name: String(raw.name || ''), enabled: raw.enabled !== false }
     }
-    if (platform === 'realstream') {
-        const url = String(raw.manifestUrl || raw.baseUrl || '')
-        if (!url) return null
-        return { url, name: String(raw.name || ''), enabled: raw.enabled !== false }
-    }
     return null
 }
 
 export async function discoverFromConnections(account: Account, accountId: string): Promise<DiscoveryResult> {
     const connections = (account.connections || []).filter(
-        c => c.enabled && (c.platform === 'nuvio' || c.platform === 'realstream')
+        c => c.enabled && c.platform === 'nuvio'
     )
     const failedReadConnIds = new Set<string>()
     const failedReads = new Map<string, FailedRead>()
@@ -59,9 +54,7 @@ export async function discoverFromConnections(account: Account, accountId: strin
     const existingUrls = new Set((account.addons || []).map(a => normalizeAddonUrl(a.transportUrl)))
 
     const { fetchConnectionToken } = await import('@/api/connection')
-    const { getOrFetchRealStreamToken, invalidateRealStreamToken } = await import('@/lib/realstream-token-cache')
-    const { realStreamTokenOwner } = await import('@/lib/realstream-token-owner')
-    const { nuvioDriverFor, realStreamDriverFor } = await import('@/lib/drivers/factory')
+    const { nuvioDriverFor } = await import('@/lib/drivers/factory')
 
     const discovered: DiscoveredEntry[] = []
 
@@ -70,24 +63,14 @@ export async function discoverFromConnections(account: Account, accountId: strin
         try {
             let rawAddons: Record<string, unknown>[] = []
 
-            if (conn.platform === 'nuvio') {
-                const { getCachedNuvioToken, setCachedNuvioToken } = await import('@/lib/nuvio-token-cache')
-                let token = getCachedNuvioToken(conn.id)
-                if (!token) {
-                    token = await fetchConnectionToken(accountId, conn.id, 'nuvio', conn.credentials?.baseUrl)
-                    setCachedNuvioToken(conn.id, token)
-                }
-                const profileId = conn.credentials?.profileIndex || conn.credentials?.profileId
-                rawAddons = await nuvioDriverFor(conn).readAddons(token.accessToken, profileId) as Record<string, unknown>[]
-            } else {
-                const token = await getOrFetchRealStreamToken(realStreamTokenOwner(accountId, conn), () => fetchConnectionToken(accountId, conn.id, 'realstream'))
-                const userId = conn.credentials?.userId || ''
-                if (!userId) {
-                    invalidateRealStreamToken(conn.id)
-                    return { connId: conn.id, platform: conn.platform, entries: connDiscovered, failed: { message: 'Missing RealStream user id', isAuthError: false } }
-                }
-                rawAddons = await realStreamDriverFor(conn).readAddons(token.accessToken, userId) as Record<string, unknown>[]
+            const { getCachedNuvioToken, setCachedNuvioToken } = await import('@/lib/nuvio-token-cache')
+            let token = getCachedNuvioToken(conn.id)
+            if (!token) {
+                token = await fetchConnectionToken(accountId, conn.id, 'nuvio', conn.credentials?.baseUrl)
+                setCachedNuvioToken(conn.id, token)
             }
+            const profileId = conn.credentials?.profileIndex || conn.credentials?.profileId
+            rawAddons = await nuvioDriverFor(conn).readAddons(token.accessToken, profileId) as Record<string, unknown>[]
 
             for (const raw of rawAddons || []) {
                 const entry = normalizeRawEntry(conn.platform, raw)

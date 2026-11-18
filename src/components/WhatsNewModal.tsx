@@ -25,13 +25,13 @@ const FALLBACK_RELEASE: Release = {
     html_url: `https://github.com/sonicx161/AIOManager/releases/tag/v${pkg.version}`,
     body: `### Connections
 
-- **Multi-platform connections** - Mirror your addon configuration to Stremio, Nuvio, Hydra (inbound and outbound), and RealStream from a single account.
+- **RealStream** - RealStream was retired for RealFin, a Jellyfin app that works with regular Jellyfin servers and AIOStreams or AIOMetadata Jellyfin servers. Existing connections no longer sync and can be removed without affecting your addons or other connections.
+- **Multi-platform connections** - Mirror your addon configuration to Stremio, Nuvio, and Hydra (inbound and outbound) from a single account.
 
 - **Bidirectional reconciler** - The sync engine detects changes on both sides and propagates them. Addons added or removed on any connected platform sync to all others.
 
 - **Connection API keys** - Credentials are encrypted at rest on the server using AES-256-GCM and never exposed to the client after initial setup.
 
-- **RealStream driver** - Native RealStream integration with server-side token custody and automatic refresh.
 
 ### Discover
 

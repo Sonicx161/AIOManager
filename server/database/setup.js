@@ -865,7 +865,7 @@ export async function initializeDatabase(fastify) {
             const credsCount = await db.get(`SELECT COUNT(*) as c FROM server_credentials`)
             if (Number(credsCount?.c || 0) === 0) {
                 const rules = await db.query(
-                    `SELECT DISTINCT r.account_id, r.auth_key, r.owner_sync_user FROM autopilot_rules r WHERE r.auth_key IS NOT NULL AND r.owner_sync_user IS NOT NULL`
+                    `SELECT DISTINCT r.account_id, r.auth_key, r.owner_sync_user FROM autopilot_rules r WHERE r.auth_key IS NOT NULL AND r.owner_sync_user IS NOT NULL AND (r.platform IS NULL OR r.platform = 'stremio')`
                 )
                 let credsSeeded = 0
                 for (const rule of rules) {
@@ -912,6 +912,10 @@ export async function initializeDatabase(fastify) {
     } catch (migrationErr) {
         fastify.log.warn({ category: 'Database' }, `Migration warning: ${migrationErr.message}`)
     }
+
+    await db.run("DELETE FROM server_credentials WHERE credential_type = 'realstream'")
+    const { invalidateConnectionCache } = await import('../providers/reconciler.js')
+    invalidateConnectionCache()
 
     const recCacheCreateDdl = db.type === 'postgres'
         ? `CREATE TABLE IF NOT EXISTS recommendation_cache (

@@ -4,7 +4,7 @@ import { PRIMARY_KEY } from '../keys.js'
 // Shared by the Users screen (server/admin/reads.js) and the Dashboard log ring, so the two
 // always produce the exact same labels. DB values never become object keys as-is: platforms
 // map to a fixed list, anything unknown reads as `other`.
-export const PLATFORMS = new Set(['stremio', 'nuvio', 'realstream', 'hydra', 'fusion', 'jellyfin', 'emby'])
+export const PLATFORMS = new Set(['stremio', 'nuvio', 'hydra', 'fusion', 'jellyfin', 'emby'])
 export const platformKey = (v) => {
     const s = String(v ?? 'stremio').toLowerCase()
     return PLATFORMS.has(s) ? s : 'other'

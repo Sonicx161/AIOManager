@@ -20,7 +20,7 @@ import { getUserCached } from '@/lib/stremio-user-cache'
 import { loginWithCredentials } from '@/api/auth'
 import { buildResetPasswordUrl } from '@/api/stremio-relay'
 import { isStremioPasswordResetError, STREMIO_PASSWORD_RESET_COPY } from '@/lib/stremio-password-reset'
-import { nuvioAuth, realstreamAuth } from '@/api/hydra-providers'
+import { nuvioAuth } from '@/api/hydra-providers'
 import { exchangeNuvioQr, pollNuvioQr, startNuvioQr } from '@/api/nuvio-qr'
 import { QRLinkDialog } from '@/components/qr/QRLinkDialog'
 import type { QRSession } from '@/lib/qr-device-link'
@@ -30,7 +30,6 @@ import { encrypt } from '@/lib/crypto'
 import type { PremiumStatus } from '@/lib/stremio-premium'
 import type { NuvioMemberStatus } from '@/lib/nuvio-tier'
 import { DEFAULT_BASE_URL as NUVIO_DEFAULT_BASE_URL } from '@/lib/drivers/nuvio'
-import { DEFAULT_BASE_URL as REALSTREAM_DEFAULT_BASE_URL } from '@/lib/drivers/realstream'
 import { toast } from '@/hooks/use-toast'
 import { cn, maskEmailLevel, maskNameLevel, maskProfileLevel, maskUrlLevel } from '@/lib/utils'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -60,7 +59,7 @@ import {
 } from './workspace'
 import {
     DEFAULT_WORKSPACE_TAB, backendLabel, needsReauth, resolveWorkspaceTab, sessionState, statusSentence, syncSummary,
-    tokenExpiresIn, workspaceKind, workspaceTabsFor, type SessionState, type WorkspaceKind,
+    tokenExpiresIn, workspaceKind, workspaceTabsFor, type WorkspaceKind,
 } from './workspace/workspace-model'
 
 const errMsg = (e: unknown, fallback = 'Try again.') => (e instanceof Error ? e.message : fallback)
@@ -99,12 +98,6 @@ export async function runConnectionTest(accountId: string, connection: Connectio
     }
     if (kind === 'nuvio') {
         const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'nuvio', connection.credentials?.baseUrl))
-        return { message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})`, token }
-    }
-    if (kind === 'realstream') {
-        // Beta's RealStream token path never passes a baseUrl (self-hosted
-        // RealStream is gone), so the test must match it exactly.
-        const token = await withTimeout(fetchConnectionToken(accountId, connection.id, 'realstream'))
         return { message: `Session healthy (token expires ${new Date(token.expiresAt).toLocaleString()})`, token }
     }
     throw new Error('This connection has no test.')
@@ -960,142 +953,6 @@ function NuvioCredentialsSection({ accountId, connection }: { accountId: string;
     )
 }
 
-function RealStreamCredentialsSection({ accountId, connection }: { accountId: string; connection: Connection }) {
-    const updateConnection = useConnectionStore(s => s.updateConnection)
-    const [email, setEmail] = useState(connection.credentials?.email || '')
-    const [password, setPassword] = useState('')
-    const [showPassword, setShowPassword] = useState(false)
-    const [saving, setSaving] = useState(false)
-    const [testing, setTesting] = useState(false)
-    const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
-
-    const emailValid = email.includes('@')
-    const passwordValid = password.length > 0
-
-    const handleReauth = async () => {
-        if (!emailValid || !passwordValid) return
-        setSaving(true)
-        try {
-            const result = await realstreamAuth(email, password, connection.credentials?.baseUrl || undefined)
-            const t = result.tokens
-            if (!t) throw new Error('No tokens returned. Confirm your RealStream account and try again.')
-            const credentials = {
-                ...connection.credentials,
-                email,
-                password,
-                accessToken: t.accessToken,
-                userId: t.userId || connection.credentials?.userId || '',
-                expiresAt: String(t.expiresAt),
-            }
-            await updateConnection(accountId, connection.id, { credentials, status: 'active' })
-            const { storeConnectionCredential } = await import('@/api/hydra-providers')
-            try {
-                await storeConnectionCredential(accountId, connection.id, {
-                    accessToken: t.accessToken,
-                    userId: t.userId || null,
-                    expiresAt: t.expiresAt,
-                    baseUrl: connection.credentials?.baseUrl || null,
-                    email,
-                    password,
-                }, 'realstream', connection.generation)
-            } catch (err) {
-                toast({ title: 'Saved locally, but the server did not store the new session', description: errMsg(err), variant: 'destructive' })
-            }
-            toast({ title: 'RealStream session refreshed' })
-            setPassword('')
-            await useConnectionStore.getState().syncConnections(accountId)
-        } catch (err) {
-            toast({ title: 'Re-authentication failed', description: errMsg(err), variant: 'destructive' })
-        } finally {
-            setSaving(false)
-        }
-    }
-
-    const handleTest = async () => {
-        setTesting(true)
-        setTestResult(null)
-        try {
-            const { message } = await runConnectionTest(accountId, connection)
-            setTestResult({ ok: true, message })
-            toast({ title: 'Connection healthy' })
-        } catch (err) {
-            const message = errMsg(err, 'Session could not be verified. Try re-authenticating.')
-            setTestResult({ ok: false, message })
-            toast({ title: 'Connection test failed', description: message, variant: 'destructive' })
-        } finally {
-            setTesting(false)
-        }
-    }
-
-    return (
-        <ReauthCard
-            title="RealStream credentials"
-            description="Re-authenticate to refresh your session tokens."
-            headerAction={
-                <ConnectionTestButton testing={testing} onClick={handleTest} />
-            }
-            footer={<ConnectionTestResult result={testResult} />}
-            methods={[
-                {
-                    id: 'password',
-                    label: 'Password',
-                    content: (
-                        <div className="space-y-3">
-                            <div className="space-y-2">
-                                <Label htmlFor="rs-edit-email">Email</Label>
-                                <div className="relative">
-                                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                                    <Input
-                                        id="rs-edit-email"
-                                        type="email"
-                                        placeholder="you@example.com"
-                                        value={email}
-                                        onChange={e => setEmail(e.target.value)}
-                                        className="pl-10"
-                                    />
-                                </div>
-                            </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="rs-edit-password">Password</Label>
-                                <div className="relative">
-                                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                                    <Input
-                                        id="rs-edit-password"
-                                        type={showPassword ? 'text' : 'password'}
-                                        placeholder="Your RealStream password"
-                                        value={password}
-                                        onChange={e => setPassword(e.target.value)}
-                                        className="pl-10 pr-9"
-                                        onKeyDown={e => { if (e.key === 'Enter' && emailValid && passwordValid) handleReauth() }}
-                                    />
-                                    <button
-                                        type="button"
-                                        data-theme-part="button"
-                                        onClick={() => setShowPassword(s => !s)}
-                                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                                        aria-label={showPassword ? 'Hide password' : 'Show password'}
-                                    >
-                                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                                    </button>
-                                </div>
-                            </div>
-                                <Button
-                                    size="sm"
-                                    className="h-8 w-full gap-1.5 text-xs"
-                                    onClick={handleReauth}
-                                    disabled={saving || !emailValid || !passwordValid}
-                                >
-                                    {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                                    {saving ? 'Authenticating...' : 'Re-authenticate'}
-                                </Button>
-                            </div>
-                        ),
-                    },
-            ]}
-        />
-    )
-}
-
 function HydraCredentialsSection({ accountId, connection }: { accountId: string; connection: Connection }) {
     const updateConnection = useConnectionStore(s => s.updateConnection)
     const [newApiKey, setNewApiKey] = useState('')
@@ -1606,34 +1463,10 @@ function useServerTokenMirror(accountId: string, connection: Connection, active:
     useEffect(() => {
         if (!active || !expired || checked.current === connection.id) return
         checked.current = connection.id
-        const platform = workspaceKind(connection) === 'nuvio' ? 'nuvio' : 'realstream'
-        const baseUrl = platform === 'nuvio' ? connection.credentials?.baseUrl : undefined
-        fetchConnectionToken(accountId, connection.id, platform, baseUrl)
+        fetchConnectionToken(accountId, connection.id, 'nuvio', connection.credentials?.baseUrl)
             .then(token => mirrorServerToken(accountId, connection, token))
             .catch(() => {})
     }, [accountId, connection, active, expired])
-}
-
-function RealStreamSessionCard({ connection, session, onReauth }: { connection: Connection; session: SessionState; onReauth: () => void }) {
-    const privacyOn = useUIStore(s => s.isPrivacyModeEnabled)
-    const emailLevel = useUIStore(s => s.privacyLevelEmail)
-    const email = connection.credentials?.email
-    const expires = tokenExpiresIn(connection.credentials?.expiresAt, Date.now())
-    const backend = backendLabel(connection.credentials?.baseUrl, REALSTREAM_DEFAULT_BASE_URL)
-    return (
-        <SectionCard
-            title="Session"
-            description="The server refreshes RealStream sessions when it can."
-            footer={<Button variant="outline" size="sm" className="h-11 gap-1.5 text-xs sm:h-8" onClick={onReauth}><Key className="h-3.5 w-3.5" />Re-authenticate</Button>}
-        >
-            <SectionRows>
-                <SectionRow label="Signed in as" value={email ? maskEmailLevel(email, privacyOn ? emailLevel : 0) : 'Not recorded'} tone={email ? undefined : 'muted'} />
-                <SectionRow label="Token" value={expires?.label || 'No expiry recorded'} tone={expires?.expired ? 'destructive' : expires ? undefined : 'muted'} />
-                <SectionRow label="Backend" value={backend.host} mono />
-                <SectionRow label="Re-auth" value={session === 'Silent re-auth ready' ? 'Silent, with the saved password' : session} tone={needsReauth(session) ? 'destructive' : undefined} />
-            </SectionRows>
-        </SectionCard>
-    )
 }
 
 function StremioLoginCard({ connection, email }: { connection: Connection; email?: string }) {
@@ -1690,7 +1523,6 @@ export function ConnectionEditPanel({
     const kind = workspaceKind(connection)
     const isStremio = kind === 'stremio'
     const isNuvio = kind === 'nuvio'
-    const isRealStream = kind === 'realstream'
     const isHydra = kind === 'hydra-outbound'
     const enabled = connection.enabled !== false
     const isPrimaryStremio = isStremio && !!account && getStremioConnection(account)?.id === connection.id
@@ -1709,7 +1541,7 @@ export function ConnectionEditPanel({
     const sync = syncSummary(enabled, lastSync, ts => timeAgo(ts))
     const liveError = showLive ? friendlyConnectionError(lastError) || null : null
     const membership = useNuvioMembership(accountId, connection, nuvioMember, isNuvio && enabled)
-    useServerTokenMirror(accountId, connection, (isNuvio || isRealStream) && enabled)
+    useServerTokenMirror(accountId, connection, isNuvio && enabled)
 
     const testDisabledReason = isStremio && vaultLocked ? 'Unlock your vault to test this login.'
         : isStremio && !connection.credentials?.authKey ? 'Sign in first.'
@@ -1760,7 +1592,6 @@ export function ConnectionEditPanel({
         if (maskedEmail) identityParts.push(maskedEmail)
         if (isStremio && connection.credentials?.stremioProfileName) identityParts.push(maskProfileLevel(connection.credentials.stremioProfileName, privacyOn ? profileLevel : 0))
         if (isNuvio) identityParts.push(backendLabel(connection.credentials?.baseUrl, NUVIO_DEFAULT_BASE_URL).host)
-        if (isRealStream) identityParts.push(backendLabel(connection.credentials?.baseUrl, REALSTREAM_DEFAULT_BASE_URL).host)
     }
 
     const addonsStat: WorkspaceStat = {
@@ -1771,9 +1602,7 @@ export function ConnectionEditPanel({
         actionLabel: 'Show installed addons',
     }
     const syncStat: WorkspaceStat = { label: 'Last sync', value: sync.value, sub: sync.sub, tone: enabled ? undefined : 'muted', title: sync.sub }
-    const sessionSub = isRealStream ? tokenExpiresIn(connection.credentials?.expiresAt, Date.now())?.label
-        : isNuvio ? 'Refreshed by the server'
-            : expiry.label || undefined
+    const sessionSub = isNuvio ? 'Refreshed by the server' : expiry.label || undefined
     const sessionStat: WorkspaceStat = { label: 'Session', value: session, sub: sessionSub, tone: reauth ? 'destructive' : undefined }
     const errorStat: WorkspaceStat = { label: 'Last error', value: !showLive ? 'Not checked' : liveError || 'None', tone: liveError ? 'destructive' : 'muted', title: liveError || undefined, sub: liveError ? 'Details in the status menu' : undefined }
     // The Overview Membership card owns the tier display; a header copy would say it twice.
@@ -1892,7 +1721,6 @@ export function ConnectionEditPanel({
                                     onRefresh={onRefreshPremium}
                                 />
                             )}
-                            {isRealStream && <RealStreamSessionCard connection={connection} session={session} onReauth={() => setTab('connection')} />}
                             {isHydra && <HydraEndpointCard connection={connection} status={hydraStatus} onTest={() => void handleTest()} testing={testing} />}
                             {health}
                             {isStremio && <StremioLoginCard connection={connection} email={email} />}
@@ -1910,7 +1738,6 @@ export function ConnectionEditPanel({
                             </>
                         )}
                         {isNuvio && <NuvioCredentialsSection accountId={accountId} connection={connection} />}
-                        {isRealStream && <RealStreamCredentialsSection accountId={accountId} connection={connection} />}
                         {isHydra && <HydraCredentialsSection accountId={accountId} connection={connection} />}
                         <RemoveConnectionSection accountId={accountId} connection={connection} onBack={onBack} />
                     </div>

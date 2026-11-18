@@ -21,7 +21,7 @@ export interface TokenExpiry {
     label: string | null
 }
 
-const AUTO_REFRESH_PLATFORMS = new Set(['nuvio', 'realstream'])
+const AUTO_REFRESH_PLATFORMS = new Set(['nuvio'])
 
 const EXPIRING_THRESHOLD_DAYS = 7
 
@@ -44,7 +44,7 @@ export function tokenExpiry(connection: Connection): TokenExpiry {
 // action via the token endpoint. Stremio reconciles through the account authKey and Hydra uses a
 // static API key (tested at setup), so neither has a per-connection token to probe here.
 export function canTestConnection(connection: Connection): boolean {
-    return connection.platform === 'nuvio' || connection.platform === 'realstream'
+    return connection.platform === 'nuvio'
 }
 
 export type DisplayStatus = ConnectionStatus | 'expiring'

@@ -59,11 +59,10 @@ export interface PlatformDriver {
 // Media connections have their own API contract; they are never addon sources or targets.
 // Retain legacy addon platforms whose stored records predate runtime capabilities.
 export function isAddonConnection(c: Pick<Connection, 'platform' | 'connectionType' | 'capabilities'>): boolean {
-    if (c.platform === 'jellyfin') return false
+    if (c.platform === 'jellyfin' || c.platform === 'realstream') return false
     return c.connectionType === 'hydra-outbound'
         || c.platform === 'stremio'
         || c.platform === 'nuvio'
-        || c.platform === 'realstream'
         || c.capabilities?.includes('addons') === true
 }
 

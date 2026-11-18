@@ -9,7 +9,7 @@ Answers to frequently asked questions about AIOManager.
 
 <Accordions>
   <Accordion title="What is AIOManager?">
-    AIOManager is an addon manager that lets you organize, configure, and manage addons across Stremio, Nuvio, RealStream, and local accounts from a single dashboard. Other apps can also use your managed collection through the Hydra protocol. It supports Autopilot (automatic addon failover), Cloud Sync, Replay Sharing, Health Checks, and more.
+    AIOManager is an addon manager that lets you organize, configure, and manage addons across Stremio, Nuvio, and local accounts from a single dashboard. Other apps can also use your managed collection through the Hydra protocol. It supports Autopilot (automatic addon failover), Cloud Sync, Replay Sharing, Health Checks, and more.
   </Accordion>
   <Accordion title="Why should I use AIOManager?">
     - **Multi-account management:** switch between Stremio accounts without logging out
@@ -202,7 +202,7 @@ A glossary of the jargon you'll see throughout AIOManager.
     A flag on individual addons that prevents them from being removed by bulk operations (Mirror, Remove by Tag, etc.). Use it on addons you never want a sweep to delete.
   </Accordion>
   <Accordion title="Connection">
-    A link between an AIOManager account and an external platform (Stremio, Nuvio, RealStream). Connections mirror your addon configuration to that platform and keep it in sync via the Reconciler.
+    A link between an AIOManager account and an external platform (Stremio, Nuvio). Connections mirror your addon configuration to that platform and keep it in sync via the Reconciler.
   </Accordion>
   <Accordion title="Reconciler">
     The bidirectional sync engine behind Connections. It reads the addon list from each connected platform, compares it against the canonical AIOManager list, and propagates additions and removals to keep everything in agreement.
@@ -215,9 +215,6 @@ A glossary of the jargon you'll see throughout AIOManager.
   </Accordion>
   <Accordion title="Nuvio">
     A streaming platform that AIOManager can connect to. Supports multiple profiles per account, with server-side token custody and automatic refresh.
-  </Accordion>
-  <Accordion title="RealStream">
-    A streaming platform integrated with AIOManager via email/password auth. Server-side token custody handles refresh automatically.
   </Accordion>
   <Accordion title="Tombstone">
     A marker placed on a deleted addon to prevent it from being accidentally re-added during sync. Tombstones self-heal when an addon is legitimately re-added and expire after a configurable TTL.

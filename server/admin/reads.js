@@ -408,7 +408,7 @@ export function createReads({ autopilotEngine = null, activityEngine = null, lim
             lastCycle: status?.lastCycle ?? null,
             breakerEntries: status?.breakerEntries ?? 0,
             config: activityEngine?.getConfig ? activityEngine.getConfig() : null,
-            scope: 'Server-side activity capture scans Stremio connections only. Nuvio, RealStream and Hydra activity is tracked by the app on the device.',
+            scope: 'Server-side activity capture scans Stremio connections only. Nuvio and Hydra activity is tracked by the app on the device.',
             computedAt: Date.now(),
         }
     })

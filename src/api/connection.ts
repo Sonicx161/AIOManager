@@ -155,6 +155,9 @@ export async function fetchConnectionToken(
     baseUrl?: string | null,
     options?: { rejectedTokenHash?: string },
 ): Promise<{ accessToken: string; expiresAt: number; profileId: string | null }> {
+    if (platform === 'realstream') {
+        throw new Error('RealStream was retired for RealFin and no longer accepts requests.')
+    }
     const rejectedTokenHash = typeof options?.rejectedTokenHash === 'string' && /^[0-9a-f]{64}$/.test(options.rejectedTokenHash)
         ? options.rejectedTokenHash
         : undefined

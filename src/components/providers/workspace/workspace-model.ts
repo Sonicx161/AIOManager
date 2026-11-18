@@ -1,7 +1,7 @@
 import type { Connection } from '../../../types/connection.ts'
 import type { NuvioMemberStatus } from '../../../lib/nuvio-tier.ts'
 
-export type WorkspaceKind = 'stremio' | 'nuvio' | 'realstream' | 'hydra-outbound' | 'jellyfin' | 'hydra-pull' | 'other'
+export type WorkspaceKind = 'stremio' | 'nuvio' | 'hydra-outbound' | 'jellyfin' | 'hydra-pull' | 'other'
 
 export interface WorkspaceTabDef {
     id: string
@@ -20,7 +20,6 @@ export function workspaceKind(connection: Pick<Connection, 'platform' | 'connect
     switch (connection.platform) {
         case 'stremio':
         case 'nuvio':
-        case 'realstream':
         case 'jellyfin':
             return connection.platform
         default:
@@ -49,8 +48,6 @@ export function workspaceTabsFor(kind: WorkspaceKind, options: { supportersProfi
                 { id: 'backup', label: 'Backup' },
                 connection,
             ]
-        case 'realstream':
-            return [overview, connection]
         case 'jellyfin':
             return [overview, { id: 'history', label: 'Watch history' }, connection]
         case 'hydra-outbound':
@@ -79,10 +76,6 @@ export function sessionState(connection: Pick<Connection, 'platform' | 'connecti
     if (kind === 'nuvio') {
         if (display === 'expired' || display === 'error') return 'Re-auth required'
         return creds.accessToken ? 'Session stored' : 'Sign in required'
-    }
-    if (kind === 'realstream') {
-        if (display === 'expired' || display === 'error') return 'Re-auth required'
-        return creds.password ? 'Silent re-auth ready' : 'Manual re-auth'
     }
     return creds.accessToken ? 'Session stored' : 'No session'
 }

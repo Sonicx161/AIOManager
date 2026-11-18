@@ -18,6 +18,7 @@ export type ConnectionRestores = Record<string, number>
 export const CONNECTION_REMOVAL_TTL_MS = 365 * 24 * 60 * 60 * 1000
 // Count cap so the synced blob stays bounded however many removals accumulate.
 export const CONNECTION_REMOVAL_MAX_ENTRIES = 200
+export const PERMANENT_CONNECTION_REMOVAL = Number.MAX_SAFE_INTEGER
 
 // The stored/synced removal state (a structural slice of Account).
 export interface ConnectionRemovalState {
@@ -36,7 +37,7 @@ export function addConnectionRemovals(state: PartialConnectionRemovalState | und
     const restored: ConnectionRestores = { ...(state?.restoredConnections || {}) }
     for (const id of ids) {
         if (!id) continue
-        deleted[id] = Math.max(now, (deleted[id] ?? 0) + 1, (restored[id] ?? 0) + 1)
+        deleted[id] = Math.min(PERMANENT_CONNECTION_REMOVAL, Math.max(now, (deleted[id] ?? 0) + 1, (restored[id] ?? 0) + 1))
     }
     return { deletedConnections: deleted, restoredConnections: restored }
 }
@@ -99,10 +100,12 @@ export function pruneConnectionRemovalState(state: PartialConnectionRemovalState
     const deleted: ConnectionRemovals = { ...(state?.deletedConnections || {}) }
     const restored: ConnectionRestores = { ...(state?.restoredConnections || {}) }
     const rankOf = (id: string) => Math.max(deleted[id] ?? 0, restored[id] ?? 0)
-    const keep = new Set(Array.from(new Set([...Object.keys(deleted), ...Object.keys(restored)]))
-        .filter(id => now - rankOf(id) < CONNECTION_REMOVAL_TTL_MS)
+    const ids = Array.from(new Set([...Object.keys(deleted), ...Object.keys(restored)]))
+    const permanent = ids.filter(id => deleted[id] === PERMANENT_CONNECTION_REMOVAL)
+    const keep = new Set([...permanent, ...ids
+        .filter(id => deleted[id] !== PERMANENT_CONNECTION_REMOVAL && now - rankOf(id) < CONNECTION_REMOVAL_TTL_MS)
         .sort((x, y) => rankOf(y) - rankOf(x))
-        .slice(0, CONNECTION_REMOVAL_MAX_ENTRIES))
+        .slice(0, CONNECTION_REMOVAL_MAX_ENTRIES)])
     for (const id of Object.keys(deleted)) {
         if (!keep.has(id)) delete deleted[id]
     }
