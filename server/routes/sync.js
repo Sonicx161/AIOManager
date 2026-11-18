@@ -328,7 +328,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             }
             if (cachedResponse) {
                 const encoding = negotiateSyncResponseEncoding(request)
-                const variantBytes = encoding ? getSyncResponseCacheVariant(id, row.content_hash, encoding) : null
+                const variantBytes = encoding ? await getSyncResponseCacheVariant(id, row.content_hash, encoding) : null
                 if (variantBytes) {
                     trace('syncRoute', 'pull.success', { accountId: id, bytes: cachedResponse.bytes, cache: 'hit-compressed', encoding, cacheStats: syncResponseCacheStats(), timing: Date.now() - start })
                     reply.header('ETag', row.content_hash)

@@ -8,11 +8,9 @@
 // long as that hash is current. This cache holds those pre-serialized strings and
 // is invalidated on every content-changing push, restore and delete.
 //
-// Pre-compressed variants (per content_hash + encoding) are built off the request
-// path so the hottest pull serves gzip/brotli bytes without re-compressing the same
-// payload on every request. A variant is served only when the route negotiated that
-// exact encoding, the payload clears the compression threshold, and the variant is
-// strictly smaller than the identity bytes.
+// The cache compresses a response when a repeat pull requests that encoding.
+// It serves the variant only for the negotiated encoding, above the compression
+// threshold, and when the compressed bytes are smaller than the original.
 //
 // Boundaries (deliberate):
 //  - Lookup happens only after the route's own auth succeeded; a cached response is
@@ -37,7 +35,7 @@ const MAX_TOTAL_BYTES = numEnv(process.env.SYNC_RESPONSE_CACHE_MAX_BYTES, 32 * 1
 const MAX_ITEM_BYTES = numEnv(process.env.SYNC_RESPONSE_CACHE_MAX_ITEM_BYTES, 8 * 1024 * 1024)
 const COMPRESS_THRESHOLD_BYTES = 1024
 
-/** @type {Map<string, {contentHash: string, serialized: string, bytes: number, variants: Map<string, {data: Buffer, bytes: number}>}>} */
+/** @type {Map<string, {contentHash: string, serialized: string, bytes: number, variants: Map<string, {data: Buffer, bytes: number}>, pending: Map<string, Promise<Buffer | null>>}>} */
 const entries = new Map()
 let totalBytes = 0
 const stats = { hits: 0, misses: 0, stores: 0, evictions: 0, itemSkips: 0, invalidations: 0, variantHits: 0, variantSkips: 0 }
@@ -106,34 +104,43 @@ export function getSyncResponseCache(accountId, contentHash) {
     return entry
 }
 
-// Returns the pre-compressed bytes for an exact encoding, or null when not ready
-// (the route then falls back to per-request compression).
-export function getSyncResponseCacheVariant(accountId, contentHash, encoding) {
+export async function getSyncResponseCacheVariant(accountId, contentHash, encoding) {
     const entry = getSyncResponseCache(accountId, contentHash)
     if (!entry) return null
     const variant = entry.variants.get(encoding)
-    if (!variant) {
-        if (!entry.variants.has(encoding)) stats.variantSkips++
-        return null
+    if (variant) {
+        stats.variantHits++
+        return variant.data
     }
-    stats.variantHits++
-    return variant.data
+    stats.variantSkips++
+    if (entry.bytes < COMPRESS_THRESHOLD_BYTES) return null
+    let pending = entry.pending.get(encoding)
+    if (!pending) {
+        pending = buildVariant(accountId, entry, encoding)
+        entry.pending.set(encoding, pending)
+    }
+    return pending
 }
 
-// A replaced entry's stale in-flight build attaches only when its contentHash still
-// matches, so a superseded hash can never decorate a newer entry.
-function buildVariant(accountId, contentHash, encoding, serialized) {
-    const done = (err, data) => {
-        const entry = entries.get(accountId)
-        if (err || !entry || entry.contentHash !== contentHash) return
-        if (!(data instanceof Buffer) || data.length === 0) return
-        if (data.length >= entry.bytes || data.length > MAX_ITEM_BYTES) return
-        entry.variants.set(encoding, { data, bytes: data.length })
-        totalBytes += data.length
-        evictOverflow()
-    }
-    if (encoding === 'gzip') zlib.gzip(serialized, { level: 6 }, done)
-    else zlib.brotliCompress(serialized, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } }, done)
+function buildVariant(accountId, entry, encoding) {
+    return new Promise(resolve => {
+        const done = (err, data) => {
+            entry.pending.delete(encoding)
+            if (err || !(data instanceof Buffer) || data.length === 0 ||
+                data.length >= entry.bytes || data.length > MAX_ITEM_BYTES) {
+                resolve(null)
+                return
+            }
+            if (entries.get(accountId) === entry) {
+                entry.variants.set(encoding, { data, bytes: data.length })
+                totalBytes += data.length
+                evictOverflow()
+            }
+            resolve(data)
+        }
+        if (encoding === 'gzip') zlib.gzip(entry.serialized, { level: 6 }, done)
+        else zlib.brotliCompress(entry.serialized, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } }, done)
+    })
 }
 
 export function setSyncResponseCache(accountId, contentHash, serialized) {
@@ -148,14 +155,11 @@ export function setSyncResponseCache(accountId, contentHash, serialized) {
         entries.delete(accountId)
         totalBytes -= entryBytes(previous)
     }
-    const entry = { contentHash, serialized, bytes, variants: new Map() }
+    const entry = { contentHash, serialized, bytes, variants: new Map(), pending: new Map() }
     entries.set(accountId, entry)
     totalBytes += bytes
     stats.stores++
     evictOverflow()
-    if (bytes < COMPRESS_THRESHOLD_BYTES) return true
-    buildVariant(accountId, contentHash, 'gzip', serialized)
-    buildVariant(accountId, contentHash, 'br', serialized)
     return true
 }
 
