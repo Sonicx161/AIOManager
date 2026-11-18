@@ -24,7 +24,7 @@ export function createConflictState({ nowMs, maxEntries = 10000 }) {
         if (bypass.delete(rule.id)) { notices.delete(rule.id); return null }
         const since = nowMs() - SWAP_WINDOW_MS
         const rows = await db.query(
-            `SELECT timestamp FROM failover_history WHERE rule_id = $1 AND timestamp > $2 AND type = '${FIGHT_TYPE}' ORDER BY timestamp DESC LIMIT ${MAX_SWAPS}`,
+            `SELECT timestamp FROM failover_history WHERE rule_id = $1 AND timestamp > $2 AND type IN ('${FIGHT_TYPE}', 'failover', 'recovery') ORDER BY timestamp DESC LIMIT ${MAX_SWAPS}`,
             [rule.id, since])
         const mine = (own.get(rule.id) || []).filter(at => at > since)
         const times = (rows?.length || 0) >= mine.length ? (rows || []).map(row => Number(row.timestamp)) : mine

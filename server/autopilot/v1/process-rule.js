@@ -355,7 +355,6 @@ export function createProcessRule({
             updatedAt: rule.updated_at ?? null,
         })
         const normalizedChain = normalizedChainUrls
-        const normalizedChainSet = new Set(normalizedChain)
 
         // Every writer must derive identical one-active flags via the shared helper, for every
         // chain this account manages, not only this rule's (applyAccountChainFlags), otherwise

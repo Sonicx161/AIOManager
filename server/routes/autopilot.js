@@ -120,7 +120,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             fastify.log.warn({ category: 'Autopilot' }, `Failed to upsert credential for ${maskContext(accountId)}: ${credErr.message}`)
         }
     }
-    const { sendNotification, syncStremioLive, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState, decryptRuleField, beginRuleCacheRead, endRuleCacheRead, retireRuleCaches, retireRuleSecrets } = autopilotEngine
+    const { sendNotification, syncStremioLive, fenceWorker, getRuleRuntimeState, getRuleCheckError, getRuleRevision, clearRuleRuntimeState, clearAccountRuleRuntimeState, decryptRuleField, beginRuleCacheRead, endRuleCacheRead, retireRuleCaches, retireRuleSecrets } = autopilotEngine
     // Engine's versioned decrypt cache (keyed by rule id + updated_at, ciphertext
     // revalidated before reuse). Falls back to a plain decrypt when a harness passes
     // an engine stub without it.
@@ -628,6 +628,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
                     // encrypt() uses a random IV, so compare plaintext before touching TOAST-heavy addon_list.
                     if (plainJsonEqual(storedAddonList, reconciledList)) return
 
+                    if (fenceWorker && !(await fenceWorker())) return
                     const result = await autopilotDb.run(`UPDATE autopilot_rules SET addon_list = $1, updated_at = ${nextRuleVersion('$2')} WHERE id = $3 AND owner_sync_user = $4 AND COALESCE(updated_at, 0) = $5`, [
                         encrypt(JSON.stringify(reconciledList), PRIMARY_KEY),
                         Date.now(),

@@ -21,7 +21,7 @@ import { autopilotTripwire, guardFetch, guardProvider } from './write-tripwire.j
 export { stableStringify, addonListChanged, runFullRuleUpdate } from './v1/commit.js'
 export { RULE_SKIP_REASONS, evaluateRuleSkip, resolveRuleSkipReason } from './v1/failover-evaluate.js'
 
-const envMs = (name, fallback, min) => Math.max(min, parseInt(process.env[name] || String(fallback), 10) || fallback)
+const envMs = (name, fallback, min) => Math.max(min, parseInt(globalThis.process?.env?.[name] || String(fallback), 10) || fallback)
 
 // Read-only provider methods; every other method is refused while the write tripwire holds safe mode.
 const STREMIO_READS = ['readAddons']
@@ -39,7 +39,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     const RULE_RUNTIME_TTL_MS = 24 * 60 * 60 * 1000
     const MAX_RULE_RUNTIME_ENTRIES = 100000
     const AUTOPILOT_SCAN_CHUNK_SIZE = envMs('AUTOPILOT_SCAN_CHUNK_SIZE', 500, 100)
-    const AUTOPILOT_MAX_RULES_PER_CYCLE = Math.max(AUTOPILOT_SCAN_CHUNK_SIZE, parseInt(process.env.AUTOPILOT_MAX_RULES_PER_CYCLE || '10000', 10) || 10000)
+    const AUTOPILOT_MAX_RULES_PER_CYCLE = Math.max(AUTOPILOT_SCAN_CHUNK_SIZE, parseInt(globalThis.process?.env?.AUTOPILOT_MAX_RULES_PER_CYCLE || '10000', 10) || 10000)
     const AUTOPILOT_CYCLE_BUDGET_MS = envMs('AUTOPILOT_CYCLE_BUDGET_MS', 120000, 5000)
     // A cycle still running this long after it started is treated as hung (see the scheduler watchdog).
     const AUTOPILOT_CYCLE_WATCHDOG_MS = envMs('AUTOPILOT_CYCLE_WATCHDOG_MS', Math.max(3 * AUTOPILOT_CYCLE_BUDGET_MS, 300000), 1000)
@@ -51,7 +51,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     const runtimeState = createRuntimeState({ nowMs, RULE_RUNTIME_TTL_MS, MAX_RULE_RUNTIME_ENTRIES })
     const { getRuleRuntimeState, clearRuleRuntimeState, clearAccountRuleRuntimeState, shouldSkipRuleCheck, setRuleRuntimeState } = runtimeState
 
-    const RULE_CACHE_MAX_BYTES = Math.max(0, parseInt(process.env.AUTOPILOT_RULE_CACHE_MAX_BYTES || String(256 * 1024 * 1024), 10) || 0)
+    const RULE_CACHE_MAX_BYTES = Math.max(0, parseInt(globalThis.process?.env?.AUTOPILOT_RULE_CACHE_MAX_BYTES || String(256 * 1024 * 1024), 10) || 0)
     // Freshness is the (id, updated_at) version key, which every writer bumps; the TTL only bounds idle memory.
     const RULE_CACHE_TTL_MS = envMs('AUTOPILOT_RULE_CACHE_TTL_MS', 86400000, 60000)
     const ruleCache = createRuleCache({ fastify, nowMs, RULE_CACHE_MAX_BYTES, RULE_CACHE_TTL_MS, READER_MAX_AGE_MS: Math.max(900000, 2 * AUTOPILOT_CYCLE_BUDGET_MS) })
@@ -68,7 +68,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
     const { isSubstantial, fetchManifestRaw, areCollectionsDifferent, prepareAddonsForStremio, fetchAndRefreshManifest } = createManifests({ fastify, nowMs, fetchImpl: deps.fetch })
     const { recordFailoverHistory } = createHistory({ fastify, nowMs })
     const workerLock = deps.workerLock !== undefined ? deps.workerLock
-        : (autopilotWorkerEnabled() && !['1', 'true', 'yes', 'on'].includes(String(process.env.READ_ONLY_REPLICA || '').toLowerCase()) ? createWorkerLock({ log: fastify.log, now: nowMs }) : null)
+        : (autopilotWorkerEnabled() && !['1', 'true', 'yes', 'on'].includes(String(globalThis.process?.env?.READ_ONLY_REPLICA || '').toLowerCase()) ? createWorkerLock({ log: fastify.log, now: nowMs }) : null)
     const workerFence = workerLock?.fence ? () => workerLock.fence() : null
     runtimeState.conflicts.setRecorder?.(recordFailoverHistory)
     const cycleTargets = runtimeState.cycleTargets
@@ -129,8 +129,13 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
             while (echoArgs.length < 8) echoArgs.push(undefined)
             echoArgs[8] = { echo: true }
             const token = ruleCache.beginRead()
-            try { return await ruleCache.withRead(token, () => syncStremioLive(...echoArgs)) } finally { ruleCache.endRead(token) }
+            try {
+                const result = await ruleCache.withRead(token, () => syncStremioLive(...echoArgs))
+                if (workerFence && !(await workerFence())) throw Object.assign(new Error('Autopilot worker lock is no longer held'), { code: 'worker_fence_lost' })
+                return result
+            } finally { ruleCache.endRead(token) }
         },
+        fenceWorker: () => workerFence ? workerFence() : Promise.resolve(true),
         enforceConnectionOnly,
         buildReconciledList,
         writeStremioCollection,
