@@ -23,6 +23,8 @@ interface UseSavedAddonLibraryDataOptions {
   manifestChangeHints: Record<string, SavedAddonManifestChangeSummary>
 }
 
+const NO_DEPLOYED_ACCOUNTS: Account[] = []
+
 function getSafeAddonUrlKey(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) return null
 
@@ -112,7 +114,7 @@ export function useSavedAddonLibraryData({
     return savedAddons.filter(a => !a.profileId || !profiles.some(p => p.id === a.profileId)).length
   }, [savedAddons, profiles])
 
-  const deploymentSummaryByAddonId = useMemo(() => {
+  const deployedAccountsByUrl = useMemo(() => {
     const accountById = new Map(accounts.map(account => [account.id, account]))
 
     const urlToAccountIds = new Map<string, Set<string>>()
@@ -130,28 +132,29 @@ export function useSavedAddonLibraryData({
       }
     }
 
+    const byUrl = new Map<string, Account[]>()
+    for (const [urlKey, accountIds] of urlToAccountIds) {
+      byUrl.set(urlKey, Array.from(accountIds)
+        .map(id => accountById.get(id))
+        .filter((a): a is Account => Boolean(a)))
+    }
+    return byUrl
+  }, [accountStates, accounts])
+
+  const deploymentSummaryByAddonId = useMemo(() => {
     // Match by normalized configured URL only. A recorded savedAddonId (or a shared
     // manifest id) can outlive a URL change, and a different URL is a different addon
     // instance — so neither may count as "installed on this account".
     const summaries: Record<string, SavedAddonDeploymentSummary> = {}
     for (const addon of savedAddons) {
-      const accountIds = new Set<string>()
-
       const key = getSafeAddonUrlKey(addon.installUrl)
-      if (key) {
-        const urlSet = urlToAccountIds.get(key)
-        if (urlSet) for (const id of urlSet) accountIds.add(id)
-      }
-
       summaries[addon.id] = {
-        deployedAccounts: Array.from(accountIds)
-          .map(id => accountById.get(id))
-          .filter((a): a is Account => Boolean(a))
+        deployedAccounts: (key && deployedAccountsByUrl.get(key)) || NO_DEPLOYED_ACCOUNTS
       }
     }
 
     return summaries
-  }, [accountStates, accounts, savedAddons])
+  }, [deployedAccountsByUrl, savedAddons])
 
   const syncOverviewData = useMemo(() => {
     const syncingAddons = savedAddons.filter(a => {

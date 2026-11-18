@@ -1317,35 +1317,39 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
       const addons = Object.values(library)
       const results = await checkAllAddonsHealth(addons)
 
-      const updatedLibrary = { ...library }
-      let hasChanges = false
+      const current = get().library
+      let updatedLibrary: Record<string, SavedAddon> | null = null
 
       for (const result of results) {
-        const addon = updatedLibrary[result.id]
-        if (!addon) continue
+        const addon = current[result.id]
+        if (!addon || addon.installUrl !== result.installUrl) continue
 
         const isOnline = result.health?.isOnline ?? false
-        const wasOnline = addon.health?.isOnline
+        if (addon.health?.isOnline === isOnline) continue
 
-        if (wasOnline !== isOnline) {
-          updatedLibrary[result.id] = {
-            ...addon,
-            health: {
-              isOnline,
-              lastChecked: Date.now(),
-            },
-            updatedAt: new Date(),
-          }
-          hasChanges = true
-        } else {
-          updatedLibrary[result.id] = {
-            ...addon,
-            health: {
-              isOnline,
-              lastChecked: Date.now(),
-            },
-          }
+        updatedLibrary ??= { ...current }
+        updatedLibrary[result.id] = {
+          ...addon,
+          health: {
+            isOnline,
+            lastChecked: Date.now(),
+          },
+          updatedAt: new Date(),
         }
+      }
+
+      if (updatedLibrary) {
+        set({ library: updatedLibrary, lastHealthCheck: Date.now() })
+        saveAddonLibrary(updatedLibrary)
+      } else {
+        set({ lastHealthCheck: Date.now() })
+      }
+
+      for (const result of results) {
+        const addon = get().library[result.id]
+        if (!addon || addon.installUrl !== result.installUrl) continue
+
+        const isOnline = result.health?.isOnline ?? false
 
         if (!isOnline && addon.autoRestore) {
           if (restorationManager.canAttemptRestore(addon.installUrl, true)) {
@@ -1364,13 +1368,6 @@ export const useAddonStore = create<AddonStore>((set, get) => ({
         } else if (isOnline && addon.autoRestore) {
           restorationManager.recordSuccess(addon.installUrl)
         }
-      }
-
-      if (hasChanges) {
-        set({ library: updatedLibrary, lastHealthCheck: Date.now() })
-        saveAddonLibrary(updatedLibrary)
-      } else {
-        set({ lastHealthCheck: Date.now() })
       }
     } catch (error) {
       if (import.meta.env.DEV) console.error('Health check failed:', error)
