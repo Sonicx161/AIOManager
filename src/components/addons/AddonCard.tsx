@@ -36,7 +36,7 @@ import { getHostnameIdentifier } from '@/lib/addon-identifier'
 import { useProfileStore } from '@/store/profileStore'
 import { useUIStore } from '@/store/uiStore'
 import { AddonDescriptor } from '@/types/addon'
-import { Copy, List, Pencil, Trash2, MoreVertical, Download, Shield, EyeOff, Loader2, Star, ArrowRightLeft, ArrowUpCircle } from 'lucide-react'
+import { Copy, List, Pencil, Trash2, MoreVertical, Download, Shield, EyeOff, Loader2, Star, ArrowRightLeft, BadgeCheck, Bandage, ArrowUpCircle } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -795,6 +795,28 @@ export const AddonCard = React.memo(function AddonCard({
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-sm font-semibold leading-tight">{addonDisplayName}</span>
                     <span className="text-xs text-muted-foreground/60">v{addon.manifest.version}</span>
+                    {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
+                    {isCinemeta && (
+                      <Tooltip content="Official Addon">
+                        <span aria-label="Official Addon" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
+                          <BadgeCheck className="h-3 w-3" />
+                        </span>
+                      </Tooltip>
+                    )}
+                    {isPatched && (
+                      <Tooltip content="Cinemeta patches applied">
+                        <span aria-label="Cinemeta patches applied" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-warning/20 bg-warning/10 text-warning">
+                          <Bandage className="h-3 w-3" />
+                        </span>
+                      </Tooltip>
+                    )}
+                    {hasUpdate && latestVersion && (
+                      <Tooltip content={`Update available: ${latestVersion}`}>
+                        <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
+                          <ArrowUpCircle className="h-3 w-3" />
+                        </span>
+                      </Tooltip>
+                    )}
                     {addon.flags?.protected && (
                       <Tooltip content="Protected">
                         <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
@@ -809,13 +831,6 @@ export const AddonCard = React.memo(function AddonCard({
                         </span>
                       </Tooltip>
                     )}
-                    {hasUpdate && latestVersion && (
-                      <Tooltip content={`Update available: ${latestVersion}`}>
-                        <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
-                          <ArrowUpCircle className="h-3 w-3" />
-                        </span>
-                      </Tooltip>
-                    )}
                     {isPendingRemoval && (
                       <Tooltip content="Deleting...">
                         <span aria-label="Deleting..." data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-destructive/20 bg-destructive/10 text-destructive">
@@ -824,7 +839,6 @@ export const AddonCard = React.memo(function AddonCard({
                       </Tooltip>
                     )}
                     {apRole && <AutopilotRoleChip role={apRole} />}
-                    {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
                   </div>
 
                   <p className="line-clamp-1 text-xs text-muted-foreground">
@@ -1082,6 +1096,28 @@ export const AddonCard = React.memo(function AddonCard({
                 </CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
                   <span className="text-xs truncate">v{addon.manifest.version}</span>
+                  {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
+                  {isCinemeta && (
+                    <Tooltip content="Official Addon">
+                      <span aria-label="Official Addon" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
+                        <BadgeCheck className="h-3 w-3" />
+                      </span>
+                    </Tooltip>
+                  )}
+                  {isPatched && (
+                    <Tooltip content="Cinemeta patches applied">
+                      <span aria-label="Cinemeta patches applied" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-warning/20 bg-warning/10 text-warning">
+                        <Bandage className="h-3 w-3" />
+                      </span>
+                    </Tooltip>
+                  )}
+                  {hasUpdate && latestVersion && (
+                    <Tooltip content={`Update available: ${latestVersion}`}>
+                      <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
+                        <ArrowUpCircle className="h-3 w-3" />
+                      </span>
+                    </Tooltip>
+                  )}
                   {addon.flags?.protected && (
                     <Tooltip content="Protected">
                       <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
@@ -1096,13 +1132,6 @@ export const AddonCard = React.memo(function AddonCard({
                       </span>
                     </Tooltip>
                   )}
-                  {hasUpdate && latestVersion && (
-                    <Tooltip content={`Update available: ${latestVersion}`}>
-                      <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
-                        <ArrowUpCircle className="h-3 w-3" />
-                      </span>
-                    </Tooltip>
-                  )}
                   {isPendingRemoval && (
                     <Tooltip content="Deleting...">
                       <span aria-label="Deleting..." data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-destructive/20 bg-destructive/10 text-destructive">
@@ -1111,7 +1140,6 @@ export const AddonCard = React.memo(function AddonCard({
                     </Tooltip>
                   )}
                   {apRole && <AutopilotRoleChip role={apRole} />}
-                  {showPlatformSource && <PlatformSourceChip account={currentAccount} addon={addon} scope="addon" ofTotal={chipState.total} failing={chipState.failing} className="ml-1" />}
                 </CardDescription>
               </div>
             </div>
