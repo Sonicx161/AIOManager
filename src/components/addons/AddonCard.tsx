@@ -795,6 +795,20 @@ export const AddonCard = React.memo(function AddonCard({
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-sm font-semibold leading-tight">{addonDisplayName}</span>
                     <span className="text-xs text-muted-foreground/60">v{addon.manifest.version}</span>
+                    {addon.flags?.protected && (
+                      <Tooltip content="Protected">
+                        <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
+                          <Shield className="h-3 w-3" />
+                        </span>
+                      </Tooltip>
+                    )}
+                    {configureHidden && (
+                      <Tooltip content="Configure button hidden in Stremio">
+                        <span aria-label="Configure button hidden in Stremio" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-muted-foreground/20 bg-muted/30 text-muted-foreground">
+                          <EyeOff className="h-3 w-3" />
+                        </span>
+                      </Tooltip>
+                    )}
                     {hasUpdate && latestVersion && (
                       <Tooltip content={`Update available: ${latestVersion}`}>
                         <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
@@ -1068,6 +1082,20 @@ export const AddonCard = React.memo(function AddonCard({
                 </CardTitle>
                 <CardDescription className="flex flex-wrap items-center gap-1.5 mt-1 overflow-hidden">
                   <span className="text-xs truncate">v{addon.manifest.version}</span>
+                  {addon.flags?.protected && (
+                    <Tooltip content="Protected">
+                      <span aria-label="Protected" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-success/20 bg-success/10 text-success">
+                        <Shield className="h-3 w-3" />
+                      </span>
+                    </Tooltip>
+                  )}
+                  {configureHidden && (
+                    <Tooltip content="Configure button hidden in Stremio">
+                      <span aria-label="Configure button hidden in Stremio" data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-muted-foreground/20 bg-muted/30 text-muted-foreground">
+                        <EyeOff className="h-3 w-3" />
+                      </span>
+                    </Tooltip>
+                  )}
                   {hasUpdate && latestVersion && (
                     <Tooltip content={`Update available: ${latestVersion}`}>
                       <span aria-label={`Update available: ${latestVersion}`} data-theme-part="badge" className="inline-flex items-center justify-center rounded-full border p-1 border-primary/20 bg-primary/10 text-primary">
