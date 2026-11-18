@@ -97,7 +97,13 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             if (fight.hold && echo) {
                 runtimeState.setRuleCheckError?.(ruleId, accountId, 'contested_by_other_writer', 'Another writer keeps changing these addons. Enforcement is paused.', fight.hold)
                 const heldChain = fight.hold.urls?.length ? fight.hold.urls : liveOn
-                return writeStremioCollection(authKey, canonical, { ...writeOpts, preserveUrls: [...new Set([...preserveUrls, ...heldChain])], chain: null })
+                const chainUrls = new Set(chain.map(url => normalizeAddonUrl(url).toLowerCase()))
+                const heldCanonical = (canonical || []).map(addon => {
+                    const url = normalizeAddonUrl(addon?.transportUrl || '').toLowerCase()
+                    if (!chainUrls.has(url) || heldChain.includes(url)) return addon
+                    return { ...addon, flags: { ...(addon.flags || {}), enabled: false } }
+                })
+                return writeStremioCollection(authKey, heldCanonical, { ...writeOpts, preserveUrls: [...new Set([...preserveUrls, ...heldChain])], chain: null })
             }
             if (fight.hold) {
                 throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {

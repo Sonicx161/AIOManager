@@ -483,7 +483,7 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
     try {
         live = await readPlatformAddons(driver, connection)
     } catch (err) {
-        if (preserved.size > 0) return null
+        if (preserved.size > 0 || preserveLiveChain) return null
         // Conservative fallback: with no live read the stored snapshot is the only source.
         trace('reconciler', 'reconcileForeignChains.readFailed', { platform: connection.platform, error: err.message })
         return canonical
@@ -494,6 +494,10 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
             const url = urlOf(row)
             if (own.has(url) && (row.flags?.enabled ?? row.enabled) !== false) preserved.add(url)
         }
+        canonical = (canonical || []).map(row => {
+            const url = urlOf(row)
+            return own.has(url) && !preserved.has(url) ? { ...row, flags: { ...(row.flags || {}), enabled: false } } : row
+        })
     }
     const conflict = typeof observeLive === 'function' ? observeLive(connection.id, live, [...(excluded || []), ...preserved]) : null
     if (conflict) return { conflict }
@@ -579,6 +583,17 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
                 rebuilt.push(row)
                 used.add(url)
             }
+        }
+        for (const row of live) {
+            const url = urlOf(row)
+            if (!preserved.has(url) || used.has(url) || excluded?.has(url)) continue
+            rebuilt.push({
+                ...row,
+                transportUrl: row.transportUrl || row.url,
+                manifest: row.manifest || { name: row.name || '' },
+                flags: { ...(row.flags || {}), enabled: (row.flags?.enabled ?? row.enabled) !== false },
+            })
+            used.add(url)
         }
         out = rebuilt
     }
@@ -873,7 +888,7 @@ export function createReconciler(fastify) {
     const enforceAccount = async (accountId, connections, canonical, opts = {}) => {
         const { stremioWriter, requiredUrls, requiredActiveUrl } = opts
         tickCycleCounter(accountId)
-        const canon = (Array.isArray(canonical) ? canonical : []).filter(a => a?.flags?.enabled !== false)
+        const canon = (Array.isArray(canonical) ? canonical : []).filter(a => opts.preserveLiveChain || a?.flags?.enabled !== false)
         const start = Date.now()
         trace('reconciler', 'enforceAccount.start', { accountId, canonicalCount: canon.length })
         const synced = []
@@ -892,8 +907,10 @@ export function createReconciler(fastify) {
             ? opts.managedChains
             : (Array.isArray(requiredUrls) && requiredUrls.length > 0 ? [{ urls: requiredUrls, target: requiredActiveUrl }] : [])
         const preserved = new Set((Array.isArray(opts.preserveUrls) ? opts.preserveUrls : []).map(normalizeUrl).filter(Boolean))
-        const managedChains = configuredChains.filter(chain => !preserved.has(normalizeUrl(chain.target || '')))
-            .map(chain => ({ ...chain, urls: (chain.urls || []).filter(url => !preserved.has(normalizeUrl(url))) }))
+        const managedChains = opts.preserveLiveChain
+            ? []
+            : configuredChains.filter(chain => !preserved.has(normalizeUrl(chain.target || '')))
+                .map(chain => ({ ...chain, urls: (chain.urls || []).filter(url => !preserved.has(normalizeUrl(url))) }))
         let chainGuardSkipped = false
         let recoveredAddons = []
         const conflictHolds = {}
