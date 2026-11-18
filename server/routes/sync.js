@@ -265,12 +265,16 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             // without it, so a cached or 304 pull never reads the stored value.
             const ifNoneMatch = request.headers['if-none-match'] || null
             // With the head index the blob is left out here and read by the refetch below only when it is served.
-            let row = kvHeadIndexed()
-                ? await db.get(`SELECT password, content_hash, NULL AS value FROM ${kvHeadSource()} WHERE key = $1`, [id])
-                : await db.get(
-                    'SELECT password, content_hash, CASE WHEN content_hash = $1 OR content_hash = $2 THEN NULL ELSE value END AS value FROM kv_store WHERE key = $3',
-                    [ifNoneMatch, peekSyncResponseCacheHash(id), id]
-                )
+            // The auth head only answers a matching conditional pull; a pull that needs the body reads the current row.
+            const authHead = request.deviceAuth?.accountUuid === id ? request.deviceAuth.head : null
+            let row = authHead && ifNoneMatch && authHead.content_hash === ifNoneMatch
+                ? { password: authHead.password, content_hash: authHead.content_hash, value: null }
+                : kvHeadIndexed()
+                    ? await db.get(`SELECT password, content_hash, NULL AS value FROM ${kvHeadSource()} WHERE key = $1`, [id])
+                    : await db.get(
+                        'SELECT password, content_hash, CASE WHEN content_hash = $1 OR content_hash = $2 THEN NULL ELSE value END AS value FROM kv_store WHERE key = $3',
+                        [ifNoneMatch, peekSyncResponseCacheHash(id), id]
+                    )
 
             if (!row) {
                 trace('syncRoute', 'pull.error', { accountId: id, error: 'not-found' })
@@ -432,54 +436,6 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             return { error: 'Missing ID or Password header' }
         }
 
-        const bodyStr = JSON.stringify(data)
-        const contentHash = crypto.createHash('sha256').update(bodyStr).digest('hex')
-        // The deduplicated canonical form is expanded for the canonical store (per hub,
-        // bounded) while the kv blob keeps the compact form: the blob's canonicalAddons
-        // is stripped on every read, and expanding a very large workspace inline would
-        // blow the runtime string limit for no reader. An old inline canonicalAddons
-        // field from an older tab is accepted and stored unchanged.
-        let expandedCanonicalAddons = null
-        // Echoed on success so the client knows its V2 canonical part was applied; a
-        // rolled-back server never sends it and the client resends inline.
-        let canonicalV2Ack = {}
-        if (data.canonicalAddonsV2 !== undefined) {
-            const decoded = decodeCanonicalAddonsV2(data.canonicalAddonsV2)
-            if (!decoded) {
-                trace('syncRoute', 'push.error', { accountId: id, error: 'malformed-canonical-addons-v2' })
-                reply.status(400)
-                return { error: 'Malformed canonicalAddonsV2 payload' }
-            }
-            if (!data.canonicalAddons || typeof data.canonicalAddons !== 'object') {
-                expandedCanonicalAddons = decoded.accounts
-                data.canonicalAddons = decoded.compact
-                canonicalV2Ack = { canonicalAddonsV2: 'accepted' }
-            }
-            delete data.canonicalAddonsV2
-        }
-        const canonicalAddonsSource = expandedCanonicalAddons ?? data.canonicalAddons
-        const clientSyncedAt = data.syncedAt ? new Date(data.syncedAt).getTime() : 0
-        const force = data.force === true
-        // contentHint is the client's hash of its logical state (pre-syncedAt stamp); unlike
-        // content_hash (over the random-IV envelope, never stable), a match proves the logical
-        // content is unchanged so archive/rewrite/apiKeys churn and the updated_at bump skip.
-        const clientHint = typeof data.contentHint === 'string' ? data.contentHint.slice(0, 64) : null
-        // Revision base the client applied (its lastSyncedCloudEtag). Comparing
-        // revisions mistakes no clock for another writer: a slow device clock no
-        // longer self-conflicts, and rapid concurrent writes differing by <5s
-        // still conflict via hash mismatch. Null for first pushes / legacy
-        // snapshots: those fall back to the timestamp guard below.
-        const clientBase = typeof data.baseContentHash === 'string' && data.baseContentHash ? data.baseContentHash : null
-        const serverTime = new Date().toISOString()
-        data.syncedAt = serverTime
-        const storedData = { ...data }
-        delete storedData.canonicalAddons
-        delete storedData.force
-        delete storedData.emptiedHubs
-        delete storedData.baseContentHash
-        delete storedData.contentHint
-        const storedStr = JSON.stringify(storedData)
-
         const serverStremioCredentialedAccounts = await listStremioCredentialedAccountIds(id)
 
         const pushedKeyHashes = new Set()
@@ -509,7 +465,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
         // until the locked in-tx row confirms that exact credential, so a racing
         // request can never reuse a half-finished verification.
         const deviceSameAccount = request.deviceAuth?.accountUuid === id
-        const preTxRow = deviceSameAccount ? null : await db.get(`SELECT password FROM ${kvHeadSource()} WHERE key = $1`, [id])
+        const preTxRow = deviceSameAccount ? null : await db.get(`SELECT password, content_hash, content_hint, updated_at FROM ${kvHeadSource()} WHERE key = $1`, [id])
         const preTxPassword = preTxRow?.password ?? null
         const rowMayExist = request.deviceAuth || preTxRow != null
         const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
@@ -548,6 +504,89 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 }
             }
         }
+
+        const clientSyncedAt = data.syncedAt ? new Date(data.syncedAt).getTime() : 0
+        const force = data.force === true
+        // contentHint is the client's hash of its logical state (pre-syncedAt stamp); unlike
+        // content_hash (over the random-IV envelope, never stable), a match proves the logical
+        // content is unchanged so archive/rewrite/apiKeys churn and the updated_at bump skip.
+        const clientHint = typeof data.contentHint === 'string' ? data.contentHint.slice(0, 64) : null
+        // Revision base the client applied (its lastSyncedCloudEtag). Comparing
+        // revisions mistakes no clock for another writer: a slow device clock no
+        // longer self-conflicts, and rapid concurrent writes differing by <5s
+        // still conflict via hash mismatch. Null for first pushes / legacy
+        // snapshots: those fall back to the timestamp guard below.
+        const clientBase = typeof data.baseContentHash === 'string' && data.baseContentHash ? data.baseContentHash : null
+
+        // Postgres only: on SQLite a read outside the tx shares its connection and can see uncommitted writes.
+        const head = deviceSameAccount ? request.deviceAuth.head : preTxRow
+        if (db.type === 'postgres' && clientHint && !keysChanged && head && head.content_hint === clientHint
+            && (deviceSameAccount || timingSafeEqual(getCachedAuthBound('sync:' + id, head.password), hashAuthPassword(password)))) {
+            const serverUpdated = head.updated_at || 0
+            const hasRevisionBase = clientBase !== null && head.content_hash != null
+            const blocked = !force && (hasRevisionBase
+                ? clientBase !== head.content_hash
+                : clientSyncedAt > 0 && serverUpdated > 0 && clientSyncedAt < serverUpdated - 5000)
+            const decoded = blocked || data.canonicalAddonsV2 === undefined ? null : decodeCanonicalAddonsV2(data.canonicalAddonsV2)
+            if (!blocked && (decoded || data.canonicalAddonsV2 === undefined)
+                && !(request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && data.apiKeys && typeof data.apiKeys === 'object' && await hasNewApiKey(db, id, data.apiKeys))) {
+                const expanded = decoded && (!data.canonicalAddons || typeof data.canonicalAddons !== 'object')
+                const skipCanonical = await skipPathCanonicalReceipts(db, id, expanded ? decoded.accounts : data.canonicalAddons, fastify.log)
+                // A push that committed while the receipts were read must take the full path and return its conflict.
+                const current = await db.get(`SELECT content_hash FROM ${kvHeadSource()} WHERE key = $1`, [id])
+                if (current?.content_hash === head.content_hash) {
+                    if (!deviceSameAccount && getCachedAuthBound('sync:' + id, head.password)) setCachedAuth('sync:' + id, password, head.password)
+                    trace('syncRoute', 'push.success', { accountId: id, skipped: true, reason: 'unchanged', keysChanged, timing: Date.now() - postStart })
+                    return {
+                        success: true,
+                        syncedAt: serverUpdated > 0 ? new Date(Number(serverUpdated)).toISOString() : new Date().toISOString(),
+                        skipped: true,
+                        contentHash: head.content_hash,
+                        serverStremioCredentialedAccounts,
+                        canonical: skipCanonical.receipts,
+                        ...(expanded ? { canonicalAddonsV2: 'accepted' } : {}),
+                        ...(Object.keys(skipCanonical.versions).length > 0 ? { canonicalVersions: skipCanonical.versions } : {}),
+                        ...(Object.keys(skipCanonical.reasons).length > 0 ? { canonicalReasons: skipCanonical.reasons } : {}),
+                    }
+                }
+            }
+        }
+
+        const bodyStr = JSON.stringify(data)
+        const contentHash = crypto.createHash('sha256').update(bodyStr).digest('hex')
+        // The deduplicated canonical form is expanded for the canonical store (per hub,
+        // bounded) while the kv blob keeps the compact form: the blob's canonicalAddons
+        // is stripped on every read, and expanding a very large workspace inline would
+        // blow the runtime string limit for no reader. An old inline canonicalAddons
+        // field from an older tab is accepted and stored unchanged.
+        let expandedCanonicalAddons = null
+        // Echoed on success so the client knows its V2 canonical part was applied; a
+        // rolled-back server never sends it and the client resends inline.
+        let canonicalV2Ack = {}
+        if (data.canonicalAddonsV2 !== undefined) {
+            const decoded = decodeCanonicalAddonsV2(data.canonicalAddonsV2)
+            if (!decoded) {
+                trace('syncRoute', 'push.error', { accountId: id, error: 'malformed-canonical-addons-v2' })
+                reply.status(400)
+                return { error: 'Malformed canonicalAddonsV2 payload' }
+            }
+            if (!data.canonicalAddons || typeof data.canonicalAddons !== 'object') {
+                expandedCanonicalAddons = decoded.accounts
+                data.canonicalAddons = decoded.compact
+                canonicalV2Ack = { canonicalAddonsV2: 'accepted' }
+            }
+            delete data.canonicalAddonsV2
+        }
+        const canonicalAddonsSource = expandedCanonicalAddons ?? data.canonicalAddons
+        const serverTime = new Date().toISOString()
+        data.syncedAt = serverTime
+        const storedData = { ...data }
+        delete storedData.canonicalAddons
+        delete storedData.force
+        delete storedData.emptiedHubs
+        delete storedData.baseContentHash
+        delete storedData.contentHint
+        const storedStr = JSON.stringify(storedData)
 
         const runPushTx = () => db.tx(async (tx) => {
             const row = await tx.get(

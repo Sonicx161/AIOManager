@@ -143,9 +143,18 @@ class MetadataCache {
     async _insertL2(key, responseText, expiresAt, now, owner = null) {
         if (owner) {
             try {
+                if (db.type === 'postgres') {
+                    // SKIP LOCKED: a miss while a push or credential change holds the row is served but not cached.
+                    const res = await db.run(
+                        `INSERT INTO metadata_cache (key, response, expires_at, created_at)
+                         SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM kv_store WHERE key = $5 AND COALESCE(password, '') = $6 FOR SHARE SKIP LOCKED)
+                         ON CONFLICT (key) DO UPDATE SET response = excluded.response, expires_at = excluded.expires_at, created_at = excluded.created_at`,
+                        [key, responseText, expiresAt, now, owner.id, owner.password]
+                    )
+                    return (res?.changes || 0) > 0
+                }
                 return await db.tx(async tx => {
-                    const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
-                    const row = await tx.get(`SELECT password FROM kv_store WHERE key = $1${lock}`, [owner.id])
+                    const row = await tx.get('SELECT password FROM kv_store WHERE key = $1', [owner.id])
                     if (!row || String(row.password ?? '') !== owner.password) return false
                     await tx.run(
                         `INSERT INTO metadata_cache (key, response, expires_at, created_at) VALUES ($1, $2, $3, $4)

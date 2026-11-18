@@ -38,7 +38,9 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
     try {
         const row = await db.get(
             `SELECT d.id, d.account_uuid, d.token_hash, d.revoked, d.expires_at, d.credential_epoch,
-                    a.key AS account_key, a.credential_epoch AS account_epoch
+                    a.key AS account_key, a.credential_epoch AS account_epoch,
+                    a.password AS account_password, a.content_hash AS account_content_hash,
+                    a.content_hint AS account_content_hint, a.updated_at AS account_updated_at
              FROM device_credentials d
              LEFT JOIN kv_store a ON a.key = d.account_uuid
              WHERE d.account_uuid = $1 AND d.device_id = $2`,
@@ -93,7 +95,12 @@ export async function deviceAuthHook(request, reply) {
     }
     const outcome = await authenticateDeviceCredential(syncUser, deviceId, presented)
     if (outcome.ok) {
+        const { row } = outcome
         request.deviceAuth = { accountUuid: outcome.accountUuid }
+        // SQLite reads share the connection of an open transaction, so only PostgreSQL's committed head is reusable.
+        if (db.type === 'postgres') {
+            request.deviceAuth.head = { password: row.account_password, content_hash: row.account_content_hash, content_hint: row.account_content_hint, updated_at: row.account_updated_at }
+        }
         if (!sessionDevice) setCachedAuth(cacheKey, presented)
         // A replica never writes, not even best-effort telemetry, against the follower.
         // A session key is not in the device list, so nothing reads its last use: polls with one write nothing.
