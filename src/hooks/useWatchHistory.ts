@@ -17,8 +17,9 @@ import { isUnresolvedActivityName } from '@/lib/activity-metadata-overlay'
 import { collapseHistoryEvents } from '@/lib/watch-history-collapse'
 import { newestLiveOverlayEventIds, liveOverlayIdentityMatches } from '@/lib/watch-history-live-overlay'
 import { canonicalEpisodeIdentity, tmdbAliasVersion, aliasDeletedAt } from '@/lib/activity-id-alias'
-import { stremioScopeResolver } from '@/lib/connection-identity'
+import { stremioConnectionsOf, stremioScopeResolver } from '@/lib/connection-identity'
 import { dedupWatchEntries } from '@/lib/watch-history-final-dedup'
+import { createWorkspaceResetSubscription } from '@/lib/workspace-reset-subscription'
 
 const GENRE_CACHE_STORAGE_KEY = 'aio-genre-map-v1'
 let _genreCache: Map<string, string[]> | null = null
@@ -41,6 +42,100 @@ const NO_WATCH_EVENTS: ReturnType<typeof useWatchEventStore.getState>['events'] 
 const NO_LIBRARY_ITEMS: ReturnType<typeof useLibraryCache.getState>['items'] = []
 const NO_HISTORY_ACCOUNTS: ReturnType<typeof useAccountStore.getState>['accounts'] = []
 const NO_DELETED_EVENT_KEYS: ReturnType<typeof useWatchEventStore.getState>['deletedEventKeys'] = {}
+const NO_MEDIA_HISTORY: ActivityItem[] = []
+const NO_SAVED_EPISODES: SavedEpisodeIndex = new Map()
+
+type WatchEvents = ReturnType<typeof useWatchEventStore.getState>['events']
+type HistoryAccounts = ReturnType<typeof useAccountStore.getState>['accounts']
+type ScopeOf = (accountId: string, sourceConnectionId?: string) => string
+type SavedEpisodeIndex = Map<string, Array<{ season?: number; episode?: number }>>
+interface HistoryIdentity { accounts: HistoryAccounts; ctxOf: ScopeOf }
+interface DerivedHistory { history: HistoryEntry[]; inProgress: ActivityItem[]; hasEventLog: boolean }
+
+const NO_HISTORY_IDENTITY: HistoryIdentity = { accounts: NO_HISTORY_ACCOUNTS, ctxOf: stremioScopeResolver(NO_HISTORY_ACCOUNTS) }
+
+let historyIdentityCache: { accounts: HistoryAccounts; key: string; value: HistoryIdentity } | null = null
+let savedEpisodeIndexCache: { events: WatchEvents; key: string; ctxOf: ScopeOf; value: SavedEpisodeIndex } | null = null
+let derivedHistoryCache: { deps: unknown[]; value: DerivedHistory } | null = null
+let combinedHistoryCache: { deps: unknown[]; genreMap: Map<string, string[]>; value: HistoryEntry[] } | null = null
+
+export function resetWatchHistoryCaches(): void {
+    historyIdentityCache = null
+    savedEpisodeIndexCache = null
+    derivedHistoryCache = null
+    combinedHistoryCache = null
+    workspaceSubscription.release()
+}
+
+const workspaceSubscription = createWorkspaceResetSubscription(resetWatchHistoryCaches, import.meta.hot)
+
+function historyIdentityOf(accounts: HistoryAccounts): HistoryIdentity {
+    const cached = historyIdentityCache
+    if (cached?.accounts === accounts) return cached.value
+    const key = JSON.stringify(accounts.map(a => [a.id, a.name, a.email, a.primaryConnectionId, stremioConnectionsOf(a.connections).map(c => c.id)]))
+    const value = cached?.key === key ? cached.value : { accounts, ctxOf: stremioScopeResolver(accounts) }
+    historyIdentityCache = { accounts, key, value }
+    workspaceSubscription.ensure()
+    return value
+}
+
+// An episode counts as confirmed-watched when it is a bitfield recovery, carries the
+// positive per-episode flag (recordBackfillEpisodes stamps it onto real events the
+// verified bitfield covers), or measurably completed a known duration (>= 95%). Mere
+// watch time or aggregate counts never qualify: a 20% partial is not a completion.
+const isConfirmedSavedEpisode = (e: WatchEvents[number]): boolean => {
+    if (e.backfill) return true
+    if ((e.flaggedWatched ?? 0) > 0) return true
+    return e.duration > 0 && (e.time_watched || 0) >= 0.95 * e.duration
+}
+const hasValidEpisodeAnchor = (e: { season?: number; episode?: number }): boolean =>
+    e.season != null && e.episode != null
+    && Number.isInteger(e.season) && Number.isInteger(e.episode)
+    && e.episode > 0
+
+// Content key over every field the index derives from: identity plus WHY an event
+// counts (backfill detection, stamped flag, measured completion). Annotations land
+// without touching detected_ts, so the flag token is what forces the rebuild; plain
+// progress wiggle below the completion threshold never churns the key.
+function savedEpisodeContentKey(events: WatchEvents): string {
+    let k = ''
+    for (const e of events) {
+        if (!hasValidEpisodeAnchor(e)) continue
+        const id = `${e.id}|${e.accountId}|${e.sourceConnectionId ?? ''}|${e.itemId}|${e.season}|${e.episode}`
+        if (e.backfill) { k += `${id}:b:${e.detected_ts};`; continue }
+        if ((e.flaggedWatched ?? 0) > 0) { k += `${id}:f;`; continue }
+        if (e.duration > 0 && (e.time_watched || 0) >= 0.95 * e.duration) k += `${id}:m;`
+    }
+    return k
+}
+
+function savedEpisodeIndexOf(events: WatchEvents, ctxOf: ScopeOf): SavedEpisodeIndex {
+    const cached = savedEpisodeIndexCache
+    if (cached && cached.events === events && cached.ctxOf === ctxOf) return cached.value
+    const key = savedEpisodeContentKey(events)
+    let value = cached && cached.key === key && cached.ctxOf === ctxOf ? cached.value : null
+    if (!value) {
+        value = new Map()
+        for (const e of events) {
+            if (!hasValidEpisodeAnchor(e) || !isConfirmedSavedEpisode(e)) continue
+            const scopeKey = `${ctxOf(e.accountId, e.sourceConnectionId)}:${e.itemId}`
+            const arr = value.get(scopeKey)
+            if (arr) arr.push({ season: e.season, episode: e.episode })
+            else value.set(scopeKey, [{ season: e.season, episode: e.episode }])
+        }
+    }
+    savedEpisodeIndexCache = { events, key, ctxOf, value }
+    workspaceSubscription.ensure()
+    return value
+}
+
+function withGenres(entries: HistoryEntry[], genreMap: ReadonlyMap<string, string[]>): HistoryEntry[] {
+    return entries.map(entry => {
+        if (!entry.isFromEventLog) return entry
+        const genres = genreMap.get(entry.itemId)
+        return genres === entry.genres ? entry : { ...entry, genres }
+    })
+}
 
 /** Reference equality over a deps tuple (for the interrupted-render caches below). */
 function depsEqual(a: unknown[], b: unknown[]): boolean {
@@ -196,7 +291,8 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
     const deletedEventKeys = useWatchEventStore(s => enabled ? s.deletedEventKeys : NO_DELETED_EVENT_KEYS)
     // Ownership, canonical-login changes and deletions invalidate a paced snapshot
     // immediately. A delayed event array must never outlive its identity context.
-    const pacingScope = useMemo(() => [accounts, accountId, deletedEventKeys], [accounts, accountId, deletedEventKeys])
+    const historyIdentity = useMemo(() => enabled ? historyIdentityOf(accounts) : NO_HISTORY_IDENTITY, [enabled, accounts])
+    const pacingScope = useMemo(() => [historyIdentity, accountId, deletedEventKeys], [historyIdentity, accountId, deletedEventKeys])
     const pacedEvents = usePacedValue(rawEvents, HISTORY_LOAD_PACE_MS, loading, pacingScope)
     const historyInput = useMemo(() => ({ events: pacedEvents, liveItems: rawLiveItems, scope: pacingScope }), [pacedEvents, rawLiveItems, pacingScope])
     const deferredInput = useDeferredValue(historyInput)
@@ -213,59 +309,17 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
     // Post-promotion, the demoted login's frozen scopeKeys (rewritten by the migration)
     // agree with this computation. The legacy `${accountId}:stremio` marker is the
     // attribution of a possibly removed login and never folds onto a stored connection.
-    const ctxOf = useMemo(() => stremioScopeResolver(accounts), [accounts])
+    const ctxOf = historyIdentity.ctxOf
 
-    const baseDerivationRef = useRef<{ deps: unknown[]; value: { history: HistoryEntry[]; inProgress: ActivityItem[]; hasEventLog: boolean } } | null>(null)
+    const baseDerivationRef = useRef<{ deps: unknown[]; value: DerivedHistory } | null>(null)
 
     // Verified saved-episode recoveries per series scope. Derived from the RAW event stream
     // (not the paced/deferred input): the aggregate live items arrive as soon as the library
-    // loads, while the paced events snapshot can lag a beat — deriving the index from the
+    // loads, while the paced events snapshot can lag a beat, so deriving the index from the
     // paced input would blank the counts on every load. The cache is keyed by backfill
     // content, so publications that don't touch backfill events reuse the same Map and never
     // re-run the big derivation below.
-    // An episode counts as confirmed-watched when it is a bitfield recovery, carries the
-    // positive per-episode flag (recordBackfillEpisodes stamps it onto real events the
-    // verified bitfield covers), or measurably completed a known duration (>= 95%). Mere
-    // watch time or aggregate counts never qualify — a 20% partial is not a completion.
-    const isConfirmedSavedEpisode = (e: typeof rawEvents[number]): boolean => {
-        if (e.backfill) return true
-        if ((e.flaggedWatched ?? 0) > 0) return true
-        return e.duration > 0 && (e.time_watched || 0) >= 0.95 * e.duration
-    }
-    const hasValidEpisodeAnchor = (e: { season?: number; episode?: number }): boolean =>
-        e.season != null && e.episode != null
-        && Number.isInteger(e.season) && Number.isInteger(e.episode)
-        && e.episode > 0
-    const buildSavedEpisodeIndex = (evs: typeof rawEvents) => {
-        const index = new Map<string, Array<{ season?: number; episode?: number }>>()
-        for (const e of evs) {
-            if (!hasValidEpisodeAnchor(e) || !isConfirmedSavedEpisode(e)) continue
-            const key = `${ctxOf(e.accountId, e.sourceConnectionId)}:${e.itemId}`
-            const arr = index.get(key)
-            if (arr) arr.push({ season: e.season, episode: e.episode })
-            else index.set(key, [{ season: e.season, episode: e.episode }])
-        }
-        return index
-    }
-    // Content key over every field the index derives from: identity plus WHY an event
-    // counts (backfill detection, stamped flag, measured completion). Annotations land
-    // without touching detected_ts, so the flag token is what forces the rebuild; plain
-    // progress wiggle below the completion threshold never churns the key.
-    const savedEpisodeContentKey = useMemo(() => {
-        let k = ''
-        for (const e of rawEvents) {
-            if (!hasValidEpisodeAnchor(e)) continue
-            if (e.backfill) { k += `${e.id}:b:${e.detected_ts};`; continue }
-            if ((e.flaggedWatched ?? 0) > 0) { k += `${e.id}:f;`; continue }
-            if (e.duration > 0 && (e.time_watched || 0) >= 0.95 * e.duration) k += `${e.id}:m;`
-        }
-        return k
-    }, [rawEvents])
-    const savedIndexCacheRef = useRef<{ key: string; ctx: typeof ctxOf; value: Map<string, Array<{ season?: number; episode?: number }>> } | null>(null)
-    if (!savedIndexCacheRef.current || savedIndexCacheRef.current.key !== savedEpisodeContentKey || savedIndexCacheRef.current.ctx !== ctxOf) {
-        savedIndexCacheRef.current = { key: savedEpisodeContentKey, ctx: ctxOf, value: buildSavedEpisodeIndex(rawEvents) }
-    }
-    const savedEpisodeEvents = savedIndexCacheRef.current.value
+    const savedEpisodeEvents = useMemo(() => enabled ? savedEpisodeIndexOf(rawEvents, ctxOf) : NO_SAVED_EPISODES, [enabled, rawEvents, ctxOf])
     const { history, inProgress, hasEventLog } = useMemo(() => {
         // Interrupted-render cache: concurrent React restarts in-progress deferred
         // renders when higher-priority store publications arrive mid-derivation,
@@ -274,9 +328,12 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         // reference comparison instead of a second O(events + live items) derivation.
         // The body is a pure derivation of the deps, so an abandoned attempt's value
         // is exactly what the committed attempt produces for the same inputs.
-        const deps = [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents, ctxOf, tmdbAliasVersion()]
-        const cached = baseDerivationRef.current
-        if (cached && depsEqual(cached.deps, deps)) return cached.value
+        const deps = [events, liveItems, historyIdentity, accountId, deletedEventKeys, savedEpisodeEvents, tmdbAliasVersion()]
+        const cached = [baseDerivationRef.current, derivedHistoryCache].find(entry => entry && depsEqual(entry.deps, deps))
+        if (cached) {
+            baseDerivationRef.current = cached
+            return cached.value
+        }
         const normalizeName = (s: string) => s.normalize('NFC').toLowerCase().replace(/[^a-z0-9]/g, '')
 
         const liveByAccountItem = new Map<string, ActivityItem>()
@@ -302,7 +359,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
             }
         }
 
-        const accountMeta = new Map(accounts.map((a, i) => [
+        const accountMeta = new Map(historyIdentity.accounts.map((a, i) => [
             a.id,
             {
                 name: a.name || a.email?.split('@')[0] || a.id || 'Unknown',
@@ -378,7 +435,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
                 source: event.source || live?.source || 'stremio',
                 sourceConnectionId: event.sourceConnectionId ?? live?.sourceConnectionId,
                 backfill: event.backfill,
-                genres: genreMap.get(event.itemId),
+                genres: undefined,
                 liveProgress: liveOverlay?.progress,
                 liveWatched: liveOverlay?.watched,
                 liveEpisode: liveOverlay?.uniqueItemId,
@@ -507,8 +564,9 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
             hasEventLog: events.length > 0,
         }
         baseDerivationRef.current = { deps, value }
+        if (enabled) derivedHistoryCache = baseDerivationRef.current
         return value
-    }, [events, liveItems, accounts, accountId, genreMap, deletedEventKeys, savedEpisodeEvents, ctxOf])
+    }, [enabled, events, liveItems, historyIdentity, accountId, deletedEventKeys, savedEpisodeEvents, ctxOf])
 
     useEffect(() => {
         const { seen, needs: allNeeds, typeByItemId } = genreCrawlTargets(events, genreMap, genresEnabled)
@@ -616,19 +674,25 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         }
     }, [events, genreMap, genresEnabled, genreRetryTick])
 
-    const combinedHistoryCacheRef = useRef<{ deps: unknown[]; value: HistoryEntry[] } | null>(null)
+    const combinedHistoryCacheRef = useRef<{ deps: unknown[]; genreMap: Map<string, string[]>; value: HistoryEntry[] } | null>(null)
+    const mediaHistory = media.history.length > 0 ? media.history : NO_MEDIA_HISTORY
     const combinedHistory = useMemo(() => {
         // Same interrupted-render cache as the base derivation: the merge below walks
         // every history + media row and restarts pay full price without it.
-        const deps = [history, media.history, deletedEventKeys, ctxOf]
-        const cached = combinedHistoryCacheRef.current
-        if (cached && depsEqual(cached.deps, deps)) return cached.value
+        const deps = [history, mediaHistory, deletedEventKeys, ctxOf]
+        const candidates = [combinedHistoryCacheRef.current, combinedHistoryCache].filter(entry => entry && depsEqual(entry.deps, deps))
+        const cached = candidates.find(entry => entry?.genreMap === genreMap) ?? candidates[0]
+        if (cached) {
+            combinedHistoryCacheRef.current = cached.genreMap === genreMap ? cached : { deps, genreMap, value: withGenres(cached.value, genreMap) }
+            if (enabled) combinedHistoryCache = combinedHistoryCacheRef.current
+            return combinedHistoryCacheRef.current.value
+        }
         const byId = new Map(history.map(entry => [entry.id, entry]))
         const notDeleted = (item: ActivityItem) => {
             const deletedAt = deletedEventKeys[`${ctxOf(item.accountId, item.sourceConnectionId)}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`]
             return deletedAt === undefined || item.timestamp.getTime() > deletedAt
         }
-        const merged = resolveUnrecordedEpisodes(collapseImportedCopies(mergeMediaHistory(history.map(historyEntryToActivityItem), media.history.filter(notDeleted))))
+        const merged = resolveUnrecordedEpisodes(collapseImportedCopies(mergeMediaHistory(history.map(historyEntryToActivityItem), mediaHistory.filter(notDeleted))))
         const entries: HistoryEntry[] = merged.map(item => {
             const existing = byId.get(item.id)
             return existing
@@ -638,9 +702,10 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
                 }
         })
         entries.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-        combinedHistoryCacheRef.current = { deps, value: entries }
-        return entries
-    }, [history, media.history, deletedEventKeys, ctxOf])
+        combinedHistoryCacheRef.current = { deps, genreMap, value: withGenres(entries, genreMap) }
+        if (enabled) combinedHistoryCache = combinedHistoryCacheRef.current
+        return combinedHistoryCacheRef.current.value
+    }, [enabled, history, mediaHistory, deletedEventKeys, ctxOf, genreMap])
     const combinedInProgress = useMemo(() => {
         const notDeleted = (item: ActivityItem) => {
             const deletedAt = deletedEventKeys[`${ctxOf(item.accountId, item.sourceConnectionId)}:${getEpisodeIdentity(item.itemId, item.uniqueItemId, item.season, item.episode, item.type)}`]

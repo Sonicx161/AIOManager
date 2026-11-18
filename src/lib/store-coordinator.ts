@@ -25,6 +25,7 @@ export async function resetAllStores(options: { includeSync?: boolean } = {}): P
     // workspace's feed rows and sorted orders until the next Activity visit.
     import('@/components/activity/feed-rows').then(({ resetActivityRowCaches }) => resetActivityRowCaches()),
     import('@/lib/jellyfin/activity').then(({ resetNowStatusCaches }) => resetNowStatusCaches()),
+    import('@/hooks/useWatchHistory').then(({ resetWatchHistoryCaches }) => resetWatchHistoryCaches()),
   ]
 
   if (includeSync) {
