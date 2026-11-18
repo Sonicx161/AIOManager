@@ -1,6 +1,7 @@
 import { autopilotDb as db } from '../write-tripwire.js'
 import { encrypt, generateRandomKey } from '../../crypto.js'
 import { PRIMARY_KEY } from '../../keys.js'
+import { SWAP_WINDOW_MS } from './conflict-state.js'
 
 export function createHistory({ fastify, nowMs }) {
     const recordFailoverHistory = async (rule, type, message, primaryUrl, activeUrl, metadata = null, latencyMs = null) => {
@@ -39,7 +40,8 @@ export function createHistory({ fastify, nowMs }) {
                         LIMIT 10
                     ) AS x
                 )
-            `, [rule.account_id, scopeKey, rule.account_id, scopeKey])
+                AND NOT (type IN ('failover', 'recovery', 'contested') AND timestamp > $5)
+            `, [rule.account_id, scopeKey, rule.account_id, scopeKey, nowMs() - SWAP_WINDOW_MS])
         } catch (err) {
             fastify.log.error({ category: 'Autopilot' }, `History record failed: ${err.message}`)
         }

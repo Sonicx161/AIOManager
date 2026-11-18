@@ -18,6 +18,7 @@ import { registerSyncRoutes } from './routes/sync.js'
 import { registerProxyRoutes } from './routes/proxy.js'
 import { registerAutopilotRoutes } from './routes/autopilot.js'
 import { createAutopilotEngine } from './autopilot/engine.js'
+import { createWorkerLock } from './autopilot/worker-lock.js'
 import { autopilotTripwire } from './autopilot/write-tripwire.js'
 import { createActivityEngine } from './activity/engine.js'
 import { registerActivityRoutes } from './routes/activity.js'
@@ -321,7 +322,8 @@ registerSyncRoutes(fastify, { autopilotEngine: () => autopilotEngine })
 registerAccountNoticeRoutes(fastify)
 
 const reconciler = createReconciler(fastify)
-const autopilotEngine = createAutopilotEngine(fastify, reconciler)
+const bootWorkerLock = !isReadOnlyReplica() && autopilotWorkerEnabled() ? createWorkerLock({ log: fastify.log }) : null
+const autopilotEngine = createAutopilotEngine(fastify, reconciler, { workerLock: bootWorkerLock })
 const activityEngine = createActivityEngine(fastify)
 await registerAdminRoutes(fastify, { autopilotEngine, activityEngine, reconciler })
 registerProxyRoutes(fastify, { checkAddonHealthInternal: autopilotEngine.checkAddonHealthInternal })

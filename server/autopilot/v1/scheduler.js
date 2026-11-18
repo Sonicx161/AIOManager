@@ -5,7 +5,7 @@ import { scrubUrls } from './url-ref.js'
 import { CHECK_INTERVAL_MS } from './failover-decision.js'
 import { accountBlockedInSnapshot } from '../../admin/account-state.js'
 
-export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shouldSkipRuleCheck, prefetchSiblingRows, siblingKey, processAutopilotRule, flushUpdates, AUTOPILOT_SCAN_CHUNK_SIZE, AUTOPILOT_MAX_RULES_PER_CYCLE, AUTOPILOT_CYCLE_BUDGET_MS, RULE_RECHECK_MS, AUTOPILOT_CYCLE_WATCHDOG_MS = Math.max(3 * AUTOPILOT_CYCLE_BUDGET_MS, 300000), AUTOPILOT_RULE_CONCURRENCY = 32, probeCycle = null }) {
+export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shouldSkipRuleCheck, prefetchSiblingRows, siblingKey, processAutopilotRule, flushUpdates, AUTOPILOT_SCAN_CHUNK_SIZE, AUTOPILOT_MAX_RULES_PER_CYCLE, AUTOPILOT_CYCLE_BUDGET_MS, RULE_RECHECK_MS, AUTOPILOT_CYCLE_WATCHDOG_MS = Math.max(3 * AUTOPILOT_CYCLE_BUDGET_MS, 300000), AUTOPILOT_RULE_CONCURRENCY = 32, probeCycle = null, workerLock = null }) {
     const { ruleCacheGet, ruleCacheSet, ruleCacheStats } = ruleCache
 
     // Watchdog (memory only): a cycle still running past its wall-clock deadline is abandoned. It schedules no
@@ -40,6 +40,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
     }
 
     const runAutopilot = async () => {
+        if (workerLock && !(await workerLock.ensure())) return
         // Write safe mode skips the whole cycle until restart; the tripwire logs the reminder.
         if (autopilotTripwire.isSafeMode()) {
             autopilotTripwire.remind()
@@ -223,6 +224,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
                 const runGroup = async (accountRules) => {
                     if (!mayStart()) return
                     for (const rule of accountRules) {
+                        if (workerLock?.isStandby?.()) return
                         if (!mayStart()) return
                         started.add(rule.id)
                         await processRule(rule)
@@ -251,7 +253,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
                 // An abandoned cycle (watchdog tripped) flushes nothing: its stale observations could overwrite the replacement cycle's newer commit.
                 if (live()) {
                     const flushable = dirtyUpdates.filter((u) => !u.ownerSyncUser || !accountBlockedInSnapshot(u.ownerSyncUser))
-                    await flushUpdates(flushable)
+                    if (flushable.length === 0 || !workerLock || typeof workerLock.fence !== 'function' || (!workerLock.isStandby?.() && await workerLock.fence())) await flushUpdates(flushable)
                 }
 
                 if (totalProcessed >= AUTOPILOT_MAX_RULES_PER_CYCLE || nowMs() >= scanDeadline) break
@@ -313,6 +315,7 @@ export function createScheduler({ fastify, nowMs, cycleTargets, ruleCache, shoul
             clearInterval(serverState.autopilotInterval)
             serverState.autopilotInterval = null
         }
+        return Promise.resolve(workerLock?.release?.()).catch(() => {})
     }
 
     return { runAutopilot, startAutopilotWorker, stopAutopilotWorker }

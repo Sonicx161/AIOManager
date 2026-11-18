@@ -263,6 +263,8 @@ export const FIELDS = {
         'How long addon health-check results are cached, in ms.'),
     AUTOPILOT_RULE_CONCURRENCY: int(32, { min: 1 },
         'Accounts the autopilot worker checks in parallel. Each finishes on its own, so one slow addon never holds up the rest.'),
+    AUTOPILOT_WORKER: optionalString(
+        'Set to off to disable the Autopilot worker on this copy. When enabled, one copy per database runs Autopilot and other copies stand by. READ_ONLY_REPLICA never creates the lock. PostgreSQL transaction-mode pooler URLs (for example Supabase port 6543) disable the advisory lock and run this copy as the worker because pooled sessions cannot hold it safely.'),
     AUTOPILOT_MANIFEST_PROBES_PER_HOST: int(6, { min: 1 },
         'Maximum manifest health checks in flight to one addon host. Public hosts serve a unique manifest per user, so this bounds the load one instance puts on them.'),
     AUTOPILOT_HEALTH_TARGETS_MAX: int(20000, { min: 100, clampBelowMin: true },

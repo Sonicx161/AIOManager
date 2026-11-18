@@ -472,11 +472,11 @@ function enqueuePlatformWrite(connection, run) {
 // resurrect a deletion this write is supposed to land.
 // `excludedUrls` (normalized) are this connection's destination-policy removals: a
 // deliberately excluded member must never be mirrored back as a foreign row either.
-async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null, managedChains = null, preserveUrls = null, observeLive = null) {
+async function reconcileForeignChains(driver, connection, canonical, requiredUrls, foreignChainUrls, excludedUrls = null, managedChains = null, preserveUrls = null, observeLive = null, preserveLiveChain = false) {
     const foreign = new Set((Array.isArray(foreignChainUrls) ? foreignChainUrls : []).map(u => normalizeUrl(u)))
     const own = new Set((Array.isArray(requiredUrls) ? requiredUrls : []).map(u => normalizeUrl(u)))
     const preserved = new Set((Array.isArray(preserveUrls) ? preserveUrls : []).map(normalizeUrl).filter(Boolean))
-    if (foreign.size === 0 && own.size === 0 && preserved.size === 0) return canonical
+    if (foreign.size === 0 && own.size === 0 && preserved.size === 0 && !preserveLiveChain) return canonical
     const excluded = excludedUrls instanceof Set && excludedUrls.size > 0 ? excludedUrls : null
     const urlOf = (a) => normalizeUrl(a?.transportUrl || a?.url || '')
     let live = []
@@ -488,7 +488,13 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
         trace('reconciler', 'reconcileForeignChains.readFailed', { platform: connection.platform, error: err.message })
         return canonical
     }
-    if (!Array.isArray(live)) return preserved.size > 0 ? null : canonical
+    if (!Array.isArray(live)) return preserved.size > 0 || preserveLiveChain ? null : canonical
+    if (preserveLiveChain) {
+        for (const row of live) {
+            const url = urlOf(row)
+            if (own.has(url) && (row.flags?.enabled ?? row.enabled) !== false) preserved.add(url)
+        }
+    }
     const conflict = typeof observeLive === 'function' ? observeLive(connection.id, live, [...(excluded || []), ...preserved]) : null
     if (conflict) return { conflict }
     if (live.length === 0 && preserved.size === 0) return canonical
@@ -542,17 +548,39 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
         })
     }
     if (preserved.size > 0) {
-        out = out.filter(row => !preserved.has(urlOf(row)))
-        for (const row of live) {
+        const liveByUrl = new Map(live.map(row => [urlOf(row), row]))
+        const outByUrl = new Map(out.map(row => [urlOf(row), row]))
+        const rebuilt = []
+        const used = new Set()
+        for (const row of canonical || []) {
             const url = urlOf(row)
-            if (!preserved.has(url) || excluded?.has(url)) continue
-            out.push({
-                ...row,
-                transportUrl: row.transportUrl || row.url,
-                manifest: row.manifest || { name: row.name || '' },
-                flags: { ...(row.flags || {}), enabled: (row.flags?.enabled ?? row.enabled) !== false },
-            })
+            if (preserved.has(url)) {
+                const liveRow = liveByUrl.get(url)
+                if (liveRow && !excluded?.has(url) && !used.has(url)) {
+                    rebuilt.push({
+                        ...liveRow,
+                        transportUrl: liveRow.transportUrl || liveRow.url,
+                        manifest: liveRow.manifest || { name: liveRow.name || '' },
+                        flags: { ...(liveRow.flags || {}), enabled: (liveRow.flags?.enabled ?? liveRow.enabled) !== false },
+                    })
+                    used.add(url)
+                }
+                continue
+            }
+            const existing = outByUrl.get(url)
+            if (existing && !used.has(url)) {
+                rebuilt.push(existing)
+                used.add(url)
+            }
         }
+        for (const row of out) {
+            const url = urlOf(row)
+            if (!used.has(url)) {
+                rebuilt.push(row)
+                used.add(url)
+            }
+        }
+        out = rebuilt
     }
     trace('reconciler', 'reconcileForeignChains.merged', { platform: connection.platform, foreign: foreign.size, count: out.length })
     return out
@@ -570,7 +598,7 @@ async function reconcileForeignChains(driver, connection, canonical, requiredUrl
 // between our read and our write). It returns { list } or { skip, reason }.
 // R2-08: a zero-row RealStream write is never an authorized clear anymore: the driver
 // resolves every empty projection as a skip, which the caller reports honestly.
-async function writePlatformAddons(driver, connection, addons, source, prep = null) {
+async function writePlatformAddons(driver, connection, addons, source, prep = null, beforeWrite = null) {
     const c = connection.credentials
     return enqueuePlatformWrite(connection, async () => {
         let list = addons
@@ -595,6 +623,7 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
             const { destinations, ...rest } = withMeta
             return rest
         })
+        if (typeof beforeWrite === 'function' && !(await beforeWrite())) return { skipped: true, reason: 'worker-fence' }
         trace('reconciler', 'writePlatformAddons', { platform: connection.platform, source, count: prepared.length, urls: traceEnabled() ? prepared.map(a => a.transportUrl || '') : undefined })
         if (connection.platform === 'stremio' && !isHydraOutbound(connection)) {
             if (!c?.authKey) { const e = new Error('Stremio credentials not loaded'); e.isAuthError = true; throw e }
@@ -823,7 +852,7 @@ export function createReconciler(fastify) {
                     const outcome = await writePlatformAddons(driver, connection, effective, 'reconcile', opts.canWrite ? async list => {
                         if (!await opts.canWrite()) return { skip: true, reason: 'rule-paused' }
                         return { list }
-                    } : null)
+                    } : null, opts.workerFence)
                     if (outcome?.skipped) { outcomes[connId] = { outcome: 'skipped', reason: outcome.reason }; continue }
                     changes.push({ type: 'restore', url: '', platform: connection.platform, primary: false })
                 }
@@ -924,7 +953,7 @@ export function createReconciler(fastify) {
                     const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
                     if (!driver) continue
                     const outcome = await writePlatformAddons(driver, connection, effective, 'enforce', async (list) => {
-                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls, managedChains, opts.preserveUrls, opts.observeLive)
+                        const merged = await reconcileForeignChains(driver, connection, list, requiredUrls, opts.foreignChainUrls, excludedUrls, managedChains, opts.preserveUrls, opts.observeLive, opts.preserveLiveChain)
                         if (merged?.conflict) {
                             conflictHolds[connId] = merged.conflict
                             return { skip: true, reason: 'contested_by_other_writer' }
@@ -959,7 +988,7 @@ export function createReconciler(fastify) {
                         })
                         if (opts.canWrite && !await opts.canWrite()) return { skip: true, reason: 'Rule was paused or removed.' }
                         return { list: finalList }
-                    })
+                    }, opts.workerFence)
                     if (outcome && outcome.skipped) {
                         chainGuardSkipped = true
                         if (conflictHolds[connId]) break

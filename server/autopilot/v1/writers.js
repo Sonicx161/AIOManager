@@ -27,7 +27,17 @@ export const unpushedConnectionIds = (targets, result) => (targets || [])
     .filter(c => !(Array.isArray(result?.syncedIds) ? result.syncedIds.includes(c.id) : (result?.synced || []).includes(c.platform)))
     .map(c => c.id)
 
-export function createWriters({ fastify, nowMs, reconciler, stremioDriver, siblingChainPlans, buildReconciledList, fetchAndRefreshManifest, prepareAddonsForStremio, areCollectionsDifferent, runtimeState = null }) {
+const liveChainOn = (live, chain, ignored = []) => {
+    const norm = url => normalizeAddonUrl(url || '').toLowerCase()
+    const skip = new Set((ignored || []).map(norm))
+    const members = new Set((chain || []).map(norm).filter(url => !skip.has(url)))
+    return [...new Set((Array.isArray(live) ? live : [])
+        .filter(addon => (addon?.flags?.enabled ?? addon?.enabled) !== false)
+        .map(addon => norm(addon?.transportUrl || addon?.url))
+        .filter(url => members.has(url)))]
+}
+
+export function createWriters({ fastify, nowMs, reconciler, stremioDriver, siblingChainPlans, buildReconciledList, fetchAndRefreshManifest, prepareAddonsForStremio, areCollectionsDifferent, runtimeState = null, workerFence = null }) {
     const canWriteRule = async (ruleId, accountId, owner) => {
         if (!ruleId) return true
         // In-memory owner-state check first: a blocked owner behaves like a paused rule.
@@ -35,7 +45,8 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
         const [sql, params] = ownerPredicate(owner, 3)
         return !!await db.get(`SELECT 1 FROM autopilot_rules WHERE id = $1 AND account_id = $2 AND is_active = 1${sql} LIMIT 1`, [ruleId, accountId, ...params])
     }
-    const writeStremioCollection = async (authKey, canonical, { remoteAddons = [], normalizedActive, accountId, syncUser, connectionId, ruleId, preserveUrls = [] }) => {
+    const writeStremioCollection = async (authKey, canonical, writeOpts) => {
+        const { remoteAddons = [], normalizedActive, accountId, syncUser, connectionId, ruleId, preserveUrls = [], chain = null, healthSwap = false, heldSwap = null, echo = false } = writeOpts
         const preserved = preserveLiveMembers(canonical || [], remoteAddons, preserveUrls)
         const refreshedMerged = await mapConcurrent(preserved, 5, async addon => {
             const normUrl = normalizeAddonUrl(addon.transportUrl).toLowerCase()
@@ -74,21 +85,30 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
 
         if (areCollectionsDifferent(finalAddons, remoteAddons)) {
             if (!await canWriteRule(ruleId, accountId, syncUser)) throw Object.assign(new Error('Rule was paused or removed during the check'), { code: 'rule_changed' })
-            const held = runtimeState?.conflicts.observeLive(
-                { id: ruleId, account_id: accountId, owner_sync_user: syncUser },
-                'stremio',
-                remoteAddons,
-                normalizedActive,
-                [...stremioExcluded, ...preserveUrls],
-            )
-            if (held) {
+            const ruleRef = { id: ruleId, account_id: accountId, owner_sync_user: syncUser }
+            if (heldSwap && chain?.length) {
+                const on = liveChainOn(remoteAddons, chain, [...stremioExcluded, ...preserveUrls])
+                if (on.length === 1 && heldSwap.includes(on[0])) return finalAddons
+            }
+            const liveOn = liveChainOn(remoteAddons, chain, [...stremioExcluded, ...preserveUrls])
+            const fight = ruleId && chain?.length && runtimeState?.conflicts.classifyWrite
+                ? await runtimeState.conflicts.classifyWrite(ruleRef, chain, normalizedActive, liveOn, { healthSwap })
+                : {}
+            if (fight.hold && echo) {
+                runtimeState.setRuleCheckError?.(ruleId, accountId, 'contested_by_other_writer', 'Another writer keeps changing these addons. Enforcement is paused.', fight.hold)
+                const heldChain = fight.hold.urls?.length ? fight.hold.urls : liveOn
+                return writeStremioCollection(authKey, canonical, { ...writeOpts, preserveUrls: [...new Set([...preserveUrls, ...heldChain])], chain: null })
+            }
+            if (fight.hold) {
                 throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
                     code: 'contested_by_other_writer',
-                    conflict: held,
+                    conflict: fight.hold,
                 })
             }
             try {
+                if (workerFence && !(await workerFence())) throw Object.assign(new Error('Autopilot worker lock is no longer held'), { code: 'worker_fence_lost' })
                 await stremioDriver.writeAddons(authKey, finalAddons)
+                if (fight.charged) await runtimeState.conflicts.recordFight(ruleRef, chain, normalizedActive)
             } finally {
                 invalidateCanonicalAddons(accountId, syncUser)
                 invalidateCanonicalByAuthKey(authKey)
@@ -98,7 +118,7 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
     }
 
     // onlyConnectionIds narrows the push to those connections (a retry of earlier failed pushes).
-    const enforceConnectionOnly = async (rule, reconciledAddons, chain = [], activeUrl = null, siblingPlans = null, mirrorUrls = null, onlyConnectionIds = null) => {
+    const enforceConnectionOnly = async (rule, reconciledAddons, chain = [], activeUrl = null, siblingPlans = null, mirrorUrls = null, onlyConnectionIds = null, { healthSwap = false, heldSwap = null, echo = false } = {}) => {
         if (!reconciler?.enforceAccount) return { synced: [] }
         const connections = await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)
         const targets = (connections || []).filter(c =>
@@ -130,10 +150,25 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
         // blocks the write when the provider cannot prove the chain exists.
         const recoveryUrls = carriesEnabledOwnTarget ? [] : chain
         const foreignChainUrls = [...new Set([...(mirrorUrls || []), ...recoveryUrls])]
+        const conflicts = runtimeState?.conflicts
+        const fightCapable = !!conflicts?.fightBudget && !healthSwap
+        const budgetHold = fightCapable ? await conflicts.fightBudget(rule, chain) : null
+        const fought = new Set()
+        const deliverOthers = !!budgetHold && echo
+        if (deliverOthers) runtimeState.setRuleCheckError?.(rule.id, rule.account_id, 'contested_by_other_writer', 'Another writer keeps changing these addons. Enforcement is paused.', budgetHold)
         const result = await reconciler.enforceAccount(rule.account_id, targets, currentAddons, {
             ...guardOpts,
             canWrite: () => canWriteRule(rule.id, rule.account_id, rule.owner_sync_user),
-            observeLive: (scope, live, ignored) => runtimeState?.conflicts?.observeLive(rule, scope, live, activeUrl, ignored),
+            workerFence,
+            preserveLiveChain: deliverOthers,
+            observeLive: deliverOthers ? null : (scope, live, ignored) => {
+                const on = liveChainOn(live, chain, ignored)
+                if (heldSwap && on.length === 1 && heldSwap.includes(on[0])) return { alreadyLive: true }
+                if (!fightCapable || (on.length === 1 && on[0] === targetNorm)) return null
+                if (budgetHold) return budgetHold
+                fought.add(scope)
+                return null
+            },
             ...(preserveUrls.length > 0 ? { preserveUrls } : {}),
             // Only the chains this rule cannot derive are mirrored from the platform: a decided
             // target outranks a platform list that has not caught up with it yet, and mirroring a
@@ -148,6 +183,9 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             managedChains: [{ urls: chain, target: activeUrl }, ...plans],
         })
         const heldFromLive = Object.values(result.conflictHolds || {})[0]
+        if (heldFromLive?.alreadyLive) {
+            return { synced: targets.map(c => c.platform), syncedIds: targets.map(c => c.id), failedIds: [], targets: targets.map(c => ({ id: c.id, platform: c.platform, enabled: c.enabled })), connectionStates: result.connectionStates || null, chainGuardSkipped: false, recoveredAddons: [] }
+        }
         if (heldFromLive) {
             throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
                 code: 'contested_by_other_writer',
@@ -156,7 +194,7 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
         }
         if (result.synced.length > 0) {
             const confirmed = result.syncedIds || targets.filter(c => !unpushedConnectionIds(targets, result).includes(c.id)).map(c => c.id)
-            runtimeState?.conflicts.recordWrite(rule, chain.filter(url => !preserveUrls.includes(normalizeAddonUrl(url))), activeUrl, confirmed)
+            for (const id of confirmed) if (fought.has(id)) await conflicts.recordFight(rule, chain, activeUrl)
             fastify.log.info({ category: 'Autopilot' }, `[${maskContext(rule.account_id)}] Connection-only enforcement pushed to ${result.synced.join(', ')}.`)
         }
         return {
@@ -171,12 +209,12 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
     }
 
     // ownerSyncUser scopes the 401 disable when the descriptor does not carry it; the owner lookup below is unchanged.
-    const syncStremioLive = async (authKeyOrDescriptor, chain, activeUrl, accountId, ruleId, storedAddonList = [], forceReinstall = false, ownerSyncUser = undefined) => {
+    const syncStremioLive = async (authKeyOrDescriptor, chain, activeUrl, accountId, ruleId, storedAddonList = [], forceReinstall = false, ownerSyncUser = undefined, writeMode = {}) => {
         const descriptor = typeof authKeyOrDescriptor === 'string' ? { authKey: authKeyOrDescriptor } : (authKeyOrDescriptor || {})
         const authKey = descriptor.authKey
         if (!authKey) {
             const rule = { account_id: accountId, id: ruleId, owner_sync_user: descriptor.ownerSyncUser, connection_id: descriptor.connectionId, platform: descriptor.platform }
-            const result = await enforceConnectionOnly(rule, storedAddonList, chain, activeUrl, await siblingChainPlans(accountId, ruleId, chain, descriptor.ownerSyncUser))
+            const result = await enforceConnectionOnly(rule, storedAddonList, chain, activeUrl, await siblingChainPlans(accountId, ruleId, chain, descriptor.ownerSyncUser), null, null, writeMode)
             if (result.chainGuardSkipped) {
                 // Broken chain state: skip so the engine can reconstitute on the next pass.
                 fastify.log.warn({ category: 'Autopilot' }, `[${maskContext(accountId)}] Chain guard skipped enforcement for rule ${ruleId}: stored addon list does not carry the active chain tier.`)
@@ -189,7 +227,7 @@ export function createWriters({ fastify, nowMs, reconciler, stremioDriver, sibli
             owner = descriptor.ownerSyncUser ?? owner ?? (await db.get('SELECT owner_sync_user FROM autopilot_rules WHERE id = $1 AND account_id = $2', [ruleId, accountId]))?.owner_sync_user
             const built = await buildReconciledList(authKey, chain, activeUrl, accountId, ruleId, storedAddonList, forceReinstall, owner)
             built.canonical = await withCurrentDestinations(built.canonical, accountId, owner)
-            await writeStremioCollection(authKey, built.canonical, { remoteAddons: built.remoteAddons, normalizedActive: built.normalizedActive, accountId, syncUser: owner, connectionId: descriptor.connectionId, ruleId, preserveUrls: built.preserveUrls || [] })
+            await writeStremioCollection(authKey, built.canonical, { remoteAddons: built.remoteAddons, normalizedActive: built.normalizedActive, accountId, syncUser: owner, connectionId: descriptor.connectionId, ruleId, chain, healthSwap: writeMode.healthSwap === true, heldSwap: writeMode.heldSwap || null, echo: writeMode.echo === true, preserveUrls: built.preserveUrls || [] })
             runtimeState?.conflicts.recordWrite({ id: ruleId, account_id: accountId, owner_sync_user: owner }, chain.filter(url => !(built.preserveUrls || []).includes(normalizeAddonUrl(url))), activeUrl, ['stremio'])
             return built.canonical
         } catch (err) {

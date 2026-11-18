@@ -7,6 +7,8 @@ import { createManifests } from './v1/manifests.js'
 import { createMerge } from './v1/merge.js'
 import { createSiblings } from './v1/siblings.js'
 import { createNotify, guardedWebhookFetch } from './v1/notify.js'
+import { createWorkerLock } from './worker-lock.js'
+import { autopilotWorkerEnabled } from '../lib/autopilot-worker.js'
 import { createHistory } from './v1/history.js'
 import { createWriters } from './v1/writers.js'
 import { createCommit } from './v1/commit.js'
@@ -65,13 +67,17 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
 
     const { isSubstantial, fetchManifestRaw, areCollectionsDifferent, prepareAddonsForStremio, fetchAndRefreshManifest } = createManifests({ fastify, nowMs, fetchImpl: deps.fetch })
     const { recordFailoverHistory } = createHistory({ fastify, nowMs })
+    const workerLock = deps.workerLock !== undefined ? deps.workerLock
+        : (autopilotWorkerEnabled() && !['1', 'true', 'yes', 'on'].includes(String(process.env.READ_ONLY_REPLICA || '').toLowerCase()) ? createWorkerLock({ log: fastify.log, now: nowMs }) : null)
+    const workerFence = workerLock?.fence ? () => workerLock.fence() : null
+    runtimeState.conflicts.setRecorder?.(recordFailoverHistory)
     const cycleTargets = runtimeState.cycleTargets
     const { siblingKey, prefetchSiblingRows, siblingChainPlans } = createSiblings({ fastify, decryptRuleField, cycleTargets, conflicts: runtimeState.conflicts })
     const { buildReconciledList } = createMerge({ fastify, stremioDriver, checkAddonHealthInternal, recordFailoverHistory, isSubstantial, fetchManifestRaw, siblingChainPlans, runtimeState })
 
     const { writeStremioCollection, enforceConnectionOnly, syncStremioLive } = createWriters({
         fastify, nowMs, reconciler, stremioDriver, siblingChainPlans, buildReconciledList,
-        fetchAndRefreshManifest, prepareAddonsForStremio, areCollectionsDifferent, runtimeState,
+        fetchAndRefreshManifest, prepareAddonsForStremio, areCollectionsDifferent, runtimeState, workerFence,
     })
 
     const { sendNotification, notifyTransition } = createNotify({ fastify, nowMs, fetchImpl, decryptRuleField })
@@ -84,7 +90,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         buildReconciledList, writeStremioCollection, enforceConnectionOnly, syncStremioLive,
         recordFailoverHistory, notifyTransition, planCommit,
         ruleSnapshots: { get: ruleCache.ruleSnapshotGet, set: ruleCache.ruleSnapshotSet, getList: ruleCache.ruleListGet, holdList: ruleCache.ruleListHold, releaseList: ruleCache.ruleListRelease },
-        connectionRetry, stremioDriver,
+        connectionRetry, stremioDriver, workerFence,
     })
     // Safe mode stops new rules mid-cycle; the seen set sizes the derived write limits.
     // A check that throws (proxy queue saturated) still records the attempt and its error, in memory only.
@@ -103,7 +109,7 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         fastify, nowMs, cycleTargets, ruleCache, shouldSkipRuleCheck, prefetchSiblingRows, siblingKey,
         processAutopilotRule, flushUpdates, AUTOPILOT_SCAN_CHUNK_SIZE, AUTOPILOT_MAX_RULES_PER_CYCLE,
         AUTOPILOT_CYCLE_BUDGET_MS, RULE_RECHECK_MS, AUTOPILOT_CYCLE_WATCHDOG_MS, AUTOPILOT_RULE_CONCURRENCY,
-        probeCycle: { begin: beginProbeCycle, end: endProbeCycle },
+        probeCycle: { begin: beginProbeCycle, end: endProbeCycle }, workerLock,
     })
 
     return {
@@ -118,8 +124,12 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         retireRuleCaches: ruleCache.retireRuleCaches,
         retireRuleSecrets: ruleCache.retireRuleSecrets,
         syncStremioLive: async (...args) => {
+            if (workerLock && !(await workerLock.ensure())) return null
+            const echoArgs = [...args]
+            while (echoArgs.length < 8) echoArgs.push(undefined)
+            echoArgs[8] = { echo: true }
             const token = ruleCache.beginRead()
-            try { return await ruleCache.withRead(token, () => syncStremioLive(...args)) } finally { ruleCache.endRead(token) }
+            try { return await ruleCache.withRead(token, () => syncStremioLive(...echoArgs)) } finally { ruleCache.endRead(token) }
         },
         enforceConnectionOnly,
         buildReconciledList,
@@ -144,6 +154,8 @@ export function createAutopilotEngine(fastify, rawReconciler = null, deps = {}) 
         runAutopilot,
         startAutopilotWorker,
         stopAutopilotWorker,
+        releaseWorkerLock: () => workerLock?.release?.(),
+        workerLockState: () => workerLock?.state?.() ?? 'off',
         getRuleDecryptCacheStats: ruleCache.getRuleDecryptCacheStats,
         getRuleCacheStats: ruleCache.getRuleCacheStats,
         getConnectionRetry: connectionRetry.get,

@@ -27,7 +27,7 @@ export function createProcessRule({
     memberStatus, getHealthLatency, isSubstantial, fetchManifestRaw,
     buildReconciledList, writeStremioCollection, enforceConnectionOnly, syncStremioLive,
     recordFailoverHistory, notifyTransition, planCommit,
-    ruleSnapshots = null, connectionRetry = null, stremioDriver = null,
+    ruleSnapshots = null, connectionRetry = null, stremioDriver = null, workerFence = null,
 }) {
     const { setRuleRuntimeState, getRuleRuntimeState, clearRuleRuntimeState } = runtimeState
     const noteCheckError = runtimeState.setRuleCheckError ?? (() => {})
@@ -39,6 +39,10 @@ export function createProcessRule({
         const [sql, params] = ownerPredicate(rule.owner_sync_user, 3)
         return !!await db.get(`SELECT 1 FROM autopilot_rules WHERE id = $1 AND account_id = $2 AND is_active = 1${sql} LIMIT 1`, [rule.id, rule.account_id, ...params])
     }
+    const ensureWorkerFence = async () => {
+        if (workerFence && !(await workerFence())) throw Object.assign(new Error('Autopilot worker lock is no longer held'), { code: 'worker_fence_lost' })
+    }
+    const canWriteWithFence = async rule => (await canWrite(rule)) && (!workerFence || await workerFence())
 
     const recordRuleDecryptFailure = async (rule) => {
         const runtime = getRuleRuntimeState(rule.id) || {}
@@ -84,11 +88,13 @@ export function createProcessRule({
                 const live = await stremioDriver.readAddons(decryptedAuthKey)
                 const own = applyOneActiveFlags(live, normalizedChain, normalizedTarget, preserveUrls).list
                 const list = await withCurrentDestinations(own, rule.account_id, rule.owner_sync_user)
-                const result = await reconciler.enforceAccount(rule.account_id, connections, list, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, canWrite: () => canWrite(rule), ...(preserveUrls.length > 0 ? { preserveUrls } : {}) })
+                const result = await reconciler.enforceAccount(rule.account_id, connections, list, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, canWrite: () => canWriteWithFence(rule), workerFence, ...(preserveUrls.length > 0 ? { preserveUrls } : {}) })
+                await ensureWorkerFence()
                 runtimeState.conflicts?.recordWrite(rule, normalizedChain.filter(url => !preserveUrls.includes(url)), normalizedTarget, connections.filter(c => !unpushedConnectionIds(connections, result).includes(c.id)).map(c => c.id))
                 unreached = unpushedConnectionIds(connections, result)
             } else {
-                const result = await enforceConnectionOnly(rule, await ctx.ensureUpdatedAddonList(), chain, targetActiveUrl, siblingPlans, ctx.getMirrorChainUrls(), entry.connectionIds)
+                const result = await enforceConnectionOnly(rule, await ctx.ensureUpdatedAddonList(), chain, targetActiveUrl, siblingPlans, ctx.getMirrorChainUrls(), entry.connectionIds, { healthSwap: true })
+                await ensureWorkerFence()
                 if (result.synced.length === 0 && !result.failedIds) { connectionRetry.clear(rule.id); return }
                 unreached = result.failedIds || []
                 runtimeState.conflicts?.recordWrite(rule, normalizedChain.filter(url => !preserveUrls.includes(url)), normalizedTarget, result.syncedIds || [])
@@ -326,6 +332,16 @@ export function createProcessRule({
         }
         const stabilization = stabilizationFrom(normalizedChainUrls, members)
         if (skipContestedTarget(targetActiveUrl)) { showConflict(); return conflictHeartbeat({ stabilization }) }
+        const wantedTarget = normalizeAddonUrl(targetActiveUrl).toLowerCase()
+        const leavesDeadActive = decision.reason === 'active-dead' && wantedTarget !== currentActiveNorm
+        const paused = leavesDeadActive ? null
+            : (runtimeState.conflicts?.getHold(rule.id) || (wantedTarget !== currentActiveNorm ? await runtimeState.conflicts?.fightBudget?.(rule, chain) : null))
+        const heldSwap = leavesDeadActive && (runtimeState.conflicts?.getHold(rule.id) || await runtimeState.conflicts?.fightBudget?.(rule, chain))
+            ? normalizedChainUrls.filter((_, i) => members[i].state !== 'DOWN') : null
+        if (paused) {
+            noteCheckError(rule.id, rule.account_id, 'contested_by_other_writer', 'Another writer keeps changing these addons. Enforcement is paused.', paused)
+            return conflictHeartbeat({ stabilization })
+        }
 
         const decryptedNormalizedActive = currentActiveNorm
         let normalizedTarget = normalizeAddonUrl(targetActiveUrl).toLowerCase()
@@ -417,7 +433,8 @@ export function createProcessRule({
             const pushStartedAt = Date.now()
             try {
                 if (!decryptedAuthKey) {
-                    const result = await enforceConnectionOnly(rule, updatedAddonList, chain, targetActiveUrl, siblingPlans, mirrorChainUrls)
+                    const result = await enforceConnectionOnly(rule, updatedAddonList, chain, targetActiveUrl, siblingPlans, mirrorChainUrls, null, { healthSwap: hasChanged, heldSwap })
+                    await ensureWorkerFence()
                     const { synced } = result
                     if (synced.length === 0) {
                         if (result.chainGuardSkipped) {
@@ -457,7 +474,7 @@ export function createProcessRule({
                     const connectionTargets = hasChanged ? (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)).filter(c => c.enabled && c.platform !== 'stremio') : []
                     const stremioWriter = async (conn) => {
                         try {
-                            await writeStremioCollection(conn.credentials.authKey, built.canonical, { remoteAddons: built.remoteAddons, normalizedActive: built.normalizedActive, accountId: rule.account_id, syncUser: rule.owner_sync_user, connectionId: conn.id, ruleId: rule.id, preserveUrls: built.preserveUrls || [] })
+                            await writeStremioCollection(conn.credentials.authKey, built.canonical, { remoteAddons: built.remoteAddons, normalizedActive: built.normalizedActive, accountId: rule.account_id, syncUser: rule.owner_sync_user, connectionId: conn.id, ruleId: rule.id, chain, healthSwap: hasChanged, heldSwap, preserveUrls: built.preserveUrls || [] })
                         } catch (err) {
                             if (err.status === 401) {
                                 fastify.log.error({ category: 'Autopilot', fmt: 'ap.auth_expired', acct: rule.account_id }, `[${maskContext(rule.account_id)}] Auth Key Expired (401). Disabling rule.`)
@@ -468,7 +485,8 @@ export function createProcessRule({
                         }
                     }
 
-                    const result = await reconciler.enforceAccount(rule.account_id, [stremioConn, ...connectionTargets], built.canonical, { stremioWriter, canWrite: () => canWrite(rule), ...(preserveUrls.length > 0 ? { preserveUrls } : {}) })
+                    const result = await reconciler.enforceAccount(rule.account_id, [stremioConn, ...connectionTargets], built.canonical, { stremioWriter, canWrite: () => canWriteWithFence(rule), workerFence, ...(preserveUrls.length > 0 ? { preserveUrls } : {}) })
+                    await ensureWorkerFence()
                     const heldFromWrite = Object.values(result.conflictHolds || {})[0]
                     if (heldFromWrite) {
                         throw Object.assign(new Error('Another writer keeps changing these addons. Enforcement is paused.'), {
@@ -487,7 +505,8 @@ export function createProcessRule({
                     const failedNote = failedPlatforms.length > 0 ? ` (push failed: ${failedPlatforms.join(', ')})` : ''
                     fastify.log.info({ category: 'Autopilot', fmt: 'ap.push', n: built.canonical.length, acct: rule.account_id, ref: urlRef(normalizedTarget), platforms: result.synced, failnote: failedPlatforms.length > 0 ? failedPlatforms : null }, `[${maskContext(rule.account_id)}] Synced ${urlRef(normalizedTarget)} to ${syncedPlatforms.join(', ')}.${failedNote}`)
                 } else {
-                    reconciledList = await syncStremioLive(decryptedAuthKey, chain, targetActiveUrl, rule.account_id, rule.id, updatedAddonList, hasChanged, rule.owner_sync_user)
+                    reconciledList = await syncStremioLive(decryptedAuthKey, chain, targetActiveUrl, rule.account_id, rule.id, updatedAddonList, hasChanged, rule.owner_sync_user, { healthSwap: hasChanged, heldSwap })
+                    await ensureWorkerFence()
                     syncSucceeded = true
                     confirmedScopes = ['stremio']
 
@@ -503,8 +522,9 @@ export function createProcessRule({
                             connTargets = targets
                             if (targets.length > 0) {
                                 const outcome = preserveUrls.length > 0
-                                    ? await reconciler.enforceAccount(rule.account_id, targets, reconciledList ?? updatedAddonList, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, preserveUrls, canWrite: () => canWrite(rule) })
-                                    : await reconciler.reconcileAccount(rule.account_id, null, conns, reconciledList ?? updatedAddonList, { canWrite: () => canWrite(rule) })
+                                    ? await reconciler.enforceAccount(rule.account_id, targets, reconciledList ?? updatedAddonList, { requiredUrls: chain, requiredActiveUrl: targetActiveUrl, preserveUrls, canWrite: () => canWriteWithFence(rule), workerFence })
+                                    : await reconciler.reconcileAccount(rule.account_id, null, conns, reconciledList ?? updatedAddonList, { canWrite: () => canWriteWithFence(rule), workerFence })
+                                await ensureWorkerFence()
                                 const unreachedIds = preserveUrls.length > 0 ? new Set(unpushedConnectionIds(targets, outcome)) : null
                                 const unreached = targets.filter(c => c.enabled && (unreachedIds ? unreachedIds.has(c.id) : RETRYABLE_RECONCILE.has(reconcileOutcomeKey(outcome?.outcomes?.[c.id]))))
                                 confirmedScopes.push(...targets.filter(c => c.enabled && (outcome?.outcomes?.[c.id] ? ['written', 'unchanged'].includes(outcome.outcomes[c.id].outcome) : !unreached.includes(c))).map(c => c.id))
@@ -526,6 +546,7 @@ export function createProcessRule({
                     fastify.log.info({ category: 'Autopilot', fmt: 'ap.push', n: reconciledList?.length ?? updatedAddonList?.length, acct: rule.account_id, ref: urlRef(normalizedTarget), platforms: syncedPlatforms, failnote: failedPlatforms.length > 0 ? failedPlatforms : null }, `[${maskContext(rule.account_id)}] Synced ${urlRef(normalizedTarget)} to ${syncedPlatforms.join(', ')}.${failedNote}`)
                 }
 
+                if (syncSucceeded) await ensureWorkerFence()
                 if (syncSucceeded) runtimeState.conflicts?.recordWrite(rule, normalizedChain.filter(url => !preserveUrls.includes(url)), normalizedTarget, confirmedScopes)
 
                 // Post-write owner recheck (snapshot only, zero DB reads): a block that

@@ -937,7 +937,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             if (hasRules) { reply.status(403); return { error: 'Forbidden' } }
         }
 
-        const history = await db.query('SELECT * FROM failover_history WHERE account_id = $1 AND rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $2) ORDER BY timestamp DESC LIMIT 10', [accountId, authUser])
+        const history = await db.query(`SELECT * FROM failover_history WHERE account_id = $1 AND type != 'contested' AND rule_id IN (SELECT id FROM autopilot_rules WHERE owner_sync_user = $2) ORDER BY timestamp DESC LIMIT 10`, [accountId, authUser])
 
         const decryptedHistory = (history || []).map(log => ({
             ...log,
