@@ -1,4 +1,5 @@
 import type { AddonDescriptor } from '@/types/addon'
+import { trace } from '@/lib/trace'
 
 /**
  * Per-account "merge base" for the inbound canonical reconcile (the common ancestor a
@@ -84,19 +85,33 @@ export function getCanonicalBaseEntry(accountId: string): CanonicalBaseEntry | n
  * (zero-I/O ethos: no write per sync cycle when nothing moved).
  */
 export function setCanonicalBases(entries: Record<string, CanonicalBaseEntry>): void {
-    const map = { ...load() }
-    let changed = false
+    const stored = load()
+    const map = { ...stored }
+    const changed: string[] = []
     for (const [id, entry] of Object.entries(entries)) {
         if (JSON.stringify(map[id]) !== JSON.stringify(entry)) {
             map[id] = entry
-            changed = true
+            changed.push(id)
         }
     }
-    if (changed) {
-        try {
-            localStorage.setItem(KEY, JSON.stringify(map))
-            invalidate()
-        } catch {}
+    if (changed.length === 0) return
+    try {
+        localStorage.setItem(KEY, JSON.stringify(map))
+    } catch (e) {
+        // A stale base can revert an unpushed edit; no base cannot, so drop the ones this push moved.
+        const stale = changed.filter(id => Object.prototype.hasOwnProperty.call(stored, id))
+        if (stale.length > 0) {
+            const kept = { ...stored }
+            for (const id of stale) delete kept[id]
+            try {
+                localStorage.setItem(KEY, JSON.stringify(kept))
+            } catch {
+                try { localStorage.removeItem(KEY) } catch {}
+            }
+        }
+        trace('sync', 'canonical-base.write-failed', { error: e instanceof Error ? e.name : String(e), hubs: changed.length, dropped: stale.length })
+    } finally {
+        invalidate()
     }
 }
 

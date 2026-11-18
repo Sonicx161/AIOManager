@@ -11,7 +11,7 @@ const safeLocalStorage: StateStorage = {
                 const backup = localStorage.getItem(backupKey)
                 if (backup && !backup.includes('[object Object]') && backup !== '[object Object]') {
                     console.warn(`[SafeStorage] Recovered ${name} from backup`)
-                    localStorage.setItem(name, backup)
+                    try { localStorage.setItem(name, backup) } catch {}
                     return backup
                 }
 
@@ -21,16 +21,21 @@ const safeLocalStorage: StateStorage = {
             }
 
             if (value && name === 'aioman-sync') {
+                let parsed
                 try {
-                    const parsed = JSON.parse(value)
-                    if (parsed && parsed.state && parsed.state.auth && parsed.state.auth.isAuthenticated) {
-                        localStorage.setItem(`${name}:last-good`, value)
-                    }
+                    parsed = JSON.parse(value)
                 } catch {
                     console.warn(`[SafeStorage] Stored data for ${name} is not valid JSON. Wiping corrupted key.`)
                     localStorage.removeItem(name)
                     localStorage.removeItem(`${name}:last-good`)
                     return null
+                }
+                if (parsed && parsed.state && parsed.state.auth && parsed.state.auth.isAuthenticated) {
+                    try {
+                        localStorage.setItem(`${name}:last-good`, value)
+                    } catch (e) {
+                        console.warn(`[SafeStorage] Failed to back up ${name}`, e)
+                    }
                 }
             }
 
