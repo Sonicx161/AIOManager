@@ -36,11 +36,11 @@ function buildMultiRowPlaceholders(numRows, numCols) {
 
 const KV_HISTORY_KEEP = 3
 
-async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
-    const existingRows = await tx.query(
-        'SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1',
-        [id],
-    )
+function readApiKeys(db, id) {
+    return db.query('SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1', [id])
+}
+
+async function registerApiKeys(tx, id, apiKeys, pushedAccounts, existingRows) {
     const existingKeyAccounts = new Set(existingRows.map(r => r.account_id))
     const apiKeyRows = []
     const seenHashes = new Map()
@@ -82,8 +82,7 @@ async function registerApiKeys(tx, id, apiKeys, pushedAccounts) {
         await tx.run(sql, params)
     }
 }
-async function hasNewApiKey(tx, id, apiKeys) {
-    const existing = await tx.query('SELECT account_id, api_key_hash FROM account_api_keys WHERE sync_user = $1', [id])
+function hasNewApiKey(existing, apiKeys) {
     const keys = new Map()
     for (const row of existing) {
         if (!keys.has(row.account_id)) keys.set(row.account_id, new Set())
@@ -529,7 +528,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 : clientSyncedAt > 0 && serverUpdated > 0 && clientSyncedAt < serverUpdated - 5000)
             const decoded = blocked || data.canonicalAddonsV2 === undefined ? null : decodeCanonicalAddonsV2(data.canonicalAddonsV2)
             if (!blocked && (decoded || data.canonicalAddonsV2 === undefined)
-                && !(request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && data.apiKeys && typeof data.apiKeys === 'object' && await hasNewApiKey(db, id, data.apiKeys))) {
+                && !(request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && data.apiKeys && typeof data.apiKeys === 'object' && hasNewApiKey(await readApiKeys(db, id), data.apiKeys))) {
                 const expanded = decoded && (!data.canonicalAddons || typeof data.canonicalAddons !== 'object')
                 const skipCanonical = await skipPathCanonicalReceipts(db, id, expanded ? decoded.accounts : data.canonicalAddons, fastify.log)
                 // A push that committed while the receipts were read must take the full path and return its conflict.
@@ -596,6 +595,9 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 [id]
             )
 
+            const apiKeys = data.apiKeys
+            const pushedAccounts = Array.isArray(data.accounts) ? data.accounts : null
+            let lockedApiKeys
             if (row) {
                 let storedPassword = row.password
                 if (!deviceSameAccount && preVerified && row.password === verifiedPassword) {
@@ -662,17 +664,20 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                     return { success: true, conflict: true, syncedAt: currentSyncedAt, contentHash: row.content_hash ?? null, serverStremioCredentialedAccounts }
                 }
 
-                if (request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && data.apiKeys && typeof data.apiKeys === 'object' && await hasNewApiKey(tx, id, data.apiKeys)) {
-                    reply.status(403)
-                    return { error: 'Password sign-in required', code: 'PASSWORD_AUTH_REQUIRED' }
+                if (request.deviceAuth && isSessionDevice(request.headers['x-sync-device']) && apiKeys && typeof apiKeys === 'object') {
+                    lockedApiKeys = await readApiKeys(tx, id)
+                    if (hasNewApiKey(lockedApiKeys, apiKeys)) {
+                        reply.status(403)
+                        return { error: 'Password sign-in required', code: 'PASSWORD_AUTH_REQUIRED' }
+                    }
                 }
 
                 // Revision checks precede even the no-op paths: a stale hint cannot
                 // certify rejected local state or replace the winning key registry.
                 if ((clientHint && row.content_hint === clientHint) || row.content_hash === contentHash) {
                     trace('syncRoute', 'push.success', { accountId: id, skipped: true, reason: 'unchanged', keysChanged, timing: Date.now() - postStart })
-                    if (keysChanged && data.apiKeys && typeof data.apiKeys === 'object') {
-                        await registerApiKeys(tx, id, data.apiKeys, Array.isArray(data.accounts) ? data.accounts : null)
+                    if (keysChanged && apiKeys && typeof apiKeys === 'object') {
+                        await registerApiKeys(tx, id, apiKeys, pushedAccounts, lockedApiKeys ?? await readApiKeys(tx, id))
                     }
                     // Receipts still describe what the server holds: a lost response
                     // before this retry may have committed the canonical writes, and
@@ -727,9 +732,8 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 `, [id, encryptedVal, hashedPass, Date.now(), contentHash, clientHint])
             }
 
-            const apiKeys = data.apiKeys
             if (apiKeys && typeof apiKeys === 'object') {
-                await registerApiKeys(tx, id, apiKeys, Array.isArray(data.accounts) ? data.accounts : null)
+                await registerApiKeys(tx, id, apiKeys, pushedAccounts, lockedApiKeys ?? await readApiKeys(tx, id))
             }
 
             // Server-readable canonical addon lists: the Hydra inbound source for Hubs the
