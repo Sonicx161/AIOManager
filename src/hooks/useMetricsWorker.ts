@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'react'
 import type { ActivityItem } from '@/types/activity'
 import type { EventRollups } from '@/lib/watch-event-rollups'
-import { cumulativeWatchKey } from '@/lib/activity-utils'
+import type { Account } from '@/types/account'
+import type { HistoryEntry } from '@/hooks/useWatchHistory'
+import { canonicalStremioConnections, cumulativeWatchKey, historyEntryToActivityItem } from '@/lib/activity-utils'
 import { buildRuntimeIndex, mediaResumePositionMs, runtimeIndexFingerprint, type RuntimeIndex } from '@/lib/watch-hours'
-import { createIsolatedItemsFingerprintMemo, createItemsFingerprintMemo, fnvText } from '@/lib/metrics-fingerprint'
+import { createItemsFingerprintMemo, fnvText } from '@/lib/metrics-fingerprint'
 import { useSyncStore } from '@/store/syncStore'
 import { useAuthStore } from '@/store/authStore'
 import { getActiveWorkspaceId, subscribeWorkspaceChanges } from '@/lib/workspace-persistence'
@@ -232,12 +234,21 @@ function bindMetricsCacheInvalidation() {
     if (cacheInvalidationBound) return
     cacheInvalidationBound = true
     useSyncStore.subscribe((state, prev) => {
-        if (state.auth.id !== prev.auth.id || state.auth.isAuthenticated !== prev.auth.isAuthenticated) metricsResultCache.clear()
+        if (state.auth.id !== prev.auth.id || state.auth.isAuthenticated !== prev.auth.isAuthenticated) {
+            metricsResultCache.clear()
+            resetMetricsInputMemos()
+        }
     })
     useAuthStore.subscribe((state, prev) => {
-        if (state.encryptionKey !== prev.encryptionKey) metricsResultCache.clear()
+        if (state.encryptionKey !== prev.encryptionKey) {
+            metricsResultCache.clear()
+            resetMetricsInputMemos()
+        }
     })
-    subscribeWorkspaceChanges(() => metricsResultCache.clear())
+    subscribeWorkspaceChanges(() => {
+        metricsResultCache.clear()
+        resetMetricsInputMemos()
+    })
 }
 
 function createEmptyMetricsResult(): MetricsResult {
@@ -382,18 +393,72 @@ function createRollupsFingerprint(rollups: MetricsRollupInput): string {
     return `${byMonthKeys.length}-${hash >>> 0}`
 }
 
-// Data identity of the whole viewer history, independent of viewer/period
-// selection: rows hashed through the real worker transform in a memo isolated
-// from the result-key cache, plus canonical attribution and all rollup days.
-const sourceIdentityMemo = createIsolatedItemsFingerprintMemo()
+const rollupsFingerprints = new WeakMap<object, string>()
+
+function rollupsFingerprintOf(rollups: MetricsRollupInput): string {
+    let fingerprint = rollupsFingerprints.get(rollups)
+    if (fingerprint === undefined) {
+        fingerprint = createRollupsFingerprint(rollups)
+        rollupsFingerprints.set(rollups, fingerprint)
+    }
+    return fingerprint
+}
+
+interface MappedRows {
+    rows: ReadonlyArray<ActivityItem>
+    canonical: ReadonlyMap<string, string | undefined> | undefined
+    mapped: MetricsWorkerItem[]
+    fingerprint: string
+}
+
+// One map and fingerprint pass per row array, shared by the source identity and the worker request.
+let mappedRowsMemo: MappedRows[] = []
+const MAPPED_ROWS_MEMO_MAX = 2
+
+function mapRows(rows: ReadonlyArray<ActivityItem>, canonical: ReadonlyMap<string, string | undefined> | undefined, periodStart: number | null): { mapped: MetricsWorkerItem[]; fingerprint: string } {
+    if (periodStart == null) {
+        const hit = mappedRowsMemo.find(entry => entry.rows === rows && entry.canonical === canonical)
+        if (hit) return hit
+    }
+    const mapped = rows.map(item => toMetricsWorkerItem(item, canonical))
+    const fingerprint = createItemsFingerprintMemo(rows, mapped, canonical, periodStart)
+    if (periodStart == null) bindMetricsCacheInvalidation()
+    if (periodStart == null) mappedRowsMemo = [{ rows, canonical, mapped, fingerprint }, ...mappedRowsMemo].slice(0, MAPPED_ROWS_MEMO_MAX)
+    return { mapped, fingerprint }
+}
+
+let historyRowsMemo: { source: ReadonlyArray<HistoryEntry>; rows: ActivityItem[] } | null = null
+
+export function metricsHistoryRows(history: ReadonlyArray<HistoryEntry>): ActivityItem[] {
+    if (historyRowsMemo?.source === history) return historyRowsMemo.rows
+    const rows = history.map(historyEntryToActivityItem).filter(item => !item.backfill)
+    bindMetricsCacheInvalidation()
+    historyRowsMemo = { source: history, rows }
+    return rows
+}
+
+let canonicalMemo: { accounts: ReadonlyArray<Account>; value: Map<string, string | undefined> } | null = null
+
+export function metricsCanonicalConnections(accounts: ReadonlyArray<Account>): Map<string, string | undefined> {
+    if (canonicalMemo?.accounts === accounts) return canonicalMemo.value
+    const value = canonicalStremioConnections(accounts)
+    bindMetricsCacheInvalidation()
+    canonicalMemo = { accounts, value }
+    return value
+}
+
+function resetMetricsInputMemos(): void {
+    mappedRowsMemo = []
+    historyRowsMemo = null
+    canonicalMemo = null
+}
 
 export function createMetricsSourceIdentity(
     history: ReadonlyArray<ActivityItem>,
     rollups: MetricsRollupInput | undefined,
     canonical: ReadonlyMap<string, string | undefined> | undefined,
 ): string {
-    const mapped = history.map(item => toMetricsWorkerItem(item, canonical))
-    return `${sourceIdentityMemo(history, mapped, canonical, null)}|${rollups ? createRollupsFingerprint(rollups) : ''}`
+    return `${mapRows(history, canonical, null).fingerprint}|${rollups ? rollupsFingerprintOf(rollups) : ''}`
 }
 
 export interface MetricsWorkerOptions {
@@ -423,6 +488,36 @@ export function subsetRuntimeIndex(index: RuntimeIndex, itemIds: Iterable<string
         hash = fnvText(hash, `${itemId}:${t}:${l};`)
     }
     return { runtimes: { typical, longest }, fingerprint: String(hash >>> 0) }
+}
+
+const runtimeIndexes = new WeakMap<object, RuntimeIndex>()
+const runtimeFingerprints = new WeakMap<RuntimeIndex, string>()
+const runtimeSubsets = new WeakMap<object, { index: RuntimeIndex; value: { runtimes: RuntimeIndex; fingerprint: string } }>()
+
+function runtimeIndexOf(source: ReadonlyArray<Pick<ActivityItem, 'itemId' | 'duration'>>): RuntimeIndex {
+    let index = runtimeIndexes.get(source)
+    if (!index) {
+        index = buildRuntimeIndex(source)
+        runtimeIndexes.set(source, index)
+    }
+    return index
+}
+
+function runtimeFingerprintOf(index: RuntimeIndex): string {
+    let fingerprint = runtimeFingerprints.get(index)
+    if (fingerprint === undefined) {
+        fingerprint = runtimeIndexFingerprint(index)
+        runtimeFingerprints.set(index, fingerprint)
+    }
+    return fingerprint
+}
+
+function runtimeSubsetOf(index: RuntimeIndex, workerItems: MetricsWorkerItem[]): { runtimes: RuntimeIndex; fingerprint: string } {
+    const hit = runtimeSubsets.get(workerItems)
+    if (hit && hit.index === index) return hit.value
+    const value = subsetRuntimeIndex(index, workerItems.map(item => item.itemId))
+    runtimeSubsets.set(workerItems, { index, value })
+    return value
 }
 
 export function pickScopedResult(scoped: ScopedResult | null, scope: string): MetricsResult | null {
@@ -456,23 +551,19 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
     const vaultKey = useAuthStore(s => s.encryptionKey)
     const workspaceId = useSyncExternalStore(subscribeWorkspaceChanges, getActiveWorkspaceId, () => '')
     const scope = metricsCacheScope({ workspaceId, authId, authenticated, vaultKey })
-    const rollupsFingerprint = useMemo(() => (rollups ? createRollupsFingerprint(rollups) : ''), [rollups])
+    const rollupsFingerprint = useMemo(() => (rollups ? rollupsFingerprintOf(rollups) : ''), [rollups])
     // Post only what the worker reads; whole rows would also clone genres, saved-episode
     // summaries and media observations. The gate fingerprint is derived from the same
     // pass, memoized per source row, so filter/period switches skip re-hashing fields.
     const { workerItems, itemsFingerprint } = useMemo(
         () => {
-            const rows = selectMetricsRows(items, periodStart, canonicalConnections)
-            const mapped = rows.map(item => toMetricsWorkerItem(item, canonicalConnections))
-            return {
-                workerItems: mapped,
-                itemsFingerprint: createItemsFingerprintMemo(rows, mapped, canonicalConnections, periodStart),
-            }
+            const { mapped, fingerprint } = mapRows(selectMetricsRows(items, periodStart, canonicalConnections), canonicalConnections, periodStart)
+            return { workerItems: mapped, itemsFingerprint: fingerprint }
         },
         [items, periodStart, canonicalConnections]
     )
-    const runtimeIndex = useMemo(() => buildRuntimeIndex(runtimeSource ?? items), [runtimeSource, items])
-    const runtimeSubset = useMemo(() => subsetRuntimeIndex(runtimeIndex, workerItems.map(item => item.itemId)), [runtimeIndex, workerItems])
+    const runtimeIndex = useMemo(() => runtimeIndexOf(runtimeSource ?? items), [runtimeSource, items])
+    const runtimeSubset = useMemo(() => runtimeSubsetOf(runtimeIndex, workerItems), [runtimeIndex, workerItems])
     const resultKey = useMemo(
         () => (workerItems.length === 0 ? '' : `${filterKey}\u0001${itemsFingerprint}|${rollupsFingerprint}|${runtimeSubset.fingerprint}`),
         [workerItems, filterKey, itemsFingerprint, rollupsFingerprint, runtimeSubset]
@@ -481,7 +572,7 @@ export function useMetricsWorker(items: ActivityItem[], rollups?: MetricsRollupI
     // through the real transform, canonical attribution, rollups, runtime index)
     // plus the session scope. Viewer and period selection stay out of it, so a
     // selection change never discards in-flight work while a data change does.
-    const runtimeFullFingerprint = useMemo(() => runtimeIndexFingerprint(runtimeIndex), [runtimeIndex])
+    const runtimeFullFingerprint = useMemo(() => runtimeFingerprintOf(runtimeIndex), [runtimeIndex])
     const dataKey = options?.sourceIdentity
         ? `${scope}\u0000${options.sourceIdentity}|${runtimeFullFingerprint}`
         : `${scope}\u0000${itemsFingerprint}|${rollupsFingerprint}|${runtimeFullFingerprint}`

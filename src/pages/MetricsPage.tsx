@@ -9,13 +9,12 @@ import { MetricsEmptyState } from '@/components/common/PageEmptyStates'
 import { CHART_PALETTE } from '@/lib/chart-colors'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useWatchHistory } from '@/hooks/useWatchHistory'
-import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState } from '@/hooks/useMetricsWorker'
+import { useMetricsWorker, createMetricsSourceIdentity, metricsViewState, metricsHistoryRows, metricsCanonicalConnections } from '@/hooks/useMetricsWorker'
 import { useMetricsFirstReveal } from '@/hooks/useMetricsFirstReveal'
 import { useAccountStore } from '@/store/accountStore'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import type { Account } from '@/types/account'
-import { historyEntryToActivityItem, canonicalStremioConnections } from '@/lib/activity-utils'
 import { crossLinkWatcherIndex, type WatcherItemIdentity } from '@/lib/watcher-identity'
 import {
     Activity,
@@ -141,13 +140,13 @@ export function MetricsPage() {
         for (const account of accounts) unique.set(account.id, unique.has(account.id) ? null : account)
         return unique
     }, [accounts])
-    const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
+    const canonicalConnections = useMemo(() => metricsCanonicalConnections(accounts), [accounts])
     const cacheLoading = useLibraryCache(s => s.loading)
     const ensureLoaded = useLibraryCache(s => s.ensureLoaded)
     const loadingProgress = useLibraryCache(s => s.loadingProgress)
     const { history: watchHistory, mediaSettling } = useWatchHistory(undefined, true, METRICS_HISTORY_OPTIONS)
     // Exclude backfilled episodes (synthetic timestamps) from time-based metrics; Replay keeps them in totals.
-    const history = useMemo(() => watchHistory.map(historyEntryToActivityItem).filter(item => !item.backfill), [watchHistory])
+    const history = useMemo(() => metricsHistoryRows(watchHistory), [watchHistory])
     const rollups = useWatchEventStore(s => s.rollups)
 
     const [selectedAccountId, setSelectedAccountId] = useState<string>('all')
