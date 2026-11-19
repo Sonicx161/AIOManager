@@ -23,6 +23,7 @@ interface DocSearchEntry {
     description: string
     headingText: string
     body: string
+    hay: string
     headings: Array<{ id: string; content: string; lower: string }>
 }
 
@@ -34,14 +35,21 @@ const entryCache = new WeakMap<IndexedDoc[], DocSearchEntry[]>()
 function getEntries(docs: IndexedDoc[]): DocSearchEntry[] {
     const cached = entryCache.get(docs)
     if (cached) return cached
-    const entries = docs.map(doc => ({
-        doc,
-        title: doc.title.toLowerCase(),
-        description: doc.description.toLowerCase(),
-        headingText: doc.headings.map(h => h.content).join(' ').toLowerCase(),
-        body: doc.body.toLowerCase(),
-        headings: doc.headings.map(h => ({ id: h.id, content: String(h.content ?? ''), lower: String(h.content ?? '').toLowerCase() })),
-    }))
+    const entries = docs.map(doc => {
+        const title = doc.title.toLowerCase()
+        const description = doc.description.toLowerCase()
+        const headingText = doc.headings.map(h => h.content).join(' ').toLowerCase()
+        const body = doc.body.toLowerCase()
+        return {
+            doc,
+            title,
+            description,
+            headingText,
+            body,
+            hay: `${title} ${description} ${headingText} ${body}`,
+            headings: doc.headings.map(h => ({ id: h.id, content: String(h.content ?? ''), lower: String(h.content ?? '').toLowerCase() })),
+        }
+    })
     entryCache.set(docs, entries)
     return entries
 }
@@ -53,8 +61,7 @@ export function searchIndexed(query: string, docs: IndexedDoc[]): DocSearchResul
 
     const scored: Array<{ score: number; results: DocSearchResult[] }> = []
     for (const entry of getEntries(docs)) {
-        const hay = `${entry.title} ${entry.description} ${entry.headingText} ${entry.body}`
-        if (!terms.every(t => hay.includes(t))) continue
+        if (!terms.every(t => entry.hay.includes(t))) continue
 
         let score = 0
         if (entry.title.includes(q)) score += 100
