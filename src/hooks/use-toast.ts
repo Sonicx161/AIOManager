@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import { useCallback, useState, useEffect } from 'react'
+import { useSyncExternalStore } from 'react'
 
 export const DEFAULT_TOAST_DURATION = 5000
 
@@ -30,13 +30,22 @@ export interface Toast {
 
 type ToastInput = Omit<Toast, 'id' | 'createdAt'> & { id?: string }
 
-let toastListeners: ((toasts: Toast[]) => void)[] = []
+const toastListeners = new Set<() => void>()
 let toastSinks: ((toast: Toast) => void)[] = []
 let toasts: Toast[] = []
 
 const notifyListeners = () => {
-  toastListeners.forEach((listener) => listener([...toasts]))
+  toastListeners.forEach((listener) => listener())
 }
+
+function subscribeToToastList(listener: () => void) {
+  toastListeners.add(listener)
+  return () => {
+    toastListeners.delete(listener)
+  }
+}
+
+const getToasts = () => toasts
 
 const toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -85,22 +94,12 @@ export function dismissToast(toastId: string) {
   removeToast(toastId)
 }
 
+const toastApi = { toast, dismiss: dismissToast }
+
 export function useToast() {
-  const [, setLocalToasts] = useState<Toast[]>([])
+  return toastApi
+}
 
-  useEffect(() => {
-    const listener = (newToasts: Toast[]) => setLocalToasts(newToasts)
-    toastListeners.push(listener)
-    return () => {
-      toastListeners = toastListeners.filter((l) => l !== listener)
-    }
-  }, [])
-
-  const dismiss = useCallback((toastId: string) => dismissToast(toastId), [])
-
-  return {
-    toast,
-    dismiss,
-    toasts,
-  }
+export function useToastList() {
+  return useSyncExternalStore(subscribeToToastList, getToasts, getToasts)
 }

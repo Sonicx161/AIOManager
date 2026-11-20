@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils'
-import { DEFAULT_TOAST_DURATION, useToast, type Toast } from '@/hooks/use-toast'
+import { DEFAULT_TOAST_DURATION, dismissToast as dismiss, useToastList, type Toast } from '@/hooks/use-toast'
 import { AlertCircle, AlertTriangle, CheckCircle, X } from 'lucide-react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useEffect, useState } from 'react'
@@ -56,7 +56,7 @@ function ToastAction({ toast, onDone, below }: { toast: Toast; onDone: () => voi
 }
 
 export function Toaster() {
-  const { toasts, dismiss } = useToast()
+  const toasts = useToastList()
 
   return (
     <div aria-live="polite" aria-atomic="true" className="pointer-events-none fixed inset-x-0 top-0 z-[100] flex flex-col items-center gap-2 px-3 pt-[calc(env(safe-area-inset-top,0px)+12px)] sm:left-auto sm:right-4 sm:w-full sm:max-w-sm sm:items-stretch">
