@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useMemo, useState, useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import { preloadRouteChunk } from '@/routes'
 import { useTheme } from '@/contexts/ThemeContext'
 import { BrandLogo } from '@/components/common/BrandLogo'
@@ -9,6 +9,7 @@ import { useSyncStore } from '@/store/syncStore'
 import { useFailoverStore, type FailoverRule } from '@/store/failoverStore'
 import { LogOut, Users, Package, Activity, BarChart3, Settings, HelpCircle, KeyRound, StickyNote, MoreHorizontal, X, Search, CloudOff, RefreshCw, Cloud, Zap, ZapOff, AlertTriangle, Check, Eye, EyeOff } from 'lucide-react'
 import { PriorityPillNav } from '@/components/ui/priority-nav'
+import { navDotMotion } from '@/components/layout/nav-dot-motion'
 import { useAccountStore, getAccountEmail } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { useAddonStore } from '@/store/addonStore'
@@ -53,6 +54,10 @@ const MORE_NAV = [
   { to: '/settings', icon: Settings, label: 'Settings', match: (p: string) => p === '/settings' },
 ]
 
+function NavDot({ crossfade }: { crossfade: boolean }) {
+  return <motion.div {...navDotMotion(crossfade, useReducedMotion() === true)} className="absolute top-1 w-1 h-1 rounded-full bg-primary" />
+}
+
 interface MobileMoreTriggerProps {
   moreOpen: boolean
   setMoreOpen: (v: boolean | ((prev: boolean) => boolean)) => void
@@ -71,14 +76,7 @@ function MobileMoreTrigger({ moreOpen, setMoreOpen, isMoreActive }: MobileMoreTr
     >
       <AnimatePresence>
         {isMoreActive && !moreOpen && (
-          <motion.div
-            layoutId="mobile-nav-dot"
-            className="absolute top-1 w-1 h-1 rounded-full bg-primary"
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0 }}
-            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-          />
+          <NavDot crossfade={false} />
         )}
       </AnimatePresence>
       <MoreHorizontal className="h-5 w-5 mb-0.5" />
@@ -91,7 +89,12 @@ export function MobileBottomNav() {
   const location = useLocation()
   const [moreOpen, setMoreOpen] = useState(false)
   const isMoreActive = MORE_NAV.some(item => item.match(location.pathname))
+  const isPrimaryActive = PRIMARY_NAV.some(item => item.match(location.pathname))
+  const wasPrimaryActive = useRef(false)
+  const crossfade = wasPrimaryActive.current && isPrimaryActive
   const barRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => { wasPrimaryActive.current = isPrimaryActive }, [isPrimaryActive])
 
   // The More sheet anchors to this bar's border-box height so taller themed bars and safe-area padding never overlap it.
   useEffect(() => {
@@ -128,16 +131,9 @@ export function MobileBottomNav() {
             onTouchStart={() => preloadRouteChunk(item.to)}
             className={`relative flex flex-col items-center justify-center pt-3 pb-1 px-1 w-full transition-colors ${isActive ? 'text-primary' : 'text-muted-foreground hover:text-foreground'}`}
           >
-            <AnimatePresence>
+            <AnimatePresence custom={crossfade}>
               {isActive && (
-                <motion.div
-                  layoutId="mobile-nav-dot-bottom"
-                  className="absolute top-1 w-1 h-1 rounded-full bg-primary"
-                  initial={{ opacity: 0, scale: 0 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0 }}
-                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                />
+                <NavDot crossfade={crossfade} />
               )}
             </AnimatePresence>
             <Icon className="h-5 w-5 mb-0.5" />
