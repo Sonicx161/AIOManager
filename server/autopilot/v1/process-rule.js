@@ -469,7 +469,7 @@ export function createProcessRule({
                     built.canonical = await withCurrentDestinations(built.canonical, rule.account_id, rule.owner_sync_user)
                     reconciledList = built.canonical
 
-                    const stremioConn = { id: `${rule.account_id}:stremio`, platform: 'stremio', accountId: rule.account_id, enabled: true, status: 'active', credentials: { authKey: decryptedAuthKey }, capabilities: ['addons'], consecutiveFailures: 0 }
+                    const stremioConn = { id: `${rule.account_id}:stremio`, platform: 'stremio', accountId: rule.account_id, syncUser: rule.owner_sync_user, enabled: true, status: 'active', credentials: { authKey: decryptedAuthKey }, capabilities: ['addons'], consecutiveFailures: 0 }
                     const connectionTargets = hasChanged ? (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)).filter(c => c.enabled && c.platform !== 'stremio') : []
                     const stremioWriter = async (conn) => {
                         try {

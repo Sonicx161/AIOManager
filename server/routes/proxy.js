@@ -15,6 +15,7 @@ import { getAddonUrlKey } from '../utils/addon-url.js'
 import { invalidateCanonicalAddons, invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
 import { PRIMARY_KEY } from '../keys.js'
 import { AVATAR_ALLOWED_TYPES, AVATAR_BUDGET_BYTES, AVATAR_CACHE_CONTROL, AVATAR_MAX_BYTES, AVATAR_SIGN_BATCH_MAX, POSTER_CACHE_CONTROL, clampImageWidth, createByteBudget, declaredTypeConflicts, detectImageType, ifNoneMatchSatisfies, keepCachedArtifact, metahubVariantUrl, signAvatarUrl, verifyAvatarSignature } from '../utils/image-variants.js'
+import { recordClientCollectionWrite } from '../lib/client-collection-writes.js'
 
 export const briefAddons = (addons) => (Array.isArray(addons) ? addons.map(a => ({ id: a?.manifest?.id || a?.id || '?', host: a?.transportUrl ? hostOf(a.transportUrl) : '' })) : [])
 
@@ -786,10 +787,7 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal, seriesV
         const syncUserHeader = request.headers['x-sync-user']
         const ringAcct = request.deviceAuth?.accountUuid || (typeof syncUserHeader === 'string' && syncUserHeader ? syncUserHeader : null)
         // Client writes land on Stremio before their E2E sync blob; the reconciler must not re-assert the stale hub over them.
-        if (type === 'AddonCollectionSet') {
-            if (!fastify.clientCollectionWrites) fastify.clientCollectionWrites = new Map()
-            fastify.clientCollectionWrites.set(accountContext, Date.now())
-        }
+        if (type === 'AddonCollectionSet') recordClientCollectionWrite(ringAcct, accountContext)
 
         const actionMap = {
             'AddonCollectionGet': 'Refreshing Addons',

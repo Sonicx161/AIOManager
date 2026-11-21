@@ -8,6 +8,7 @@ import { invalidateCredentialBundleCache } from './credential-bundle-cache.js'
 import { isLocalHostname } from '../hydra/client.js'
 import { invalidateCanonicalByAuthKey } from '../hydra/canonical-cache.js'
 import { AuthStateError, StateUnavailableError, ReadOnlyReplicaError } from '../admin/account-state.js'
+import { hasRecentClientCollectionWrite } from '../lib/client-collection-writes.js'
 
 // Typed account-state refusals always surface: request paths map them to the fixed
 // 403 or 503 body, background cycles record the skip. Never collapsed into a
@@ -686,18 +687,9 @@ export function createReconciler(fastify) {
     const EXPIRED_RETRY_COOLDOWN_MS = 30 * 60 * 1000 // 30 minutes; Supabase rate-limits auth to 6 req/min per IP. Hammering it gets users banned.
     const NETWORK_ERROR_COOLDOWN_MS = 2 * 60 * 1000  // 2 minutes for transient network issues
 
-    const skipReasonFor = (accountId, connId) => {
+    const skipReasonFor = (accountId, connId, owner) => {
         // A fresh client collection write means the hub is momentarily behind the platforms.
-        const writes = fastify.clientCollectionWrites
-        if (writes) {
-            const last = Math.max(
-                writes.get(accountId) || 0,
-                writes.get('Bulk Op') || 0,
-                writes.get('Profile Swap') || 0,
-                writes.get('Clear All') || 0
-            )
-            if (Date.now() - last < 20000) return 'recent-write'
-        }
+        if (hasRecentClientCollectionWrite(owner, accountId)) return 'recent-write'
         const state = getState(accountId, connId)
         if (state.status === 'expired') {
             // Auth errors get a LONG cooldown. Supabase bans IPs that hit auth too frequently.
@@ -712,7 +704,7 @@ export function createReconciler(fastify) {
         }
         return null
     }
-    const shouldSkip = (accountId, connId) => skipReasonFor(accountId, connId) !== null
+    const shouldSkip = (accountId, connection) => skipReasonFor(accountId, connection.id, connection.syncUser) !== null
 
     const tickCycleCounter = (accountId) => {
         evictStaleState()
@@ -761,7 +753,7 @@ export function createReconciler(fastify) {
 
         for (const connection of targetConnections) {
             const connId = connection.id
-            const skipReason = skipReasonFor(accountId, connId)
+            const skipReason = skipReasonFor(accountId, connId, connection.syncUser)
             if (skipReason) {
                 outcomes[connId] = { outcome: 'skipped', reason: skipReason }
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): ${skipReason}`)
@@ -866,7 +858,7 @@ export function createReconciler(fastify) {
 
         for (const connection of (connections || []).filter(c => c.enabled && c.platform !== 'realstream')) {
             const connId = connection.id
-            if (shouldSkip(accountId, connId)) {
+            if (shouldSkip(accountId, connection)) {
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): in backoff`)
                 continue
             }
@@ -981,7 +973,7 @@ export function createReconciler(fastify) {
     const reconcilePlugins = async (accountId, connection, opts = {}) => {
         if (connection.platform !== 'nuvio') return
         if (!connection.enabled) return
-        if (shouldSkip(accountId, connection.id)) return
+        if (shouldSkip(accountId, connection)) return
         if (nuvioPluginsUnsupported.has(connection.id)) return
 
         const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
@@ -1035,7 +1027,7 @@ export function createReconciler(fastify) {
         const results = []
         for (const connection of (connections || []).filter(c => c.enabled && c.platform !== 'realstream')) {
             const connId = connection.id
-            if (shouldSkip(accountId, connId)) {
+            if (shouldSkip(accountId, connection)) {
                 results.push({ connectionId: connId, platform: connection.platform, skipped: 'backoff' })
                 continue
             }
