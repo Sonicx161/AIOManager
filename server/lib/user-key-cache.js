@@ -4,6 +4,18 @@ import { FALLBACK_KEYS } from '../keys.js'
 
 const _keyCache = new Map()
 const _KEY_CACHE_TTL = 60_000
+const _KEY_CACHE_MAX = 10_000
+
+function remember(cacheKey, value, binding) {
+    const now = Date.now()
+    for (const [key, entry] of _keyCache) {
+        if (entry.expiresAt > now) break
+        _keyCache.delete(key)
+    }
+    _keyCache.delete(cacheKey)
+    _keyCache.set(cacheKey, { value, binding, expiresAt: now + _KEY_CACHE_TTL })
+    if (_keyCache.size > _KEY_CACHE_MAX) _keyCache.delete(_keyCache.keys().next().value)
+}
 
 export async function loadUserKey(userId, provider, binding = null) {
     const cacheKey = `${userId}:${provider}`
@@ -27,18 +39,18 @@ export async function loadUserKey(userId, provider, binding = null) {
                 else format = 'generic'
             }
             const result = { key: plaintext, format, source: 'user' }
-            _keyCache.set(cacheKey, { value: result, binding, expiresAt: Date.now() + _KEY_CACHE_TTL })
+            remember(cacheKey, result, binding)
             return result
         }
     }
     const nullResult = null
-    _keyCache.set(cacheKey, { value: nullResult, binding, expiresAt: Date.now() + _KEY_CACHE_TTL })
+    remember(cacheKey, nullResult, binding)
     return null
 }
 
 export function setUserKey(userId, provider, value, binding = null) {
     const cacheKey = `${userId}:${provider}`
-    _keyCache.set(cacheKey, { value, binding, expiresAt: Date.now() + _KEY_CACHE_TTL })
+    remember(cacheKey, value, binding)
 }
 
 export function invalidateUserKey(userId, provider) {
