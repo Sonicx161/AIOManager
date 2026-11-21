@@ -851,15 +851,17 @@ export async function initializeDatabase(fastify) {
             if (db.type === 'postgres') {
                 await db.run(`
                     INSERT INTO autopilot_rule_stats (rule_id, stabilization, last_check, last_notification, updated_at)
-                    SELECT id, stabilization, last_check, last_notification, updated_at
-                    FROM autopilot_rules
+                    SELECT r.id, r.stabilization, r.last_check, r.last_notification, r.updated_at
+                    FROM autopilot_rules r
+                    WHERE NOT EXISTS (SELECT 1 FROM autopilot_rule_stats s WHERE s.rule_id = r.id)
                     ON CONFLICT (rule_id) DO NOTHING
                 `)
             } else {
                 await db.run(`
                     INSERT OR IGNORE INTO autopilot_rule_stats (rule_id, stabilization, last_check, last_notification, updated_at)
-                    SELECT id, stabilization, last_check, last_notification, updated_at
-                    FROM autopilot_rules
+                    SELECT r.id, r.stabilization, r.last_check, r.last_notification, r.updated_at
+                    FROM autopilot_rules r
+                    WHERE NOT EXISTS (SELECT 1 FROM autopilot_rule_stats s WHERE s.rule_id = r.id)
                 `)
             }
             const afterCount = await db.get(`SELECT COUNT(*) as c FROM autopilot_rule_stats`)
