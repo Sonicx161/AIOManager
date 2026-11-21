@@ -593,6 +593,10 @@ export async function initializeDatabase(fastify) {
             const ruleColNames = await db.query(
                 `SELECT column_name FROM information_schema.columns WHERE table_name = 'autopilot_rules' AND table_schema = 'public'`
             ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
+            // The ALTERs below act on whatever search_path resolves, so read that relation's declared types; 25 is the built-in text OID.
+            const plainTextRuleColumns = await db.query(
+                `SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('autopilot_rules') AND attnum > 0 AND NOT attisdropped AND atttypid = 25`
+            ).then(rows => new Set(rows.map(r => r.attname))).catch(() => new Set())
             const ruleColumnAdds = [
                 ['is_active', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`],
                 ['last_check', `ALTER TABLE autopilot_rules ADD COLUMN IF NOT EXISTS last_check BIGINT`],
@@ -636,9 +640,15 @@ export async function initializeDatabase(fastify) {
             // Migration: Ensure columns are TEXT/VARCHAR for encrypted strings, not JSONB
             // We use try/catch to avoid aborting if the types are already correct
             // Using explicit casting (USING column::TEXT) ensures stability if columns were manually tweaked
-            try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN priority_chain TYPE TEXT USING priority_chain::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN addon_list TYPE TEXT USING addon_list::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
-            try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN stabilization TYPE TEXT USING stabilization::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            if (!plainTextRuleColumns.has('priority_chain')) {
+                try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN priority_chain TYPE TEXT USING priority_chain::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            }
+            if (!plainTextRuleColumns.has('addon_list')) {
+                try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN addon_list TYPE TEXT USING addon_list::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            }
+            if (!plainTextRuleColumns.has('stabilization')) {
+                try { await db.run(`ALTER TABLE autopilot_rules ALTER COLUMN stabilization TYPE TEXT USING stabilization::TEXT`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
+            }
 
             // Same guarded check as autopilot_rules above: current schemas already
             // carry all three columns; only legacy databases pay the ALTER cost.
