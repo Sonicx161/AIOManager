@@ -13,7 +13,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useUIStore } from '@/store/uiStore'
 import { memo } from 'react'
-import { SavedAddonEditDialog, SavedAddonDeleteConfirm, useOpenedOnce } from './SavedAddonEditDialog'
+import { SavedAddonEditDialog, SavedAddonDeleteConfirm } from './SavedAddonEditDialog'
+import { useEverTrue } from '@/hooks/useEverTrue'
 import { getTagColor } from '@/lib/tag-utils'
 import { Button } from '@/components/ui/button'
 import { SavedAddonDeploymentBadge } from './SavedAddonDeploymentBadge'
@@ -69,8 +70,8 @@ export const SavedAddonListRow = memo(function SavedAddonListRow({
         handleReplaceUrl,
         getHealthTooltip,
     } = useSavedAddonActions({ savedAddon, latestVersion, manifestChange, onUpdate })
-    const detailsMounted = useOpenedOnce(showDetails)
-    const deleteMounted = useOpenedOnce(showDeleteDialog)
+    const detailsMounted = useEverTrue(showDetails)
+    const deleteMounted = useEverTrue(showDeleteDialog)
 
     const handleOpenConfiguration = (e: React.MouseEvent) => {
         e.stopPropagation()

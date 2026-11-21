@@ -1,15 +1,8 @@
-import { useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import type { SavedAddon } from '@/types/saved-addon'
 import type { Account } from '@/types/account'
 import { SavedAddonDetails } from './SavedAddonDetails'
-
-export function useOpenedOnce(open: boolean): boolean {
-    const [opened, setOpened] = useState(open)
-    if (open && !opened) setOpened(true)
-    return opened || open
-}
 
 interface SavedAddonEditDialogProps {
     savedAddon: SavedAddon

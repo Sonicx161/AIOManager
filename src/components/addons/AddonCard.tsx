@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react'
+import { useEverTrue } from '@/hooks/useEverTrue'
 import { AddonMetadataDialog } from './AddonMetadataDialog'
 import { CinemetaConfigurationDialog } from './CinemetaConfigurationDialog'
 import { PlatformSourceChip } from './PlatformSourceChip'
@@ -234,12 +235,6 @@ function AddonMenuHeader({ name, logo, summary, iconClassName }: { name: string;
       </div>
     </>
   )
-}
-
-function useEverTrue(flag: boolean): boolean {
-  const [seen, setSeen] = useState(flag)
-  if (flag && !seen) setSeen(true)
-  return seen || flag
 }
 
 export const AddonCard = React.memo(function AddonCard({

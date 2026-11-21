@@ -16,7 +16,8 @@ import { extractAddonParams } from '@/lib/addon-params'
 import React from 'react'
 import type { SavedAddon, SavedAddonManifestChangeSummary } from '@/types/saved-addon'
 import type { Account } from '@/types/account'
-import { SavedAddonEditDialog, SavedAddonDeleteConfirm, useOpenedOnce } from './SavedAddonEditDialog'
+import { SavedAddonEditDialog, SavedAddonDeleteConfirm } from './SavedAddonEditDialog'
+import { useEverTrue } from '@/hooks/useEverTrue'
 import { getTagColor } from '@/lib/tag-utils'
 import { HighlightText } from '@/components/ui/highlight-text'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -74,8 +75,8 @@ export const SavedAddonCard = React.memo(function SavedAddonCard({
     handleReplaceUrl,
     getHealthTooltip,
   } = useSavedAddonActions({ savedAddon, latestVersion, manifestChange, onUpdate })
-  const detailsMounted = useOpenedOnce(showDetails)
-  const deleteMounted = useOpenedOnce(showDeleteDialog)
+  const detailsMounted = useEverTrue(showDetails)
+  const deleteMounted = useEverTrue(showDeleteDialog)
 
   const handleDelete = () => {
     setShowDeleteDialog(true)
