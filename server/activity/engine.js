@@ -270,9 +270,9 @@ async function getRegisteredAccountsPage(limit, after = null) {
                     ) AS login_rank
              FROM server_credentials
              WHERE (credential_type = 'stremio' OR credential_type IS NULL)
-               AND NOT EXISTS (SELECT 1 FROM account_admin_state aas WHERE aas.sync_user = server_credentials.sync_user)
+               AND NOT EXISTS (SELECT 1 FROM account_admin_state aas WHERE aas.sync_user = server_credentials.sync_user)${keyset.where}
          ) ranked
-         WHERE login_rank = 1${keyset.where}
+         WHERE login_rank = 1
          ORDER BY sync_user ASC, account_id ASC, COALESCE(connection_id, '') ASC
          LIMIT ${keyset.limitParam}`,
         keyset.params
