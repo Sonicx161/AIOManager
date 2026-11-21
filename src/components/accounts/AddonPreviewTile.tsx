@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import { isUsableLogoSrc } from '@/components/ui/addon-icon'
 import { tileLetter } from './account-stat-chips'
 
 /** Addon logo tile with a letter fallback while loading or when the logo fails. */
-export function AddonPreviewTile({ src, name }: { src?: string; name?: string }) {
+export const AddonPreviewTile = memo(function AddonPreviewTile({ src, name }: { src?: string; name?: string }) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
   useEffect(() => { setLoaded(false); setFailed(false) }, [src])
@@ -25,4 +25,4 @@ export function AddonPreviewTile({ src, name }: { src?: string; name?: string })
       )}
     </div>
   )
-}
+})
