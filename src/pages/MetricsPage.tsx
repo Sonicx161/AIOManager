@@ -54,6 +54,7 @@ import { lazyChunk } from '@/lib/lazy-chunk'
 import { ActivityHeatmap, ActivitySparkline, WatchFunnel, ContentDonut, FranchiseBars, VelocityChart, WeekComparison, ContributionGraph, SessionDepth, WeeklyRhythm, ComebackRate, DropOffPoint } from '@/components/metrics'
 import { pressable, PRESSABLE_FOCUS } from '@/components/metrics/pressable'
 import { rankedProfileCount } from '@/components/metrics/profile-counts'
+import { useDropStaleDetailParam } from '@/hooks/useDropStaleDetailParam'
 
 const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
@@ -154,6 +155,7 @@ export function MetricsPage() {
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
     const [detailModalSeen, setDetailModalSeen] = useState(false)
     useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
+    useDropStaleDetailParam(detailItem !== null)
 
     const openDetail = useCallback((type?: string, itemId?: string, name?: string, poster?: string) => {
         if (!itemId) return

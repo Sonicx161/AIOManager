@@ -31,6 +31,7 @@ import { useTmdbKeyStatus } from '@/hooks/useTmdbKeyStatus'
 import { buildCinemetaFatRails } from '@/lib/cinemeta-rails'
 import { getWatchlist, type WatchlistItem } from '@/lib/watchlist'
 import { bucketize, bucketsToPmdbRails, itemIdFromCanonical, type BucketItem } from '@/lib/rail-buckets'
+import { useDropStaleDetailParam } from '@/hooks/useDropStaleDetailParam'
 
 const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
@@ -130,6 +131,7 @@ export function AccountDetailPage({ accountId, onBack }: AccountDetailPageProps)
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
     const [detailModalSeen, setDetailModalSeen] = useState(false)
     useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
+    useDropStaleDetailParam(detailItem !== null)
     const [catalogOpen, setCatalogOpen] = useState(false)
 
     const [pmdbDialogOpen, setPmdbDialogOpen] = useState(false)

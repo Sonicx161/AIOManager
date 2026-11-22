@@ -968,7 +968,7 @@ export function ActivityPage() {
             </Tabs>
             {activeView === 'foryou' && (
                 <div className={forYouAccountId ? 'hidden' : undefined}>
-                    <ForYouPage onAccountClick={(id) => setForYouAccountId(id)} />
+                    <ForYouPage onAccountClick={(id) => setForYouAccountId(id)} active={!forYouAccountId} />
                 </div>
             )}
             {activeView === 'foryou' && forYouAccountId && (

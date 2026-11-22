@@ -40,6 +40,7 @@ import { getWatchlist, type WatchlistItem } from '@/lib/watchlist'
 import { bucketize, bucketsToPmdbRails, itemIdFromCanonical, type BucketItem } from '@/lib/rail-buckets'
 import type { ActivityItem } from '@/types/activity'
 import type { Account } from '@/types/account'
+import { useDropStaleDetailParam } from '@/hooks/useDropStaleDetailParam'
 
 const ActivityDetailModal = lazyChunk(() => import('@/components/activity/ActivityDetailModal').then(m => ({ default: m.ActivityDetailModal })))
 
@@ -48,6 +49,8 @@ const HOUSEHOLD_RAIL_MAX = 12
 export interface ForYouPageProps {
     onAccountClick?: (accountId: string) => void
     onItemClick?: (item: { itemId: string; type: string; name: string }) => void
+    /** False while hidden under the account page: no pending pick may open a sheet, and the URL belongs to that page. */
+    active?: boolean
 }
 
 // ─── Hero ──────────────────────────────────────────────────────────────────
@@ -246,7 +249,7 @@ function ForYouHero({ item, loading, onMoreInfo, onSurpriseMe, surpriseSpinning 
     )
 }
 
-export function ForYouPage({ onAccountClick }: ForYouPageProps) {
+export function ForYouPage({ onAccountClick, active = true }: ForYouPageProps) {
     useDocumentTitle('For You')
 
     const RAIL_MAX = useRailSize()
@@ -599,6 +602,7 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
     const [detailItem, setDetailItem] = useState<DetailItem | null>(null)
     const [detailModalSeen, setDetailModalSeen] = useState(false)
     useEffect(() => { if (detailItem) setDetailModalSeen(true) }, [detailItem])
+    useDropStaleDetailParam(detailItem !== null, active)
     const [pmdbDialogOpen, setPmdbDialogOpen] = useState(false)
     const [hasPmdbKey, setHasPmdbKey] = useState(false)
     const [pmdbLastPublished, setPmdbLastPublished] = useState<number | null>(null)
@@ -630,6 +634,12 @@ export function ForYouPage({ onAccountClick }: ForYouPageProps) {
     // ── Surprise Me ────────────────────────────────────────────────────────
     const [surpriseSpinning, setSurpriseSpinning] = useState(false)
     const surpriseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    useEffect(() => {
+        if (active) return
+        if (surpriseTimerRef.current) clearTimeout(surpriseTimerRef.current)
+        surpriseTimerRef.current = null
+        setSurpriseSpinning(false)
+    }, [active])
     useEffect(() => () => { if (surpriseTimerRef.current) clearTimeout(surpriseTimerRef.current) }, [])
     const handleSurpriseMe = useCallback(() => {
         const pool = recsResult?.rails
