@@ -902,8 +902,8 @@ export function MetricsPage() {
                                                     </div>
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-2">
-                                                            <div className="font-semibold text-base tracking-tight truncate">{maskAccountName(user.name)}</div>
-                                                            {user.rank === 1 && <StatusChip variant="primary">Lead</StatusChip>}
+                                                            <div className="font-semibold text-base tracking-tight line-clamp-2 [overflow-wrap:anywhere]">{maskAccountName(user.name)}</div>
+                                                            {user.rank === 1 && <StatusChip variant="primary" className="shrink-0">Lead</StatusChip>}
                                                         </div>
                                                         <div className="text-xs font-medium text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 mt-1">
                                                             <span className="flex items-center gap-1"><PlayCircle className="h-3 w-3 text-primary" /> {user.count}</span>
