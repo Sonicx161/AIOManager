@@ -12,7 +12,8 @@ const canonicalCache = new Map()
 const canonicalInFlight = new Map()
 const keysByAuthHash = new Map()
 
-const cacheKey = (accountId, syncUser) => `${syncUser || ''}:${accountId}`
+const cacheKey = (accountId, syncUser) => JSON.stringify([String(syncUser || ''), String(accountId)])
+const ownerOf = (key) => JSON.parse(key)[0]
 const hashAuthKey = (authKey) => createHash('sha256').update(String(authKey)).digest('hex')
 
 function invalidateKey(key) {
@@ -26,26 +27,25 @@ export function invalidateCanonicalAddons(accountId, syncUser) {
     invalidateKey(cacheKey(accountId, syncUser))
 }
 
-// Owner-scoped clear (Dashboard repair): keys are `${syncUser}:${accountId}`, so a
-// non-empty owner prefix never crosses tenants. Also drops the owner's in-flight reads.
+// Owner-scoped clear (Dashboard repair, workspace delete): matches the key's owner exactly. Also drops the owner's in-flight reads.
 export function invalidateCanonicalForOwner(syncUser) {
     if (!syncUser) return 0
-    const prefix = `${syncUser}:`
+    const owner = String(syncUser)
     // The union of cached and in-flight keys: an in-flight read whose entry is
     // dropped here fails the identity check in refresh() and cannot repopulate.
     const keys = new Set()
-    for (const key of canonicalCache.keys()) if (key.startsWith(prefix)) keys.add(key)
-    for (const key of canonicalInFlight.keys()) if (key.startsWith(prefix)) keys.add(key)
+    for (const key of canonicalCache.keys()) if (ownerOf(key) === owner) keys.add(key)
+    for (const key of canonicalInFlight.keys()) if (ownerOf(key) === owner) keys.add(key)
     for (const key of keys) invalidateKey(key)
     return keys.size
 }
 
 export function canonicalCacheCountForOwner(syncUser) {
     if (!syncUser) return 0
-    const prefix = `${syncUser}:`
+    const owner = String(syncUser)
     const keys = new Set()
-    for (const key of canonicalCache.keys()) if (key.startsWith(prefix)) keys.add(key)
-    for (const key of canonicalInFlight.keys()) if (key.startsWith(prefix)) keys.add(key)
+    for (const key of canonicalCache.keys()) if (ownerOf(key) === owner) keys.add(key)
+    for (const key of canonicalInFlight.keys()) if (ownerOf(key) === owner) keys.add(key)
     return keys.size
 }
 

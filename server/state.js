@@ -38,16 +38,14 @@ export function getCachedAuthBound(key, storedHash) {
     return entry.passwordHash
 }
 
+// Password cache key for one workspace id, encoded so no id can collide with another key.
+export const passwordCacheKey = (id) => JSON.stringify(['sync', String(id)])
+
 export function setCachedAuth(key, password, boundHash) {
     authCache.set(key, { passwordHash: hashAuthPassword(password), ts: Date.now(), ...(boundHash !== undefined ? { bound: boundHash } : {}) })
-    // Cap sized for the namespace mix: 'sync:<uuid>' (one per account) plus
-    // 'device:<uuid>:<deviceId>' (one per enrolled device). Above the cap the
-    // LRU evicts entries inside their 60s TTL, so every request from the
-    // evicted credentials pays a DB read, a device-token scrypt and a
-    // last_used_at write. Default 10 000 keeps both namespaces resident for
-    // public instances: ~350 bytes per entry (64-char hex hash string, key
-    // string, Map slots, entry object) -> ~3.5 MB at the cap, versus ~1 MB at
-    // the old 1000. AUTH_CACHE_MAX overrides; below the previous default of
+    // One entry per workspace with a recent password check (~350 bytes each, ~3.5 MB at the
+    // default 10 000 cap). Above the cap the LRU evicts entries inside their 60s TTL, so those
+    // workspaces pay a DB read and a password scrypt again. AUTH_CACHE_MAX overrides; below
     // 1000 is rejected to keep a typo from silently reintroducing the thrash.
     if (authCache.size > AUTH_CACHE_MAX) {
         const oldest = authCache.keys().next().value
@@ -57,14 +55,6 @@ export function setCachedAuth(key, password, boundHash) {
 
 export function invalidateCachedAuth(key) {
     authCache.delete(key)
-}
-
-// Invalidate every entry under a namespace prefix, e.g. 'device:<uuid>:' when
-// a credential epoch bump kills all of an account's device sessions.
-export function invalidateCachedAuthPrefix(prefix) {
-    for (const key of authCache.keys()) {
-        if (key.startsWith(prefix)) authCache.delete(key)
-    }
 }
 
 export const proxyQueue = []

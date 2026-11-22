@@ -98,7 +98,7 @@ class MetadataCache {
         return entry.value
     }
 
-    async _getL2(key, now) {
+    async _getL2(key, now, label = 'metadata') {
         try {
             const row = await db.get(
                 'SELECT response, expires_at FROM metadata_cache WHERE key = $1',
@@ -123,7 +123,7 @@ class MetadataCache {
             }
             return { expired: false, value: parsed, expiresAt }
         } catch (err) {
-            logger.warn && logger.warn(`[MetadataCache] L2 read failed for key prefix=${key.split(':')[0]}: ${err && err.message}`)
+            logger.warn && logger.warn(`[MetadataCache] L2 read failed (${label}): ${err && err.message}`)
             return null
         }
     }
@@ -226,7 +226,7 @@ class MetadataCache {
             return this._awaitPending(pending, key)
         }
 
-        const l2Result = await this._getL2(key, now)
+        const l2Result = await this._getL2(key, now, options.label)
         if (l2Result && !l2Result.expired) {
             this.stats.l2_hits_total++
             if (current()) this._setL1(key, l2Result.value, l2Result.expiresAt || (now + jitteredTtl(baseTtl)))

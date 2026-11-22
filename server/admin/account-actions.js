@@ -5,7 +5,7 @@
 import crypto from 'crypto'
 import db from '../db.js'
 import { verifyAuth } from '../auth.js'
-import { invalidateCachedAuth, invalidateCachedAuthPrefix } from '../state.js'
+import { invalidateCachedAuth, passwordCacheKey } from '../state.js'
 import { auditedTx } from './audit.js'
 import { refreshAccountAdminState, patchLocalAccountState } from './account-state.js'
 import { accountHandle } from '../utils/acct-handle.js'
@@ -107,8 +107,7 @@ async function refreshSnapshotAfterMutation(key, localState) {
 }
 
 function invalidateAccountCaches(key) {
-    invalidateCachedAuth('sync:' + key)
-    invalidateCachedAuthPrefix('device:' + key + ':')
+    invalidateCachedAuth(passwordCacheKey(key))
 }
 
 async function readStateRow(tx, key) {

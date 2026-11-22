@@ -4,10 +4,11 @@ import { verifyAuth, authenticateDeviceCredential, timingSafeEqual } from '../au
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
 import { assertWritablePrimary, AuthUnavailableError, applyAccountStateErrorMapping } from '../admin/account-state.js'
-import { invalidateCachedAuth, invalidateCachedAuthPrefix, getCachedAuthBound, hashAuthPassword } from '../state.js'
+import { invalidateCachedAuth, getCachedAuthBound, hashAuthPassword, passwordCacheKey } from '../state.js'
 import { hashSyncPassword, hashSessionKey, verifySyncPassword } from '../lib/sync-password.js'
 import { isReadOnlyReplica } from '../config.js'
 import { SESSION_DEVICE_PREFIX, SESSION_KEY_LIFETIME_MS, SESSION_KEYS_PER_ACCOUNT, isSessionDevice } from '../lib/session-key.js'
+import { isAcceptableNewId } from '../lib/ids.js'
 
 const DEVICE_TIERS = new Set(['idb', 'prf'])
 // Fixed server-side policy; renewal = re-enroll, which slides expires_at to now + 180d.
@@ -25,7 +26,7 @@ export async function sweepExpiredSessionKeys(now = Date.now()) {
 async function passwordMatchesLockedRow(request, user, row) {
     if (!row?.password) return false
     const password = request.headers['x-sync-password']
-    const cached = getCachedAuthBound('sync:' + user, row.password)
+    const cached = getCachedAuthBound(passwordCacheKey(user), row.password)
     if (cached && timingSafeEqual(cached, hashAuthPassword(password))) return true
     const verified = await verifySyncPassword(password, row.password)
     if (verified !== null) return verified === true
@@ -98,6 +99,8 @@ export function registerDeviceCredentialRoutes(fastify) {
                     if (!updated.changes) return { unauthorized: true }
                     return await tx.get('SELECT * FROM device_credentials WHERE id = $1', [existing.id])
                 }
+                // A colon is refused only for a device being created; an existing (legacy) device keeps renewing under its id.
+                if (!isAcceptableNewId(deviceId)) return { invalidNew: true }
                 const id = crypto.randomUUID()
                 await tx.run(
                     `INSERT INTO device_credentials (id, account_uuid, device_id, token_hash, tier, label, created_at, expires_at, revoked, last_used_at, credential_epoch)
@@ -107,9 +110,8 @@ export function registerDeviceCredentialRoutes(fastify) {
                 return await tx.get('SELECT * FROM device_credentials WHERE id = $1', [id])
             }, { immediate: true })
             if (row.reserved) { reply.status(400); return { error: 'deviceId required (1-128 chars)' } }
+            if (row.invalidNew) { reply.status(400); return { error: 'deviceId must be 1-128 characters with no colon or control characters' } }
             if (row.unauthorized) { reply.status(401); return { error: 'Unauthorized' } }
-            // Re-enrollment replaced the credential: any cached token for this device is dead.
-            invalidateCachedAuth('device:' + authUser + ':' + deviceId)
             return { success: true, device: publicDeviceRecord(row) }
         } catch (err) {
             if (err instanceof AuthUnavailableError) return applyAccountStateErrorMapping(err, reply)
@@ -190,8 +192,7 @@ export function registerDeviceCredentialRoutes(fastify) {
                 return result.changes > 0
             }, { immediate: true })
             if (!found) return { success: true, found: false }
-            invalidateCachedAuth('sync:' + authUser)
-            invalidateCachedAuth('device:' + authUser + ':' + deviceId)
+            invalidateCachedAuth(passwordCacheKey(authUser))
             return { success: true, found: true }
         } catch {
             reply.status(500)
@@ -212,8 +213,7 @@ export function registerDeviceCredentialRoutes(fastify) {
             if (!account) { reply.status(404); return { error: 'Account not found' } }
             const nextEpoch = (Number(account.credential_epoch) || 1) + 1
             await db.run('UPDATE kv_store SET credential_epoch = $1 WHERE key = $2', [nextEpoch, authUser])
-            invalidateCachedAuth('sync:' + authUser)
-            invalidateCachedAuthPrefix('device:' + authUser + ':')
+            invalidateCachedAuth(passwordCacheKey(authUser))
             return { success: true, credentialEpoch: nextEpoch }
         } catch {
             reply.status(500)

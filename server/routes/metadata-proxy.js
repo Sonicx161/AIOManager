@@ -357,8 +357,8 @@ export function registerMetadataProxyRoutes(fastify) {
 
     const AUX_CACHE_TTL_DEFAULT = 6 * 60 * 60 * 1000
 
-    async function auxMetadataGet(cacheKey, fetcher, ttl = AUX_CACHE_TTL_DEFAULT, owner = null) {
-        const result = await metadataCache.get(cacheKey, fetcher, { ttl, owner })
+    async function auxMetadataGet(label, cacheKey, fetcher, ttl = AUX_CACHE_TTL_DEFAULT, owner = null) {
+        const result = await metadataCache.get(cacheKey, fetcher, { ttl, owner, label })
         return { value: result && result.value, hit: result ? result.source !== 'miss' && result.source !== 'stale' : false }
     }
 
@@ -406,7 +406,7 @@ export function registerMetadataProxyRoutes(fastify) {
         const version = createHash('sha256').update(String(binding)).digest('hex')
         const cacheKey = JSON.stringify(['private-v2', authUser, version, 'pmdb', url])
         try {
-            const { value, hit } = await auxMetadataGet(cacheKey, async () => {
+            const { value, hit } = await auxMetadataGet('pmdb', cacheKey, async () => {
                 const controller = new AbortController()
                 if (request.socket && !request.socket.destroyed) {
                     request.socket.once('close', () => controller.abort())
@@ -547,7 +547,7 @@ export function registerMetadataProxyRoutes(fastify) {
         const cacheKey = JSON.stringify(['private-v2', authUser, version, 'mdblist', pathParts, mdbKeyQuery])
 
         try {
-            const { value, hit } = await auxMetadataGet(cacheKey, async () => {
+            const { value, hit } = await auxMetadataGet('mdblist', cacheKey, async () => {
                 const response = await resilientFetch(url, {
                     headers: { Accept: 'application/json' },
                     timeout: UPSTREAM_TIMEOUT_MS,
@@ -592,9 +592,9 @@ export function registerMetadataProxyRoutes(fastify) {
             ? `${TVDB_BASE}/${cleanPath}?${queryString}`
             : `${TVDB_BASE}/${cleanPath}`
 
-        const cacheKey = `tvdb:${authUser}:${url}`
+        const cacheKey = JSON.stringify(['tvdb', String(authUser), url])
         try {
-            const { value, hit } = await auxMetadataGet(cacheKey, async () => {
+            const { value, hit } = await auxMetadataGet('tvdb', cacheKey, async () => {
                 const response = await resilientFetch(url, {
                     headers: { Authorization: `Bearer ${keyRecord.key}`, Accept: 'application/json' },
                     timeout: UPSTREAM_TIMEOUT_MS,
@@ -635,7 +635,7 @@ export function registerMetadataProxyRoutes(fastify) {
         const url = `${FANART_BASE}/${cleanPath}?api_key=${keyRecord.key}`
 
         try {
-            const { value, hit } = await auxMetadataGet(`fanart:${authUser}:${cleanPath}`, async () => {
+            const { value, hit } = await auxMetadataGet('fanart', JSON.stringify(['fanart', String(authUser), cleanPath]), async () => {
                 const response = await resilientFetch(url, {
                     headers: { Accept: 'application/json' },
                     timeout: UPSTREAM_TIMEOUT_MS,
@@ -734,7 +734,7 @@ export function registerMetadataProxyRoutes(fastify) {
         let comments = []
         if (tmdbKeyRecord) {
             try {
-                const aggregate = await auxMetadataGet(cacheKey, buildComments)
+                const aggregate = await auxMetadataGet('comments', cacheKey, buildComments)
                 comments = aggregate.value
             } catch (err) {}
         }

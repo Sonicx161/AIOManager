@@ -3,7 +3,7 @@ import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { encrypt } from '../crypto.js'
 import { FALLBACK_KEYS, PRIMARY_KEY } from '../keys.js'
-import { getCachedAuth, setCachedAuth, hashAuthPassword } from '../state.js'
+import { getCachedAuth, setCachedAuth, hashAuthPassword, passwordCacheKey } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
 import { verifySyncPassword, upgradeLegacyPasswordHash } from '../lib/sync-password.js'
@@ -23,7 +23,7 @@ async function validateSyncAuth(request, reply) {
         return null
     }
 
-    const cachedPw = getCachedAuth('sync:' + syncUser)
+    const cachedPw = getCachedAuth(passwordCacheKey(syncUser))
     if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(syncPassword))) {
         return syncUser
     }
@@ -49,7 +49,7 @@ async function validateSyncAuth(request, reply) {
         return null
     }
 
-    setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
+    setCachedAuth(passwordCacheKey(syncUser), syncPassword, upgradedHash || row.password)
     return syncUser
 }
 
@@ -392,6 +392,12 @@ export function registerActivityRoutes(fastify, activityEngine) {
             }
             let upserted = 0
             let skipped = 0
+            const rejected = []
+            // A row id held by another workspace (ids joined with ':' can coincide) is never updated; the entry is reported instead.
+            const heldByOtherWorkspace = async (tx, credId) => {
+                const row = await tx.get('SELECT sync_user FROM server_credentials WHERE id = $1', [credId])
+                return Boolean(row) && row.sync_user !== syncUser
+            }
             let pruned = 0
             await conn.tx(async (tx) => {
                 const now = Date.now()
@@ -494,8 +500,9 @@ export function registerActivityRoutes(fastify, activityEngine) {
                     }
                     const encryptedAuthKey = encrypt(acc.authKey, PRIMARY_KEY)
 
+                    let accountWrite
                     if (db.type === 'postgres') {
-                        await tx.run(
+                        accountWrite = await tx.run(
                             `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, canonical_connection_id)
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (id) DO UPDATE SET
@@ -503,11 +510,12 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                 auth_key = EXCLUDED.auth_key,
                                 updated_at = EXCLUDED.updated_at,
                                 canonical_connection_id = EXCLUDED.canonical_connection_id
-                             WHERE server_credentials.credential_type IS NULL OR server_credentials.credential_type = 'stremio'`,
+                             WHERE server_credentials.sync_user = EXCLUDED.sync_user
+                                 AND (server_credentials.credential_type IS NULL OR server_credentials.credential_type = 'stremio')`,
                             [credId, syncUser, acc.accountId, accountName, encryptedAuthKey, now, acc.connectionId || null]
                         )
                     } else {
-                        await tx.run(
+                        accountWrite = await tx.run(
                             `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, canonical_connection_id)
                              VALUES ($1, $2, $3, $4, $5, $6, $7)
                              ON CONFLICT (id) DO UPDATE SET
@@ -515,9 +523,14 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                 auth_key = excluded.auth_key,
                                 updated_at = excluded.updated_at,
                                 canonical_connection_id = excluded.canonical_connection_id
-                             WHERE credential_type IS NULL OR credential_type = 'stremio'`,
+                             WHERE sync_user = excluded.sync_user
+                                 AND (credential_type IS NULL OR credential_type = 'stremio')`,
                             [credId, syncUser, acc.accountId, accountName, encryptedAuthKey, now, acc.connectionId || null]
                         )
+                    }
+                    if (!accountWrite?.changes && await heldByOtherWorkspace(tx, credId)) {
+                        rejected.push({ accountId: acc.accountId, ...(acc.connectionId ? { connectionId: acc.connectionId } : {}), reason: 'id-collision' })
+                        continue
                     }
                     upserted++
                 }
@@ -532,6 +545,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
                     // so a delayed cleanup of a previous same-id incarnation cannot claim it.
                     const generationToken = typeof conn.generation === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(conn.generation.trim()) ? conn.generation.trim() : null
                     if (foreignOwners.has(credId)) {
+                        rejected.push({ accountId: conn.accountId, connectionId: conn.connectionId, reason: 'id-collision' })
                         continue
                     }
                     const existing = existingById.get(credId)
@@ -561,8 +575,9 @@ export function registerActivityRoutes(fastify, activityEngine) {
                         }
                     }
                     const encryptedAuthKey = encrypt(conn.authKey, PRIMARY_KEY)
+                    let connectionWrite
                     if (db.type === 'postgres') {
-                        await tx.run(
+                        connectionWrite = await tx.run(
                             `INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                              VALUES ($1, $2, $3, $4, $5, 'stremio', $6, $7)
                              ON CONFLICT (id) DO UPDATE SET
@@ -574,7 +589,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
                             [credId, syncUser, conn.accountId, encryptedAuthKey, conn.connectionId, now, generationToken]
                         )
                     } else {
-                        await tx.run(
+                        connectionWrite = await tx.run(
                             `INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                              VALUES ($1, $2, $3, $4, $5, 'stremio', $6, $7)
                              ON CONFLICT (id) DO UPDATE SET
@@ -585,6 +600,10 @@ export function registerActivityRoutes(fastify, activityEngine) {
                                  AND (credential_type IS NULL OR credential_type = 'stremio')`,
                             [credId, syncUser, conn.accountId, encryptedAuthKey, conn.connectionId, now, generationToken]
                         )
+                    }
+                    if (!connectionWrite?.changes && await heldByOtherWorkspace(tx, credId)) {
+                        rejected.push({ accountId: conn.accountId, connectionId: conn.connectionId, reason: 'id-collision' })
+                        continue
                     }
                     upserted++
                 }
@@ -709,7 +728,7 @@ export function registerActivityRoutes(fastify, activityEngine) {
             const { invalidateConnectionCache } = await import('../providers/reconciler.js')
             invalidateConnectionCache(syncUser)
 
-            return { synced: upserted, skipped, pruned, serverStremioCredentialedAccounts: await listStremioCredentialedAccountIds(syncUser, conn) }
+            return { synced: upserted, skipped, pruned, ...(rejected.length > 0 ? { rejected } : {}), serverStremioCredentialedAccounts: await listStremioCredentialedAccountIds(syncUser, conn) }
         })
     })
 }

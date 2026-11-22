@@ -3,7 +3,7 @@ import { kvHeadSource } from '../lib/kv-head.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
 import { verifyAuth, timingSafeEqual, authenticateDeviceCredential } from '../auth.js'
-import { getCachedAuthBound, hashAuthPassword } from '../state.js'
+import { getCachedAuthBound, hashAuthPassword, passwordCacheKey } from '../state.js'
 import { assertWritablePrimary } from '../admin/account-state.js'
 import { isSafeUrl } from '../utils/ssrf.js'
 import { guardedWebFetch } from '../utils/safe-fetch.js'
@@ -122,7 +122,7 @@ export function registerMetadataKeysRoutes(fastify) {
         const binding = authUser ? await workspaceBinding(authUser) : null
         const boundAuth = request.deviceAuth
             ? (await authenticateDeviceCredential(authUser, request.headers['x-sync-device'], request.headers['x-sync-password'])).ok
-            : timingSafeEqual(getCachedAuthBound('sync:' + authUser, binding), hashAuthPassword(request.headers['x-sync-password']))
+            : timingSafeEqual(getCachedAuthBound(passwordCacheKey(authUser), binding), hashAuthPassword(request.headers['x-sync-password']))
         if (!authUser || binding === null || !boundAuth) {
             reply.status(401); return { error: 'Unauthorized' }
         }
@@ -338,7 +338,7 @@ export function registerMetadataKeysRoutes(fastify) {
         const binding = authUser ? await workspaceBinding(authUser) : null
         const boundAuth = request.deviceAuth
             ? (await authenticateDeviceCredential(authUser, request.headers['x-sync-device'], request.headers['x-sync-password'])).ok
-            : timingSafeEqual(getCachedAuthBound('sync:' + authUser, binding), hashAuthPassword(request.headers['x-sync-password']))
+            : timingSafeEqual(getCachedAuthBound(passwordCacheKey(authUser), binding), hashAuthPassword(request.headers['x-sync-password']))
         if (!authUser || binding === null || !boundAuth) {
             reply.status(401); return { error: 'Unauthorized' }
         }

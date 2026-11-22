@@ -7,7 +7,7 @@ import { auditedTx } from './audit.js'
 import { appendUserNotice, invalidReason, auditReason, resolveHandleToKey, NOTICE_TEMPLATES } from './account-actions.js'
 import { assertAccountActive, assertWritablePrimary, AuthStateError } from './account-state.js'
 import { REPAIR_CATALOG, AVAILABLE_REPAIRS, repairCatalogForStatus } from './reads.js'
-import { authCache, invalidateCachedAuth, invalidateCachedAuthPrefix } from '../state.js'
+import { authCache, invalidateCachedAuth, passwordCacheKey } from '../state.js'
 import { invalidateSyncResponseCache, peekSyncResponseCache } from '../lib/sync-response-cache.js'
 import { invalidateCanonicalForOwner, canonicalCacheCountForOwner } from '../hydra/canonical-cache.js'
 import { dropConnectionCacheForOwner, connectionCacheCountForOwner } from '../providers/reconciler.js'
@@ -18,15 +18,13 @@ const HANDLE_RE = /^acct-[0-9a-f]{12}$/
 
 const countAuthEntries = (key) => {
     let n = 0
-    if (authCache.has(`sync:${key}`)) n++
-    for (const k of authCache.keys()) if (k.startsWith(`device:${key}:`)) n++
+    if (authCache.has(passwordCacheKey(key))) n++
     return n
 }
 
 const dropAuthEntries = (key) => {
     const dropped = countAuthEntries(key)
-    invalidateCachedAuth(`sync:${key}`)
-    invalidateCachedAuthPrefix(`device:${key}:`)
+    invalidateCachedAuth(passwordCacheKey(key))
     return dropped
 }
 

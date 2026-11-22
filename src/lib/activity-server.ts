@@ -3,6 +3,7 @@ import { syncUploadTimeoutMs } from '@/lib/api-resilience'
 import { getDeviceAwareAuthHeaders } from '@/lib/device-session'
 import type { ServerActivityEvent } from '@/store/watchEventStore'
 import { takePendingStremioRepoints, clearPendingStremioRepoint, convertPendingLoginsRemovedToRepoint } from '@/lib/stremio-repoint'
+import { acknowledgedTransitionAccounts } from '@/lib/credential-sync-ack'
 import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 import { useAuthStore } from '@/store/authStore'
 import { useAccountStore } from '@/store/accountStore'
@@ -313,8 +314,9 @@ export async function syncCredentialsToServer(): Promise<number> {
         // STILL on the exact ownership that captured them.
         if (!ownershipValid()) return data.synced || 0
         learnServerCredentialedAccounts(data.serverStremioCredentialedAccounts)
+        const acknowledged = new Set(acknowledgedTransitionAccounts(Object.keys(pending), data))
         for (const [accountId, note] of Object.entries(pending)) {
-            clearPendingStremioRepoint(accountId, note)
+            if (acknowledged.has(accountId)) clearPendingStremioRepoint(accountId, note)
         }
         return data.synced || 0
     } catch {

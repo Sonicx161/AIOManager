@@ -2,7 +2,7 @@ import crypto from 'crypto'
 import db from './db.js'
 import { decrypt } from './crypto.js'
 import { FALLBACK_KEYS } from './keys.js'
-import { getCachedAuth, setCachedAuth, hashAuthPassword } from './state.js'
+import { getCachedAuth, setCachedAuth, hashAuthPassword, passwordCacheKey } from './state.js'
 import { verifySyncPassword, verifyDeviceToken, verifySessionKey, upgradeLegacyPasswordHash } from './lib/sync-password.js'
 import { trace } from './utils/trace.js'
 import { isAdminPath } from './admin/paths.js'
@@ -37,7 +37,7 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
     }
     try {
         const row = await db.get(
-            `SELECT d.id, d.account_uuid, d.token_hash, d.revoked, d.expires_at, d.credential_epoch,
+            `SELECT d.id, d.account_uuid, d.token_hash, d.revoked, d.expires_at, d.credential_epoch, d.last_used_at,
                     a.key AS account_key, a.credential_epoch AS account_epoch,
                     a.password AS account_password, a.content_hash AS account_content_hash,
                     a.content_hint AS account_content_hint, a.updated_at AS account_updated_at
@@ -54,7 +54,8 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
         if (!verified) return { ok: false, reason: 'unknown' }
         if (Number(row.revoked) === 1) return { ok: false, reason: 'revoked' }
         if (Number(row.expires_at) <= now) return { ok: false, reason: 'expired' }
-        if (row.account_key == null) return { ok: false, reason: 'unknown' }
+        // Only a workspace row (it always has a password) counts; a passwordless kv_store row at the same key is not an account.
+        if (row.account_key == null || row.account_password == null) return { ok: false, reason: 'unknown' }
         if (Number(row.account_epoch) !== Number(row.credential_epoch)) return { ok: false, reason: 'generation' }
         return { ok: true, accountUuid: row.account_uuid, row }
     } catch (err) {
@@ -64,14 +65,10 @@ export async function authenticateDeviceCredential(syncUser, deviceId, token, no
     }
 }
 
-// Device credentials authenticate BEFORE any password check. The token is cached under
-// a distinct namespace (keyed per account+device, never mixed with 'sync:'): a device
-// token in the shared password cache would be accepted as the account password by
-// headerless requests within the cache TTL. The hook reads its own namespace back so a
-// repeat request within the TTL skips both DB reads and scrypt entirely. Revocation,
-// expiry, and epoch bumps are enforced by the DB path and by explicit invalidation at
-// every security action (enroll/revoke/revoke-everywhere); a revocation that bypasses
-// those is honored within the same 60s TTL window the password cache already accepts.
+// Device credentials authenticate before any password check. Every request re-reads the exact (account_uuid, device_id) row, so
+// revocation, expiry, account deletion and epoch bumps apply at once; only the token-hash memo (keyed by the stored hash) skips scrypt.
+const LAST_USED_WRITE_MS = 60_000
+
 export async function deviceAuthHook(request, reply) {
     // Sync credentials never reach the Dashboard API.
     if (isAdminPath(request.url)) return
@@ -82,17 +79,7 @@ export async function deviceAuthHook(request, reply) {
     // Account state gate: ahead of the cache accept, the DB accept and every telemetry
     // write, and outside the try below so a gate refusal can never be swallowed.
     await assertAccountActive(syncUser)
-    const cacheKey = 'device:' + syncUser + ':' + deviceId
     const sessionDevice = isSessionDevice(deviceId)
-    const cachedTokenHash = sessionDevice ? null : getCachedAuth(cacheKey)
-    if (cachedTokenHash && timingSafeEqual(cachedTokenHash, hashAuthPassword(presented))) {
-        // accountUuid is provably syncUser here: the DB path only caches after matching
-        // device_credentials rows on account_uuid = syncUser, and downstream consumers
-        // compare it against the x-sync-user header, never use it as a DB handle.
-        request.deviceAuth = { accountUuid: String(syncUser) }
-        trace('auth', 'deviceAuth.accept', { user: syncUser, deviceId, source: 'cache' })
-        return
-    }
     const outcome = await authenticateDeviceCredential(syncUser, deviceId, presented)
     if (outcome.ok) {
         const { row } = outcome
@@ -101,10 +88,9 @@ export async function deviceAuthHook(request, reply) {
         if (db.type === 'postgres') {
             request.deviceAuth.head = { password: row.account_password, content_hash: row.account_content_hash, content_hint: row.account_content_hint, updated_at: row.account_updated_at }
         }
-        if (!sessionDevice) setCachedAuth(cacheKey, presented)
         // A replica never writes, not even best-effort telemetry, against the follower.
         // A session key is not in the device list, so nothing reads its last use: polls with one write nothing.
-        if (!isReadOnlyReplica() && !isSessionDevice(deviceId)) {
+        if (!isReadOnlyReplica() && !sessionDevice && !(Number(row.last_used_at) > Date.now() - LAST_USED_WRITE_MS)) {
             try {
                 await db.run('UPDATE device_credentials SET last_used_at = $1 WHERE id = $2', [Date.now(), outcome.row.id])
             } catch (err) {
@@ -131,7 +117,7 @@ export async function verifyAuth(request) {
         return null
     }
     try {
-        const cached = getCachedAuth('sync:' + syncUser)
+        const cached = getCachedAuth(passwordCacheKey(syncUser))
         if (cached && timingSafeEqual(cached, hashAuthPassword(syncPassword))) {
             trace('auth', 'verifyAuth.accept', { user: syncUser, source: 'cache' })
             return syncUser
@@ -155,7 +141,7 @@ export async function verifyAuth(request) {
             trace('auth', 'verifyAuth.reject', { user: syncUser, reason: 'password-mismatch' })
             return null
         }
-        setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
+        setCachedAuth(passwordCacheKey(syncUser), syncPassword, upgradedHash || row.password)
         trace('auth', 'verifyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
         return syncUser
     } catch (err) {
@@ -176,7 +162,7 @@ export async function requireProxyAuth(request, reply) {
         reply.status(401)
         return { error: 'Authentication required' }
     }
-    const cached = getCachedAuth('sync:' + syncUser)
+    const cached = getCachedAuth(passwordCacheKey(syncUser))
     if (cached && timingSafeEqual(cached, hashAuthPassword(syncPassword))) {
         trace('auth', 'proxyAuth.accept', { user: syncUser, source: 'cache' })
         return null
@@ -203,7 +189,7 @@ export async function requireProxyAuth(request, reply) {
             reply.status(401)
             return { error: 'Unauthorized' }
         }
-        setCachedAuth('sync:' + syncUser, syncPassword, upgradedHash || row.password)
+        setCachedAuth(passwordCacheKey(syncUser), syncPassword, upgradedHash || row.password)
         trace('auth', 'proxyAuth.accept', { user: syncUser, source: verified === null ? 'legacy' : 'password' })
     } catch (err) {
         if (err instanceof AuthStateError || err instanceof StateUnavailableError) throw err

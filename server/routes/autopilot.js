@@ -90,30 +90,40 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
             const canonicalConnectionId = previous?.canonical_connection_id
                 && decrypt(previous.auth_key, FALLBACK_KEYS) === decrypt(encryptedAuthKey, FALLBACK_KEYS)
                 ? previous.canonical_connection_id : null
-            await (conn.bestEffort ? conn.bestEffort(async () => {
+            const written = await (conn.bestEffort ? conn.bestEffort(async () => {
                 if (conn.type === 'postgres') {
-                    await conn.run(
+                    return conn.run(
                         `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                         ON CONFLICT (id) DO UPDATE SET auth_key = EXCLUDED.auth_key, updated_at = EXCLUDED.updated_at, credential_type = EXCLUDED.credential_type, connection_id = EXCLUDED.connection_id, canonical_connection_id = EXCLUDED.canonical_connection_id, connection_generation = COALESCE(EXCLUDED.connection_generation, server_credentials.connection_generation)`,
+                         ON CONFLICT (id) DO UPDATE SET auth_key = EXCLUDED.auth_key, updated_at = EXCLUDED.updated_at, credential_type = EXCLUDED.credential_type, connection_id = EXCLUDED.connection_id, canonical_connection_id = EXCLUDED.canonical_connection_id, connection_generation = COALESCE(EXCLUDED.connection_generation, server_credentials.connection_generation)
+                         WHERE server_credentials.sync_user = EXCLUDED.sync_user`,
                         [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
                     )
                 } else {
-                    await conn.run(
+                    return conn.run(
                         `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                         ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, connection_generation)`,
+                         ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, connection_generation)
+                         WHERE sync_user = excluded.sync_user`,
                         [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
                     )
                 }
             }) : (async () => {
-                await conn.run(
+                const existing = conn.type === 'postgres' ? 'server_credentials.' : ''
+                return conn.run(
                     `INSERT INTO server_credentials (id, sync_user, account_id, account_name, auth_key, updated_at, credential_type, connection_id, canonical_connection_id, connection_generation)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, ${conn.type === 'postgres' ? 'server_credentials.connection_generation' : 'connection_generation'})`,
+                     ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at, credential_type = excluded.credential_type, connection_id = excluded.connection_id, canonical_connection_id = excluded.canonical_connection_id, connection_generation = COALESCE(excluded.connection_generation, ${existing}connection_generation)
+                     WHERE ${existing}sync_user = excluded.sync_user`,
                     [credId, owner, accountId, accountName || '', encryptedAuthKey, now, credentialType, connectionId, canonicalConnectionId, connectionId ? connectionGeneration : null]
                 )
             })())
+            if (!written?.changes) {
+                const holder = await conn.get('SELECT sync_user FROM server_credentials WHERE id = $1', [credId])
+                if (holder && holder.sync_user !== owner) {
+                    throw new Error('credential id is already used by another workspace; not saved')
+                }
+            }
             const { invalidateConnectionCache } = await import('../providers/reconciler.js')
             invalidateConnectionCache(owner)
         } catch (credErr) {
@@ -1002,7 +1012,7 @@ export function registerAutopilotRoutes(fastify, autopilotEngine) {
         if (!/^https?:\/\//i.test(trimmed)) { reply.status(400); return { error: 'Webhook URL must be http(s)' } }
         if (!(await isSafeUrlResolved(trimmed))) { reply.status(400); return { error: 'Invalid webhook URL' } }
 
-        await setGlobalWebhook(authUser, trimmed)
+        if (!(await setGlobalWebhook(authUser, trimmed))) { reply.status(409); return { error: 'The global webhook could not be saved for this workspace.' } }
         return { configured: true, masked: maskWebhookUrl(trimmed) }
     })
 

@@ -440,30 +440,39 @@ export function registerProviderRoutes(fastify, reconciler) {
                 if (existingRow) return { ok: true }
             }
 
+            let written
             if (insertOnly) {
-                await conn.run(`
+                written = await conn.run(`
                     INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (id) DO NOTHING
                 `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
             } else if (db.type === 'postgres') {
-                await conn.run(`
+                written = await conn.run(`
                     INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (id) DO UPDATE SET auth_key = $4, credential_type = $6, updated_at = $7,
                         connection_generation = COALESCE($8, server_credentials.connection_generation)
+                    WHERE server_credentials.sync_user = EXCLUDED.sync_user
                 `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
             } else {
                 // R2-07: COALESCE keeps a legacy (generationless) write from downgrading a
                 // known stamp; INSERT OR REPLACE cannot reference the existing row, so this
                 // branch uses the same upsert shape as postgres (excluded.* avoids reusing
                 // positional parameters under the sqlite placeholder expansion).
-                await conn.run(`
+                written = await conn.run(`
                     INSERT INTO server_credentials (id, sync_user, account_id, auth_key, connection_id, credential_type, updated_at, connection_generation)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, credential_type = excluded.credential_type, updated_at = excluded.updated_at,
                         connection_generation = COALESCE(excluded.connection_generation, connection_generation)
+                    WHERE sync_user = excluded.sync_user
                 `, [id, authUser, accountId, encrypted, connectionId, type, Date.now(), generationToken])
+            }
+            if (!written?.changes) {
+                const holder = await conn.get('SELECT sync_user FROM server_credentials WHERE id = $1', [id])
+                if (holder && holder.sync_user !== authUser) {
+                    reply.code(409); return { error: 'This connection id is already used by another workspace; it was not saved.' }
+                }
             }
             const { invalidateConnectionCache } = await import('../providers/reconciler.js')
             invalidateConnectionCache(authUser)

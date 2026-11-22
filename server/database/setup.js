@@ -874,35 +874,9 @@ export async function initializeDatabase(fastify) {
         }
 
         try {
-            const credsCount = await db.get(`SELECT COUNT(*) as c FROM server_credentials`)
-            if (Number(credsCount?.c || 0) === 0) {
-                const rules = await db.query(
-                    `SELECT DISTINCT r.account_id, r.auth_key, r.owner_sync_user FROM autopilot_rules r WHERE r.auth_key IS NOT NULL AND r.owner_sync_user IS NOT NULL AND (r.platform IS NULL OR r.platform = 'stremio')`
-                )
-                let credsSeeded = 0
-                for (const rule of rules) {
-                    try {
-                        const credId = `${rule.owner_sync_user}:${rule.account_id}`
-                        if (db.type === 'postgres') {
-                            await db.run(
-                                `INSERT INTO server_credentials (id, sync_user, account_id, auth_key, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET auth_key = EXCLUDED.auth_key, updated_at = EXCLUDED.updated_at`,
-                                [credId, rule.owner_sync_user, rule.account_id, rule.auth_key, Date.now()]
-                            )
-                        } else {
-                            await db.run(
-                                `INSERT OR REPLACE INTO server_credentials (id, sync_user, account_id, auth_key, updated_at) VALUES ($1, $2, $3, $4, $5)`,
-                                [credId, rule.owner_sync_user, rule.account_id, rule.auth_key, Date.now()]
-                            )
-                        }
-                        credsSeeded++
-                    } catch (e) {
-                        fastify.log.warn({ category: 'Database' }, `Credential backfill failed for ${rule.account_id}: ${e.message}`)
-                    }
-                }
-                if (credsSeeded > 0) {
-                    fastify.log.info({ category: 'Database' }, `Server Credentials: backfilled ${credsSeeded} accounts from autopilot rules.`)
-                }
-            }
+            const { seeded, skipped } = await backfillServerCredentialsFromRules(db)
+            if (seeded > 0) fastify.log.info({ category: 'Database' }, `Server Credentials: backfilled ${seeded} accounts from autopilot rules.`)
+            if (skipped > 0) fastify.log.warn({ category: 'Database' }, `Server Credentials: skipped ${skipped} rule credentials whose id is already held by another workspace.`)
         } catch (credsBackfillErr) {
             fastify.log.warn({ category: 'Database' }, `Server Credentials backfill warning: ${credsBackfillErr.message}`)
         }
@@ -1157,4 +1131,32 @@ export async function initializeDatabase(fastify) {
         fastify.log.warn({ category: 'Database' }, `Startup cleanup warning: ${cleanupErr.message}`)
     }
     return dbPath
+}
+
+// Seeds account-level credentials from rules into an empty table; a joined id held by another workspace is skipped, never updated.
+export async function backfillServerCredentialsFromRules(db) {
+    const credsCount = await db.get('SELECT COUNT(*) as c FROM server_credentials')
+    if (Number(credsCount?.c || 0) !== 0) return { seeded: 0, skipped: 0 }
+    const rules = await db.query(
+        `SELECT DISTINCT r.account_id, r.auth_key, r.owner_sync_user FROM autopilot_rules r WHERE r.auth_key IS NOT NULL AND r.owner_sync_user IS NOT NULL AND (r.platform IS NULL OR r.platform = 'stremio')`
+    )
+    const existing = db.type === 'postgres' ? 'server_credentials.' : ''
+    let seeded = 0
+    let skipped = 0
+    for (const rule of rules) {
+        const credId = `${rule.owner_sync_user}:${rule.account_id}`
+        try {
+            const result = await db.run(
+                `INSERT INTO server_credentials (id, sync_user, account_id, auth_key, updated_at) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (id) DO UPDATE SET auth_key = excluded.auth_key, updated_at = excluded.updated_at
+                 WHERE ${existing}sync_user = excluded.sync_user`,
+                [credId, rule.owner_sync_user, rule.account_id, rule.auth_key, Date.now()]
+            )
+            if (result?.changes) seeded++
+            else skipped++
+        } catch (e) {
+            console.warn(`[Database] Credential backfill failed for ${rule.account_id}: ${e.message}`)
+        }
+    }
+    return { seeded, skipped }
 }

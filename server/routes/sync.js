@@ -3,7 +3,7 @@ import db from '../db.js'
 import { kvHeadIndexed, kvHeadSource } from '../lib/kv-head.js'
 import { encrypt, decrypt } from '../crypto.js'
 import { PRIMARY_KEY, FALLBACK_KEYS } from '../keys.js'
-import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, invalidateCachedAuthPrefix, hashAuthPassword } from '../state.js'
+import { getCachedAuth, getCachedAuthBound, setCachedAuth, invalidateCachedAuth, hashAuthPassword, passwordCacheKey } from '../state.js'
 import { timingSafeEqual } from '../auth.js'
 import { hashApiKey } from '../api-keys.js'
 import { isSessionDevice } from '../lib/session-key.js'
@@ -20,6 +20,8 @@ import { decodeCanonicalAddonsV2 } from '../lib/canonical-addons-v2.js'
 import { noteSyncWrite } from '../lib/wal-checkpoint.js'
 import { trace } from '../utils/trace.js'
 import { maskContext } from '../utils/log-helpers.js'
+import { globalWebhookKey } from '../autopilot/global-webhook.js'
+import { isAcceptableNewId } from '../lib/ids.js'
 
 function buildMultiRowPlaceholders(numRows, numCols) {
     const rows = []
@@ -281,7 +283,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 return { error: 'Unauthorized: Invalid credentials' }
             }
 
-            const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth('sync:' + id)
+            const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth(passwordCacheKey(id))
             if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
             } else if (request.deviceAuth?.accountUuid !== id) {
                 const verified = await verifySyncPassword(password, row.password)
@@ -296,7 +298,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                     reply.status(401);
                     return { error: 'Unauthorized: Invalid credentials' }
                 }
-                setCachedAuth('sync:' + id, password, row.password)
+                setCachedAuth(passwordCacheKey(id), password, row.password)
             }
 
             if (row.content_hash && ifNoneMatch === row.content_hash) {
@@ -467,6 +469,10 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
         const preTxRow = deviceSameAccount ? null : await db.get(`SELECT password, content_hash, content_hint, updated_at FROM ${kvHeadSource()} WHERE key = $1`, [id])
         const preTxPassword = preTxRow?.password ?? null
         const rowMayExist = request.deviceAuth || preTxRow != null
+        if (!rowMayExist && !isAcceptableNewId(id)) {
+            reply.status(400);
+            return { error: 'Workspace ids may only use up to 128 characters without colons or control characters.' }
+        }
         const precomputedHashedPass = (request.deviceAuth || rowMayExist) ? null : await hashSyncPassword(password)
 
         // Pre-tx verification against the just-read stored credential. A failure is
@@ -480,7 +486,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
         let verifiedPassword = null // exact stored string the pre-tx check authenticated
         let legacyUpgrade = null // { legacy, hashed } pending upgrade of a legacy-format row
         if (!deviceSameAccount && preTxRow != null) {
-            const cachedPw = getCachedAuthBound('sync:' + id, preTxPassword)
+            const cachedPw = getCachedAuthBound(passwordCacheKey(id), preTxPassword)
             if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
                 preVerified = true
                 verifiedPassword = preTxPassword
@@ -520,7 +526,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
         // Postgres only: on SQLite a read outside the tx shares its connection and can see uncommitted writes.
         const head = deviceSameAccount ? request.deviceAuth.head : preTxRow
         if (db.type === 'postgres' && clientHint && !keysChanged && head && head.content_hint === clientHint
-            && (deviceSameAccount || timingSafeEqual(getCachedAuthBound('sync:' + id, head.password), hashAuthPassword(password)))) {
+            && (deviceSameAccount || timingSafeEqual(getCachedAuthBound(passwordCacheKey(id), head.password), hashAuthPassword(password)))) {
             const serverUpdated = head.updated_at || 0
             const hasRevisionBase = clientBase !== null && head.content_hash != null
             const blocked = !force && (hasRevisionBase
@@ -534,7 +540,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 // A push that committed while the receipts were read must take the full path and return its conflict.
                 const current = await db.get(`SELECT content_hash FROM ${kvHeadSource()} WHERE key = $1`, [id])
                 if (current?.content_hash === head.content_hash) {
-                    if (!deviceSameAccount && getCachedAuthBound('sync:' + id, head.password)) setCachedAuth('sync:' + id, password, head.password)
+                    if (!deviceSameAccount && getCachedAuthBound(passwordCacheKey(id), head.password)) setCachedAuth(passwordCacheKey(id), password, head.password)
                     trace('syncRoute', 'push.success', { accountId: id, skipped: true, reason: 'unchanged', keysChanged, timing: Date.now() - postStart })
                     return {
                         success: true,
@@ -598,6 +604,10 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             const apiKeys = data.apiKeys
             const pushedAccounts = Array.isArray(data.accounts) ? data.accounts : null
             let lockedApiKeys
+            if (row && deviceSameAccount && row.password == null) {
+                reply.status(401);
+                return { error: 'Unauthorized: Password mismatch' }
+            }
             if (row) {
                 let storedPassword = row.password
                 if (!deviceSameAccount && preVerified && row.password === verifiedPassword) {
@@ -611,13 +621,13 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                         // tx (same write the old in-tx path performed) and store the new hash.
                         storedPassword = await applyLegacyPasswordUpgrade(tx, id, legacyUpgrade.hashed) || storedPassword
                     }
-                    setCachedAuth('sync:' + id, password, storedPassword)
+                    setCachedAuth(passwordCacheKey(id), password, storedPassword)
                 } else if (!deviceSameAccount) {
                     // The stored credential is not the exact string verified before the tx:
                     // it changed mid-request, the pre-tx check failed, or the row carries no
                     // password at all. Re-run the original check against the locked row;
                     // scrypt inside the tx is confined to this rare path.
-                    const cachedPw = getCachedAuthBound('sync:' + id, row.password)
+                    const cachedPw = getCachedAuthBound(passwordCacheKey(id), row.password)
                     if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
                     } else if (row.password === preTxPassword) {
                         // Deterministic short-circuit: the pre-tx cache-miss check already
@@ -641,7 +651,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                             reply.status(401);
                             return { error: 'Unauthorized: Password mismatch' }
                         }
-                        setCachedAuth('sync:' + id, password, storedPassword)
+                        setCachedAuth(passwordCacheKey(id), password, storedPassword)
                     }
                 }
 
@@ -962,7 +972,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 return { error: 'Unauthorized: Invalid credentials' }
             }
 
-            const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth('sync:' + id)
+            const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth(passwordCacheKey(id))
             if (request.deviceAuth?.accountUuid !== id && !(cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password)))) {
                 const verified = await verifySyncPassword(password, row.password)
                 let authorized = verified === true
@@ -978,7 +988,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                     reply.status(401)
                     return { error: 'Unauthorized: Invalid credentials' }
                 }
-                setCachedAuth('sync:' + id, password, upgradedHash || row.password)
+                setCachedAuth(passwordCacheKey(id), password, upgradedHash || row.password)
             }
 
             const result = await db.tx(async (tx) => {
@@ -988,14 +998,14 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 )
                 if (!archived) return { restored: false }
 
-                await tx.run(
-                    `UPDATE kv_store SET value = $1, password = $2, updated_at = $3, content_hash = $4, content_hint = NULL WHERE key = $5`,
+                const restored = await tx.run(
+                    `UPDATE kv_store SET value = $1, password = $2, updated_at = $3, content_hash = $4, content_hint = NULL WHERE key = $5 AND password IS NOT NULL`,
                     [archived.value, archived.password, archived.updated_at, archived.content_hash, id]
                 )
-                return { restored: true }
+                return { restored: Boolean(restored?.changes) }
             })
 
-            invalidateCachedAuth('sync:' + id)
+            invalidateCachedAuth(passwordCacheKey(id))
             if (result?.restored) invalidateSyncResponseCache(id)
             trace('syncRoute', 'restore.done', { accountId: id, restored: result?.restored, timing: Date.now() - restoreStart })
             if (!result?.restored) {
@@ -1041,7 +1051,7 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             return { error: 'Unauthorized: Invalid credentials' }
         }
 
-        const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth('sync:' + id)
+        const cachedPw = request.deviceAuth?.accountUuid === id ? null : getCachedAuth(passwordCacheKey(id))
         if (cachedPw && timingSafeEqual(cachedPw, hashAuthPassword(password))) {
         } else if (request.deviceAuth?.accountUuid !== id) {
             const verified = await verifySyncPassword(password, row.password)
@@ -1056,15 +1066,16 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                 reply.status(401);
                 return { error: 'Unauthorized: Invalid credentials' }
             }
-            setCachedAuth('sync:' + id, password, row.password)
+            setCachedAuth(passwordCacheKey(id), password, row.password)
         }
 
         fastify.log.info({ category: 'Server' }, `Deleting all data for sync user: ${maskContext(id)}`)
         const privateCachePrefixes = metadataCache.invalidateOwner(id)
         let deletedRuleIds = []
-        await db.tx(async (tx) => {
+        const deleted = await db.tx(async (tx) => {
             const lock = db.type === 'postgres' ? ' FOR UPDATE' : ''
-            await tx.get(`SELECT key FROM kv_store WHERE key = $1${lock}`, [id])
+            const locked = await tx.get(`SELECT key, password FROM kv_store WHERE key = $1${lock}`, [id])
+            if (!locked || locked.password == null) return false
             for (const prefix of privateCachePrefixes) {
                 await tx.run('DELETE FROM metadata_cache WHERE substr(key, 1, length($1)) = $2', [prefix, prefix])
             }
@@ -1097,11 +1108,17 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             await tx.run('DELETE FROM account_notices WHERE sync_user = $1', [id])
             await tx.run('DELETE FROM kv_store WHERE key = $1', [id])
             await tx.run('DELETE FROM kv_store_history WHERE key = $1', [id])
+            await tx.run('DELETE FROM kv_store WHERE key = $1 AND password IS NULL', [globalWebhookKey(id)])
+            return true
         })
+        if (!deleted) {
+            trace('syncRoute', 'delete.error', { accountId: id, error: 'not-a-workspace' })
+            reply.status(401);
+            return { error: 'Unauthorized: Invalid credentials' }
+        }
         autopilotEngine?.()?.retireRuleCaches?.(deletedRuleIds)
         metadataCache.invalidateOwner(id)
-        invalidateCachedAuth('sync:' + id)
-        invalidateCachedAuthPrefix('device:' + id + ':')
+        invalidateCachedAuth(passwordCacheKey(id))
         invalidateUserKeys(id)
         invalidateCanonicalForOwner(id)
         invalidateSyncResponseCache(id)
