@@ -555,15 +555,15 @@ function mockUserRow(u: MockUser) {
 
 /** Fixed-template user notices, mirroring server/admin/account-actions.js. */
 const MOCK_NOTICES: Record<string, string> = {
-    'account.disabled': "Your instance's Dashboard disabled your account.",
-    'account.enabled': "Your instance's Dashboard re-enabled your account.",
-    'account.deleted': "Your instance's Dashboard deleted your account. Data is kept.",
-    'account.restored': "Your instance's Dashboard restored your account.",
-    'account.signed_out': "Your instance's Dashboard signed out the devices for your account.",
-    'repair.release-sync-lease': "Your instance's Dashboard cleared the sync server caches for your account.",
-    'repair.clear-server-caches': "Your instance's Dashboard cleared server caches for your account. Some responses may be slower for a few minutes.",
-    'repair.reset-activity-breaker': "Your instance's Dashboard reset the activity scan backoff for your account.",
-    'repair.clear-login-backoff': "Your instance's Dashboard cleared the login backoff for your account.",
+    'account.disabled': "The host disabled your account.",
+    'account.enabled': "The host re-enabled your account.",
+    'account.deleted': "The host removed your account. Your data was kept.",
+    'account.restored': "The host restored your account.",
+    'account.signed_out': "The host ended the saved sign-ins on your devices. You may need to sign in again.",
+    'repair.release-sync-lease': "The host cleared temporary sync data for your account. Nothing was lost.",
+    'repair.clear-server-caches': "The host refreshed temporary data for your account. The app may be a little slower for a few minutes.",
+    'repair.reset-activity-breaker': "The host cleared any pause on watch history checks for your account.",
+    'repair.clear-login-backoff': "The host removed a sign-in delay on your connections.",
 }
 
 /** Dry-run plans per repair, in the server's exact response shape. */
