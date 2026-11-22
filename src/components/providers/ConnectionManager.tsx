@@ -62,7 +62,11 @@ interface ConnectionManagerProps {
     focusEditConnection?: { id: string; nonce: number } | null
 }
 
-export function ConnectionManager({ accountId, account, connections = [], onShowInstalledAddons, focusEditConnection, variant = 'panel' }: ConnectionManagerProps) {
+export function ConnectionManager(props: ConnectionManagerProps) {
+    return <AccountConnectionManager key={props.accountId} {...props} />
+}
+
+function AccountConnectionManager({ accountId, account, connections = [], onShowInstalledAddons, focusEditConnection, variant = 'panel' }: ConnectionManagerProps) {
     const { syncConnections, isSyncing, connectionStates, addConnection, refreshConnectionStates } = useConnectionStore(
         useShallow(s => ({
             syncConnections: s.syncConnections,
@@ -115,7 +119,7 @@ export function ConnectionManager({ accountId, account, connections = [], onShow
         import('@/api/hydra-providers')
             .then(({ fetchSubscribers }) => fetchSubscribers(accountId))
             .then(subs => { if (!cancelled) setSubscribers(subs) })
-            .catch(() => { })
+            .catch(() => { if (!cancelled) setSubscribers([]) })
         return () => { cancelled = true }
     }, [accountId])
 

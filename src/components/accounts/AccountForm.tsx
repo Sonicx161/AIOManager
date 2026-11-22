@@ -35,7 +35,7 @@ import {
   X,
   type LucideIcon
 } from 'lucide-react'
-import { Suspense, lazy, useEffect, useMemo, useState, useRef } from 'react'
+import { Fragment, Suspense, lazy, useEffect, useMemo, useState, useRef } from 'react'
 import { AddonPreviewTile } from './AddonPreviewTile'
 import { Link } from 'react-router-dom'
 import {
@@ -203,6 +203,10 @@ export function AccountForm() {
     setCardOpen(false)
     setEmojiOpen(false)
     setShowAvatarUrl(false)
+    setNuvioDialogOpen(false)
+    setQrDialogOpen(false)
+    setJellyfinDialogOpen(false)
+    setHydraDialogOpen(false)
     setSignInAgainTarget(editingAccount && focusConnectionId ? { id: focusConnectionId, nonce: Date.now() } : null)
     setSubmitting(false)
 
@@ -1941,6 +1945,7 @@ export function AccountForm() {
       </DialogContent>
     </Dialog>
 
+    <Fragment key={editingAccount?.id ?? 'new'}>
     <QRLinkDialog
       open={qrDialogOpen}
       onOpenChange={setQrDialogOpen}
@@ -1977,6 +1982,7 @@ export function AccountForm() {
       onOpenChange={setHydraDialogOpen}
       onComplete={handleHydraAccountComplete}
     />
+    </Fragment>
   </>
   )
 }

@@ -93,6 +93,7 @@ export function StremioOAuth({ onAuthKey, onError, disabled }: StremioOAuthProps
                         referrerPolicy: 'no-referrer',
                     }
                 )
+                if (cancelled) return
 
                 if (res.status === 410) {
                     setError('Link expired. Please try again.')
@@ -105,6 +106,7 @@ export function StremioOAuth({ onAuthKey, onError, disabled }: StremioOAuthProps
                 }
 
                 const data = await res.json()
+                if (cancelled) return
                 if (data?.result?.success && data.result.authKey) {
                     onAuthKey(data.result.authKey, data.result.user)
                     setIsPolling(false)
