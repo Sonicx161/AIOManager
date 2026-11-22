@@ -3,6 +3,7 @@ import { PlayCircle, X } from 'lucide-react'
 import { Poster } from '@/components/common/Poster'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { PlatformSourceBadge } from '@/components/activity/PlatformSourceBadge'
+import { episodeIsShowNumber } from '@/lib/episode-resolution'
 import type { ActivityItem } from '@/types/activity'
 import type { Account } from '@/types/account'
 
@@ -19,7 +20,7 @@ interface UpNextCardProps {
 
 export function UpNextCard({ item, account, watcherName, peerLabel, index, preferredPoster, onOpen, onDismiss }: UpNextCardProps) {
     const progress = Math.round(item.progress)
-    const isEpisode = (item.type === 'series' || item.type === 'anime') && item.episode !== undefined
+    const isEpisode = (item.type === 'series' || item.type === 'anime') && item.episode !== undefined && !episodeIsShowNumber(item)
     const live = item.mediaObservation?.kind === 'live' ? (item.mediaObservation.isPaused ? 'Paused' : 'Playing') : null
 
     return (

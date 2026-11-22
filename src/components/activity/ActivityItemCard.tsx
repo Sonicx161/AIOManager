@@ -11,7 +11,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { cn, openStremioDetail, maskNameLevel, maskEmailLevel } from '@/lib/utils'
 import { resolveWatchBadgePct, formatSavedEpisodeRanges, MIN_PLAUSIBLE_WATCH_MS } from '@/lib/activity-utils'
 import { continueWatchingPosterFor } from '@/lib/activity-cw-poster'
-import { formatEpisodeRange } from '@/lib/episode-resolution'
+import { episodeIsShowNumber, formatEpisodeRange } from '@/lib/episode-resolution'
 import { useUIStore } from '@/store/uiStore'
 import { useAccountStore } from '@/store/accountStore'
 import { Poster } from '@/components/common/Poster'
@@ -66,7 +66,7 @@ export const ActivityItemCard = memo(({
     // Imported saved watch state: bitfield-aggregate series carry a verified episode summary
     // (no watch dates, no resume); flagged-only movies keep their positive watched badge.
     const savedState = item.importedSavedState === true
-    const hasEpisode = Number.isInteger(item.episode) && (item.episode ?? 0) > 0
+    const hasEpisode = Number.isInteger(item.episode) && (item.episode ?? 0) > 0 && !episodeIsShowNumber(item)
     const episodeLabel = isEpisodeLike
         ? hasEpisode
             ? `S${item.season ?? 1} E${item.episode}`

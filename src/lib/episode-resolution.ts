@@ -11,6 +11,17 @@ const isEpisodeLikeType = (type: string) => type === 'series' || type === 'anime
 const hasResolvedEpisode = (item: ActivityItem) => Number.isInteger(item.episode) && (item.episode ?? 0) > 0
 const seriesBaseId = (id: string) => id.split(':')[0]
 
+// Stremio rows get season and episode only by parsing the watched id, so a show id like tmdb:tv:260463 reads as S1 E260463.
+export function episodeIsShowNumber(item: Pick<ActivityItem, 'itemId' | 'uniqueItemId' | 'season' | 'episode' | 'source'>): boolean {
+    if (item.source && item.source !== 'stremio') return false
+    const parts = item.itemId.split(':')
+    return item.uniqueItemId === item.itemId
+        && parts.length === 3
+        && /^(tv|series|show)$/i.test(parts[1])
+        && Number(parts[2]) === item.episode
+        && (item.season ?? 1) === 1
+}
+
 /**
  * Watches whose record lost its episode id (progress survived, the `:s:e` suffix
  * didn't) render as "Episode unknown". Two sound resolutions before settling
