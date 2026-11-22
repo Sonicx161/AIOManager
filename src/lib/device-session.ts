@@ -95,6 +95,17 @@ export function isDeviceAuthActive(): boolean {
     return !!deviceSessionRuntime.activeDeviceAuth
 }
 
+// Best-effort reads use the browser fetch directly so a refusal never reaches the 401 recovery paths.
+export function uninterceptedFetch(): typeof window.fetch {
+    return deviceSessionRuntime.originalFetch ?? window.fetch.bind(window)
+}
+
+export function deviceAuthHeadersFor(accountId: string): Record<string, string> | null {
+    const session = deviceSessionRuntime.activeDeviceAuth
+    if (!session || session.accountUUID !== accountId) return null
+    return { 'x-sync-user': session.accountUUID, 'x-sync-password': session.deviceToken, 'x-sync-device': session.deviceId }
+}
+
 export function getDeviceSyncKey(): CryptoKey | null {
     return deviceSessionRuntime.activeDeviceAuth?.syncKey ?? null
 }

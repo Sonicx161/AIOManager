@@ -157,6 +157,17 @@ export function dropSessionAuthKey(deviceId?: string): void {
     }
 }
 
+export function sessionKeyCoversUrl(keyBase: string, url: string, pageUrl: string): boolean {
+    try {
+        const target = new URL(url, pageUrl)
+        const base = new URL(keyBase.replace(/\/$/, '') + '/', pageUrl)
+        if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) return false
+        return target.pathname !== base.pathname + 'devices/session' && target.pathname !== base.pathname + 'devices/enroll'
+    } catch {
+        return false
+    }
+}
+
 export type SessionAuthKeyChoice = { use: SessionAuthKey & { accountId: string } } | { expired: SessionAuthKey } | null
 
 /**
@@ -172,14 +183,7 @@ export function chooseSessionAuthKey(request: { url: string; user: string | null
     const key = memoryKey ? parseSessionAuthKey(memoryKey) : stored?.key ?? null
     if (!id || !wireToken || !key) return null
     if (request.password !== wireToken || (request.user !== null && request.user !== id)) return null
-    try {
-        const target = new URL(request.url, pageUrl)
-        const base = new URL(key.base.replace(/\/$/, '') + '/', pageUrl)
-        if (target.origin !== base.origin || !target.pathname.startsWith(base.pathname)) return null
-        if (target.pathname === base.pathname + 'devices/session' || target.pathname === base.pathname + 'devices/enroll') return null
-    } catch {
-        return null
-    }
+    if (!sessionKeyCoversUrl(key.base, request.url, pageUrl)) return null
     if (key.expiresAt - 30_000 <= now) return { expired: key }
     return { use: { ...key, accountId: id } }
 }

@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import { type LucideIcon, AlertTriangle, ChevronRight, KeyRound, Palette, User, Wrench, Zap } from 'lucide-react'
 import { cn, getTimeAgo, maskedInitial } from '@/lib/utils'
 import { useSyncStore } from '@/store/syncStore'
@@ -33,9 +33,10 @@ interface SettingsRootListProps {
     /** Pages matching the active search query; null when the query is empty. */
     filterPages: ReadonlySet<SettingsPageId> | null
     className?: string
+    afterCard?: ReactNode
 }
 
-export function SettingsRootList({ activePage, onSelect, filterPages, className }: SettingsRootListProps) {
+export function SettingsRootList({ activePage, onSelect, filterPages, className, afterCard }: SettingsRootListProps) {
     const auth = useSyncStore(s => s.auth)
     const maskLabel = useMaskedAccountLabel()
     const lastSyncedAt = useSyncStore(s => s.lastSyncedAt)
@@ -125,6 +126,8 @@ export function SettingsRootList({ activePage, onSelect, filterPages, className 
                     <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" aria-hidden />
                 </button>
             )}
+
+            {afterCard}
 
             {SETTINGS_GROUP_ORDER.map(group => {
                 const rows = rowsByGroup.get(group)

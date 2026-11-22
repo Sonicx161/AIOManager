@@ -63,6 +63,8 @@ import { ApiKeysSection } from '@/components/settings/ApiKeysSection'
 import { RememberedDevicesSection } from '@/components/settings/RememberedDevicesSection'
 import { SettingsSearch, resolveSectionElement, searchSettings, SETTING_PAGE_LABELS, type SettingSearchEntry } from '@/components/settings/SettingsNavigation'
 import { SettingsRootList } from '@/components/settings/SettingsRootList'
+import { AccountNoticesList, AccountNoticesRootRow, NoticesReveal, NOTICES_TITLE } from '@/components/settings/AccountNoticesSection'
+import { useNoticesVisible } from '@/hooks/useAccountNotices'
 import { SettingsGroup, SettingsGroupFooter, SettingsRow } from '@/components/settings/SettingsRows'
 import { nextLegacyJump, resolveSelectedPage, resolveSettingsPage, stripFadeState, stripWheelTarget, SETTINGS_TAB_SHORT_LABELS, type SettingsPageId, type SettingsPageSelection } from '@/components/settings/settings-model'
 import { ToolbarShell } from '@/components/ui/toolbar-shell'
@@ -206,6 +208,18 @@ export function SettingsPage() {
     // first tab, legacy tab ids resolve through settings-model. Tab switches
     // replace history so arrowing across tabs never stacks back steps.
     const isDesktop = useSyncExternalStore(subscribeDesktop, isDesktopNow, isDesktopNow)
+    const noticesVisible = useNoticesVisible()
+    const noticesOpen = !isDesktop && noticesVisible && hash === 'notices'
+    const openNotices = () => navigate({ pathname: location.pathname, search: location.search, hash: '#notices' }, { preventScrollReset: true })
+    const closeNotices = () => navigate({ pathname: location.pathname, search: location.search, hash: '' }, { preventScrollReset: true })
+    const noticesHeadingRef = useRef<HTMLHeadingElement>(null)
+    const noticesRowRef = useRef<HTMLButtonElement>(null)
+    const noticesWasOpen = useRef(false)
+    useEffect(() => {
+        if (noticesOpen) noticesHeadingRef.current?.focus()
+        else if (noticesWasOpen.current) noticesRowRef.current?.focus()
+        noticesWasOpen.current = noticesOpen
+    }, [noticesOpen])
     const activeTab = resolveSelectedPage(hash, true) ?? 'account-sync'
     const handleTabChange = (next: string) => {
         if (next === activeTab) return
@@ -600,6 +614,13 @@ export function SettingsPage() {
     // Per-page section stacks, shared by the phone drill-in pages and the desktop tabs.
     const renderAccountSyncSections = () => (
         <>
+            <NoticesReveal show={isDesktop && noticesVisible} className="mb-0">
+                <div className="pb-4 sm:pb-6">
+                    <div data-settings-anchor="account-notices" className={sectionAnchorClass('account-notices')}>
+                        <AccountNoticesList heading={sectionHeading(NOTICES_TITLE)} />
+                    </div>
+                </div>
+            </NoticesReveal>
             <div data-settings-anchor="sync-identity" className={sectionAnchorClass('sync-identity')}>
                 {sectionHeading('Sync identity')}
                 <AccountSection />
@@ -903,6 +924,25 @@ export function SettingsPage() {
                         </div>
                     </div>
                 </Tabs>
+            ) : noticesOpen ? (
+                <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                        <button
+                            type="button"
+                            onClick={closeNotices}
+                            aria-label="Back to settings"
+                            className="flex h-11 min-w-[64px] items-center gap-0.5 rounded-full pl-1 pr-1.5 text-sm font-semibold text-primary transition-colors hover:bg-primary/10"
+                        >
+                            <ChevronLeft className="h-4 w-4" aria-hidden />
+                            Settings
+                        </button>
+                        <h1 ref={noticesHeadingRef} tabIndex={-1} className="min-w-0 flex-1 truncate text-center text-base font-bold outline-none">{NOTICES_TITLE}</h1>
+                        <span className="min-w-[64px]" aria-hidden />
+                    </div>
+                    <div className="mt-4">
+                        <AccountNoticesList />
+                    </div>
+                </div>
             ) : selectedPage === null ? (
                 <div className="min-w-0">
                     <div className="mb-4 flex items-baseline gap-2">
@@ -917,6 +957,7 @@ export function SettingsPage() {
                         onSelect={navigateToPage}
                         filterPages={filterPages}
                         className="mt-4"
+                        afterCard={<NoticesReveal show={!filterPages && noticesVisible}><AccountNoticesRootRow ref={noticesRowRef} onOpen={openNotices} /></NoticesReveal>}
                     />
                 </div>
             ) : (

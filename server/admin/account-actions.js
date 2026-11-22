@@ -470,6 +470,7 @@ export function registerAccountNoticeRoutes(fastify) {
     fastify.get('/api/account/notices', {
         config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
     }, async (request, reply) => {
+        reply.header('Cache-Control', 'private, no-store')
         const syncUser = await verifyAuth(request)
         if (!syncUser) {
             reply.status(401)
