@@ -87,14 +87,20 @@ function writeActivityCursor(ts: number) {
 
 // The watch-event store is only needed once server events actually merge; load it
 // lazily so it stays out of the boot chunk graph.
-async function mergeServerEvents(batch: ServerActivityEvent[]): Promise<void> {
+async function mergeServerEvents(batch: ServerActivityEvent[], workspace: string): Promise<boolean> {
     const { useWatchEventStore } = await import('@/store/watchEventStore')
+    if (getActiveWorkspaceId() !== workspace) return false
     useWatchEventStore.getState().mergeServerEvents(batch)
+    return true
 }
 
 export async function fetchAndMergeServerEvents(): Promise<number> {
     const { auth, serverUrl } = useSyncStore.getState()
     if (!auth.isAuthenticated) return 0
+    // The rows belong to the workspace that asked for them: a response that lands after a
+    // workspace switch is dropped, never merged, persisted or used to move the cursor.
+    const workspace = getActiveWorkspaceId()
+    const stillOurs = () => getActiveWorkspaceId() === workspace
     let authHeaders: Record<string, string>
     try {
         authHeaders = await getDeviceAwareAuthHeaders()
@@ -102,7 +108,7 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
 
     const apiPath = getApiBase(serverUrl)
     const status = await getActivityServerStatus(apiPath, authHeaders)
-    if (!status?.engineEnabled) return 0
+    if (!status?.engineEnabled || !stillOurs()) return 0
 
     const since = readActivityCursor()
     let totalMerged = 0
@@ -122,6 +128,7 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
             if (!res.ok) break
 
             const data = await res.json()
+            if (!stillOurs()) return 0
             const events = (data.events || []) as ServerActivityEvent[]
 
             if (events.length === 0) { pullComplete = true; break }
@@ -131,7 +138,7 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
             for (const e of events) if (e.timestamp > maxTs) maxTs = e.timestamp
 
             if (batch.length >= MERGE_FLUSH_LIMIT) {
-                await mergeServerEvents(batch)
+                if (!await mergeServerEvents(batch, workspace)) return 0
                 batch.length = 0
             }
 
@@ -142,8 +149,8 @@ export async function fetchAndMergeServerEvents(): Promise<number> {
         }
     }
 
-    if (batch.length > 0) await mergeServerEvents(batch)
-    if (pullComplete && maxTs > 0) writeActivityCursor(maxTs)
+    if (batch.length > 0 && !await mergeServerEvents(batch, workspace)) return 0
+    if (pullComplete && maxTs > 0 && stillOurs()) writeActivityCursor(maxTs)
 
     return totalMerged
 }

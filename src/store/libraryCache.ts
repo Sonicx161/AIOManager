@@ -1,4 +1,5 @@
 import { triggerSync } from '@/lib/sync-trigger'
+import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 import { create } from 'zustand'
 import localforage from 'localforage'
 import { ActivityItem, LibraryItem } from '@/types/activity'
@@ -310,6 +311,8 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
     ensureLoaded: async (accounts: Account[]) => {
         if (accounts.length === 0) return
+        // These accounts belong to this workspace; a retry after a switch must not read them into another.
+        const owner = getActiveWorkspaceId()
         trace('libraryCache', 'ensureLoaded.start', { accountCount: accounts.length })
 
         const storedVersion = localStorage.getItem('aio-cache-version')
@@ -325,6 +328,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
 
         let shouldRetry = true
         while (shouldRetry) {
+            if (getActiveWorkspaceId() !== owner) return
             const state = get()
             const now = Date.now()
 
@@ -363,6 +367,8 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                 const now = Date.now()
                 const activeAccountIds = new Set(accounts.map(account => account.id))
                 const generation = cacheGeneration
+                // Watch rows read under one workspace are never written into another's store.
+                const startWorkspace = owner
                 const loadStart = Date.now()
                 trace('libraryCache', 'ensureLoaded.load', { accountCount: accounts.length, reason: state.isStale ? 'stale' : (!state.lastFetched ? 'cold' : 'ttl') })
 
@@ -644,7 +650,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                             metaSkipped = true
                             learnTmdbAliases(cachedItems || [])
                             const cachedRows = seriesRowsForBackfill.get(login.ctx)
-                            if (cachedRows || metaRows) {
+                            if ((cachedRows || metaRows) && getActiveWorkspaceId() === startWorkspace) {
                                 useWatchEventStore.getState().recordBackfillEpisodes(account.id, cachedRows || [], { contextKey: login.ctx, sourceConnectionId: login.connectionId, ownerConnectionId: login.ownerConnectionId, authKey: login.authKey, completeLibrary: true, libraryIds: metaRows.map(([id]) => id) })
                                     .then(backfilled => { if (backfilled > 0) triggerSync() })
                                     .catch(e => { if (import.meta.env?.DEV) console.error(`[LibraryCache] bitfield backfill (meta-skip) failed for ${account.name || account.id}:`, e) })
@@ -697,6 +703,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                     })
 
                     const ownBits = await useWatchEventStore.getState().resolveOwnEpisodeBits(libraryItems, login.ctx)
+                    if (getActiveWorkspaceId() !== startWorkspace) return
                     const newEvents = useWatchEventStore.getState().diffAndRecord(
                         account.id, libraryItems, account, accounts, { ...diffOptions, ownBits }
                     )
@@ -944,7 +951,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         ...progressActivities.filter((a): a is ActivityItem => a !== null),
                                         ...watchedActivities.filter((a): a is ActivityItem => a !== null && !seenIds.has(a.uniqueItemId)),
                                     ]
-                                    if (nuvioActivities.length > 0) {
+                                    if (nuvioActivities.length > 0 && getActiveWorkspaceId() === startWorkspace) {
                                         useWatchEventStore.getState().mergeExternalWatchEvents(account.id, 'nuvio', nuvioActivities.map(a => ({
                                             itemId: a.itemId,
                                             video_id: a.uniqueItemId,

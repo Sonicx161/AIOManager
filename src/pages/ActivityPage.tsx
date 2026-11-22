@@ -1,4 +1,5 @@
 import { triggerSync } from '@/lib/sync-trigger'
+import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 import { ActivityFeed } from '@/components/activity/ActivityFeed'
 import { MediaReadBanner } from '@/components/activity/MediaReadBanner'
 import { lazyChunk } from '@/lib/lazy-chunk'
@@ -594,6 +595,7 @@ export function ActivityPage() {
     }, [detailParamId, history, searchParams])
 
     const deletePlatformItems = useCallback(async (items: ActivityItem[]): Promise<{ failed: boolean; keptIds: Set<string>; keptReasons: Map<string, number>; noVideos: Array<{ accountId: string; itemId: string; id: string; sourceConnectionId?: string }> }> => {
+        const deleteWorkspace = getActiveWorkspaceId()
         if (items.length === 0) return { failed: false, keptIds: new Set<string>(), keptReasons: new Map<string, number>(), noVideos: [] }
         const byAccount: Record<string, ActivityItem[]> = {}
         for (const item of items) {
@@ -762,6 +764,7 @@ export function ActivityPage() {
                                         throw error
                                     }
                                     touchedShows.add(item.itemId)
+                                    if (getActiveWorkspaceId() !== deleteWorkspace) return
                                     // The rewrite preserves the row mtime, so the watcher inference
                                     // would otherwise read the repointed anchor as a fresh watch.
                                     useWatchEventStore.getState().patchSnapshot(accountId, item.itemId, {
@@ -855,7 +858,9 @@ export function ActivityPage() {
     }, [accountById, removeItems])
 
     const runActivityDelete = async (items: ActivityItem[], ids: string[], success: { title: string; description: string }) => {
+        const workspace = getActiveWorkspaceId()
         const { failed, keptIds, keptReasons, noVideos } = await deletePlatformItems(items)
+        if (getActiveWorkspaceId() !== workspace) return
         purgeLocalActivity(items.filter(item => !keptIds.has(item.id)), ids.filter(id => !keptIds.has(id)))
 
         if (noVideos.length > 0) {
@@ -887,6 +892,7 @@ export function ActivityPage() {
             return
         }
         setIsDeletingWholeShow(true)
+        const workspace = getActiveWorkspaceId()
         try {
             const { encryptionKey } = useAuthStore.getState()
             const deleted: Array<{ accountId: string; itemId: string; id: string; sourceConnectionId?: string }> = []
@@ -912,6 +918,7 @@ export function ActivityPage() {
                     }
                 }
             })
+            if (getActiveWorkspaceId() !== workspace) return
             if (deleted.length > 0) {
                 purgeLocalActivity(deleted.map(entry => history.find(h => h.id === entry.id)).filter((h): h is ActivityItem => !!h), deleted.map(entry => entry.id))
                 toast({ title: 'Shows Deleted', description: `${deleted.length} show(s) removed from Stremio and history.` })

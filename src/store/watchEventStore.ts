@@ -14,6 +14,7 @@ import { EventRollups, emptyRollups, capWatchEventsWithRollups, mergeRollups } f
 import { isIdentityDeleted, isSyntheticBackfillEvent, mergeBackfillDuplicates, mergeBackfillEvent, mergeWatchEventsById } from '@/lib/event-tombstones'
 import { aliasIdentityKeys, aliasDeletedAt, canonicalEpisodeIdentity } from '@/lib/activity-id-alias'
 import { createBackfillProcessed } from './backfill-processed.ts'
+import { getActiveWorkspaceId } from '@/lib/workspace-persistence'
 
 const STORAGE_KEY = 'aio_watch_events_v2'
 
@@ -177,7 +178,7 @@ interface WatchEventState {
     recordBackfillEpisodes: (accountId: string, items: LibraryItem[], options?: { contextKey?: string; sourceConnectionId?: string; ownerConnectionId?: string; authKey?: string; completeLibrary?: boolean; libraryIds?: string[] }) => Promise<number>
 
     export: () => { events: WatchEvent[]; snapshot: Snapshot; deletedEvents: Record<string, number>; rollups: EventRollups }
-    reset: () => void
+    reset: (options?: { memoryOnly?: boolean }) => void
 }
 
 export interface ServerActivityEvent {
@@ -256,18 +257,14 @@ async function persistWatchEventsNow() {
     const { events, snapshot, snapshotOwners, rollups } = useWatchEventStore.getState()
     const deleted = _pendingDeleted
     _pendingDeleted = null
-    try {
-        await localforage.setItem(STORAGE_KEY, { events, snapshot, snapshotOwners, rollups, backfillProcessed: backfillProcessed.export(), trustedBackfills: Array.from(trustedBackfills), backfillRetries: Array.from(backfillRetries) })
-    } catch (e) {
-        if (import.meta.env.DEV) console.error('[watchEventStore] persist failed:', e)
-    }
-    if (deleted) {
-        try {
-            await localforage.setItem(DELETED_EVENTS_KEY, deleted)
-        } catch (e) {
-            if (import.meta.env.DEV) console.error('[watchEventStore] persist tombstones failed:', e)
-        }
-    }
+    // Both writes start now so they land in the same workspace even if it changes mid-flush.
+    const eventsWrite = localforage.setItem(STORAGE_KEY, { events, snapshot, snapshotOwners, rollups, backfillProcessed: backfillProcessed.export(), trustedBackfills: Array.from(trustedBackfills), backfillRetries: Array.from(backfillRetries) })
+        .catch(e => { if (import.meta.env.DEV) console.error('[watchEventStore] persist failed:', e) })
+    const deletedWrite = deleted
+        ? localforage.setItem(DELETED_EVENTS_KEY, deleted).catch(e => { if (import.meta.env.DEV) console.error('[watchEventStore] persist tombstones failed:', e) })
+        : null
+    await eventsWrite
+    await deletedWrite
 }
 
 function persistWatchEvents() {
@@ -415,10 +412,12 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
     load: async () => {
         const state = get()
         if (state.initialized) return
+        const workspace = getActiveWorkspaceId()
         try {
             // Beta candidates briefly persisted {deleted, pinned}; reads tolerate that
             // shape so their tombstones survive, writes use the shipped flat map.
             const storedDeleted = await localforage.getItem<unknown>(DELETED_EVENTS_KEY)
+            if (getActiveWorkspaceId() !== workspace) return
             let deleted: Record<string, number> = {}
             if (storedDeleted && typeof storedDeleted === 'object' && !Array.isArray(storedDeleted)) {
                 const inner = (storedDeleted as { deleted?: unknown }).deleted
@@ -427,6 +426,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
                     : storedDeleted) as Record<string, number>
             }
             const stored = await localforage.getItem<{ events: WatchEvent[]; snapshot: Snapshot; snapshotOwners?: Record<string, string>; rollups?: EventRollups; backfillProcessed?: Record<string, string>; trustedBackfills?: Array<[string, TrustedBackfill]>; backfillRetries?: Array<[string, { watched: string; at: number }]> }>(STORAGE_KEY)
+            if (getActiveWorkspaceId() !== workspace) return
             if (stored && stored.events) {
                 backfillProcessed.load(stored.backfillProcessed || {})
                 for (const entry of (Array.isArray(stored.trustedBackfills) ? stored.trustedBackfills.slice(-TRUSTED_BACKFILL_CAP) : [])) {
@@ -945,6 +945,7 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
     // so an old partial stop the bitfield confirms counts as watched, while partials outside the
     // bitfield stay partial. No duplicate backfill event and no fabricated chronology.
     recordBackfillEpisodes: async (accountId, items, options) => {
+        const workspace = getActiveWorkspaceId()
         const ctx = options?.contextKey ?? accountId
         const eventAttribution = options?.sourceConnectionId || options?.ownerConnectionId
             ? { sourceConnectionId: options.sourceConnectionId ?? options.ownerConnectionId, scopeKey: ctx }
@@ -981,6 +982,10 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
 
         const decoded = await Promise.all(results.map((result, index) => result.kind === 'list'
             ? decodeStremioVisibleIndices(candidates[index].state?.watched, result.videos) : null))
+        if (getActiveWorkspaceId() !== workspace) {
+            for (const [key, revision] of revisions) if (backfillRevisions.get(key) === revision) backfillRevisions.delete(key)
+            return 0
+        }
         for (const [index, item] of candidates.entries()) {
             if (!current(item)) continue
             const key = keyOf(item)
@@ -1140,16 +1145,17 @@ export const useWatchEventStore = create<WatchEventState>((set, get) => ({
         rollups: get().rollups,
     }),
 
-    reset: () => {
+    reset: (options) => {
         cancelPendingPersist()
         // Deletes are durable: reset clears watch data but NEVER the tombstones; wiping
         // them would resurrect every deleted event on the next pull.
-        const deleted = get().deletedEventKeys
+        const deleted = options?.memoryOnly ? {} : get().deletedEventKeys
         backfillProcessed.clear()
         trustedBackfills.clear()
         backfillRetries.clear()
         set({ events: [], snapshot: {}, snapshotOwners: {}, deletedEventKeys: deleted, rollups: emptyRollups(), initialized: false })
-        localforage.removeItem(STORAGE_KEY).catch(() => {})
+        // memoryOnly: forget an outgoing workspace without touching its disk.
+        if (!options?.memoryOnly) localforage.removeItem(STORAGE_KEY).catch(() => {})
         if (Object.keys(deleted).length > 0) persistDeletedEvents(deleted)
     },
 

@@ -312,6 +312,7 @@ export const useNotesStore = create<NotesStore>((set, get) => ({
                 const stored = await localforage.getItem<NoteMeta[]>(NOTES_INDEX_KEY)
                 metas = stored && Array.isArray(stored) ? stored : []
             }
+            if (bootEpoch !== cacheEpoch) return
             set({ notes: metas })
 
             await migratePlaintextNotes()
@@ -332,6 +333,7 @@ export const useNotesStore = create<NotesStore>((set, get) => ({
             } catch (e) { if (import.meta.env.DEV) console.error(e) }
 
             const storedTrash = await localforage.getItem<Note[]>(NOTES_TRASH_KEY)
+            if (bootEpoch !== cacheEpoch) return
             if (storedTrash && Array.isArray(storedTrash)) {
                 const now = Date.now()
                 const pruned = storedTrash.filter(n => now - new Date(n.updatedAt).getTime() < TRASH_TTL)

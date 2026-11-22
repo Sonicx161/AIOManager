@@ -353,6 +353,15 @@ export const useSyncStore = create<SyncState>()(
                         throw setupError
                     }
 
+                    const [{ useNotesStore }, { useWatchEventStore }] = await Promise.all([import('@/store/notesStore'), import('@/store/watchEventStore')])
+                    // A locked session can still hold the previous workspace in memory; none of it may reach this one.
+                    syncRuntime.lastPulledNotes = null
+                    syncRuntime.lastPulledNotesTrash = null
+                    syncRuntime.lastPulledDeletedWatchEvents = null
+                    syncRuntime.lastPulledCloudAvatar = null
+                    useNotesStore.getState().resetLocal()
+                    useWatchEventStore.getState().reset({ memoryOnly: true })
+
                     // A fresh workspace starts in a fresh namespace; the wipe
                     // above already cleared the signed-out one.
                     clearVaultSyncRuntime()
@@ -994,6 +1003,7 @@ export const useSyncStore = create<SyncState>()(
                     if (secondary.notes && Array.isArray(secondary.notes)) {
                         const { useNotesStore } = await import('@/store/notesStore')
                         await useNotesStore.getState().importNotes(secondary.notes, ownership)
+                        fence()
                         syncRuntime.lastPulledNotes = secondary.notes as import('./notesStore').Note[]
                         set({ lastSyncedNotesCount: secondary.notes.length })
                         if (Array.isArray(secondary.notesTrash)) {
