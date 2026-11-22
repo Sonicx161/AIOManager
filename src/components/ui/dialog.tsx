@@ -6,6 +6,7 @@ import { getLastActivated, pickReturnFocus, trackActivations } from './dialog-fo
 import { acquireScrollLock, releaseScrollLock } from './dialog-scroll-lock'
 import { drillBack, drillForward, drillPush, initDrillHistory } from '@/lib/drill-history'
 import { dispatchAltNav, hostOwnsKeyEvent, type DialogNavEntry } from '@/lib/dialog-nav'
+import { topmostOwner } from './dialog-layers'
 
 if (typeof document !== 'undefined') trackActivations(document)
 
@@ -13,18 +14,30 @@ if (typeof document !== 'undefined') trackActivations(document)
 const openNavHosts: Array<{ rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void }> = []
 
 // Lets sheet content (an embedded wizard) count as a layer above its parent dialog.
-function useDialogEscapeLayer(active: boolean, onEscape?: () => void) {
+function useDialogEscapeLayer(active: boolean, onEscape?: () => void, rootRef?: React.RefObject<HTMLElement | null>) {
   const latest = React.useRef(onEscape)
   latest.current = onEscape
+  const hostRef = React.useRef<{ rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void } | null>(null)
   React.useEffect(() => {
     if (!active) return
-    const host: { rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void } = { rootRef: { current: null }, onEscape: () => latest.current?.() }
+    const host: { rootRef: React.RefObject<HTMLElement | null>; onEscape?: () => void } = { rootRef: rootRef ?? { current: null }, onEscape: () => latest.current?.() }
+    hostRef.current = host
     openNavHosts.push(host)
     return () => {
+      hostRef.current = null
       const at = openNavHosts.indexOf(host)
       if (at >= 0) openNavHosts.splice(at, 1)
     }
-  }, [active])
+  }, [active, rootRef])
+  return React.useCallback(() => !!hostRef.current && topmostOwner(openNavHosts) === hostRef.current, [])
+}
+
+const topmostDialogHost = () => topmostOwner(openNavHosts)
+
+const isBehindDialogs = (target: EventTarget | null) => {
+  if (target === document.body) return true
+  if (!(target instanceof Element)) return false
+  return !!document.getElementById('root')?.contains(target) && !target.closest('[aria-live]')
 }
 
 const DialogContext = React.createContext<{ onOpenChange?: (open: boolean) => void; titleId?: string; backStack?: React.MutableRefObject<Array<() => void>>; navStack?: React.MutableRefObject<DialogNavEntry[]>; isTopmost?: () => boolean }>({})
@@ -143,6 +156,25 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
     const host = { rootRef: dialogRef }
     navHostRef.current = host
     openNavHosts.push(host)
+    let lastInside: HTMLElement | null = null
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target
+      if (target instanceof HTMLElement && dialogRef.current?.contains(target)) {
+        lastInside = target
+        return
+      }
+      if (topmostDialogHost() !== host || !isBehindDialogs(target)) return
+      const back = lastInside?.isConnected ? lastInside : dialogRef.current
+      back?.focus({ preventScroll: true })
+    }
+    const onEscapeBehind = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || topmostDialogHost() !== host || !isBehindDialogs(e.target)) return
+      e.preventDefault()
+      e.stopPropagation()
+      escapeRef.current()
+    }
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('keydown', onEscapeBehind)
     const onKeyDown = (e: KeyboardEvent) => {
       if (!e.altKey || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
       if (e.defaultPrevented) return
@@ -156,6 +188,8 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
       document.removeEventListener('keydown', onKeyDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('keydown', onEscapeBehind)
       navHostRef.current = null
       const at = openNavHosts.indexOf(host)
       if (at >= 0) openNavHosts.splice(at, 1)
@@ -209,28 +243,33 @@ const Dialog = ({ open, onOpenChange, children, describedBy }: DialogProps) => {
     }
   }, [open, mounted])
 
+  const escapeRef = React.useRef<() => void>(() => {})
+  escapeRef.current = () => {
+    // A layer above owns the dismissal; an embedded layer with onEscape receives it.
+    if (!isTopmost()) {
+      const top = openNavHosts[openNavHosts.length - 1]
+      if (top && top !== navHostRef.current) {
+        top.onEscape?.()
+        requestAnimationFrame(() => navHostRef.current?.rootRef.current?.focus())
+      }
+      return
+    }
+    const back = backStack.current[backStack.current.length - 1]
+    if (back) {
+      back()
+      return
+    }
+    onOpenChange?.(false)
+  }
+
   const handleKeyDown = React.useCallback((e: React.KeyboardEvent) => {
     e.stopPropagation()
     if (e.key === 'Escape') {
       // A menu or popover inside the dialog already handled this Escape.
       if (e.defaultPrevented) return
-      // A layer above owns the dismissal; an embedded layer with onEscape receives it.
-      if (!isTopmost()) {
-        const top = openNavHosts[openNavHosts.length - 1]
-        if (top && top !== navHostRef.current) {
-          top.onEscape?.()
-          requestAnimationFrame(() => navHostRef.current?.rootRef.current?.focus())
-        }
-        return
-      }
-      const back = backStack.current[backStack.current.length - 1]
-      if (back) {
-        back()
-        return
-      }
-      onOpenChange?.(false)
+      escapeRef.current()
     }
-  }, [onOpenChange, isTopmost])
+  }, [])
 
   // Capture phase, so a control that stops key propagation cannot let Tab leave the modal.
   const handleTabCapture = React.useCallback((e: React.KeyboardEvent) => {

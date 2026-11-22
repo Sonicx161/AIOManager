@@ -684,14 +684,22 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
     // lastSyncedParamsRef; the open-flip commit is skipped because the open
     // effect above already restored any deep-linked state.
     const prevOpenForSyncRef = useRef(false)
+    const onOpenChangeRef = useRef(onOpenChange)
+    onOpenChangeRef.current = onOpenChange
+    const hadDetailParamsRef = useRef(false)
     useEffect(() => {
         const wasOpen = prevOpenForSyncRef.current
         prevOpenForSyncRef.current = open
+        const hadDetailParams = hadDetailParamsRef.current
+        hadDetailParamsRef.current = open && !!parseDetailParams(searchParams)
         if (!open || !wasOpen) return
         if (lastSyncedParamsRef.current && paramsEqual(lastSyncedParamsRef.current, searchParams)) return
         lastSyncedParamsRef.current = searchParams
         const target = parseDetailParams(searchParams)
-        if (!target) return // detail params removed — the page closes the modal
+        if (!target) {
+            if (hadDetailParams) onOpenChangeRef.current(false)
+            return
+        }
         const prev = navStackRef.current
         const baseEntry = prev.find((e): e is Extract<NavEntry, { kind: 'item' }> => e.kind === 'item')
         let stack: NavEntry[]
