@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Account } from '@/types/account'
-import { cn, maskNameLevel } from '@/lib/utils'
+import { cn, maskedAccountInitial } from '@/lib/utils'
 import { useUIStore } from '@/store/uiStore'
 import { useSyncStore } from '@/store/syncStore'
 import { avatarSigner, isRemoteAvatar } from '@/lib/image-proxy'
@@ -65,8 +65,9 @@ export function AccountAvatar({
     accentColor,
 }: AccountAvatarProps) {
     const dim = SIZE_MAP[size]
-    const privacyLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
-    const initial = maskNameLevel(account.name || account.email || '?', privacyLevel)[0]?.toUpperCase()
+    const nameLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelNames : 0))
+    const emailLevel = useUIStore(s => (s.isPrivacyModeEnabled ? s.privacyLevelEmail : 0))
+    const initial = maskedAccountInitial(account, nameLevel, emailLevel)
     const status = account.status as string | undefined
     const shouldShowStatus = showStatus ?? !!status
     const isPulsing = pulse ?? status === 'active'

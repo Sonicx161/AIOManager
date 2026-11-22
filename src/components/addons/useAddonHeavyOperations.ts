@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import { useToast } from '@/hooks/use-toast'
 import { useAccountStore } from '@/store/accountStore'
 import { mapConcurrent } from '@/lib/concurrency'
+import { bulkDeployToAllResult, deployToAllCopy, newDeployToastId, runBulkDeployToAll } from '@/lib/deploy-to-all'
 import type { OperationStatus } from '@/components/ui/operation-progress'
 import type { AddonDescriptor } from '@/types/addon'
 
@@ -21,7 +22,6 @@ interface AddonHeavyOperationsParams {
   accountId: string
   account: unknown
   addons: AddonDescriptor[]
-  accounts: { id: string }[]
   updatesAvailable: AddonDescriptor[]
   selectedAddonUrls: Set<string>
   setSearchParams: (next: Record<string, string>, options?: { replace?: boolean }) => void
@@ -37,7 +37,6 @@ export function useAddonHeavyOperations({
   accountId,
   account,
   addons,
-  accounts,
   updatesAvailable,
   selectedAddonUrls,
   setSearchParams,
@@ -216,28 +215,21 @@ export function useAddonHeavyOperations({
     setSelectedAddonUrls(new Set())
   }, [selectedAddonUrls, addons, toast, setIsBulkActionLoading, setShowBulkAccountPicker, setIsSelectionMode, setSelectedAddonUrls])
 
-  const handleBulkDeployToAll = useCallback(async () => {
-    const targetAccountIds = accounts
-      .filter(acc => acc.id !== accountId)
-      .map(acc => acc.id)
-
-    if (targetAccountIds.length === 0) {
-      toast({
-        title: 'No other accounts',
-        description: 'You need at least one other account to deploy to.'
-      })
-      return
-    }
-
-    if (selectedAddonUrls.size === 0) return
-
+  const handleBulkDeployToAll = useCallback(async (targetAccountIds: string[], addonUrls: string[], addonLabel: string) => {
+    const copy = deployToAllCopy(addonLabel, targetAccountIds.length)
+    const toastId = newDeployToastId()
+    toast({ id: toastId, title: copy.runningTitle, description: copy.runningDescription, history: false, duration: 120_000 })
     setIsBulkActionLoading(true)
     try {
-      await handleBulkCloneToAccounts(targetAccountIds)
+      const tally = await runBulkDeployToAll(targetAccountIds, addonUrls, (targetId, urls) =>
+        useAccountStore.getState().installAddonsToAccount(targetId, urls, BULK_ADDON_FETCH_CONCURRENCY), BULK_ACCOUNT_CONCURRENCY)
+      toast({ id: toastId, ...bulkDeployToAllResult(addonLabel, tally) })
+      setIsSelectionMode(false)
+      setSelectedAddonUrls(new Set())
     } finally {
       setIsBulkActionLoading(false)
     }
-  }, [accounts, accountId, selectedAddonUrls, handleBulkCloneToAccounts, toast, setIsBulkActionLoading])
+  }, [toast, setIsBulkActionLoading, setIsSelectionMode, setSelectedAddonUrls])
 
   return {
     handleCreateRule,

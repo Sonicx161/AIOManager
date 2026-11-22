@@ -23,6 +23,7 @@ interface ConfirmationDialogProps {
   disabled?: boolean
   severity?: "warning" | "danger" | "info"
   impactItems?: React.ReactNode[]
+  details?: React.ReactNode
   onConfirm: () => void
 }
 
@@ -38,6 +39,7 @@ export function ConfirmationDialog({
   disabled = false,
   severity,
   impactItems,
+  details,
   onConfirm,
 }: ConfirmationDialogProps) {
   const handleConfirm = () => {
@@ -64,8 +66,8 @@ export function ConfirmationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent hideClose className="max-w-md gap-0 overflow-hidden p-0">
-        <DialogHeader className="items-center px-6 pb-5 pt-7 text-center">
+      <DialogContent hideClose className={cn("max-w-md gap-0 overflow-hidden p-0", details && "flex flex-col")}>
+        <DialogHeader className={cn("items-center px-6 pb-5 pt-7 text-center", details && "min-h-0 overflow-y-auto")}>
           {Icon && resolvedSeverity && (
             <div data-theme-part="badge" className={cn(
               "mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border shadow-[inset_0_0.5px_0_hsl(0_0%_100%/0.08)]",
@@ -91,8 +93,9 @@ export function ConfirmationDialog({
               </div>
             </div>
           )}
+          {details}
         </DialogHeader>
-        <DialogFooter className="grid grid-cols-2 gap-3 px-4 pb-4 pt-0 sm:grid-cols-2">
+        <DialogFooter className={cn("grid grid-cols-2 gap-3 px-4 pb-4 pt-0 sm:grid-cols-2", details && "shrink-0")}>
           <Button
             variant="subtle"
             onClick={() => onOpenChange(false)}

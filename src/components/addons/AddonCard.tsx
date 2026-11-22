@@ -2,6 +2,8 @@ import { Button } from '@/components/ui/button'
 import type { SavedAddonManifestChangeSummary } from '@/types/saved-addon'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
+import { DeployToAllConfirm } from '@/components/addons/DeployToAllConfirm'
+import { createDeployToAllGate, deployToAllCopy, deployToAllResult, deployToAllTargets, newDeployToastId, runDeployToAll, visibleDeployRequest, type DeployRequest } from '@/lib/deploy-to-all'
 import { isUndoPending, scheduleUndoable, useIsUndoPending } from '@/lib/undo-action'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import {
@@ -139,6 +141,12 @@ const buildCandidateUrls = (addon: AddonDescriptor): string[] => {
   }
 
   return result
+}
+
+interface CardDeployPayload {
+  transportUrl: string
+  metadata: AddonDescriptor['metadata']
+  label: string
 }
 
 interface AddonCardProps {
@@ -292,6 +300,14 @@ export const AddonCard = React.memo(function AddonCard({
   const [showAccountPicker, setShowAccountPicker] = useState(false)
   const [pickerMode, setPickerMode] = useState<'clone' | 'move'>('clone')
   const [isActionLoading, setIsActionLoading] = useState(false)
+  const [deployRequest, setDeployRequest] = useState<DeployRequest<Account, CardDeployPayload> | null>(null)
+  const shownDeployRequest = visibleDeployRequest(deployRequest, accountId)
+  const deployConfirmMounted = useEverTrue(shownDeployRequest !== null)
+  const [deployGate] = useState(() => createDeployToAllGate<Account, CardDeployPayload>())
+  useEffect(() => () => {
+    deployGate.cancel()
+    setDeployRequest(null)
+  }, [accountId, deployGate])
 
   const [saveName, setSaveName] = useState('')
   const [saveTags, setSaveTags] = useState('')
@@ -432,22 +448,31 @@ export const AddonCard = React.memo(function AddonCard({
     setShowAccountPicker(false)
   }
 
-  const handleDeployToAll = async () => {
-    const targetAccountIds = useAccountStore.getState().accounts
-      .filter(acc => acc.id !== accountId)
-      .map(acc => acc.id)
-
-    if (targetAccountIds.length === 0) {
+  const handleDeployToAll = () => {
+    const targets = deployToAllTargets(useAccountStore.getState().accounts, accountId)
+    if (targets.length === 0) {
       toast({
         title: 'No other accounts',
         description: 'You need at least one other account to deploy to.'
       })
       return
     }
+    setDeployRequest(deployGate.request(accountId, targets, { transportUrl: addon.transportUrl, metadata: addon.metadata, label: removalLabel }))
+  }
 
+  const confirmDeployToAll = async () => {
+    setDeployRequest(null)
+    const request = deployGate.take(accountId)
+    if (!request) return
+    const { targets, payload } = request
+    const copy = deployToAllCopy(payload.label, targets.length)
+    const toastId = newDeployToastId()
+    toast({ id: toastId, title: copy.runningTitle, description: copy.runningDescription, history: false, duration: 120_000 })
     setIsActionLoading(true)
     try {
-      await handleBulkAction(targetAccountIds)
+      const install = useAccountStore.getState().installAddonToAccount
+      const outcome = await runDeployToAll(targets.map(t => t.id), id => install(id, payload.transportUrl, payload.metadata))
+      toast({ id: toastId, ...deployToAllResult(payload.label, { succeeded: outcome.succeeded.length, failed: outcome.failed.length }) })
     } finally {
       setIsActionLoading(false)
     }
@@ -1435,6 +1460,13 @@ export const AddonCard = React.memo(function AddonCard({
         confirmText="Confirm Unprotect"
         isDestructive={true}
         onConfirm={confirmUnprotectCinemeta}
+      />}
+
+      {deployConfirmMounted && <DeployToAllConfirm
+        addonLabel={shownDeployRequest?.payload.label ?? removalLabel}
+        targets={shownDeployRequest?.targets ?? null}
+        onCancel={() => { deployGate.cancel(); setDeployRequest(null) }}
+        onConfirm={() => { void confirmDeployToAll() }}
       />}
 
       {showPickerMounted && <AccountPickerDialog

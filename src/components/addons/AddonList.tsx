@@ -1,3 +1,4 @@
+import { getHostnameIdentifier } from '@/lib/addon-identifier'
 import { triggerSync } from '@/lib/sync-trigger'
 import type { SavedAddonManifestChangeSummary } from '@/types/saved-addon'
 import { checkAddonUpdates } from '@/api/addons'
@@ -31,6 +32,9 @@ import { useAddonFlagOperations } from './useAddonFlagOperations'
 import { useAddonHeavyOperations } from './useAddonHeavyOperations'
 import { StaggerContainer, StaggerItem } from '@/components/ui/stagger'
 import { AccountPickerDialog } from '../accounts/AccountPickerDialog'
+import { DeployToAllConfirm } from '@/components/addons/DeployToAllConfirm'
+import { createDeployToAllGate, deployToAllTargets, visibleDeployRequest, type DeployRequest } from '@/lib/deploy-to-all'
+import type { Account } from '@/types/account'
 import { AddonReorderDialog } from './AddonReorderDialog'
 import { InstallSavedAddonDialog } from './InstallSavedAddonDialog'
 import { BulkSaveDialog } from './BulkSaveDialog'
@@ -408,7 +412,7 @@ export function AddonList({ accountId }: AddonListProps) {
     const handleKeyDown = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement
       const isInput = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
-      if (e.key === 'Escape' && isSelectionMode) {
+      if (e.key === 'Escape' && isSelectionMode && !e.defaultPrevented) {
         setIsSelectionMode(false)
         setSelectedAddonUrls(new Set())
       }
@@ -549,13 +553,31 @@ export function AddonList({ accountId }: AddonListProps) {
     handleReinstallAll,
     handleBulkCloneToAccounts,
     handleBulkDeployToAll,
-  } = useAddonHeavyOperations({ accountId, account, addons, accounts, updatesAvailable, selectedAddonUrls, setSearchParams, setUpdatingAll, setRefreshProgress, setIsSelectionMode, setSelectedAddonUrls, setIsBulkActionLoading, setShowBulkAccountPicker })
+  } = useAddonHeavyOperations({ accountId, account, addons, updatesAvailable, selectedAddonUrls, setSearchParams, setUpdatingAll, setRefreshProgress, setIsSelectionMode, setSelectedAddonUrls, setIsBulkActionLoading, setShowBulkAccountPicker })
 
   const isPrivacyModeEnabled = useUIStore((state) => state.isPrivacyModeEnabled)
   const privacyLevelNames = useUIStore((state) => state.privacyLevelNames)
   const selectedAddons = useMemo(() => {
     return addons.filter((_, index) => selectedAddonUrls.has(`${addons[index].transportUrl}::${index}`))
   }, [addons, selectedAddonUrls])
+  const [bulkDeployRequest, setBulkDeployRequest] = useState<DeployRequest<Account, { urls: string[]; label: string }> | null>(null)
+  const shownBulkDeploy = visibleDeployRequest(bulkDeployRequest, accountId)
+  const [bulkDeployGate] = useState(() => createDeployToAllGate<Account, { urls: string[]; label: string }>())
+  useEffect(() => () => {
+    bulkDeployGate.cancel()
+    setBulkDeployRequest(null)
+  }, [accountId, bulkDeployGate])
+  const openBulkDeployToAll = () => {
+    if (selectedAddons.length === 0) return
+    const targets = deployToAllTargets(accounts, accountId)
+    if (targets.length === 0) {
+      toast({ title: 'No other accounts', description: 'You need at least one other account to deploy to.' })
+      return
+    }
+    const only = selectedAddons.length === 1 ? selectedAddons[0] : null
+    const label = only ? (only.metadata?.customName || only.manifest.name || getHostnameIdentifier(only.transportUrl)) : `${selectedAddons.length} addons`
+    setBulkDeployRequest(bulkDeployGate.request(accountId, targets, { urls: selectedAddons.map(addon => addon.transportUrl), label }))
+  }
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1063,6 +1085,17 @@ export function AddonList({ accountId }: AddonListProps) {
         </TabsContent>
       </Tabs>
 
+      <DeployToAllConfirm
+        addonLabel={shownBulkDeploy?.payload.label ?? ''}
+        targets={shownBulkDeploy?.targets ?? null}
+        onCancel={() => { bulkDeployGate.cancel(); setBulkDeployRequest(null) }}
+        onConfirm={() => {
+          setBulkDeployRequest(null)
+          const request = bulkDeployGate.take(accountId)
+          if (request) void handleBulkDeployToAll(request.targets.map(t => t.id), request.payload.urls, request.payload.label)
+        }}
+      />
+
       <AddonReorderDialog
         accountId={accountId}
         addons={addons}
@@ -1181,7 +1214,7 @@ export function AddonList({ accountId }: AddonListProps) {
           {
             label: 'Deploy to All',
             icon: <Download className="h-3.5 w-3.5" />,
-            onClick: handleBulkDeployToAll,
+            onClick: openBulkDeployToAll,
             disabled: isBulkActionLoading,
             tooltip: 'Deploy to all accounts',
           },

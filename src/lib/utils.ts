@@ -91,6 +91,11 @@ export function maskAccountLabel(account: { name?: string | null; email?: string
   return (name.includes('@') ? maskEmailLevel(name, emailLevel) : maskNameLevel(name, nameLevel)) || 'Unnamed Account'
 }
 
+export function maskedAccountInitial(account: { name?: string | null; email?: string | null }, nameLevel: number, emailLevel: number): string {
+  if (!account.name && !account.email) return '?'
+  return maskAccountLabel(account, nameLevel, emailLevel).charAt(0).toUpperCase()
+}
+
 export function maskedInitial(name: string, level: number): string {
   return maskNameLevel(name, level).charAt(0).toUpperCase()
 }
