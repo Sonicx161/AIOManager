@@ -545,6 +545,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
         const actionAudit = (request) => auditCtx(request)
         const actionBody = (request) => (request.body && typeof request.body === 'object' ? request.body : {})
         const sessionHash = (request) => request.adminSession?.idHash || 'anonymous'
+        const settled = (result) => { if (result?.ok === true) reads.afterAccountAction(); return result }
 
         admin.get('/users/bulk-delete/preview', opts({ max: 30 }), async (request, reply) => {
             try {
@@ -555,12 +556,12 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
         })
 
         admin.post('/users/bulk-delete', opts({ max: 3 }), async (request, reply) => {
-            return bulkDelete.confirm(reply, sessionHash(request), actionBody(request), actionAudit(request))
+            return settled(await bulkDelete.confirm(reply, sessionHash(request), actionBody(request), actionAudit(request)))
         })
 
         const accountAction = (path, max, run) => {
             admin.post(`/users/:handle/${path}`, opts({ max }), async (request, reply) => {
-                return run(reply, String(request.params.handle || ''), actionBody(request), actionAudit(request))
+                return settled(await run(reply, String(request.params.handle || ''), actionBody(request), actionAudit(request)))
             })
         }
         accountAction('disable', 20, (reply, handle, body, audit) => accountActions.disable(reply, handle, body, audit))
@@ -576,7 +577,7 @@ export async function registerAdminRoutes(fastify, { limits = ADMIN_LIMITS, log 
             return repairs.catalogAndHistory(reply, String(request.params.handle || ''))
         })
         admin.post('/users/:handle/repairs/:key', opts({ adminReplicaOk: true, max: 10 }), async (request, reply) => {
-            return repairs.run(reply, String(request.params.handle || ''), String(request.params.key || ''), actionBody(request), actionAudit(request))
+            return settled(await repairs.run(reply, String(request.params.handle || ''), String(request.params.key || ''), actionBody(request), actionAudit(request)))
         })
 
         admin.get('/users/:handle', opts(), async (request, reply) => {

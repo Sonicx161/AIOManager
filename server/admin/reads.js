@@ -596,5 +596,7 @@ export function createReads({ autopilotEngine = null, activityEngine = null, lim
         return value
     }
 
-    return { overview, system, users, listUsers, getUser, autopilot, activity, tasks, cache, metrics }
+    const afterAccountAction = () => { users.reset(); recentAudit.reset(); overview.reset(); activity.reset(); cache.reset() }
+
+    return { overview, system, users, listUsers, getUser, autopilot, activity, tasks, cache, metrics, afterAccountAction }
 }
