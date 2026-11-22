@@ -688,6 +688,19 @@ export function activityNowStatuses(history: ActivityItem[], now = Date.now(), c
     return status
 }
 
+export function accountRecentActivity(items: ActivityItem[], now = Date.now()): ActivityItem | undefined {
+    let latest: ActivityItem | undefined
+    const cutoff = now + 60_000
+    for (const item of items) {
+        if (item.backfill) continue
+        const time = itemTimeMs(item.timestamp)
+        if (!Number.isFinite(time) || time <= 0 || time > cutoff) continue
+        const prior = latest ? itemTimeMs(latest.timestamp) : -Infinity
+        if (!latest || time > prior || (time === prior && item.id < latest.id)) latest = item
+    }
+    return latest && activityNowStatus(latest, now) === 'recent' ? latest : undefined
+}
+
 /** Dated resume points compete with every platform's latest item. Only live reports override it. */
 export function accountMediaPlayback(playback: MediaPlayback[], latest: ActivityItem | null): MediaPlayback | undefined {
     return playback.find(item => item.state === 'playing') || playback.find(item => item.state === 'paused')

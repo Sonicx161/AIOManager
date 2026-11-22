@@ -6,7 +6,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Textarea } from '@/components/ui/textarea'
 import { AccountAvatar, AccountMenuHeader } from './AccountAvatar'
 import { usePhoneViewport } from '@/hooks/usePhoneViewport'
-import { AccountMediaPlayback } from './AccountMedia'
+import { AccountMediaPlayback, AccountWatchingNow } from './AccountMedia'
+import { useWatchingNow } from '@/hooks/useWatchingNow'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
 import { syncErrorPanelCopy, classifySyncError, attributeAccountError } from '@/lib/sync-error-copy'
@@ -220,6 +221,7 @@ export const AccountCard = memo(function AccountCard({
     return latest
   }, [accountItems, libraryLoading, media.initialLoading, media.history.length])
   const mediaPlayback = accountMediaPlayback(media.playback, lastWatched)
+  const watchingNow = useWatchingNow(accountItems, !account.hideLastWatched)
 
   const handleEdit = () => {
     openAddAccountDialog(account)
@@ -585,7 +587,7 @@ export const AccountCard = memo(function AccountCard({
         <CardFooter className="mt-auto flex flex-wrap items-center gap-2 px-5 pb-5 pt-2 md:px-6 md:pb-6">
           {!account.hideLastWatched && (mediaPlayback || lastWatched) && (
             <div className="min-w-0 flex-[1_1_8.5rem]">
-              {mediaPlayback ? <AccountMediaPlayback playback={mediaPlayback} /> : lastWatched && (
+              {mediaPlayback ? <AccountMediaPlayback playback={mediaPlayback} /> : watchingNow && lastWatched ? <AccountWatchingNow name={watchingNow.name} /> : lastWatched && (
                 <div className="flex min-h-5 min-w-0 items-center gap-1.5 text-xs">
                   <Play className="h-3.5 w-3.5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
                   <Tooltip content={lastWatched.name} side="top">

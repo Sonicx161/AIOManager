@@ -5,7 +5,8 @@ import { Account } from '@/types/account'
 import { Tooltip } from '@/components/ui/tooltip'
 import { AccountAvatar, AccountMenuHeader } from './AccountAvatar'
 import { usePhoneViewport } from '@/hooks/usePhoneViewport'
-import { AccountMediaPlayback } from './AccountMedia'
+import { AccountMediaPlayback, AccountWatchingNow } from './AccountMedia'
+import { useWatchingNow } from '@/hooks/useWatchingNow'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
 import { PlatformSourceChip } from '@/components/addons/PlatformSourceChip'
@@ -83,6 +84,7 @@ export const AccountListRow = memo(function AccountListRow({
         return [...accountItems].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
     }, [accountItems])
     const mediaPlayback = accountMediaPlayback(media.playback, lastWatched)
+    const watchingNow = useWatchingNow(accountItems, !account.hideLastWatched)
 
     const isStale = isSyncStale(account.lastSync, Date.now())
     const hasPlatformSources = accountPlatformSources(account).length > 0
@@ -171,7 +173,13 @@ export const AccountListRow = memo(function AccountListRow({
                         <span className="shrink-0 whitespace-nowrap">{addonCountLabel(account.addons.length)}</span>
                     </Tooltip>
                     {!account.hideLastWatched && mediaPlayback && <AccountMediaPlayback playback={mediaPlayback} compact />}
-                    {!account.hideLastWatched && !mediaPlayback && lastWatched && (
+                    {!account.hideLastWatched && !mediaPlayback && watchingNow && (
+                        <>
+                            <span className="hidden shrink-0 sm:inline">·</span>
+                            <AccountWatchingNow name={watchingNow.name} compact />
+                        </>
+                    )}
+                    {!account.hideLastWatched && !mediaPlayback && !watchingNow && lastWatched && (
                         <>
                             <span className="hidden shrink-0 sm:inline">·</span>
                             <span className="min-w-0 truncate">

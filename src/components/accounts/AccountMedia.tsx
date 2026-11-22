@@ -17,3 +17,13 @@ export function AccountMediaPlayback({ playback, compact = false }: { playback: 
         <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{clock}</span>
     </div>
 }
+
+export function AccountWatchingNow({ name, compact = false }: { name: string; compact?: boolean }) {
+    return <div data-watching-now className={cn('flex min-w-0 items-center gap-1.5 text-xs', !compact && 'min-h-5')}>
+        <Play className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden="true" />
+        <span className={cn('text-[10px] font-medium text-muted-foreground', compact ? 'min-w-0 truncate' : 'shrink-0')}>Watching now</span>
+        <Tooltip content={name} side="top">
+            <span className={cn('truncate font-medium text-foreground/80', compact && 'hidden sm:inline')}>{name}</span>
+        </Tooltip>
+    </div>
+}
