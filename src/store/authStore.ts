@@ -26,7 +26,15 @@ interface AuthStore {
   unlock: (password: string) => Promise<boolean>
   lock: () => void
   resetMasterPassword: (password: string) => Promise<void>
-  unlockFromSync: (password: string, saltBase64?: string, options?: { allowGenerate?: boolean }) => Promise<void>
+  unlockFromSync: (password: string, saltBase64?: string, options?: { allowGenerate?: boolean; keepEqualKey?: boolean }) => Promise<void>
+}
+
+async function rawKeyBase64(key: CryptoKey): Promise<string | null> {
+  try {
+    return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.exportKey('raw', key))))
+  } catch {
+    return null
+  }
 }
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
@@ -171,7 +179,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     await get().setupMasterPassword(password)
   },
 
-  unlockFromSync: async (password: string, saltBase64?: string, options?: { allowGenerate?: boolean }) => {
+  unlockFromSync: async (password: string, saltBase64?: string, options?: { allowGenerate?: boolean; keepEqualKey?: boolean }) => {
     let salt: Uint8Array | null = null
 
     if (saltBase64) {
@@ -212,10 +220,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       console.warn('Your session may not persist across page reloads.')
     }
 
-    await saveSessionKey(key)
+    // A same-session refresh that derives identical key bytes keeps the installed key object, which readers treat as the unlock epoch.
+    const current = options?.keepEqualKey ? get().encryptionKey : null
+    const installed = current && await rawKeyBase64(current) === hash && get().encryptionKey === current ? current : key
+
+    await saveSessionKey(installed)
 
     set({
-      encryptionKey: key,
+      encryptionKey: installed !== key && get().encryptionKey !== installed ? key : installed,
       isLocked: false,
     })
   },

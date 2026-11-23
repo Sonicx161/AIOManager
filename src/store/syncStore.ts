@@ -826,7 +826,7 @@ export const useSyncStore = create<SyncState>()(
                     } else {
                         try {
                             const allowGen = saltPolicy.allowGenerate || (saltPolicy.refuse && bypassGuard)
-                            await useAuthStore.getState().unlockFromSync(password, saltPolicy.saltToUse, { allowGenerate: allowGen })
+                            await useAuthStore.getState().unlockFromSync(password, saltPolicy.saltToUse, { allowGenerate: allowGen, keepEqualKey: priorWorkspace === id && get().auth.isAuthenticated && get().auth.id === id })
                             unlockOk = true
                         } catch (e) {
                             if (import.meta.env.DEV) console.error("Failed to restore session from sync:", e)
