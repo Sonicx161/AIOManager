@@ -1,4 +1,5 @@
 import { buildAIOStreamsVariantInstallUrl } from './aiostreams-variant-url.ts'
+import { addProfile, alignProfilesForReadback, assertProfilesKept, listProfiles, ownerDisplayName, updateProfile, OWNER_PROFILE_ID } from './aiostreams-profiles.ts'
 
 export type HouseholdConfig = Record<string, unknown>
 type RecordValue = Record<string, unknown>
@@ -61,10 +62,11 @@ export function readHouseholdCapabilities(status: HouseholdConfig | null, destin
     const variants = record(settings.variants)
     const jellyfin = record(settings.jellyfin)
     if (jellyfin.enabled !== true) throw new Error('This AIOStreams instance does not advertise household users. Enable Jellyfin support or update the instance, then load again.')
-    if (typeof jellyfin.maxPersonas !== 'number' || !Number.isSafeInteger(jellyfin.maxPersonas) || jellyfin.maxPersonas < 0) {
+    const limit = jellyfin.maxProfiles ?? jellyfin.maxPersonas
+    if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 0) {
         throw new Error('This AIOStreams instance did not report its household user limit. Update the instance, then load again.')
     }
-    const result = { maxPersonas: jellyfin.maxPersonas, variantsAvailable: false }
+    const result = { maxPersonas: limit, variantsAvailable: false }
     if (!['all', 'trusted'].includes(String(variants.access))) return { ...result, variantUnavailableReason: 'Variants are disabled on this instance.' }
     if (variants.access === 'trusted' && destination.trusted !== true) return { ...result, variantUnavailableReason: 'This instance limits variants to trusted configurations.' }
     if (![variants.maxScriptLength, variants.max].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) {
@@ -101,37 +103,47 @@ export function buildHouseholdSetupPlan(input: HouseholdSetupInput): HouseholdSe
         variantId = newId(variantName, reservedIds)
         destination.variants = [...variants, { id: variantId, name: variantName, enabled: true, script: input.variant.script }]
     }
-    const jellyfin = record(destination.jellyfin)
-    const personas = configRecords(jellyfin.personas)
+    const before = destination
+    const addVariant = (entry: RecordValue) => ({ ...entry, variants: [...new Set([...strings(entry.variants), variantId!])] })
+    const others = listProfiles(destination).profiles.filter(p => !p.owner)
     let memberId: string
+    let after: HouseholdConfig
+    let memberName: string
+    let playbackVariantIds: string[]
     if (input.memberId === '@primary') {
         memberId = 'primary'
-        const primary = record(jellyfin.primary)
-        if (typeof primary.name !== 'string' || !primary.name.trim()) throw new Error('The primary user has no configured name. Select an existing household user or create a separate user.')
-        if (variantId) destination.jellyfin = { ...jellyfin, primary: { ...primary, variants: [...new Set([...strings(primary.variants), variantId])] } }
+        memberName = ownerDisplayName(destination)
+        if (!memberName) throw new Error('The primary user has no configured name. Select an existing household user or create a separate user.')
+        after = variantId ? updateProfile(destination, OWNER_PROFILE_ID, addVariant) : destination
+        assertProfilesKept(before, after, [OWNER_PROFILE_ID])
+        playbackVariantIds = [...new Set(listProfiles(after).profiles.find(p => p.owner)?.variants ?? [])]
     } else if (input.memberId) {
-        const member = personas.find(p => p.id === input.memberId)
+        const member = others.find(p => p.id === input.memberId)
         if (!member) throw new Error('The selected AIOStreams user no longer exists. Load the config again.')
-        memberId = String(member.id)
-        if (variantId) destination.jellyfin = { ...jellyfin, personas: personas.map(p => p.id === memberId
-            ? { ...p, variants: [...new Set([...strings(p.variants), variantId])] } : p) }
+        memberId = member.id
+        after = variantId ? updateProfile(destination, memberId, addVariant) : destination
+        assertProfilesKept(before, after, [memberId])
+        const updated = listProfiles(after).profiles.find(p => !p.owner && p.id === memberId)!
+        memberName = updated.name || name
+        playbackVariantIds = [...new Set(updated.variants ?? [])]
     } else {
-        if (input.maxPersonas !== undefined && personas.length >= input.maxPersonas) throw new Error('This configuration has reached the instance’s household user limit. Select an existing user instead.')
-        if (personas.some(p => sameName(p.name, name)) || sameName(record(jellyfin.primary).name, name)) {
+        if (input.maxPersonas !== undefined && others.length >= input.maxPersonas) throw new Error('This configuration has reached the instance’s household user limit. Select an existing user instead.')
+        const ownerName = listProfiles(destination).profiles.find(p => p.owner)?.name
+        if (others.some(p => sameName(p.name, name)) || sameName(ownerName, name)) {
             throw new Error('An AIOStreams user already has this name. Select that existing user.')
         }
-        memberId = newId(name, new Set(personas.map(p => String(p.id))))
-        destination.jellyfin = { ...jellyfin, personas: [...personas, { id: memberId, name, variants: variantId ? [variantId] : [], history: 'own', trackers: [] }] }
+        memberId = newId(name, new Set(others.map(p => p.id)))
+        after = addProfile(destination, { id: memberId, name, variants: variantId ? [variantId] : [], history: 'own', trackers: [] })
+        assertProfilesKept(before, after, [memberId, OWNER_PROFILE_ID])
+        memberName = name
+        playbackVariantIds = variantId ? [variantId] : []
     }
-    const member = input.memberId === '@primary' ? record(record(destination.jellyfin).primary)
-        : configRecords(record(destination.jellyfin).personas).find(p => p.id === memberId)!
-    const playbackVariantIds = [...new Set(strings(member.variants))]
     const plan: HouseholdSetupPlan = {
         ...(variantId && input.variant ? { variantId, variantName: input.variant.name.trim(), variantScript: input.variant.script } : {}),
         playbackVariantIds, playbackUrl: householdVariantInstallUrl(input.installUrl, playbackVariantIds),
         memberId, memberKind: input.memberId === '@primary' ? 'primary' : 'persona', personName: name,
-        memberName: String(member.name || name),
-        aiostreams: { before: structuredClone(input.destination), after: destination,
+        memberName,
+        aiostreams: { before: structuredClone(input.destination), after,
             ...(input.effectiveDestination ? { effectiveBefore: structuredClone(input.effectiveDestination) } : {}) },
     }
     if (input.metadata) {
@@ -140,8 +152,7 @@ export function buildHouseholdSetupPlan(input: HouseholdSetupInput): HouseholdSe
         let user = input.metadataMemberId ? users.find(p => p.id === input.metadataMemberId) : undefined
         if (input.metadataMemberId && !user) throw new Error('The selected AIOMetadata user no longer exists. Load the config again.')
         if (!user && users.some(p => sameName(p.name, name))) throw new Error('An AIOMetadata user already has this name. Select that existing user.')
-        const handoffName = input.memberId === '@primary' ? String(record(record(destination.jellyfin).primary).name || name)
-            : String(configRecords(record(destination.jellyfin).personas).find(p => p.id === memberId)?.name || name)
+        const handoffName = memberName
         if (users.some(p => p.id !== user?.id && (sameName(p.name, handoffName) || strings(p.handoffNames).some(n => sameName(n, handoffName))))) {
             throw new Error('That handoff name is assigned to another AIOMetadata user. Choose the matching user.')
         }
@@ -177,6 +188,11 @@ function contains(actual: unknown, expected: unknown): boolean {
     return actual === expected
 }
 
+function readbackPair(actual: HouseholdConfig, expected: HouseholdConfig): [HouseholdConfig, HouseholdConfig] {
+    const aligned = alignProfilesForReadback(expected, actual)
+    return [aligned.readback, aligned.planned]
+}
+
 export interface HouseholdServiceAdapter {
     load: () => Promise<HouseholdConfig>
     loadEffective?: () => Promise<HouseholdConfig>
@@ -206,19 +222,21 @@ export async function applyHouseholdSetupPlan(
         onProgress(progress)
         try {
             const current = await adapter.load()
+            const confirms = (actual: HouseholdConfig) => service === 'aiostreams'
+                ? contains(...readbackPair(actual, expected)) : contains(actual, expected)
             // A retry verifies the already-saved step rather than creating a second user.
-            if (!contains(current, expected)) {
+            if (!confirms(current)) {
                 if (canonical(comparable(current)) !== canonical(comparable(stage.before))) throw new Error('This configuration changed after preview. Load it again and review your choices.')
                 if (service === 'aiostreams' && plan.aiostreams.effectiveBefore) {
                     if (!adapter.loadEffective) throw new Error('Reload the effective destination configuration before saving this setup.')
                     const effective = await adapter.loadEffective()
-                    const userBasis = (config: HouseholdConfig) => ({ jellyfin: config.jellyfin, variants: config.variants })
+                    const userBasis = (config: HouseholdConfig) => ({ jellyfin: config.jellyfin, profiles: config.profiles, variants: config.variants })
                     if (canonical(userBasis(effective)) !== canonical(userBasis(plan.aiostreams.effectiveBefore))) {
                         throw new Error('The shared users or variants changed after preview. Load it again and review your choices.')
                     }
                 }
                 await adapter.save(stage.after, current)
-                if (!contains(await adapter.load(), expected)) throw new Error('The server did not confirm the requested setup settings. Review this service before retrying.')
+                if (!confirms(await adapter.load())) throw new Error('The server did not confirm the requested setup settings. Review this service before retrying.')
             }
             const result = { service, status: 'verified' } as HouseholdStageResult
             results.push(result); onProgress(result)

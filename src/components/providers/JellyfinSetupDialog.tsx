@@ -16,6 +16,7 @@ import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { isAIOStreamsAddon, parseAIOStreamsUrl, fetchAIOStreamsUser, getStoredAIOStreamsPassword } from '@/lib/aiostreams-utils'
 import { isAIOMetadataAddon, parseAIOMetadataUrl, fetchAIOMetadataConfig, fetchAIOMetadataStatus, getStoredAIOMetadataPassword } from '@/lib/aiometadata-utils'
+import { aiostreamsQuickAddUsers } from '@/lib/aiostreams-profiles'
 
 interface Props {
     open: boolean
@@ -130,14 +131,8 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                         const password = parsed && getStoredAIOStreamsPassword(parsed.baseUrl, parsed.uuid)
                         if (!parsed || !password) return
                         const result = await fetchAIOStreamsUser(parsed.baseUrl, parsed.uuid, password)
-                        const jellyfin = result.userData.jellyfin as Record<string, unknown> | undefined
-                        const primary = jellyfin?.primary as Record<string, unknown> | undefined
-                        if (typeof primary?.name === 'string' && primary.name.trim()) suggestions.push({ id: `aios:primary:${parsed.uuid}`, name: primary.name.trim(), provider: 'AIOStreams', baseUrl: `${parsed.baseUrl}/jellyfin`, username: parsed.uuid, password })
-                        const personas = Array.isArray(jellyfin?.personas) ? jellyfin.personas : []
-                        for (const entry of personas) {
-                            if (!entry || typeof entry !== 'object') continue
-                            const person = entry as Record<string, unknown>
-                            if (typeof person.id === 'string' && typeof person.name === 'string' && person.name.trim()) suggestions.push({ id: `aios:${parsed.uuid}:${person.id}`, name: person.name.trim(), provider: 'AIOStreams', baseUrl: `${parsed.baseUrl}/jellyfin`, username: `${parsed.uuid}/${person.id}`, password })
+                        for (const profile of aiostreamsQuickAddUsers(result.userData)) {
+                            suggestions.push({ id: profile.owner ? `aios:primary:${parsed.uuid}` : `aios:${parsed.uuid}:${profile.id}`, name: profile.name, provider: 'AIOStreams', baseUrl: `${parsed.baseUrl}/jellyfin`, username: profile.owner ? parsed.uuid : `${parsed.uuid}/${profile.id}`, password })
                         }
                     } else if (isAIOMetadataAddon(addon)) {
                         const parsed = parseAIOMetadataUrl(addon.transportUrl)

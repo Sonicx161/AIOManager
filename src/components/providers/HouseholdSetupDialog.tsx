@@ -24,6 +24,7 @@ import { fetchAIOMetadataConfig, getStoredAIOMetadataPassword, isAIOMetadataAddo
 import { getAIOMetadataConfigVersion } from '@/lib/aiometadata-config-safety'
 import { applyHouseholdSetupPlan, buildHouseholdSetupPlan, configRecords, readHouseholdCapabilities, type HouseholdConfig, type HouseholdSetupPlan, type HouseholdStageResult } from '@/lib/household-setup'
 import { openJellyfinSecret, sealJellyfinSecret } from '@/lib/jellyfin/connection-data'
+import { listProfiles, ownerDisplayName } from '@/lib/aiostreams-profiles'
 import { normalizeJellyfinUrl, type JellyfinSession } from '@/lib/jellyfin/session'
 import type { Account } from '@/types/account'
 import { JellyfinSetupDialog } from './JellyfinSetupDialog'
@@ -41,7 +42,6 @@ function configOptions(accounts: Account[], service: 'aiostreams' | 'aiometadata
             logo: addon.metadata?.customLogo || addon.manifest.logo }] : []
     }))
 }
-const asRecord = (value: unknown): HouseholdConfig => value && typeof value === 'object' && !Array.isArray(value) ? value as HouseholdConfig : {}
 const serviceName = (service: string) => service === 'aiostreams' ? 'AIOStreams' : 'AIOMetadata'
 
 interface Loaded {
@@ -191,8 +191,8 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
             if (generation.current !== token) return
             const capabilities = readHouseholdCapabilities(status, effectiveDestination.userData)
             if (metadata && getAIOMetadataConfigVersion(metadata) === null) throw new Error('This AIOMetadata instance cannot protect this update from concurrent edits. Update the instance and load again.')
-            const rawPersonas = configRecords(asRecord(destination.userData.jellyfin).personas)
-            const inheritedPersonas = configRecords(asRecord(effectiveDestination.userData.jellyfin).personas).filter(p => !rawPersonas.some(raw => raw.id === p.id))
+            const rawPersonas = listProfiles(destination.userData).profiles.filter(p => !p.owner)
+            const inheritedPersonas = listProfiles(effectiveDestination.userData).profiles.filter(p => !p.owner && !rawPersonas.some(raw => raw.id === p.id))
             if (inheritedPersonas.length > 0) throw new Error('This config inherits household users from its parent. Set up the person in that parent configuration to preserve its existing users.')
             setLoaded({ destination: destination.userData, effectiveDestination: effectiveDestination.userData, metadata, to, metadataTo,
                 destinationPassword: toPassword, metadataPassword: metaPassword, accessKey, addonPassword, ownership, capabilities,
@@ -276,8 +276,8 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
     const verifiedServices = results.filter(result => result.status === 'verified').length
     const totalServices = plan?.aiometadata ? 2 : 1
     const savingService = results.find(result => result.status === 'saving')?.service
-    const personas = configRecords(asRecord(loaded?.destination.jellyfin).personas)
-    const primaryName = asRecord(asRecord(loaded?.destination.jellyfin).primary).name
+    const personas = listProfiles(loaded?.destination).profiles.filter(p => !p.owner)
+    const primaryName = ownerDisplayName(loaded?.destination)
     const metadataMembers = configRecords(loaded?.metadata?.jellyfinUsers)
     const privateName = (value: string) => value.includes('@') ? maskEmailLevel(value, privacy ? emailLevel : 0) : maskNameLevel(value, privacy ? nameLevel : 0)
     const localAccountLabel = (account: Account) => privateName(account.name?.trim() || getAccountEmail(account) || 'Unnamed account')
@@ -337,7 +337,7 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
                     </fieldset> : !plan ? <fieldset disabled={busy} className="space-y-4">
                         <div data-theme-part="panel" className="min-w-0 rounded-2xl border border-border/40 bg-card p-3 shadow-sm">{configChoice(loaded.to)}</div>
                         <div className="space-y-1.5"><Label htmlFor="household-name">Person’s name</Label><Input id="household-name" value={personName} maxLength={32} onChange={e => { if (variantName === personName) setVariantName(e.target.value); setPersonName(e.target.value) }} /></div>
-                        <div className="space-y-1.5"><Label htmlFor="household-member">AIOStreams user</Label><Select disabled={busy} value={memberId || '@new'} onValueChange={value => setMemberId(value === '@new' ? '' : value)}><SelectTrigger id="household-member"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="@new">Create a separate user</SelectItem>{typeof primaryName === 'string' && primaryName.trim() && <SelectItem value="@primary">{privateName(primaryName)} · primary user</SelectItem>}{personas.map(person => <SelectItem key={String(person.id)} value={String(person.id)}>{privateName(String(person.name))}</SelectItem>)}</SelectContent></Select></div>
+                        <div className="space-y-1.5"><Label htmlFor="household-member">AIOStreams user</Label><Select disabled={busy} value={memberId || '@new'} onValueChange={value => setMemberId(value === '@new' ? '' : value)}><SelectTrigger id="household-member"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="@new">Create a separate user</SelectItem>{primaryName && <SelectItem value="@primary">{privateName(primaryName)} · primary user</SelectItem>}{personas.map(person => <SelectItem key={person.id} value={person.id}>{privateName(person.name || person.id)}</SelectItem>)}</SelectContent></Select></div>
                         {loaded.metadata && <div className="space-y-1.5"><Label htmlFor="household-metadata-member">AIOMetadata user</Label><Select disabled={busy} value={metadataMemberId || '@new'} onValueChange={value => setMetadataMemberId(value === '@new' ? '' : value)}><SelectTrigger id="household-metadata-member"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="@new">Create a separate user</SelectItem>{metadataMembers.map(person => <SelectItem key={String(person.id)} value={String(person.id)}>{privateName(String(person.name))}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">This user belongs to {loaded.metadataTo ? label(loaded.metadataTo) : 'the selected configuration'}. Only this user’s playback source will be set.</p></div>}
                         <div data-theme-part="panel" className="space-y-3 rounded-2xl border border-border/40 bg-card p-4 shadow-sm">
                             <div className="flex items-start gap-3"><Checkbox id="household-create-variant" checked={createVariant} disabled={busy || !loaded.capabilities.variantsAvailable} onCheckedChange={checked => setCreateVariant(checked === true)} className="mt-0.5 shrink-0" /><div className="min-w-0 space-y-1"><Label htmlFor="household-create-variant">Create a variant for this person <span className="font-normal text-muted-foreground">· optional, advanced</span></Label><p className="text-xs leading-relaxed text-muted-foreground">Use different playback filters, sorting or formatting. You can finish user setup without a new variant.</p></div></div>
