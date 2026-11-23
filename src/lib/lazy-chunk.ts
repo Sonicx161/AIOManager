@@ -1,4 +1,4 @@
-import { lazy, type ComponentType, type LazyExoticComponent } from 'react'
+import { createElement, lazy, useState, type ComponentType, type LazyExoticComponent } from 'react'
 
 const CHUNK_RETRY_KEY = 'aiom:chunk-retry'
 
@@ -16,9 +16,13 @@ export type LazyChunk<T extends { default: ComponentType<never> }> = LazyExoticO
 // fatal for the tab. Reload once; a second failure surfaces to the boundary.
 export function lazyChunk<T extends { default: ComponentType<never> }>(load: () => Promise<T>): LazyChunk<T> {
     let inflight: Promise<T> | null = null
+    let loaded: T | null = null
     const start = (): Promise<T> => {
         if (!inflight) {
-            inflight = load().catch((error: unknown) => {
+            inflight = load().then((mod) => {
+                loaded = mod
+                return mod
+            }, (error: unknown) => {
                 // Allow a fresh attempt after a failure instead of caching it forever.
                 inflight = null
                 throw error
@@ -26,7 +30,7 @@ export function lazyChunk<T extends { default: ComponentType<never> }>(load: () 
         }
         return inflight
     }
-    const chunk = lazy((async (): Promise<T> => {
+    const Lazy = lazy((async (): Promise<T> => {
         try {
             const mod = await start()
             sessionStorage.removeItem(CHUNK_RETRY_KEY)
@@ -38,7 +42,16 @@ export function lazyChunk<T extends { default: ComponentType<never> }>(load: () 
             }
             throw error
         }
-    }) as unknown as LazyFactory) as unknown as LazyChunk<T>
+    }) as unknown as LazyFactory)
+    const Chunk = (props: Record<string, unknown>) => {
+        const [loadedComponent] = useState(() => {
+            if (!loaded) return null
+            sessionStorage.removeItem(CHUNK_RETRY_KEY)
+            return loaded.default
+        })
+        return createElement((loadedComponent ?? Lazy) as unknown as ComponentType<Record<string, unknown>>, props)
+    }
+    const chunk = Chunk as unknown as LazyChunk<T>
     // A failed preload stays silent: the mount-time load retries and owns the
     // one-shot reload guard.
     chunk.preload = () => start().catch(() => null)

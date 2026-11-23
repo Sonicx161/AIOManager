@@ -190,6 +190,15 @@ function App() {
     return () => { cancelled = true }
   }, [renderReady, sessionReady])
 
+  useEffect(() => {
+    if (!renderReady || sessionReady) return
+    return useSyncStore.subscribe((state, prev) => {
+      if (!state.isSyncing || prev.isSyncing) return
+      void AuthenticatedShell.preload()
+      preloadRouteChunk(window.location.pathname)
+    })
+  }, [renderReady, sessionReady])
+
   // Nav pages: once the first authenticated screen has settled (network quiet)
   // plus idle, prefetch the most likely next routes' lazy chunks (Cider's
   // preloadSidebarPages); the other routes rely on hover/intent prefetch and
