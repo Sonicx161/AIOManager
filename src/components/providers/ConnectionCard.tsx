@@ -1,6 +1,6 @@
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, Link as LinkIcon } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import type { Connection, ConnectionStatus } from '@/types/connection'
@@ -21,6 +21,7 @@ interface ConnectionCardProps {
     contextLabel?: string
     badge?: React.ReactNode
     addonCount?: number
+    sharedNote?: string
     /** Which truth the count represents: the account's recorded collection or the count recorded at the connection's last sync. */
 }
 
@@ -35,6 +36,7 @@ export const ConnectionCard = memo(function ConnectionCard({
     email,
     badge,
     addonCount,
+    sharedNote,
 }: ConnectionCardProps) {
     const name = connectionLabel(connection)
     const expiry = tokenExpiry(connection)
@@ -110,6 +112,12 @@ export const ConnectionCard = memo(function ConnectionCard({
                     )}
                     <span>{statusParts.activity}</span>
                 </p>
+                {sharedNote && (
+                    <p className="mt-0.5 flex min-w-0 items-start gap-1 text-xs leading-tight text-warning sm:items-center sm:text-[13px] sm:leading-snug">
+                        <LinkIcon className="mt-px h-3 w-3 shrink-0 sm:mt-0" aria-hidden="true" />
+                        <span className="min-w-0 line-clamp-2 break-words sm:line-clamp-1">{sharedNote}</span>
+                    </p>
+                )}
             </div>
             <div className="flex shrink-0 items-center gap-2" onClick={stop} onKeyDown={stopActivate}>
                 {!healthy && <ConnectionStatusPill status={pill} />}

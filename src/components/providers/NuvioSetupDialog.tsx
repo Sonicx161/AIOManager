@@ -25,10 +25,13 @@ import {
     Lock,
     QrCode,
 } from 'lucide-react'
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { cn, maskEmailLevel } from '@/lib/utils'
 import { usesMainProfileAddons } from '@/lib/nuvio-profile-flags'
+import { findNuvioProfileSharers } from '@/lib/nuvio-shared-profile'
 import { useUIStore } from '@/store/uiStore'
+import { useAccountStore } from '@/store/accountStore'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 type WizardStep = 'login' | 'profile' | 'confirm'
 
@@ -51,6 +54,7 @@ interface NuvioSetupDialogProps {
     onComplete: (tokens: NuvioTokens, profileId: string | null, profiles: NuvioProfile[], email: string, backend: NuvioBackend) => void | Promise<void>
     initialBackend?: NuvioBackend
     onBackToPicker?: () => void
+    accountId?: string | null
 }
 
 interface NuvioTokens {
@@ -65,7 +69,7 @@ const STEP_INDICATORS = [
     { step: 'confirm' as const, label: 'Confirm' },
 ]
 
-export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBackend, onBackToPicker }: NuvioSetupDialogProps) {
+export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBackend, onBackToPicker, accountId }: NuvioSetupDialogProps) {
     const [step, setStep] = useState<WizardStep>('login')
     const [mode, setMode] = useState<'login' | 'signup'>('login')
     const [email, setEmail] = useState('')
@@ -88,6 +92,9 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
     const isPrivacyModeEnabled = useUIStore(s => s.isPrivacyModeEnabled)
     const privacyLevelEmail = useUIStore(s => s.privacyLevelEmail)
     const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
+    const accounts = useAccountStore(s => s.accounts)
+    const deletedAccounts = useAccountStore(s => s.deletedAccounts)
+    const maskedAccountLabel = useMaskedAccountLabel()
 
     const reset = useCallback(() => {
         requestGeneration.current += 1
@@ -227,6 +234,17 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
             if (generation === requestGeneration.current) setSubmitting(false)
         }
     }
+
+    const sharedWith = useMemo(() => {
+        if (step !== 'confirm' || !tokens) return []
+        const credentials = {
+            accessToken: tokens.accessToken,
+            email,
+            baseUrl: customBaseUrl.trim() || undefined,
+            profileId: selectedProfileId || '',
+        }
+        return findNuvioProfileSharers(accounts, { accountId, credentials }, { deletedAccounts, rosters: [{ credentials, profiles }] })
+    }, [step, tokens, email, customBaseUrl, selectedProfileId, profiles, accounts, deletedAccounts, accountId])
 
     const stepIndex = STEP_INDICATORS.findIndex(s => s.step === step)
     const emailValid = email.includes('@')
@@ -485,6 +503,17 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                     </div>
                                 )}
                             </div>
+
+                            {sharedWith.length > 0 && (
+                                <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-warning/10 border border-warning/20 px-3 py-2 text-xs text-warning flex items-start gap-2">
+                                    <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                                    <span className="min-w-0 break-words">
+                                        This Nuvio profile is already connected on <strong className="font-semibold">{maskedAccountLabel(sharedWith[0])}</strong>
+                                        {sharedWith.length > 1 && ` and ${sharedWith.length - 1} other ${sharedWith.length === 2 ? 'account' : 'accounts'}`}
+                                        . Both accounts write the same addon list, so the last one to sync wins.
+                                    </span>
+                                </div>
+                            )}
 
                             <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-warning/10 border border-warning/20 px-3 py-2 text-xs text-warning flex items-start gap-2">
                                 <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />

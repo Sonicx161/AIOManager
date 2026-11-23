@@ -31,12 +31,15 @@ import { cachedRead, isDisplayCacheFresh, peekDisplayCache } from '@/lib/display
 import { getUserCached } from '@/lib/stremio-user-cache'
 import { toast } from '@/hooks/use-toast'
 import { findResignTarget } from '@/lib/connection-identity'
+import { findNuvioProfileSharers, type NuvioRoster } from '@/lib/nuvio-shared-profile'
+import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
+import { nuvioReadIdentity } from './NuvioWorkspace'
 import { useShallow } from 'zustand/react/shallow'
 import { isAddonConnection, type Connection } from '@/types/connection'
 import type { Account } from '@/types/account'
 import type { HydraDriverConfig } from '@/types/provider'
 import { RefreshCw, Plus, Zap, Link2, Key, ChevronRight, Users, History } from 'lucide-react'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { countActiveConnections } from './connection-state'
 import { cn } from '@/lib/utils'
 import { PLATFORM_REGISTRY } from '@/lib/platform-registry'
@@ -101,6 +104,15 @@ function AccountConnectionManager({ accountId, account, connections = [], onShow
     const emailPrivacyLevel = isPrivacyModeEnabled ? privacyLevelEmail : 0
     const namePrivacyLevel = isPrivacyModeEnabled ? privacyLevelNames : 0
     const storeAccount = useAccountStore(s => getAccountById(s.accounts, accountId))
+    const workspaceAccounts = useAccountStore(s => s.accounts)
+    const deletedAccounts = useAccountStore(s => s.deletedAccounts)
+    const maskedAccountLabel = useMaskedAccountLabel()
+    const nuvioRosters = useMemo(() => workspaceAccounts.flatMap(a => (a.connections || [])
+        .filter(c => c.platform === 'nuvio')
+        .flatMap((c): NuvioRoster[] => {
+            const rows = peekDisplayCache<NuvioRoster['profiles']>(`nuvio:profiles:${nuvioReadIdentity(a.id, c, false)}`)?.value
+            return rows?.length ? [{ credentials: c.credentials, profiles: rows }] : []
+        })), [workspaceAccounts])
     const statusAccount = account ?? storeAccount
     const encryptionKeyFromStore = useAuthStore(s => s.encryptionKey)
 
@@ -433,6 +445,7 @@ function AccountConnectionManager({ accountId, account, connections = [], onShow
                 onOpenChange={(open) => { setNuvioDialogOpen(open) }}
                 onComplete={handleNuvioComplete}
                 onBackToPicker={backToPicker(setNuvioDialogOpen)}
+                accountId={accountId}
                 initialBackend={(() => {
                     const existing = resolvedConnections.find(c => c.platform === 'nuvio')
                     return existing ? { baseUrl: existing.credentials?.baseUrl, publishableKey: existing.credentials?.publishableKey } : undefined
@@ -622,6 +635,11 @@ function AccountConnectionManager({ accountId, account, connections = [], onShow
                             const contextLabel = [customLabel, profileLabel].filter(Boolean).join(' · ') || undefined
                             const premium = isPrimaryStremio ? premiumByAccount.get(accountId) : undefined
                             const nuvioMember = kind === 'nuvio' ? nuvioMemberByConnection.get(conn.id) : undefined
+                            const sharers = conn.platform === 'nuvio' && (conn.connectionType == null || conn.connectionType === 'native')
+                                ? findNuvioProfileSharers(workspaceAccounts, { accountId, connectionId: conn.id, credentials: conn.credentials, profileMapping: conn.profileMapping, activeProfileId: statusAccount?.activeProfileId }, { deletedAccounts, rosters: nuvioRosters })
+                                : []
+                            const sharedNote = sharers.length === 1 ? `Also on ${maskedAccountLabel(sharers[0])}`
+                                : sharers.length > 1 ? `Also on ${sharers.length} other accounts` : undefined
                             // lastKnownAddonCount is not maintained after connection creation.
                             // Show the current account collection rather than a stale remote count.
                             const accountAddonCount = statusAccount?.addons?.length
@@ -640,6 +658,7 @@ function AccountConnectionManager({ accountId, account, connections = [], onShow
                                     email={connEmail}
                                     contextLabel={contextLabel}
                                     addonCount={conn.platform === 'jellyfin' ? undefined : accountAddonCount}
+                                    sharedNote={sharedNote}
                                     badge={
                                         <>
                                             {needsSignIn ? (

@@ -1973,6 +1973,7 @@ export function AccountForm() {
       open={nuvioDialogOpen}
       onOpenChange={setNuvioDialogOpen}
       onComplete={handleNuvioAccountComplete}
+      accountId={createdAccountId}
     />
 
     {jellyfinDialogOpen && <JellyfinSetupDialog
