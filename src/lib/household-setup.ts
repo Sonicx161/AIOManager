@@ -30,6 +30,7 @@ export interface HouseholdSetupPlan {
     memberId: string
     memberKind: 'primary' | 'persona'
     memberName: string
+    memberNameDerived?: boolean
     metadataMemberId?: string
     metadataMemberName?: string
     aiostreams: { before: HouseholdConfig; after: HouseholdConfig; effectiveBefore?: HouseholdConfig }
@@ -53,6 +54,8 @@ function newId(name: string, used: Set<string>): string {
     return candidate
 }
 
+export const VARIANT_SCRIPT_SANITY_LIMIT = 65536
+
 export function readHouseholdCapabilities(status: HouseholdConfig | null, destination: HouseholdConfig): {
     maxPersonas: number; maxScriptLength?: number; maxVariants?: number
     variantsAvailable: boolean; variantUnavailableReason?: string
@@ -69,10 +72,11 @@ export function readHouseholdCapabilities(status: HouseholdConfig | null, destin
     const result = { maxPersonas: limit, variantsAvailable: false }
     if (!['all', 'trusted'].includes(String(variants.access))) return { ...result, variantUnavailableReason: 'Variants are disabled on this instance.' }
     if (variants.access === 'trusted' && destination.trusted !== true) return { ...result, variantUnavailableReason: 'This instance limits variants to trusted configurations.' }
-    if (![variants.maxScriptLength, variants.max].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) {
+    const usable = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    if (!usable(variants.max) || (variants.maxScriptLength !== undefined && !usable(variants.maxScriptLength))) {
         return { ...result, variantUnavailableReason: 'This instance did not report usable variant limits.' }
     }
-    return { ...result, variantsAvailable: true, maxScriptLength: variants.maxScriptLength as number, maxVariants: variants.max as number }
+    return { ...result, variantsAvailable: true, maxVariants: variants.max, ...(usable(variants.maxScriptLength) ? { maxScriptLength: variants.maxScriptLength } : {}) }
 }
 
 export function householdVariantInstallUrl(installUrl: string, variantIds: string | string[] | null): string {
@@ -96,7 +100,9 @@ export function buildHouseholdSetupPlan(input: HouseholdSetupInput): HouseholdSe
         const variantName = input.variant.name.trim()
         if (!variantName || variantName.length > 64) throw new Error('Enter a variant name between 1 and 64 characters.')
         if (!input.variant.script.trim()) throw new Error('Enter CEL rules for the variant, or turn off variant creation.')
-        if (input.variant.script.length > (input.maxScriptLength ?? 4000)) throw new Error('These rules exceed the instance’s variant size limit. Shorten the script before continuing.')
+        if (input.variant.script.length > (input.maxScriptLength ?? VARIANT_SCRIPT_SANITY_LIMIT)) throw new Error(input.maxScriptLength === undefined
+            ? 'These rules are too long. Shorten the script before continuing.'
+            : 'These rules exceed the instance’s variant size limit. Shorten the script before continuing.')
         const variants = configRecords(destination.variants)
         const reservedIds = new Set([...variants.map(v => String(v.id)), ...(input.reservedVariantIds || [])].map(id => id.toLowerCase()))
         if (input.maxVariants !== undefined && reservedIds.size >= input.maxVariants) throw new Error('This configuration has reached the instance’s variant limit. Continue with user setup only, or remove an unused variant.')
@@ -143,6 +149,7 @@ export function buildHouseholdSetupPlan(input: HouseholdSetupInput): HouseholdSe
         playbackVariantIds, playbackUrl: householdVariantInstallUrl(input.installUrl, playbackVariantIds),
         memberId, memberKind: input.memberId === '@primary' ? 'primary' : 'persona', personName: name,
         memberName,
+        ...(input.memberId === '@primary' && !listProfiles(destination).profiles.find(p => p.owner)?.name ? { memberNameDerived: true } : {}),
         aiostreams: { before: structuredClone(input.destination), after,
             ...(input.effectiveDestination ? { effectiveBefore: structuredClone(input.effectiveDestination) } : {}) },
     }
