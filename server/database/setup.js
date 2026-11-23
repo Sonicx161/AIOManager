@@ -153,6 +153,9 @@ export async function initializeDatabase(fastify) {
 
     // New tables for v2.0 activity engine - created separately with migration guards
     // so a stale intermediate table from dev builds doesn't crash the entire exec()
+    // Columns of the table that unqualified statements resolve to, in whichever schema the connection uses.
+    const PG_TABLE_COLUMNS = 'SELECT attname AS column_name FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped'
+
     async function ensureTable(tableName, createDdl, indexDdls, requiredColumns, addColumnDdls, pkColumns = []) {
         try {
             let tableExists = false
@@ -172,10 +175,7 @@ export async function initializeDatabase(fastify) {
                     }
                 }
             } else {
-                const rows = await db.query(
-                    `SELECT column_name FROM information_schema.columns WHERE table_name = $1 AND table_schema = 'public'`,
-                    [tableName]
-                )
+                const rows = await db.query(PG_TABLE_COLUMNS, [tableName])
                 tableExists = rows.length > 0
                 if (tableExists) {
                     const colNames = new Set(rows.map(r => r.column_name))
@@ -223,7 +223,7 @@ export async function initializeDatabase(fastify) {
             }
 
             // PG note: missing columns are already migrated above via the guarded
-            // information_schema check; SQLite has no ADD COLUMN IF NOT EXISTS, so
+            // column check; SQLite has no ADD COLUMN IF NOT EXISTS, so
             // no unconditional per-column ALTER pass is needed for either backend.
 
             for (const idx of indexDdls) {
@@ -591,7 +591,7 @@ export async function initializeDatabase(fastify) {
             // this process cannot fail on the check-then-add gap; if the column
             // read itself fails we fall back to running every ALTER unguarded.
             const ruleColNames = await db.query(
-                `SELECT column_name FROM information_schema.columns WHERE table_name = 'autopilot_rules' AND table_schema = 'public'`
+                PG_TABLE_COLUMNS, ['autopilot_rules']
             ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
             // The ALTERs below act on whatever search_path resolves, so read that relation's declared types; 25 is the built-in text OID.
             const plainTextRuleColumns = await db.query(
@@ -653,7 +653,7 @@ export async function initializeDatabase(fastify) {
             // Same guarded check as autopilot_rules above: current schemas already
             // carry all three columns; only legacy databases pay the ALTER cost.
             const kvColNames = await db.query(
-                `SELECT column_name FROM information_schema.columns WHERE table_name = 'kv_store' AND table_schema = 'public'`
+                PG_TABLE_COLUMNS, ['kv_store']
             ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
             const kvColumnAdds = [
                 ['content_hash', `ALTER TABLE kv_store ADD COLUMN IF NOT EXISTS content_hash TEXT`],
@@ -677,7 +677,7 @@ export async function initializeDatabase(fastify) {
             try { await db.run(`CREATE INDEX IF NOT EXISTS idx_rules_connection ON autopilot_rules (connection_id)`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
 
             const fhColNames = await db.query(
-                `SELECT column_name FROM information_schema.columns WHERE table_name = 'failover_history' AND table_schema = 'public'`
+                PG_TABLE_COLUMNS, ['failover_history']
             ).then(rows => new Set(rows.map(r => r.column_name))).catch(() => null)
             if (!fhColNames?.has('latency_ms')) {
                 try { await db.run(`ALTER TABLE failover_history ADD COLUMN IF NOT EXISTS latency_ms INTEGER`) } catch (e) { fastify.log.warn({ category: 'Database' }, `Migration step failed: ${e.message}`) }
