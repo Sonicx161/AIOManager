@@ -2,8 +2,8 @@
 //
 // Both facades SERVE profile pictures over the Jellyfin API but accept no
 // uploads through it (upstream source, checked 2026-11-05):
-//   - AIOStreams images.ts resolves GET /Users/:id/Images/Primary to
-//     userData.jellyfin.primary.avatar (personas: userData.jellyfin.personas[].avatar).
+//   - AIOStreams images.ts resolves GET /Users/:id/Images/Primary to the owner
+//     profile's avatar (userData.profiles[] on nightly, jellyfin.primary before).
 //   - AIOMetadata profiles.ts resolves its default profile to
 //     config.jellyfinUserAvatar (per-user entries: config.jellyfinUsers[].avatar).
 // So a write goes through each product's own config write path with the avatar
@@ -16,23 +16,16 @@
 import { verifyAIOStreamsWriteReadback, AIOSTREAMS_SERVER_REWRITTEN_KEYS, AIOStreamsAccessKeyError } from '../aiostreams-config-safety.ts'
 import { verifyAIOMetadataWriteReadback, AIOMETADATA_SERVER_REWRITTEN_KEYS } from '../aiometadata-config-safety.ts'
 import { isValidAvatarHttpsUrl } from './avatar-value.ts'
+import { alignProfilesForReadback, assertProfilesKept, readOwner, setOwnerAvatar, OWNER_PROFILE_ID } from '../aiostreams-profiles.ts'
 
-/** Sets or removes userData.jellyfin.primary.avatar on an AIOStreams config (pure). */
+/** Sets or removes the owner's avatar in whichever profile layout the config uses (pure). */
 export function applyAIOStreamsAvatar(userData: Record<string, unknown>, avatarUrl: string | null): Record<string, unknown> {
-    const next = JSON.parse(JSON.stringify(userData)) as Record<string, unknown>
-    const jellyfin = (next.jellyfin ?? {}) as Record<string, unknown>
-    const primary = (jellyfin.primary ?? {}) as Record<string, unknown>
-    if (avatarUrl === null || avatarUrl === '') delete primary.avatar
-    else primary.avatar = avatarUrl
-    jellyfin.primary = primary
-    next.jellyfin = jellyfin
-    return next
+    return setOwnerAvatar(userData, avatarUrl)
 }
 
-/** Reads userData.jellyfin.primary.avatar (only http(s) strings count, upstream rule). */
+/** Reads the owner's avatar from profiles[] or jellyfin.primary (only http(s) strings count, upstream rule). */
 export function readAIOStreamsAvatar(userData: unknown): { marker: string; thumbUrl: string | null } {
-    const avatar = (userData as { jellyfin?: { primary?: { avatar?: unknown } } })?.jellyfin?.primary?.avatar
-    const marker = typeof avatar === 'string' && /^https?:\/\//i.test(avatar.trim()) ? avatar.trim() : ''
+    const marker = readOwner(userData).owner?.avatar ?? ''
     return { marker, thumbUrl: marker || null }
 }
 
@@ -111,6 +104,7 @@ export async function writeAIOStreamsAvatar(io: FacadeAvatarIO, avatarUrl: strin
             const target = assertTransportAvatarUrl(avatarUrl)
             const userData = await io.fetch()
             const next = applyAIOStreamsAvatar(userData, target)
+            assertProfilesKept(userData, next, [OWNER_PROFILE_ID])
             await io.write(next)
             if (io.readback) {
                 const readback = await io.readback()
@@ -119,8 +113,9 @@ export async function writeAIOStreamsAvatar(io: FacadeAvatarIO, avatarUrl: strin
                 if (read.marker !== expected) {
                     return { ok: false as const, message: 'The AIOStreams picture did not persist; it may have been changed elsewhere. Reload and try again.', conflict: true }
                 }
-                const preservedFields = Object.keys(userData).filter(key => key !== 'jellyfin' && !(AIOSTREAMS_SERVER_REWRITTEN_KEYS as readonly string[]).includes(key))
-                const verification = verifyAIOStreamsWriteReadback({ planned: next, readback, fields: ['jellyfin'], preWrite: userData, preservedFields })
+                const preservedFields = Object.keys(userData).filter(key => key !== 'jellyfin' && key !== 'profiles' && !(AIOSTREAMS_SERVER_REWRITTEN_KEYS as readonly string[]).includes(key))
+                const aligned = alignProfilesForReadback(next, readback)
+                const verification = verifyAIOStreamsWriteReadback({ planned: aligned.planned, readback: aligned.readback, fields: ['jellyfin', 'profiles'], preWrite: userData, preservedFields })
                 if (!verification.ok) {
                     const detail = verification.mismatchedFields.length > 0 ? `changed fields: ${verification.mismatchedFields.join(', ')}` : `lost fields: ${verification.lostFields.join(', ')}`
                     return { ok: false as const, message: `The AIOStreams config changed elsewhere during the write (${detail}). Reload the instance and reapply the picture.`, conflict: true }
