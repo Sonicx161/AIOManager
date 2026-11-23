@@ -250,6 +250,7 @@ export function HouseholdSetupDialog({ accountId, open, onOpenChange, embedded =
         loaded.ownership.assert()
         if (session.secret.baseUrl !== normalizeJellyfinUrl(link.baseUrl)) throw new Error('Sign in using the server address from this setup before saving the connection.')
         if (link.matchName !== false && session.identity.userName.trim().toLowerCase() !== link.userName.trim().toLowerCase()) throw new Error('The server signed in as a different user. Choose the household user shown in the setup result.')
+        if (link.matchName === false && session.identity.authMethod !== 'password') throw new Error('Sign in with the username and password from this setup before saving the connection.')
         const key = useAuthStore.getState().encryptionKey
         if (!key) throw new Error('Unlock your vault before saving a connection.')
         const account = useAccountStore.getState().accounts.find(a => a.id === link.accountId)
