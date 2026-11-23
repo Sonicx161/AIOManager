@@ -713,7 +713,8 @@ export function useJellyfinMediaConnections(scopes: JellyfinMediaScope[], option
         return () => { pageScopeMediaConsumers -= 1 }
     }, [holdsCadence])
     const vaultEpoch = encryptionKey ? epoch(encryptionKey) : -1
-    const hydration = useSyncExternalStore(subscribeHydration, () => restoredMediaCache, () => emptyRestoredMediaCache)
+    const hasJobs = jobs.length > 0
+    const hydration = useSyncExternalStore(subscribeHydration, () => (hasJobs ? restoredMediaCache : emptyRestoredMediaCache), () => emptyRestoredMediaCache)
     useEffect(() => {
         if (!encryptionKey || jobs.length === 0) return
         const missing = jobs.filter(job => {

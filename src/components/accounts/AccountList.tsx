@@ -38,12 +38,26 @@ import { useAccountStore, getStremioAuthKey, hasPlatformConnection } from '@/sto
 import { accountMatchesQuery } from '@/lib/account-compat'
 import { useScrollRestoration } from '@/hooks/use-scroll-restoration'
 import { useAuthStore } from '@/store/authStore'
+import { useSyncStore } from '@/store/syncStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { useMaskedAccountLabel } from '@/hooks/useMaskedAccountLabel'
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { AccountListRow } from './AccountListRow'
 import { AccountReorderDialog } from './AccountReorderDialog'
+
+const ACCOUNT_CARD_CHUNK = 4
+
+function initialAccountCardLimit(view: string): number {
+  try {
+    if (Number(sessionStorage.getItem('scroll:accounts') || 0) > 0) return Number.POSITIVE_INFINITY
+  } catch {
+    return Number.POSITIVE_INFINITY
+  }
+  if (view === 'list') return Math.ceil(window.innerHeight / 56) + 1
+  const columns = window.matchMedia('(min-width: 1024px)').matches ? 3 : window.matchMedia('(min-width: 768px)').matches ? 2 : 1
+  return columns * Math.ceil(window.innerHeight / 340)
+}
 
 export function AccountList() {
   useScrollRestoration('accounts')
@@ -335,6 +349,25 @@ export function AccountList() {
       return false
     })
   }, [accounts, debouncedSearchQuery])
+
+  const [cardLimit, setCardLimit] = useState(() => initialAccountCardLimit(accountsView))
+  const accountCount = filteredAccounts.length
+  const pullCertified = useSyncStore(state => state.isInitialSyncCompleted)
+  useEffect(() => {
+    if (cardLimit >= accountCount) return
+    const grow = () => setCardLimit(limit => limit + ACCOUNT_CARD_CHUNK)
+    if (pullCertified) {
+      const timer = setTimeout(grow, 0)
+      return () => clearTimeout(timer)
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const handle = window.requestIdleCallback(grow, { timeout: 500 })
+      return () => window.cancelIdleCallback(handle)
+    }
+    const timer = setTimeout(grow, 16)
+    return () => clearTimeout(timer)
+  }, [cardLimit, accountCount, pullCertified])
+  const renderedAccounts = cardLimit >= accountCount ? filteredAccounts : filteredAccounts.slice(0, cardLimit)
 
   const checkRules = useFailoverStore((state) => state.checkRules)
   const isSelectionActive = isSelectionMode || selectedAccountIds.size > 0
@@ -693,7 +726,7 @@ export function AccountList() {
               }
             />
           ) : (
-            filteredAccounts.map((account) => (
+            renderedAccounts.map((account) => (
               <AccountListRow
                 key={account.id}
                 account={account}
@@ -722,7 +755,7 @@ export function AccountList() {
             />
           ) : (
             <>
-              {filteredAccounts.map((account) => (
+              {renderedAccounts.map((account) => (
                 <StaggerItem key={account.id}>
                   <AccountCard
                     account={account}
