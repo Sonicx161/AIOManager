@@ -19,6 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { clearLocalAuthSecrets, restoreLocalAuthSecrets } from '@/lib/crypto'
 import { apiGet } from '@/lib/http-client'
 import { endSessionAuthKey } from '@/lib/session-sync-token'
+import { CREDENTIALS_INCORRECT, firstMissingSignInField, signInErrorMessage, type SignInField } from '@/lib/login-errors'
 import {
     deactivateDeviceAuth,
     enrollRememberedDevice,
@@ -87,14 +88,21 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
 
     const [loading, setLoading] = useState(false)
     const [loginError, setLoginError] = useState<string | null>(null)
+    const [missingField, setMissingField] = useState<SignInField | null>(null)
     const [regError, setRegError] = useState<string | null>(null)
     const [registrationsClosed, setRegistrationsClosed] = useState(false)
 
     const passwordsMatch = regPass === regPassConfirm || !regPassConfirm
     const normalizedLoginError = loginError?.toLowerCase() ?? ''
     const notFoundError = normalizedLoginError.includes('not found')
+    const credentialsError = loginError === CREDENTIALS_INCORRECT
     const sessionRestoreError = loginError ? /database is locked|vault is locked|session expired|app is not initialized|encryption metadata|unlock (?:the )?app/i.test(loginError) : false
-    const passwordError = loginError ? /password|decrypt/i.test(loginError) && !sessionRestoreError : false
+    const passwordError = loginError ? /password|decrypt/i.test(loginError) && !sessionRestoreError && !credentialsError : false
+
+    const flagMissing = (field: SignInField) => {
+        setMissingField(field)
+        document.getElementById(field === 'uuid' ? 'login-uuid' : 'login-password')?.focus()
+    }
 
     useEffect(() => {
         apiGet<{ customHtml?: string; registrationsClosed?: boolean }>('/config')
@@ -211,7 +219,7 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
 
     const handleUnlock = async () => {
         if (!loginPass) {
-            toast({ variant: "destructive", title: "Password required", description: "Enter your master password." })
+            flagMissing('password')
             return
         }
 
@@ -272,8 +280,9 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
     }
 
     const handleLogin = async () => {
-        if (!loginId || !loginPass) {
-            toast({ variant: "destructive", title: "Missing credentials", description: "Enter your UUID and password." })
+        const missing = firstMissingSignInField(loginId, loginPass)
+        if (missing) {
+            flagMissing(missing)
             return
         }
 
@@ -297,7 +306,7 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
         } catch (e) {
             if (import.meta.env.DEV) console.error("Login error:", e)
             if (isSupersededAuthFailure(e, attempt, authAttemptSeq.current, ownership)) return
-            setLoginError((e as Error).message)
+            setLoginError(signInErrorMessage((e as Error).message))
         } finally {
             if (attempt === authAttemptSeq.current) setLoading(false)
         }
@@ -512,9 +521,11 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                             name="username"
                                             autoComplete="username"
                                             placeholder="uuid-string..."
-                                            className={`h-11 pl-10 font-mono text-sm ${notFoundError ? 'border-destructive' : ''}`}
+                                            className={`h-11 pl-10 font-mono text-sm ${notFoundError || credentialsError || missingField === 'uuid' ? 'border-destructive' : ''}`}
                                             value={loginId}
-                                            onChange={(e) => { setLoginId(e.target.value.trim()); setLoginError(null); }}
+                                            onChange={(e) => { setLoginId(e.target.value.trim()); setLoginError(null); setMissingField(null); }}
+                                            aria-invalid={notFoundError || credentialsError || missingField === 'uuid' || undefined}
+                                            aria-describedby={missingField === 'uuid' ? 'login-uuid-missing' : undefined}
                                             disabled={isLocked && auth.isAuthenticated}
                                             autoFocus
                                         />
@@ -522,6 +533,11 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                     {notFoundError && (
                                         <p className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
                                             We couldn't find an account with this UUID. Make sure you copied the entire string correctly.
+                                        </p>
+                                    )}
+                                    {missingField === 'uuid' && (
+                                        <p id="login-uuid-missing" role="alert" className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
+                                            Enter your UUID.
                                         </p>
                                     )}
                                 </div>
@@ -535,10 +551,12 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                             name="password"
                                             type={showPassword ? "text" : "password"}
                                             placeholder="••••••••"
-                                            className={`h-11 pl-10 pr-12 ${passwordError ? 'border-destructive' : ''}`}
+                                            className={`h-11 pl-10 pr-12 ${passwordError || credentialsError || missingField === 'password' ? 'border-destructive' : ''}`}
                                             autoComplete="current-password"
                                             value={loginPass}
-                                            onChange={(e) => { setLoginPass(e.target.value); setLoginError(null); }}
+                                            onChange={(e) => { setLoginPass(e.target.value); setLoginError(null); setMissingField(null); }}
+                                            aria-invalid={passwordError || credentialsError || missingField === 'password' || undefined}
+                                            aria-describedby={missingField === 'password' ? 'login-password-missing' : credentialsError ? 'login-credentials-error' : undefined}
                                         />
                                         <Button
                                             type="button"
@@ -551,12 +569,22 @@ export function LoginPage({ initialMode = 'login' }: LoginPageProps = {}) {
                                             {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                         </Button>
                                     </div>
+                                    {missingField === 'password' && (
+                                        <p id="login-password-missing" role="alert" className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
+                                            Enter your password.
+                                        </p>
+                                    )}
                                     {passwordError && (
                                         <p className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
                                             The password you entered is incorrect. Try again or check your Caps Lock.
                                         </p>
                                     )}
-                                    {loginError && !notFoundError && !passwordError && !sessionRestoreError && (
+                                    {credentialsError && (
+                                        <p id="login-credentials-error" className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
+                                            {CREDENTIALS_INCORRECT}
+                                        </p>
+                                    )}
+                                    {loginError && !notFoundError && !passwordError && !credentialsError && !sessionRestoreError && (
                                         <p className="text-xs text-destructive font-medium animate-in slide-in-from-top-1">
                                             {loginError === 'Server error, try again later.'
                                                 ? 'Something went wrong on our end. Wait a moment and try again.'
