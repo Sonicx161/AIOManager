@@ -868,7 +868,7 @@ export function CommandPalette({ initiallyOpen = false }: { initiallyOpen?: bool
                 </div>
 
 
-                <ScrollArea className={ordered.length > VIRTUAL_RESULTS_THRESHOLD ? "h-[min(54vh,440px)]" : "max-h-[min(54vh,440px)]"} ref={attachScrollRoot}>
+                <ScrollArea className={`[&_[data-radix-scroll-area-viewport]>div]:block! ${ordered.length > VIRTUAL_RESULTS_THRESHOLD ? "h-[min(54vh,440px)]" : "max-h-[min(54vh,440px)]"}`} ref={attachScrollRoot}>
                     <div className="py-3">
                         {filtered.length === 0 ? (
                             <div data-theme-part="panel" className="mx-3 rounded-2xl border border-dashed border-border/40 bg-muted/15 px-4 py-10 text-center text-sm text-muted-foreground">
