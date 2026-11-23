@@ -66,7 +66,8 @@ import { useLibraryCache } from '@/store/libraryCache'
 import { activityForAccount } from '@/lib/account-activity-index'
 import { useJellyfinActivity } from '@/hooks/useJellyfinActivity'
 import { accountMediaPlayback, mergeMediaItems } from '@/lib/jellyfin/activity'
-import { AccountMediaPlayback } from './AccountMedia'
+import { AccountMediaPlayback, AccountWatchingNow } from './AccountMedia'
+import { useWatchingNow } from '@/hooks/useWatchingNow'
 import { aggregateAccountPlatforms, accountPlatformSources } from '@/components/addons/platform-source'
 import { toast } from '@/hooks/use-toast'
 import { formatFileSize, processImageFile } from '@/lib/image-upload'
@@ -172,6 +173,7 @@ export function AccountForm() {
       previewItems[0]
     )
   }, [previewAccountId, previewItems])
+  const previewWatchingNow = useWatchingNow(previewItems, !hideLastWatched)
 
   const isExpiredSession = editTarget?.status === 'expired'
   const expiredSessionConnection = editTarget?.connections?.find(c => c.enabled !== false && c.status === 'expired')
@@ -1760,6 +1762,8 @@ export function AccountForm() {
                   <div className="mt-auto flex min-h-5 flex-wrap items-center gap-1.5 px-5 pb-4 text-xs">
                     {!hideLastWatched && (previewPlayback ? (
                       <AccountMediaPlayback playback={previewPlayback} />
+                    ) : previewWatchingNow && previewLastWatched ? (
+                      <AccountWatchingNow name={previewWatchingNow.name} />
                     ) : previewLastWatched && (
                       <>
                         <Play className="h-3.5 w-3.5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
