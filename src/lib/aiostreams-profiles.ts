@@ -212,12 +212,32 @@ export function assertProfilesKept(before: RecordValue, after: RecordValue, allo
     if (layoutAfter === 'profiles' && count(after) < count(before)) throw new Error(PROFILE_LOSS_MESSAGE)
 }
 
-export function aiostreamsQuickAddUsers(userData: unknown): Array<{ id: string; owner: boolean; name: string }> {
-    const users: Array<{ id: string; owner: boolean; name: string }> = []
+function lockedProfileIds(userData: unknown): Set<string> {
+    const locked = new Set<string>()
+    const isLocked = (entry: unknown): entry is RecordValue => isRecord(entry) && typeof entry.lock === 'string' && entry.lock !== ''
+    const layout = profilesLayout(userData)
+    if (layout === 'profiles') {
+        for (const entry of (userData as RecordValue).profiles as unknown[]) if (isLocked(entry) && typeof entry.id === 'string') locked.add(entry.id)
+    } else if (layout === 'legacy') {
+        const jellyfin = (userData as RecordValue).jellyfin as RecordValue
+        if (isLocked(jellyfin.primary)) locked.add(OWNER_PROFILE_ID)
+        if (Array.isArray(jellyfin.personas)) for (const entry of jellyfin.personas) if (isLocked(entry) && typeof entry.id === 'string' && entry.id) locked.add(entry.id)
+    }
+    return locked
+}
+
+export function aiostreamsQuickAddUsers(userData: unknown): Array<{ id: string; owner: boolean; name: string; locked: boolean }> {
+    const users: Array<{ id: string; owner: boolean; name: string; locked: boolean }> = []
+    const locked = lockedProfileIds(userData)
     const ownerName = ownerDisplayName(userData)
-    if (ownerName) users.push({ id: OWNER_PROFILE_ID, owner: true, name: ownerName.trim() })
+    if (ownerName) users.push({ id: OWNER_PROFILE_ID, owner: true, name: ownerName.trim(), locked: locked.has(OWNER_PROFILE_ID) })
     for (const profile of listProfiles(userData).profiles) {
-        if (!profile.owner && profile.name) users.push({ id: profile.id, owner: false, name: profile.name.trim() })
+        if (!profile.owner && profile.name) users.push({ id: profile.id, owner: false, name: profile.name.trim(), locked: locked.has(profile.id) })
     }
     return users
+}
+
+// AIOStreams splits the sign-in password at its last '/' into the config password and the user's PIN.
+export function aiostreamsPinSignInPassword(password: string, pin: string): string | null {
+    return pin ? `${password}/${pin}` : null
 }

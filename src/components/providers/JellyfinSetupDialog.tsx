@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, Loader2, MonitorSmartphone } from 'lucide-react'
+import { Check, ChevronDown, Loader2, Lock, MonitorSmartphone } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { cn, maskNameLevel } from '@/lib/utils'
 import { maskIds } from '@/lib/mask-ids'
-import { JellyfinClient, jellyfinSignInErrorMessage, normalizeJellyfinUrl, type JellyfinSession } from '@/lib/jellyfin/session'
+import { JellyfinClient, jellyfinSignInErrorMessage, normalizeJellyfinUrl, PIN_REJECTED_MESSAGE, type JellyfinSession } from '@/lib/jellyfin/session'
 import { JellyfinError } from '@/lib/jellyfin/client'
 import { runQuickConnect, quickConnectAttemptCurrent } from '@/lib/jellyfin/quick-connect'
 import { parseJellyfinSecret } from '@/lib/jellyfin/connection-data'
@@ -16,7 +16,7 @@ import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { isAIOStreamsAddon, parseAIOStreamsUrl, fetchAIOStreamsUser, getStoredAIOStreamsPassword } from '@/lib/aiostreams-utils'
 import { isAIOMetadataAddon, parseAIOMetadataUrl, fetchAIOMetadataConfig, fetchAIOMetadataStatus, getStoredAIOMetadataPassword } from '@/lib/aiometadata-utils'
-import { aiostreamsQuickAddUsers } from '@/lib/aiostreams-profiles'
+import { aiostreamsPinSignInPassword, aiostreamsQuickAddUsers } from '@/lib/aiostreams-profiles'
 
 interface Props {
     open: boolean
@@ -30,7 +30,7 @@ interface Props {
     onBackToPicker?: () => void
 }
 
-interface AddonUserSuggestion { id: string; name: string; provider: 'AIOStreams' | 'AIOMetadata'; baseUrl: string; username: string; password: string }
+interface AddonUserSuggestion { id: string; name: string; provider: 'AIOStreams' | 'AIOMetadata'; baseUrl: string; username: string; password: string; locked?: boolean }
 
 // Fictitious sample values only — never a real user's name, password or server.
 const RETRY_MESSAGE = 'Retrying addon user discovery…'
@@ -87,6 +87,10 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const [method, setMethod] = useState<'password' | 'token' | 'quickconnect'>('password')
     const [username, setUsername] = useState(initialUsername)
     const [password, setPassword] = useState('')
+    const [pinUser, setPinUser] = useState('')
+    const [pin, setPin] = useState('')
+    const [pinError, setPinError] = useState<'' | 'missing' | 'rejected'>('')
+    const pinInput = useRef<HTMLInputElement>(null)
     const [accessToken, setAccessToken] = useState('')
     const [userId, setUserId] = useState('')
     const [session, setSession] = useState<JellyfinSession | null>(null)
@@ -117,6 +121,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const baseUrlRef = useRef(initialBaseUrl)
     useEffect(() => { baseUrlRef.current = baseUrl }, [baseUrl])
     useEffect(() => () => { request.current?.abort(); discoveryRequest.current?.abort(); quickConnectRequest.current?.abort() }, [])
+    useEffect(() => { if (!open) { setPinUser(''); setPin(''); setPinError('') } }, [open])
     // Addon discovery is explicitly retried after the optional AIOM password is entered.
     useEffect(() => {
         if (!open || !account || !accountId) return
@@ -132,7 +137,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                         if (!parsed || !password) return
                         const result = await fetchAIOStreamsUser(parsed.baseUrl, parsed.uuid, password)
                         for (const profile of aiostreamsQuickAddUsers(result.userData)) {
-                            suggestions.push({ id: profile.owner ? `aios:primary:${parsed.uuid}` : `aios:${parsed.uuid}:${profile.id}`, name: profile.name, provider: 'AIOStreams', baseUrl: `${parsed.baseUrl}/jellyfin`, username: profile.owner ? parsed.uuid : `${parsed.uuid}/${profile.id}`, password })
+                            suggestions.push({ id: profile.owner ? `aios:primary:${parsed.uuid}` : `aios:${parsed.uuid}:${profile.id}`, name: profile.name, provider: 'AIOStreams', baseUrl: `${parsed.baseUrl}/jellyfin`, username: profile.owner ? parsed.uuid : `${parsed.uuid}/${profile.id}`, password, locked: profile.locked })
                         }
                     } else if (isAIOMetadataAddon(addon)) {
                         const parsed = parseAIOMetadataUrl(addon.transportUrl)
@@ -170,7 +175,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     useEffect(() => {
         if (!reconnectCredentials) return
         if (!encryptionKey) {
-            setBaseUrl(''); setLoadingAddress(false)
+            setBaseUrl(''); setLoadingAddress(false); setPinUser(''); setPin(''); setPinError('')
             setError('Unlock your vault to load the saved server address.')
             return
         }
@@ -178,7 +183,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         setLoadingAddress(true)
         void decrypt(reconnectCredentials, encryptionKey).then(value => {
             const saved = parseJellyfinSecret(value)
-            if (!cancelled) { setBaseUrl(saved.baseUrl); setError('') }
+            if (!cancelled) { setBaseUrl(saved.baseUrl); setError(''); setPinUser(''); setPin(''); setPinError('') }
         }).catch(() => {
             if (!cancelled) setError('The saved server address could not be loaded. Enter the complete address to reconnect.')
         }).finally(() => { if (!cancelled) setLoadingAddress(false) })
@@ -192,12 +197,16 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         setQuickConnectPhase('idle'); setQuickConnectCode(''); setQuickConnectDeadline(0); setQuickConnectRemaining(''); setQuickConnectUnavailable(false)
     }
 
+    const clearPin = () => { setPinUser(''); setPin(''); setPinError('') }
+    const clearPinEntry = () => { setPin(''); setPinError('') }
+
     const close = (value: boolean) => {
         if (running.current) return
         if (!value) {
             discoveryGeneration.current++
             discoveryRequest.current?.abort()
             resetQuickConnect()
+            clearPin()
             setBaseUrl(''); setUsername(''); setPassword(''); setAccessToken(''); setUserId('')
             setSession(null); setError(''); setMethod('password'); setDiscoveredUsers([]); setDiscoveryMessage(''); setAddonSuggestions([]); setAIOMAddonPassword(''); setAIOMNeedsAddonPassword(false); setDiscoveryNonce(0)
         }
@@ -206,7 +215,14 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const submit = async () => {
         if (running.current || loadingAddress || (reconnectCredentials && !encryptionKey)) return
         if (!session && method === 'quickconnect') return
-        running.current = true; setBusy(true); setError('')
+        const pinSignIn = !session && method === 'password' && !!pinUser
+        const signInPassword = pinSignIn ? aiostreamsPinSignInPassword(password, pin) : password
+        if (signInPassword === null) {
+            setError(''); setPinError('missing')
+            pinInput.current?.focus()
+            return
+        }
+        running.current = true; setBusy(true); setError(''); setPinError('')
         const controller = new AbortController()
         request.current = controller
         try {
@@ -219,13 +235,18 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                     if (normalizeJellyfinUrl(baseUrl) !== normalizeJellyfinUrl(expectedSignIn.baseUrl)) throw new Error('Sign in using the server address from this setup before saving the connection.')
                     if (method !== 'password' || username.trim().toLowerCase() !== expectedSignIn.username.trim().toLowerCase()) throw new Error('Sign in as the household user selected in this setup. Use the prefilled username.')
                 }
-                const result = await new JellyfinClient(baseUrl, crypto.randomUUID()).signIn({ baseUrl, method, username, password, accessToken, userId }, controller.signal)
+                const result = await new JellyfinClient(baseUrl, crypto.randomUUID()).signIn({ baseUrl, method, username, password: signInPassword, accessToken, userId }, controller.signal)
                 controller.signal.throwIfAborted()
-                setPassword(''); setAccessToken(''); setSession(result)
+                setPassword(''); setPin(''); setAccessToken(''); setSession(result)
                 // Disabling the fieldset drops focus to <body>; restore it so Escape still works.
                 requestAnimationFrame(() => dialogRef.current?.focus())
             }
-        } catch (err) { if (!controller.signal.aborted) setError(jellyfinSignInErrorMessage(err, { method, userId })) }
+        } catch (err) {
+            if (controller.signal.aborted) return
+            const message = jellyfinSignInErrorMessage(err, { method, userId, pinLocked: pinSignIn })
+            if (message === PIN_REJECTED_MESSAGE) setPinError('rejected')
+            setError(message)
+        }
         finally { request.current = null; running.current = false; if (!controller.signal.aborted) setBusy(false) }
     }
 
@@ -270,6 +291,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         const controller = new AbortController()
         quickConnectRequest.current = controller
         setError(''); setQuickConnectUnavailable(false); setQuickConnectCode(''); setQuickConnectRemaining(''); setQuickConnectDeadline(0)
+        clearPinEntry()
         setMethod('quickconnect')
         setQuickConnectPhase('pending')
         try {
@@ -327,12 +349,14 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
 
     const selectMethod = (next: 'password' | 'token') => {
         if (method === 'quickconnect') resetQuickConnect()
+        if (next !== method) clearPinEntry()
         setMethod(next)
     }
 
     const backFromSession = () => {
         const wasQuickConnect = session?.identity.authMethod === 'quickconnect'
         setSession(null)
+        clearPin()
         if (wasQuickConnect) { resetQuickConnect(); setMethod('password') }
     }
 
@@ -356,13 +380,13 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                     {distinctVerifiedServerName && <p className="break-words text-muted-foreground">{distinctVerifiedServerName}</p>}
                     <p>Remote user: {maskNameLevel(session.identity.userName, namePrivacyLevel)}</p>
                     {!isPrivacyModeEnabled && <p className="break-all font-mono text-xs text-muted-foreground">User ID: {maskIds(session.identity.userId)}</p>}
-                    <p className="text-muted-foreground">Confirm this is the user whose media you want to read. The server address and token are saved encrypted. Your password is never saved.</p>
+                    <p className="text-muted-foreground">Confirm this is the user whose media you want to read. The server address and token are saved encrypted. {pinUser && session.identity.authMethod === 'password' ? 'Your password and PIN are never saved.' : 'Your password is never saved.'}</p>
                     {session.identity.authMethod === 'quickconnect' && <p className="flex items-center gap-1.5 text-xs text-success"><Check className="h-3.5 w-3.5" />Approved with Quick Connect in your Jellyfin app.</p>}
                 </div> : <fieldset disabled={busy || loadingAddress} className="min-w-0 space-y-3">
-                    {hasProviderAddons && <div className="min-w-0 space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-3"><p className="text-sm font-medium">From the installed AIOS / AIOM addons on this account</p>{addonSuggestions.length > 0 ? <><p className="text-xs leading-relaxed text-muted-foreground">Choose a user from the AIOStreams and AIOMetadata addons already installed on this AIOManager account.</p><div className="grid min-w-0 gap-2 sm:grid-cols-2">{addonSuggestions.map(suggestion => <button type="button" key={suggestion.id} className="min-w-0 w-full rounded-lg border border-border/40 bg-card/70 px-3 py-2 text-left hover:border-primary/50" onClick={() => { discoveryGeneration.current++; discoveryRequest.current?.abort(); resetQuickConnect(); setDiscoveringUsers(false); setBaseUrl(suggestion.baseUrl); setUsername(suggestion.username); setPassword(suggestion.password); setMethod('password'); setQuickConnectUnavailable(false); setDiscoveredUsers([]); setDiscoveryMessage(`${suggestion.provider} user selected. Verify sign-in to continue.`) }}><span className="block truncate text-sm font-medium">{suggestion.name}</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{suggestion.provider} · {maskIds(suggestion.username)}</span></button>)}</div></> : <><p className="rounded-lg border border-dashed border-border/50 px-3 py-3 text-xs leading-relaxed text-muted-foreground">{aiomNeedsAddonPassword ? 'AIOMetadata needs its separate addon password before its users can be listed.' : 'AIOS/AIOM addons are installed, but no users could be loaded yet.'}</p><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" type="password" aria-label="AIOMetadata addon password" placeholder="AIOMetadata addon password (if required)" value={aiomAddonPassword} onChange={event => setAIOMAddonPassword(event.target.value)} /><Button type="button" variant="outline" className="shrink-0" onClick={() => { setDiscoveryMessage(RETRY_MESSAGE); setDiscoveryNonce(value => value + 1) }}>Retry</Button></div></>}</div>}
-                    <div className="space-y-1"><Label htmlFor="jf-address">Full server address</Label><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" id="jf-address" type="url" required value={baseUrl} disabled={method === 'quickconnect'} onChange={e => { discoveryGeneration.current++; discoveryRequest.current?.abort(); setBaseUrl(e.target.value); setDiscoveredUsers([]); setDiscoveryMessage(''); setDiscoveringUsers(false); setQuickConnectUnavailable(false) }} placeholder="https://server.example/jellyfin" autoComplete="off" /><Button className="shrink-0" type="button" variant="outline" disabled={busy || discoveringUsers || !baseUrl.trim() || method === 'quickconnect'} onClick={() => void discoverUsers()}>{discoveringUsers ? 'Finding…' : 'Find users'}</Button></div></div>
+                    {hasProviderAddons && <div className="min-w-0 space-y-2 rounded-xl border border-primary/30 bg-primary/5 p-3"><p className="text-sm font-medium">From the installed AIOS / AIOM addons on this account</p>{addonSuggestions.length > 0 ? <><p className="text-xs leading-relaxed text-muted-foreground">Choose a user from the AIOStreams and AIOMetadata addons already installed on this AIOManager account.</p><div className="grid min-w-0 gap-2 sm:grid-cols-2">{addonSuggestions.map(suggestion => <button type="button" key={suggestion.id} className="min-w-0 w-full rounded-lg border border-border/40 bg-card/70 px-3 py-2 text-left hover:border-primary/50" onClick={() => { discoveryGeneration.current++; discoveryRequest.current?.abort(); resetQuickConnect(); setDiscoveringUsers(false); setBaseUrl(suggestion.baseUrl); setUsername(suggestion.username); setPassword(suggestion.password); setPin(''); setPinError(''); setPinUser(suggestion.locked ? suggestion.name : ''); setMethod('password'); setQuickConnectUnavailable(false); setDiscoveredUsers([]); setDiscoveryMessage(suggestion.locked ? `${suggestion.provider} user selected. Enter the user PIN, then verify sign-in.` : `${suggestion.provider} user selected. Verify sign-in to continue.`) }}><span className="block truncate text-sm font-medium">{suggestion.name}</span>{suggestion.locked ? <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{suggestion.provider} · {maskIds(suggestion.username)}</span><span className="flex shrink-0 items-center gap-1">· <Lock className="h-3 w-3" />PIN</span></span> : <span className="mt-0.5 block truncate text-xs text-muted-foreground">{suggestion.provider} · {maskIds(suggestion.username)}</span>}</button>)}</div></> : <><p className="rounded-lg border border-dashed border-border/50 px-3 py-3 text-xs leading-relaxed text-muted-foreground">{aiomNeedsAddonPassword ? 'AIOMetadata needs its separate addon password before its users can be listed.' : 'AIOS/AIOM addons are installed, but no users could be loaded yet.'}</p><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" type="password" aria-label="AIOMetadata addon password" placeholder="AIOMetadata addon password (if required)" value={aiomAddonPassword} onChange={event => setAIOMAddonPassword(event.target.value)} /><Button type="button" variant="outline" className="shrink-0" onClick={() => { setDiscoveryMessage(RETRY_MESSAGE); setDiscoveryNonce(value => value + 1) }}>Retry</Button></div></>}</div>}
+                    <div className="space-y-1"><Label htmlFor="jf-address">Full server address</Label><div className="flex min-w-0 gap-2"><Input className="min-w-0 flex-1" id="jf-address" type="url" required value={baseUrl} disabled={method === 'quickconnect'} onChange={e => { discoveryGeneration.current++; discoveryRequest.current?.abort(); clearPin(); setBaseUrl(e.target.value); setDiscoveredUsers([]); setDiscoveryMessage(''); setDiscoveringUsers(false); setQuickConnectUnavailable(false) }} placeholder="https://server.example/jellyfin" autoComplete="off" /><Button className="shrink-0" type="button" variant="outline" disabled={busy || discoveringUsers || !baseUrl.trim() || method === 'quickconnect'} onClick={() => void discoverUsers()}>{discoveringUsers ? 'Finding…' : 'Find users'}</Button></div></div>
                     <p className="text-xs text-muted-foreground">Keep the complete configuration path supplied by your server. Sign-in runs directly in your browser.</p>
-                    {discoveredUsers.length > 0 && <div className="space-y-1"><Label htmlFor="jf-discovered-user">Choose a discovered user</Label><select id="jf-discovered-user" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={username} onChange={event => setUsername(event.target.value)}><option value="">Select a user…</option>{discoveredUsers.map(user => <option key={user.Id} value={user.Name}>{user.Name}</option>)}</select></div>}
+                    {discoveredUsers.length > 0 && <div className="space-y-1"><Label htmlFor="jf-discovered-user">Choose a discovered user</Label><select id="jf-discovered-user" className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={username} onChange={event => { clearPin(); setUsername(event.target.value) }}><option value="">Select a user…</option>{discoveredUsers.map(user => <option key={user.Id} value={user.Name}>{user.Name}</option>)}</select></div>}
                     {discoveryMessage && <p className="text-xs text-muted-foreground" role="status">{discoveryMessage}</p>}
                     {!expectedSignIn && <div className="flex flex-wrap gap-2" role="group" aria-label="Sign-in method">
                         <Button type="button" variant={method === 'password' ? 'default' : 'outline'} onClick={() => selectMethod('password')}>Username &amp; password</Button>
@@ -385,8 +409,9 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                         </div>}
                         {quickConnectPhase === 'expired' && <p role="alert" className="text-sm text-destructive">This code expired. Start again to get a new one.</p>}
                     </> : method === 'password' ? <>
-                        <div className="space-y-1"><Label htmlFor="jf-username">Server username</Label><Input id="jf-username" required value={username} onChange={e => setUsername(e.target.value)} placeholder="e.g. sonic, media-room or media-room/sonic" autoComplete="username" /></div>
+                        <div className="space-y-1"><Label htmlFor="jf-username">Server username</Label><Input id="jf-username" required value={username} onChange={e => { clearPin(); setUsername(e.target.value) }} placeholder="e.g. sonic, media-room or media-room/sonic" autoComplete="username" /></div>
                         <div className="space-y-1"><Label htmlFor="jf-password">Password</Label><Input id="jf-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Blank if this user has none" autoComplete="current-password" /></div>
+                        {pinUser && <div className="space-y-1"><Label htmlFor="jf-pin">User PIN</Label><Input ref={pinInput} id="jf-pin" type="password" inputMode="numeric" value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 12)); if (pinError) setPinError('') }} autoComplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" aria-invalid={pinError ? true : undefined} aria-describedby={pinError === 'missing' ? 'jf-pin-missing jf-pin-help' : 'jf-pin-help'} className={cn(pinError && 'border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20')} />{pinError === 'missing' && <p id="jf-pin-missing" role="alert" className="text-xs font-medium text-destructive">Enter this user's PIN.</p>}<p id="jf-pin-help" className="text-xs leading-relaxed text-muted-foreground">{pinUser} is locked with a PIN in AIOStreams. It is used for this sign-in only.</p></div>}
                         {!expectedSignIn && !quickConnectUnavailable && <p className="text-xs leading-relaxed text-muted-foreground">Quick Connect signs you in without typing your password here.</p>}
                     </> : <>
                         <div className="space-y-1"><Label htmlFor="jf-token">Session token or API key</Label><Input id="jf-token" type="password" required value={accessToken} onChange={e => setAccessToken(e.target.value)} autoComplete="off" /></div>

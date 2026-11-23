@@ -3,6 +3,7 @@ import type { JellyfinSecret } from './connection-data.ts'
 import { createJellyfinClient, JellyfinError, normalizeJellyfinUrl } from './client.ts'
 
 export { normalizeJellyfinUrl } from './client.ts'
+export const PIN_REJECTED_MESSAGE = 'Sign-in was rejected. Check the user PIN and try again.'
 export const PROFILE_MISMATCH_MESSAGE = 'This sign-in belongs to a different profile than the one shown. Reconnect it to import into the right profile.'
 
 export interface JellyfinLogin {
@@ -21,7 +22,7 @@ export interface JellyfinSession {
     identity: MediaServerIdentity
 }
 
-export function jellyfinSignInErrorMessage(error: unknown, login: Pick<JellyfinLogin, 'method' | 'userId'>): string {
+export function jellyfinSignInErrorMessage(error: unknown, login: Pick<JellyfinLogin, 'method' | 'userId'> & { pinLocked?: boolean }): string {
     if (!(error instanceof JellyfinError)) return error instanceof Error ? error.message : 'Could not verify the media-server sign-in'
     if (error.kind === 'network' || error.kind === 'timeout') {
         return 'Could not reach the media server. Check the full server address, HTTPS and browser access (CORS), then retry.'
@@ -34,6 +35,7 @@ export function jellyfinSignInErrorMessage(error: unknown, login: Pick<JellyfinL
             return 'Enter the Remote user ID for this API key, then verify sign-in again.'
         }
         if (error.status === 403) return 'The server denied access. Check the remote user permissions and sign-in credentials.'
+        if (login.method === 'password' && login.pinLocked && error.status === 401) return PIN_REJECTED_MESSAGE
         return login.method === 'password'
             ? 'Sign-in was rejected. Check the server username, password and any required user PIN.'
             : 'Sign-in was rejected. Check the token or API key and the Remote user ID, then reconnect.'
