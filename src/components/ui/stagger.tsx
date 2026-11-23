@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, createContext, useContext } from 'react'
+import { useEffect, useMemo, useRef, useState, createContext, useContext } from 'react'
 import { cn } from '@/lib/utils'
 
 // Rows beyond this band start visible so a fast scroll never reaches a dim row.
@@ -25,10 +25,10 @@ function StaggerContainer({
 }: StaggerContainerProps) {
   const counterRef = useRef(0)
   counterRef.current = 0
-  const nextIndex = () => counterRef.current++
+  const value = useMemo(() => ({ delay: staggerDelay, nextIndex: () => counterRef.current++ }), [staggerDelay])
 
   return (
-    <StaggerContext.Provider value={{ delay: staggerDelay, nextIndex }}>
+    <StaggerContext.Provider value={value}>
       <div className={cn(className)}>
         {children}
       </div>
