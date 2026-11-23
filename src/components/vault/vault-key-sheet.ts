@@ -54,6 +54,25 @@ export function statusLine(parts: Array<string | null | undefined>): string {
     return parts.map(part => (part ?? '').trim()).filter(Boolean).join(' · ')
 }
 
+export function defaultEntryName(providerName: string, existingNames: Iterable<string>): string {
+    const base = providerName.trim()
+    if (!base) return ''
+    const taken = new Set<string>()
+    for (const n of existingNames) taken.add(n.trim().toLowerCase())
+    if (!taken.has(base.toLowerCase())) return base
+    let i = 2
+    while (taken.has(`${base} ${i}`.toLowerCase())) i++
+    return `${base} ${i}`
+}
+
+export function nameForProviderPick(current: string, typedByUser: boolean, suggested: string): string {
+    return typedByUser && current.trim() ? current : suggested
+}
+
+export function nameTypedAfterEdit(value: string): boolean {
+    return value.trim() !== ''
+}
+
 // Required fields live on sub-pages, so Done must open the page that is still missing one.
 export function firstMissingField(value: string, name: string): { page: 'key' | 'provider'; id: string } | null {
     if (!value) return { page: 'key', id: 'v-value' }

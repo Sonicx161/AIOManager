@@ -31,7 +31,7 @@ import { VaultKey } from '@/types/vault'
 import { cn, getTimeAgo } from '@/lib/utils'
 import { providerAbbr, expiryDateError } from '@/components/vault/vault-key-fields'
 import { ProviderLogo } from '@/components/vault/ProviderLogo'
-import { ExpiryState, expiryLabel, firstMissingField, maskedKeyDisplay, resolveExpiry, statusLine } from '@/components/vault/vault-key-sheet'
+import { ExpiryState, defaultEntryName, expiryLabel, nameForProviderPick, nameTypedAfterEdit, firstMissingField, maskedKeyDisplay, resolveExpiry, statusLine } from '@/components/vault/vault-key-sheet'
 
 interface VaultKeyDialogProps {
     open: boolean
@@ -201,6 +201,7 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
     const [saving, setSaving] = useState(false)
     const searchRef = useRef<HTMLInputElement>(null)
     const valueInputRef = useRef<HTMLInputElement>(null)
+    const nameTypedRef = useRef(false)
 
     useEffect(() => {
         if (!open) return
@@ -222,6 +223,7 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
             setGroup(resolveVaultGroup(editingKey.provider, editingKey.group))
         } else {
             setSelected(null)
+            nameTypedRef.current = false
             setPickerCategory(defaultGroup && PICKER_PROVIDERS.some((p) => p.group === defaultGroup) ? defaultGroup : null)
             setName('')
             setValue('')
@@ -236,6 +238,11 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
 
     const handleSelect = (entry: RegistryProvider) => {
         setSelected(entry)
+        if (!editingKey) {
+            const suggested = entry.id === 'custom' ? '' : defaultEntryName(entry.name, useVaultStore.getState().keys.map(k => k.name))
+            const typed = nameTypedRef.current
+            setName(prev => nameForProviderPick(prev, typed, suggested))
+        }
         setGroup(entry.group)
         setCustomDashboardUrl(entry.credentialUrl || '')
         // Catalog "other" entries carry their own display name; custom entries are user-named.
@@ -746,7 +753,7 @@ export function VaultKeyDialog({ open, onOpenChange, editingKey, defaultGroup }:
                                 id="v-name"
                                 placeholder={`e.g. My ${selected.name} Account`}
                                 value={name}
-                                onChange={(e) => setName(e.target.value)}
+                                onChange={(e) => { nameTypedRef.current = nameTypedAfterEdit(e.target.value); setName(e.target.value) }}
                                 required
                             />
                         </div>
