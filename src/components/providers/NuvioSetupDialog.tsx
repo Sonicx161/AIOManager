@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { cn, maskEmailLevel } from '@/lib/utils'
+import { usesMainProfileAddons } from '@/lib/nuvio-profile-flags'
 import { useUIStore } from '@/store/uiStore'
 
 type WizardStep = 'login' | 'profile' | 'confirm'
@@ -36,7 +37,7 @@ interface NuvioProfile {
     name: string
     avatarColorHex?: string
     avatarId?: number
-    usesPrimaryAddons?: boolean
+    uses_primary_addons?: boolean
 }
 
 export interface NuvioBackend {
@@ -445,7 +446,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                         </div>
                                         <div className="min-w-0">
                                             <p className="text-sm font-semibold truncate">{profile.name}</p>
-                                            {profile.usesPrimaryAddons && (
+                                            {usesMainProfileAddons(profile) && (
                                                 <p className="text-xs text-muted-foreground">Uses primary addons</p>
                                             )}
                                         </div>
