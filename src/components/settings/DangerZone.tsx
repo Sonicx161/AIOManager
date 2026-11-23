@@ -236,7 +236,7 @@ export function DangerZone() {
                     </div>
                 </div>
 
-                <div data-theme-part="panel" className="space-y-0.5 rounded-[1.75rem] border border-border/45 bg-card/80 px-4 shadow-sm">
+                <div data-theme-part="panel" className="divide-y divide-border/25 rounded-[1.75rem] border border-border/45 bg-card/80 px-4 shadow-sm">
                         <DangerRow
                             title="Wipe accounts"
                             description={`Removes ${accounts.length} local account${accounts.length !== 1 ? 's' : ''}, their installed addon state and autopilot rules`}

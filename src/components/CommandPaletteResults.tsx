@@ -38,7 +38,7 @@ export function VirtualCommandResults({ groups, selectedIndex, query, scrollRoot
             const row = rows[virtualRow.index]
             return <div key={virtualRow.key} data-index={virtualRow.index} ref={virtualizer.measureElement}
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', paddingBottom: 4, transform: `translateY(${virtualRow.start}px)` }}>
-                {row.item ? renderItem(row.item) : <div className="px-6 pt-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground/80">{row.category}</div>}
+                {row.item ? renderItem(row.item) : <div className="px-6 pt-3 pb-1 text-xs font-medium text-muted-foreground">{row.category.charAt(0) + row.category.slice(1).toLowerCase()}</div>}
             </div>
         })}
     </div>
