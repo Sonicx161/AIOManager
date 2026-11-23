@@ -8,6 +8,7 @@ import { getHostnameIdentifier, identifyAddon } from '@/lib/addon-identifier'
 import { trace } from '@/lib/trace'
 import { restoreKnownManifests } from '@/lib/manifest-placeholder'
 import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
+import { manifestFetchErrorMessage, readErrorBody } from '@/lib/manifest-fetch-error'
 import { exchangeFacebookLogin, exchangeAppleLogin, deleteStremioUser, type RelayLoginResult } from './stremio-relay'
 import { fetchStremioMetaBatch, validateStremioMetaRows } from '@/lib/stremio-meta-batch'
 
@@ -398,8 +399,8 @@ export class StremioClient {
       })
 
       if (!response.ok) {
-        if (response.status === 404) throw new Error('Addon manifest not found at this URL')
-        throw new Error(`Addon server responded with ${response.status}`)
+        const body = shouldFetchDirectly ? null : await readErrorBody(response)
+        throw new Error(manifestFetchErrorMessage(response.status, body, !shouldFetchDirectly))
       }
 
       let manifestData: Record<string, unknown>

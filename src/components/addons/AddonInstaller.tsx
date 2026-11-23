@@ -17,6 +17,7 @@ import { useTheme } from '@/contexts/ThemeContext'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import { useAddonManifest } from '@/hooks/useAddonManifest'
 import { AddonManifest } from '@/types/addon'
+import { installErrorMessage } from '@/lib/manifest-fetch-error'
 
 export function AddonInstaller() {
   const isOpen = useUIStore((state) => state.isAddAddonDialogOpen)
@@ -99,18 +100,19 @@ export function AddonInstaller() {
 
     const normalizedUrl = addonUrl.trim().replace(/^stremio:\/\//, 'https://')
 
-    setInstalling(true)
     try {
       new URL(normalizedUrl)
+    } catch {
+      setError('Invalid URL format')
+      return
+    }
 
+    setInstalling(true)
+    try {
       await installAddon(selectedAccountId, normalizedUrl)
       handleClose()
     } catch (err) {
-      if (err instanceof TypeError) {
-        setError('Invalid URL format')
-      } else {
-        setError(err instanceof Error ? err.message : 'Failed to install addon')
-      }
+      setError(installErrorMessage(err))
     } finally {
       setInstalling(false)
     }
