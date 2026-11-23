@@ -42,3 +42,29 @@ export function describeDeployOutcomes(details: Array<{ accountId: string; resul
   if (lines.length <= MAX_OUTCOME_LINES) return lines
   return [...lines.slice(0, MAX_OUTCOME_LINES), `+${lines.length - MAX_OUTCOME_LINES} more.`]
 }
+
+function listAccounts(ids: string[], accountLabel: (accountId: string) => string): string {
+  const names = [...new Set(ids)].map(accountLabel)
+  if (names.length <= MAX_OUTCOME_LINES) return names.join(', ')
+  return `${names.slice(0, MAX_OUTCOME_LINES).join(', ')} and ${names.length - MAX_OUTCOME_LINES} more`
+}
+
+export function describeDeployFailure(
+  result: { success: number; failed: number; errors: Array<{ accountId: string; error: string }> },
+  summary: string,
+  accountLabel: (accountId: string) => string,
+): { title: string; description: string } {
+  const first = result.errors[0]
+  const why = first?.error ? ` Error: ${first.error}` : ''
+  const failedNames = listAccounts(result.errors.map(e => e.accountId), accountLabel)
+  if (result.success === 0) {
+    return {
+      title: 'Deployment Failed',
+      description: `Could not deploy to ${failedNames || `${result.failed} account${result.failed !== 1 ? 's' : ''}`}.${why}`,
+    }
+  }
+  return {
+    title: 'Deployment Completed with Errors',
+    description: `${summary}. Succeeded: ${result.success}, failed: ${result.failed}${failedNames ? ` (${failedNames})` : ''}.${why}`,
+  }
+}

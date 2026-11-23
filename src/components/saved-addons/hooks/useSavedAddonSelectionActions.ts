@@ -3,7 +3,7 @@ import { toast } from '@/hooks/use-toast'
 import { useAddonStore } from '@/store/addonStore'
 import { getStremioAuthKey } from '@/store/accountStore'
 import type { SavedAddon } from '@/types/saved-addon'
-import { describeDeployOutcomes, getDeploymentSummary } from '@/lib/deploy-summary'
+import { describeDeployFailure, describeDeployOutcomes, getDeploymentSummary } from '@/lib/deploy-summary'
 import { maskAccountLabel } from '@/lib/utils'
 import { useUIStore } from '@/store/uiStore'
 
@@ -225,10 +225,8 @@ export function useSavedAddonSelectionActions({
           description: [`${deploymentSummary} across ${result.success} account${result.success !== 1 ? 's' : ''}.${stopped}`, ...outcomeLines].join(' '),
         })
       } else {
-        const firstError = result.errors[0]?.error || ''
         toast({
-          title: 'Deployment Completed with Errors',
-          description: `${deploymentSummary}. Succeeded: ${result.success}, failed: ${result.failed}.${firstError ? ` Error: ${firstError}` : ''}`,
+          ...describeDeployFailure(result, deploymentSummary, accountLabel),
           variant: 'destructive',
         })
       }
