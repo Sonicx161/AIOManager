@@ -56,7 +56,8 @@ async function getStore(): Promise<StoreRef> {
 // Decide whether the stored authKey ciphertext can be kept byte for byte during
 // a no-change import instead of re-encrypting. authKey is a legacy mirror:
 // connection-based accounts keep the canonical secret on the connection, and
-// their mirror (often empty or stale) must still re-encrypt exactly as before.
+// their mirror (often empty or stale) must still re-encrypt unless sealsExactly
+// proves it already holds the value being written.
 export function canReuseAuthKeyCiphertext(
     matchedAccount: { authKey?: string },
     canonicalAuthKey: string,
@@ -69,6 +70,16 @@ export function canReuseAuthKeyCiphertext(
         && canonicalAuthKey === matchedAccount.authKey
         && !!storedSecretKey
         && (!raRawKey || raRawKey === storedSecretKey)
+}
+
+// True only when the stored value opens under this key to exactly the plaintext about to be written.
+export async function sealsExactly(sealed: string | undefined, plain: string, key: CryptoKey | null): Promise<boolean> {
+    if (!sealed || !plain || !key) return false
+    try {
+        return await decrypt(sealed, key) === plain
+    } catch {
+        return false
+    }
 }
 
 // A matched account's stored Stremio logins, offered to adoption as sealed proofs.
@@ -924,8 +935,10 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
             if (!secrets?.key) return account
             return {
                 ...account,
-                authKey: await encrypt(secrets.key, getWriteEncryptionKey()),
-                password: secrets.password ? await encrypt(secrets.password, getWriteEncryptionKey()) : account.password,
+                authKey: await sealsExactly(account.authKey, secrets.key, getWriteEncryptionKey()) ? account.authKey : await encrypt(secrets.key, getWriteEncryptionKey()),
+                password: secrets.password
+                    ? (await sealsExactly(account.password, secrets.password, getWriteEncryptionKey()) ? account.password : await encrypt(secrets.password, getWriteEncryptionKey()))
+                    : account.password,
             }
         }
 
@@ -1010,8 +1023,10 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
                     keepLocalCiphertext,
                 )
                 const passwordUnchanged = !!matchedSecrets && (keepLocalCiphertext && (ra.password === undefined || ra.password === matchedSecrets.password))
+                const mirrorUnchanged = secretUnchanged
+                    || (keepLocalCiphertext && !!mergedAuthKey && await sealsExactly(matchedAccount.authKey, mergedAuthKey, getWriteEncryptionKey()))
                 const mergedAuthKeyValue = mergedAuthKey
-                    ? (secretUnchanged ? matchedAccount.authKey : await encrypt(mergedAuthKey, getWriteEncryptionKey()))
+                    ? (mirrorUnchanged ? matchedAccount.authKey : await encrypt(mergedAuthKey, getWriteEncryptionKey()))
                     : matchedAccount.authKey
                 const updated: Account = {
                     ...matchedAccount,
