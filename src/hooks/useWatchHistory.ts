@@ -20,6 +20,7 @@ import { canonicalEpisodeIdentity, tmdbAliasVersion, aliasDeletedAt } from '@/li
 import { stremioConnectionsOf, stremioScopeResolver } from '@/lib/connection-identity'
 import { dedupWatchEntries } from '@/lib/watch-history-final-dedup'
 import { createWorkspaceResetSubscription } from '@/lib/workspace-reset-subscription'
+import { removedAccountLabels } from '@/lib/removed-account-label'
 
 const GENRE_CACHE_STORAGE_KEY = 'aio-genre-map-v1'
 let _genreCache: Map<string, string[]> | null = null
@@ -389,6 +390,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
         // that exact play identity may borrow it (#85/F-01); historical rows keep their
         // own event progress.
         const newestLiveEventIds = newestLiveOverlayEventIds(seriesDedupedEvents, ctxOf)
+        const removedNames = removedAccountLabels(seriesDedupedEvents.map(e => e.accountId), id => accountMeta.has(id))
 
         const eventEntries: HistoryEntry[] = seriesDedupedEvents.map(event => {
             const ctx = ctxOf(event.accountId, event.sourceConnectionId)
@@ -411,7 +413,7 @@ export function useWatchHistory(accountId?: string, enabled = true, options?: Wa
                 itemId: event.itemId,
                 video_id: event.video_id,
                 accountId: event.accountId,
-                accountName: meta?.name ?? event.accountId,
+                accountName: meta?.name ?? removedNames.get(event.accountId) ?? 'Removed account',
                 accountColorIndex: meta?.colorIndex ?? 0,
                 name: event.name,
                 type: event.type,

@@ -9,6 +9,15 @@ import { isPlausibleWatchMs } from '../../lib/watch-time.ts'
 
 export type FeedViewMode = 'grid' | 'list'
 
+export type FeedEmptyKind = 'none' | 'tab' | 'page-filter'
+
+export function feedEmptyKind(tabRows: number, pageRows: number, allRows: number): FeedEmptyKind | null {
+    if (tabRows > 0) return null
+    if (pageRows > 0) return 'tab'
+    if (allRows > 0) return 'page-filter'
+    return 'none'
+}
+
 export type NowStatusMap = ReadonlyMap<string, ActivityNowStatus>
 
 /**

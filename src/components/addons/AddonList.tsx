@@ -625,6 +625,7 @@ export function AddonList({ accountId }: AddonListProps) {
             variant="ghost"
             size="icon"
             onClick={() => navigate('/')}
+            aria-label="Back to accounts"
             className="mt-0.5 h-9 w-9 shrink-0 rounded-xl border border-border/40 bg-card text-muted-foreground shadow-sm hover:bg-muted/50 hover:text-foreground"
           >
             <ArrowLeft className="h-4 w-4" />

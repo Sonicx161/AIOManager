@@ -17,6 +17,7 @@ import {
     buildFeedRows,
     buildItemOrder,
     detectGridColumns,
+    feedEmptyKind,
     keepNowStatusIdentity,
     GRID_BREAKPOINT_COLUMNS,
     resolveFocusTarget,
@@ -347,14 +348,18 @@ export const ActivityFeed = memo(function ActivityFeed({
         onOpenDetail,
     }), [nowStatuses, viewMode, safeSelectedItems, isBulkMode, cwPosterIndex, onToggleSelect, onDelete, onOpenDetail])
 
-    const renderEmptyState = () => (
-        <ActivityEmptyState
-            filtered={combinedHistory.length > 0 && filteredHistory.length === 0}
-            totalItems={combinedHistory.length}
-            activeFilterLabel={ACTIVITY_TAB_LABELS[activeTab]}
-            onShowAll={combinedHistory.length > 0 ? () => setActiveTab('all') : undefined}
-        />
-    )
+    const renderEmptyState = () => {
+        const kind = feedEmptyKind(filteredHistory.length, combinedHistory.length, allHistory.length)
+        if (kind === 'page-filter') return <ActivityEmptyState filtered activeFilterLabel="your search or filters" />
+        return (
+            <ActivityEmptyState
+                filtered={kind === 'tab'}
+                totalItems={combinedHistory.length}
+                activeFilterLabel={ACTIVITY_TAB_LABELS[activeTab]}
+                onShowAll={combinedHistory.length > 0 ? () => setActiveTab('all') : undefined}
+            />
+        )
+    }
 
     const renderFeedContent = () => {
         if (filteredHistory.length === 0) return renderEmptyState()

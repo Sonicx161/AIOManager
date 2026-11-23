@@ -1,7 +1,7 @@
 import { continueWatchingPosterFor } from '@/lib/activity-cw-poster'
 import { useEffect, useState, useRef, useMemo, useCallback, type CSSProperties } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { toast } from '@/hooks/use-toast'
 import { useTheme } from '@/contexts/ThemeContext'
 
@@ -1616,6 +1616,13 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
     if (!renderItem) return null
 
     const title = meta?.name?.trim() || renderItem.name || 'Unknown Title'
+    const dialogLabel = !currentEntry || currentEntry.kind === 'item'
+        ? title
+        : currentEntry.kind === 'person'
+            ? currentEntry.name
+            : currentEntry.kind === 'episode'
+                ? currentEntry.seriesName
+                : maskedAccountLabel(accounts.find(a => a.id === currentEntry.accountId))
     const { posterSrc, posterItemId, posterTmdbId } = artwork!
     const background = backgroundCandidates[heroAttempt]
     const heroReady = !!background && heroReadySrc === background
@@ -1669,6 +1676,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
                 )}
                 hideClose
             >
+                <DialogTitle className="sr-only">{dialogLabel || 'Details'}</DialogTitle>
                 <DialogBack active={navStack.length > 1} onBack={handleGoBack} />
                 <DialogAltHistory
                     active={open && (navStack.length > 1 || forwardStack.length > 0)}

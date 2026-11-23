@@ -318,7 +318,7 @@ export function AccountSwitcher(props: AccountSwitcherProps) {
                 />
             </div>
             <Tooltip content={prevLabel || 'Previous account'} side="bottom">
-                <button data-theme-part="button" className={OUTLINE_BTN + " px-2"} onClick={onPrev}>
+                <button type="button" data-theme-part="button" className={OUTLINE_BTN + " px-2"} onClick={onPrev} aria-label="Previous account">
                     <ChevronLeft className="h-4 w-4" />
                 </button>
             </Tooltip>
@@ -326,7 +326,7 @@ export function AccountSwitcher(props: AccountSwitcherProps) {
                 {currentIndex >= 0 ? currentIndex + 1 : '-'}/{accounts.length}
             </span>
             <Tooltip content={nextLabel || 'Next account'} side="bottom">
-                <button data-theme-part="button" className={OUTLINE_BTN + " px-2"} onClick={onNext}>
+                <button type="button" data-theme-part="button" className={OUTLINE_BTN + " px-2"} onClick={onNext} aria-label="Next account">
                     <ChevronRight className="h-4 w-4" />
                 </button>
             </Tooltip>
