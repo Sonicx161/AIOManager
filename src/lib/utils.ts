@@ -307,6 +307,8 @@ export function hasFallbackAddonIdentity(addon: Pick<AddonDescriptor, 'transport
  * only on the platform still arrive with the platform's flag.
  */
 
+const officialFlag = (official: boolean | undefined) => (official === undefined ? {} : { official })
+
 export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonDescriptor[], options: { keepMissingLocal?: boolean; keepMissingLocalUrls?: Set<string>; instanceMatch?: 'adopt-remote-url' | 'keep-local-url'; keepLocalFlags?: boolean } = {}) {
   trace('merge', 'enter', { local: localAddons.length, remote: remoteAddons.length, keepMissingLocal: !!options.keepMissingLocal })
   let merged = 0, netNew = 0, keptMissingLocal = 0, keptSpecial = 0, dropped = 0, instanceMatched = 0
@@ -398,6 +400,7 @@ export function mergeAddons(localAddons: AddonDescriptor[], remoteAddons: AddonD
           : {
               ...matchedRemote.flags,
               protected: localAddon.flags?.protected,
+              ...officialFlag(matchedRemote.flags?.official ?? localAddon.flags?.official),
               enabled: isRecentLocalChange ? (localAddon.flags?.enabled !== false) : (matchedRemote.flags?.enabled !== false),
             },
         metadata: mergedMetadata,
