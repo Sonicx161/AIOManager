@@ -290,7 +290,7 @@ export function guardedFetch(url, {
                 socket.once('close', () => clearTimeout(t))
             })
             req.on('error', (err) => {
-                if (!responded && !retriedStale && req.reusedSocket && STALE_SOCKET_CODES.has(err?.code)) return hop(target, n, true)
+                if (!done && !responded && !retriedStale && req.reusedSocket && STALE_SOCKET_CODES.has(err?.code)) return hop(target, n, true)
                 fail(err?.code, err?.transportCode)
             })
             req.end(reqBody)
