@@ -922,9 +922,9 @@ export function ActivityPage() {
             if (getActiveWorkspaceId() !== workspace) return
             if (deleted.length > 0) {
                 purgeLocalActivity(deleted.map(entry => history.find(h => h.id === entry.id)).filter((h): h is ActivityItem => !!h), deleted.map(entry => entry.id))
-                toast({ title: 'Shows Deleted', description: `${deleted.length} show(s) removed from Stremio and history.` })
+                toast({ title: 'Show History Cleared', description: `Watch history cleared for ${deleted.length} show(s) in Stremio and AIOManager. The shows stay in your Stremio library.` })
             } else {
-                toast({ variant: 'destructive', title: 'Delete failed', description: 'The shows could not be removed from Stremio. Try again later.' })
+                toast({ variant: 'destructive', title: 'Delete failed', description: 'The show history could not be cleared in Stremio. Try again later.' })
             }
             setPendingWholeShow(null)
         } finally {
@@ -1233,9 +1233,9 @@ export function ActivityPage() {
             <ConfirmationDialog
                 open={!!pendingWholeShow}
                 onOpenChange={(open) => { if (!open && !isDeletingWholeShow) setPendingWholeShow(null) }}
-                title="Delete entire shows instead?"
-                description={`${pendingWholeShow?.length ?? 0} item(s) could not be deleted per-episode because their show's episode list is unavailable. Delete the ENTIRE show from Stremio instead? Every episode of each show will be removed from Stremio and history. This cannot be undone.`}
-                confirmText="Delete entire shows"
+                title="Clear whole-show history instead?"
+                description={`${pendingWholeShow?.length ?? 0} item(s) could not be deleted per-episode because their show's episode list is unavailable. Clear the watch history of the ENTIRE show instead? The history of every episode is cleared in Stremio and AIOManager, and the shows stay in your Stremio library. This cannot be undone.`}
+                confirmText="Clear whole-show history"
                 isDestructive
                 isLoading={isDeletingWholeShow}
                 onConfirm={() => { void handleDeleteWholeShows() }}
