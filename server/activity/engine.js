@@ -622,7 +622,7 @@ function scanScopeAccountId(accountId, connectionId) {
 }
 
 // The scan's results are dropped when the workspace or the account was deleted while it ran.
-// KEY SHARE holds off a concurrent workspace delete (FOR UPDATE) without blocking pushes.
+// KEY SHARE holds off a concurrent workspace delete; a push on the same workspace waits briefly too.
 async function accountGone(tx, syncUser, accountId) {
     const lock = tx.type === 'postgres' ? ' FOR KEY SHARE' : ''
     const workspace = await tx.get(`SELECT 1 AS live FROM kv_store WHERE key = $1 AND password IS NOT NULL${lock}`, [syncUser])

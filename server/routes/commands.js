@@ -111,6 +111,7 @@ async function runJob(fastify, jobId) {
                     `UPDATE commands SET status = 'failed', error = $1, updated_at = $2 WHERE id = $3`,
                     [code, Date.now(), jobId]
                 ).catch((updateErr) => fastify.log.error({ category: 'Commands' }, `Job ${jobId} status update failed: ${updateErr?.message}`))
+                await pruneJobHistory(fastify, job.sync_user)
                 return
             }
             throw stateErr
@@ -126,6 +127,7 @@ async function runJob(fastify, jobId) {
             `UPDATE commands SET status = 'failed', error = $1, updated_at = $2 WHERE id = $3`,
             [err?.message || 'Job failed to start', Date.now(), jobId]
         ).catch((updateErr) => fastify.log.error({ category: 'Commands' }, `Job ${jobId} status update failed: ${updateErr?.message}`))
+        if (job) await pruneJobHistory(fastify, job.sync_user)
         return
     }
 
@@ -166,6 +168,7 @@ async function runJob(fastify, jobId) {
             `UPDATE commands SET status = 'failed', error = $1, updated_at = $2 WHERE id = $3`,
             [err?.message || 'Job failed', failedAt, jobId]
         ).catch((updateErr) => fastify.log.error({ category: 'Commands' }, `Job ${jobId} status update failed: ${updateErr?.message}`))
+        await pruneJobHistory(fastify, job.sync_user)
     }
 }
 
