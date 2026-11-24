@@ -9,6 +9,7 @@ import { trace } from '@/lib/trace'
 import { restoreKnownManifests } from '@/lib/manifest-placeholder'
 import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
 import { manifestFetchErrorMessage, readErrorBody } from '@/lib/manifest-fetch-error'
+import { hasStremioAuthKey, NO_STREMIO_KEY_MESSAGE } from '@/lib/stremio-auth-key'
 import { exchangeFacebookLogin, exchangeAppleLogin, deleteStremioUser, type RelayLoginResult } from './stremio-relay'
 import { fetchStremioMetaBatch, validateStremioMetaRows } from '@/lib/stremio-meta-batch'
 import { isStremioSessionGone, stremioSessionGoneError } from '@/lib/stremio-session'
@@ -52,6 +53,7 @@ export function isRecoveredAddonCollection(addons: AddonDescriptor[] | null | un
 }
 
 async function serverPost(path: string, body: Record<string, unknown>, headers?: Record<string, string>, beforeDispatch?: () => void | Promise<void>) {
+  if ('authKey' in body && !hasStremioAuthKey(body.authKey)) throw new Error(NO_STREMIO_KEY_MESSAGE)
   const authHeaders = await getProxyAuthHeaders()
   await beforeDispatch?.()
   const res = await resilientFetch(path, {

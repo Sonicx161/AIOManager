@@ -30,11 +30,20 @@ const collectionOf = (body) => {
     return result.addons
 }
 
+// An empty key reads Stremio's default collection as a success; never send one.
+const assertAuthKey = (authKey) => {
+    if (typeof authKey === 'string' && authKey.trim()) return
+    const err = new Error('Stremio credentials not loaded')
+    err.isAuthError = true
+    throw err
+}
+
 export function createStremioDriver({ timeoutMs = STREMIO_DRIVER_TIMEOUT_MS } = {}) {
     return {
         capabilities: ['addons'],
 
         async readAddons(authKey) {
+            assertAuthKey(authKey)
             const getCollection = async () => {
                 try {
                     const res = await enqueueProxyRequest(STREMIO_API, () => fetch(`${STREMIO_API}/addonCollectionGet`, {
@@ -72,6 +81,7 @@ export function createStremioDriver({ timeoutMs = STREMIO_DRIVER_TIMEOUT_MS } = 
         },
 
         async writeAddons(authKey, addons) {
+            assertAuthKey(authKey)
             try {
                 const res = await enqueueProxyRequest(STREMIO_API, () => fetch(`${STREMIO_API}/addonCollectionSet`, {
                     method: 'POST',

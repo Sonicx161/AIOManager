@@ -1,6 +1,7 @@
 import { WatchMigrationError } from './failures.ts'
 import { isStremioSessionGone } from '../stremio-session.ts'
 import type { MigrationFailure } from './types.ts'
+import { hasStremioAuthKey, NO_STREMIO_KEY_MESSAGE } from '../stremio-auth-key.ts'
 
 type StremioOperation = 'GetUser' | 'DatastoreGet' | 'DatastorePut'
 
@@ -127,6 +128,7 @@ export function createStremioWatchRequest(options: RequestOptions) {
     const now = options.now ?? Date.now
     const pacer = options.pacer ?? stremioWatchRequestPacer(`account:${options.accountId}`)
     return async (type: StremioOperation, body: Record<string, unknown>, signal: AbortSignal, beforeDispatch?: () => void | Promise<void>): Promise<unknown> => {
+        if (!hasStremioAuthKey(options.authKey)) throw new Error(NO_STREMIO_KEY_MESSAGE)
         const stage: MigrationFailure['stage'] = type === 'GetUser' ? 'identity' : type === 'DatastorePut' ? 'write' : 'prewrite'
         // Reads may retry a transient transport failure. Never replay a library
         // replacement here: an interrupted write may have reached Stremio already.

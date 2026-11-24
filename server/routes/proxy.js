@@ -828,6 +828,12 @@ export function registerProxyRoutes(fastify, { checkAddonHealthInternal, seriesV
             return { error: 'Method Not Allowed' }
         }
 
+        // An empty key reads Stremio's default collection and a zeroed user as a success; never forward one.
+        if (typeof payload.authKey !== 'string' || !payload.authKey.trim()) {
+            reply.status(400)
+            return { error: 'Stremio credentials not loaded' }
+        }
+
         // Stremio rejects addon collections when any embedded manifest is partial.
         // Fill required fields before forwarding so one blocked addon cannot poison the account.
         if (type === 'AddonCollectionSet' && Array.isArray(payload.addons)) {
