@@ -458,21 +458,6 @@ function App() {
   const isAdminRoute = window.location.pathname === '/dashboard' || window.location.pathname.startsWith('/dashboard/')
 
   if (!sessionReady && !isShareLink && !isKronoriumRoute && !isAdminRoute) {
-    // Check for Deep Link (Parity with AIOStreams)
-    // If user visits /account/<UUID> directly, we want to pre-fill that UUID
-    const path = window.location.pathname
-    const match = path.match(/^\/account\/([a-zA-Z0-9-]+)/)
-
-    if (match && match[1]) {
-      // Redirect to login with ID param
-      const uuid = match[1]
-      const currentId = new URLSearchParams(window.location.search).get('id')
-      if (currentId !== uuid) {
-        window.location.href = `/?id=${uuid}`
-        return null // Halt rendering
-      }
-    }
-
     return (
       <Suspense fallback={<AppLoader />}>
         <LoginPage />
