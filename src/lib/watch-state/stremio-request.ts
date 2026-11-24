@@ -1,4 +1,5 @@
 import { WatchMigrationError } from './failures.ts'
+import { isStremioSessionGone } from '../stremio-session.ts'
 import type { MigrationFailure } from './types.ts'
 
 type StremioOperation = 'GetUser' | 'DatastoreGet' | 'DatastorePut'
@@ -196,6 +197,7 @@ export function createStremioWatchRequest(options: RequestOptions) {
             }
             if (!data || typeof data !== 'object' || Array.isArray(data)) throw new WatchMigrationError({ stage, reason: 'invalid_response', attempts: attempt + 1 })
             const envelope = data as Record<string, unknown>
+            if (isStremioSessionGone(envelope.error)) throw new WatchMigrationError({ stage, reason: 'remote_declined', httpStatus: 401, attempts: attempt + 1 })
             if (envelope.error || envelope.result === false || envelope.result === undefined) throw new WatchMigrationError({ stage, reason: 'remote_declined', attempts: attempt + 1 })
             return envelope.result
         }

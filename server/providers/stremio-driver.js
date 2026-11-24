@@ -7,8 +7,19 @@ export const STREMIO_DRIVER_TIMEOUT_MS = 20_000
 
 const isTimeout = (err) => err?.name === 'TimeoutError' || err?.name === 'AbortError'
 
+// Stremio answers a logged-out or unknown key with HTTP 200 and error code 1; stremio-core logs out on exactly this code.
+const isStremioSessionGone = (body) => typeof body?.error === 'object' && body.error !== null && body.error.code === 1
+
+const sessionGoneError = () => {
+    const err = new Error('Invalid or expired auth key')
+    err._authExpired = true
+    err.isAuthError = true
+    return err
+}
+
 // A body without a collection is an error, never an empty account.
 const collectionOf = (body) => {
+    if (isStremioSessionGone(body)) throw sessionGoneError()
     const result = body?.result
     if (body?.error || !result || typeof result !== 'object') {
         const detail = body?.error ? (typeof body.error === 'string' ? body.error : body.error.message || body.error.code || 'error') : 'missing result'
@@ -75,7 +86,9 @@ export function createStremioDriver({ timeoutMs = STREMIO_DRIVER_TIMEOUT_MS } = 
                     err._authExpired = (res.status === 401 || res.status === 403)
                     throw err
                 }
-                return await res.json()
+                const body = await res.json()
+                if (isStremioSessionGone(body)) throw sessionGoneError()
+                return body
             } catch (err) {
                 // The write may have landed: callers re-read next cycle instead of re-writing now.
                 if (isTimeout(err)) {

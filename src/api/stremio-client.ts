@@ -11,6 +11,7 @@ import { ACCOUNT_CONTEXT_SYSTEM_CHECK } from '@/lib/account-contexts'
 import { manifestFetchErrorMessage, readErrorBody } from '@/lib/manifest-fetch-error'
 import { exchangeFacebookLogin, exchangeAppleLogin, deleteStremioUser, type RelayLoginResult } from './stremio-relay'
 import { fetchStremioMetaBatch, validateStremioMetaRows } from '@/lib/stremio-meta-batch'
+import { isStremioSessionGone, stremioSessionGoneError } from '@/lib/stremio-session'
 
 async function getProxyAuthHeaders(): Promise<Record<string, string>> {
     const { auth } = useSyncStore.getState()
@@ -178,6 +179,7 @@ export class StremioClient {
       }, { 'x-account-context': ACCOUNT_CONTEXT_SYSTEM_CHECK })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         throw new Error((e.message as string) || 'Failed to get user profile')
       }
@@ -209,6 +211,7 @@ export class StremioClient {
       }, { 'x-account-context': accountContext })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         throw new Error((e.message as string) || 'Failed to get sub-profile addons')
       }
@@ -269,6 +272,7 @@ export class StremioClient {
       }
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         const message = typeof data.error === 'string' ? data.error : (e.message as string)
         throw new Error(message || 'Failed to get addon collection')
@@ -332,6 +336,7 @@ export class StremioClient {
       trace('stremio', 'api-call', { method: 'AddonCollectionSet', timing: Date.now() - start })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const err = data.error as Record<string, unknown>
         const rawMessage = (err.message as string) || 'Failed to update addon collection'
         if (/descriptor.*size|payload.*too.*large|max.*size|413/i.test(rawMessage)) {
@@ -457,6 +462,7 @@ export class StremioClient {
       trace('stremio', 'api-call', { method: 'DatastoreGet', timing: Date.now() - start })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         throw new Error((e.message as string) || 'Failed to get library items')
       }
@@ -491,6 +497,7 @@ export class StremioClient {
       trace('stremio', 'api-call', { method: 'DatastoreGet', timing: Date.now() - start, ids: ids.length })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         throw new Error((e.message as string) || 'Failed to get library items')
       }
@@ -530,6 +537,7 @@ export class StremioClient {
       trace('stremio', 'api-call', { method: 'DatastoreMeta', timing: Date.now() - start })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const e = data.error as Record<string, unknown>
         throw new Error((e.message as string) || 'Failed to get library meta')
       }
@@ -637,6 +645,7 @@ export class StremioClient {
       }, { 'x-account-context': accountContext })
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const err = data.error as Record<string, unknown>
         throw new Error((err.message as string) || 'Failed to add library item')
       }
@@ -666,6 +675,7 @@ export class StremioClient {
         }, { 'x-account-context': accountContext })
 
         if (data?.error) {
+          if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
           const err = data.error as Record<string, unknown>
           throw new Error((err.message as string) || (typeof data.error === 'string' ? String(data.error) : '') || 'Failed to push library items')
         }
@@ -694,6 +704,7 @@ export class StremioClient {
       }, { 'x-account-context': accountContext }, beforeDispatch)
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const err = data.error as Record<string, unknown>
         throw new Error((err.message as string) || 'Failed to update library item')
       }
@@ -722,6 +733,7 @@ export class StremioClient {
       }, { 'x-account-context': accountContext }, beforeDispatch)
 
       if (data?.error) {
+        if (isStremioSessionGone(data.error)) throw stremioSessionGoneError()
         const err = data.error as Record<string, unknown>
         throw new Error((err.message as string) || 'Failed to remove library item')
       }
