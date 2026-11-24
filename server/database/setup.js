@@ -1117,7 +1117,7 @@ export async function initializeDatabase(fastify) {
             await db.pragma('wal_checkpoint(TRUNCATE)')
             fastify.log.info({ category: 'Database' }, 'Startup: WAL checkpoint completed - cleared stale locks.')
         } else if (db.type === 'postgres') {
-            await db.run(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction' AND pid <> pg_backend_pid() AND usename = current_user`).catch((e) => { fastify.log.warn({ category: 'Database' }, `pg_terminate_backend cleanup failed: ${e.message}`) })
+            await db.run(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND state = 'idle in transaction' AND pid <> pg_backend_pid() AND usename = current_user AND application_name = current_setting('application_name') AND application_name <> ''`).catch((e) => { fastify.log.warn({ category: 'Database' }, `pg_terminate_backend cleanup failed: ${e.message}`) })
             fastify.log.info({ category: 'Database' }, 'Startup: Cleared stale PostgreSQL transactions.')
         }
         serverState.isWorkerRunning = false

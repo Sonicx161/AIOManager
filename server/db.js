@@ -91,6 +91,7 @@ class DB {
             this.pool = new Pool({
                 connectionString,
                 ssl: conn.ssl,
+                application_name: 'aiomanager',
                 max: parseInt(process.env.DB_POOL_SIZE, 10) || 20,
                 idleTimeoutMillis: 30000,
                 connectionTimeoutMillis: conn.connectionTimeoutMillis,
