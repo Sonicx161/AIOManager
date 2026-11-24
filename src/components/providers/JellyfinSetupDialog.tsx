@@ -16,7 +16,7 @@ import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { isAIOStreamsAddon, parseAIOStreamsUrl, fetchAIOStreamsUser, getStoredAIOStreamsPassword } from '@/lib/aiostreams-utils'
 import { isAIOMetadataAddon, parseAIOMetadataUrl, fetchAIOMetadataConfig, fetchAIOMetadataStatus, getStoredAIOMetadataPassword } from '@/lib/aiometadata-utils'
-import { aiostreamsPinSignInPassword, aiostreamsQuickAddUsers } from '@/lib/aiostreams-profiles'
+import { aiostreamsPinProblem, aiostreamsPinSignInPassword, aiostreamsQuickAddUsers } from '@/lib/aiostreams-profiles'
 
 interface Props {
     open: boolean
@@ -89,7 +89,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
     const [password, setPassword] = useState('')
     const [pinUser, setPinUser] = useState('')
     const [pin, setPin] = useState('')
-    const [pinError, setPinError] = useState<'' | 'missing' | 'rejected'>('')
+    const [pinError, setPinError] = useState<'' | 'missing' | 'short' | 'rejected'>('')
     const pinInput = useRef<HTMLInputElement>(null)
     const [accessToken, setAccessToken] = useState('')
     const [userId, setUserId] = useState('')
@@ -218,7 +218,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
         const pinSignIn = !session && method === 'password' && !!pinUser
         const signInPassword = pinSignIn ? aiostreamsPinSignInPassword(password, pin) : password
         if (signInPassword === null) {
-            setError(''); setPinError('missing')
+            setError(''); setPinError(aiostreamsPinProblem(pin) ?? 'missing')
             pinInput.current?.focus()
             return
         }
@@ -411,7 +411,7 @@ export function JellyfinSetupDialog({ open, onOpenChange, onComplete, reconnectC
                     </> : method === 'password' ? <>
                         <div className="space-y-1"><Label htmlFor="jf-username">Server username</Label><Input id="jf-username" required value={username} onChange={e => { clearPin(); setUsername(e.target.value) }} placeholder="e.g. sonic, media-room or media-room/sonic" autoComplete="username" /></div>
                         <div className="space-y-1"><Label htmlFor="jf-password">Password</Label><Input id="jf-password" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Blank if this user has none" autoComplete="current-password" /></div>
-                        {pinUser && <div className="space-y-1"><Label htmlFor="jf-pin">User PIN</Label><Input ref={pinInput} id="jf-pin" type="password" inputMode="numeric" value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 12)); if (pinError) setPinError('') }} autoComplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" aria-invalid={pinError ? true : undefined} aria-describedby={pinError === 'missing' ? 'jf-pin-missing jf-pin-help' : 'jf-pin-help'} className={cn(pinError && 'border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20')} />{pinError === 'missing' && <p id="jf-pin-missing" role="alert" className="text-xs font-medium text-destructive">Enter this user's PIN.</p>}<p id="jf-pin-help" className="text-xs leading-relaxed text-muted-foreground">{pinUser} is locked with a PIN in AIOStreams. It is used for this sign-in only.</p></div>}
+                        {pinUser && <div className="space-y-1"><Label htmlFor="jf-pin">User PIN</Label><Input ref={pinInput} id="jf-pin" type="password" inputMode="numeric" value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 12)); if (pinError) setPinError('') }} autoComplete="off" data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" aria-invalid={pinError ? true : undefined} aria-describedby={pinError === 'missing' || pinError === 'short' ? 'jf-pin-missing jf-pin-help' : 'jf-pin-help'} className={cn(pinError && 'border-destructive focus-visible:border-destructive focus-visible:ring-destructive/20')} />{(pinError === 'missing' || pinError === 'short') && <p id="jf-pin-missing" role="alert" className="text-xs font-medium text-destructive">{pinError === 'short' ? 'The PIN is 4 to 12 digits.' : "Enter this user's PIN."}</p>}<p id="jf-pin-help" className="text-xs leading-relaxed text-muted-foreground">{pinUser} is locked with a PIN in AIOStreams. It is used for this sign-in only.</p></div>}
                         {!expectedSignIn && !quickConnectUnavailable && <p className="text-xs leading-relaxed text-muted-foreground">Quick Connect signs you in without typing your password here.</p>}
                     </> : <>
                         <div className="space-y-1"><Label htmlFor="jf-token">Session token or API key</Label><Input id="jf-token" type="password" required value={accessToken} onChange={e => setAccessToken(e.target.value)} autoComplete="off" /></div>

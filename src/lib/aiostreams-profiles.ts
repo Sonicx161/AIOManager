@@ -239,5 +239,10 @@ export function aiostreamsQuickAddUsers(userData: unknown): Array<{ id: string; 
 
 // AIOStreams splits the sign-in password at its last '/' into the config password and the user's PIN.
 export function aiostreamsPinSignInPassword(password: string, pin: string): string | null {
-    return pin ? `${password}/${pin}` : null
+    return aiostreamsPinProblem(pin) ? null : `${password}/${pin}`
+}
+
+export function aiostreamsPinProblem(pin: string): 'missing' | 'short' | null {
+    if (!pin) return 'missing'
+    return /^\d{4,12}$/.test(pin) ? null : 'short'
 }
