@@ -188,6 +188,15 @@ export async function initializeDatabase(fastify) {
             if (tableExists && missingColumns.length > 0) {
                 const missingPks = missingColumns.filter(c => pkColumns.includes(c))
                 if (missingPks.length > 0) {
+                    const sharesColumn = missingColumns.length < columnsToCheck.length
+                    const hasRows = await db.get(`SELECT 1 AS present FROM ${tableName} LIMIT 1`).then(r => !!r, () => true)
+                    if (hasRows || !sharesColumn) {
+                        const schema = db.type === 'sqlite'
+                            ? 'main'
+                            : (await db.get('SELECT n.nspname AS schema FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass($1)', [tableName]).catch(() => null))?.schema || 'unknown'
+                        fastify.log.error({ category: 'Database' }, `Table ${schema}.${tableName} lacks primary-key columns [${missingPks.join(', ')}] and ${hasRows ? 'has rows' : 'shares no column with AIOManager\'s table'}; it may belong to another app, so it was left untouched and ${tableName} was not set up.`)
+                        return
+                    }
                     fastify.log.warn({ category: 'Database' }, `${tableName} missing primary-key columns [${missingPks.join(', ')}]. Dropping and recreating (stale schema, no recoverable data).`)
                     await db.run(`DROP TABLE IF EXISTS ${tableName}`)
                     tableExists = false
