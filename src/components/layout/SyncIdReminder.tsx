@@ -11,9 +11,7 @@ export function SyncIdReminder() {
 
     useEffect(() => {
         const flag = localStorage.getItem('aiom_show_sync_id_reminder')
-        if (flag === 'true' && auth.isAuthenticated && auth.id) {
-            setShow(true)
-        }
+        setShow((flag === 'true' || flag === auth.id) && auth.isAuthenticated && !!auth.id)
     }, [auth.isAuthenticated, auth.id])
 
     const handleDismiss = () => {

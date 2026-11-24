@@ -372,6 +372,7 @@ export const useSyncStore = create<SyncState>()(
                     syncRuntime.vaultImportReady = true
                     syncRuntime.vaultCloudKnownEmpty = true
                     writeIdentityProfile(newId, name, null)
+                    try { localStorage.setItem('aiom_show_sync_id_reminder', newId) } catch { /* the reminder is best-effort */ }
                     set({
                         auth: { id: newId, password, name, avatar: null, isAuthenticated: true },
                         lastSyncedAt: readServerSyncTimestamp(registration.syncedAt),
@@ -390,8 +391,6 @@ export const useSyncStore = create<SyncState>()(
                         saveSessionSyncToken(newId, syncToken, btoa(String.fromCharCode(...syncKeyRaw)))
                     } catch { /* best-effort: this session still has the password in memory */ }
 
-                    // Set flag to show post-login reminder (Since the registration dialog is hidden too fast)
-                    localStorage.setItem('aiom_show_sync_id_reminder', 'true')
                     await get().syncToRemote(false)
 
                     toast({ title: "Account Created", description: "Welcome to AIOManager." })
