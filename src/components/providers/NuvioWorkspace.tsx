@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { RefreshCw, Loader2, Pencil, Check, X, Trash2, Plus, BookOpen, Layers, User, Users, Crosshair, Download, AlertCircle, MoreHorizontal } from 'lucide-react'
+import { RefreshCw, Loader2, Pencil, Check, X, Trash2, Plus, BookOpen, Layers, User, Users, Crosshair, Download, AlertCircle, MoreHorizontal, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger } from '@/components/ui/tooltip'
@@ -419,8 +419,8 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
     }
     const used = new Set(profiles.map(p => p.profile_index))
     let nextIdx = 1
-    while (used.has(nextIdx) && nextIdx <= 4) nextIdx++
-    const canCreate = nextIdx <= 4
+    while (used.has(nextIdx) && nextIdx <= 6) nextIdx++
+    const canCreate = nextIdx <= 6
 
     const doCreate = async () => {
         if (actionsDisabled) return
@@ -548,6 +548,12 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                                                     <p className="truncate text-sm font-medium">{profileLabel(p.name)}</p>
                                                     <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/80">
                                                         <span className="font-mono">profile {p.profile_index}</span>
+                                                        {p.pin_enabled === true && (
+                                                            <>
+                                                                <span aria-hidden="true">·</span>
+                                                                <span className="inline-flex items-center gap-1 text-warning"><Lock className="h-3 w-3 shrink-0" />PIN locked in Nuvio</span>
+                                                            </>
+                                                        )}
                                                         {isTarget && (
                                                             <>
                                                                 <span aria-hidden="true">·</span>
@@ -708,7 +714,7 @@ function NuvioProfilesRoster({ accountId, connection, status, activeProfileId, p
                         </div>
                     )}
                     {!canCreate && (
-                        <p className="pt-2 text-[11px] text-muted-foreground border-t border-border/40 mt-2">Nuvio allows up to 4 profiles per account.</p>
+                        <p className="pt-2 text-[11px] text-muted-foreground border-t border-border/40 mt-2">Nuvio allows up to 6 profiles per account.</p>
                     )}
                 </div>
             )}

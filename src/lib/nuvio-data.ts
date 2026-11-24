@@ -75,6 +75,7 @@ export interface NuvioProfileRow {
     avatar_color_hex?: string
     avatar_id?: string
     uses_primary_addons?: boolean
+    pin_enabled?: boolean
 }
 
 export function readNuvioProfiles(accountId: string, conn: Connection, opts: { fresh?: boolean } = {}): Promise<NuvioProfileRow[]> {
@@ -87,6 +88,7 @@ export function readNuvioProfiles(accountId: string, conn: Connection, opts: { f
             avatar_color_hex: typeof r.avatar_color_hex === 'string' ? r.avatar_color_hex : undefined,
             avatar_id: typeof r.avatar_id === 'string' ? r.avatar_id : undefined,
             uses_primary_addons: r.uses_primary_addons === true,
+            pin_enabled: r.pin_enabled === true,
         }))
     })
 }

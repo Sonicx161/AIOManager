@@ -324,7 +324,7 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
                 uses_primary_plugins: false,
                 avatar_id: params.avatarId ?? null,
             })
-            const result = await rpc('sync_push_profiles', { p_profiles, p_client_max_profiles: 5 }, accessToken, { retries: 0 })
+            const result = await rpc('sync_push_profiles', { p_profiles, p_client_max_profiles: 6 }, accessToken, { retries: 0 })
             invalidateNuvioProfileCache()
             return result
         },

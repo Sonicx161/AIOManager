@@ -26,7 +26,7 @@ import {
     Lock,
     QrCode,
 } from 'lucide-react'
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { Fragment, useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { cn, maskEmailLevel } from '@/lib/utils'
 import { usesMainProfileAddons } from '@/lib/nuvio-profile-flags'
 import { findNuvioProfileSharers } from '@/lib/nuvio-shared-profile'
@@ -42,6 +42,7 @@ interface NuvioProfile {
     avatar_color_hex?: unknown
     avatarId?: number
     uses_primary_addons?: boolean
+    pin_enabled?: boolean
 }
 
 export interface NuvioBackend {
@@ -446,8 +447,8 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                             <p className="text-sm text-muted-foreground">Select which Nuvio profile to sync addons with.</p>
                             <div className="grid gap-2">
                                 {profiles.map(profile => (
+                                    <Fragment key={profile.id}>
                                     <button
-                                        key={profile.id}
                                         data-theme-part="card"
                                         className={cn(
                                             'flex items-center gap-3 rounded-2xl border p-4 text-left transition-colors',
@@ -468,11 +469,21 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                             {usesMainProfileAddons(profile) && (
                                                 <p className="text-xs text-muted-foreground">Uses primary addons</p>
                                             )}
+                                            {profile.pin_enabled === true && (
+                                                <p className="flex items-center gap-1 text-xs text-warning"><Lock className="h-3 w-3 shrink-0" />PIN locked in Nuvio</p>
+                                            )}
                                         </div>
                                         {selectedProfileId === profile.id && (
                                             <Check className="h-4 w-4 text-primary ml-auto shrink-0" />
                                         )}
                                     </button>
+                                    {selectedProfileId === profile.id && profile.pin_enabled === true && (
+                                        <div data-theme-tone="status" data-theme-part="panel" className="rounded-xl bg-warning/10 border border-warning/20 px-3 py-2 text-xs text-warning flex items-start gap-2">
+                                            <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                                            <span>{profile.name || 'This profile'} is PIN locked in Nuvio. Nuvio does not ask for the PIN when syncing, so AIOManager can still change its addons.</span>
+                                        </div>
+                                    )}
+                                    </Fragment>
                                 ))}
                             </div>
                         </div>
