@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import db from '../db.js'
 import { decrypt } from '../crypto.js'
 import { FALLBACK_KEYS } from '../keys.js'
@@ -616,6 +617,12 @@ function connectionKey(accountId, connectionId) {
     return `${accountId}:${connectionId}`
 }
 
+// A Stremio auth failure is tied to the key that failed: a newly stored key is tried at once.
+function stremioKeyFingerprint(connection) {
+    const key = connection?.platform === 'stremio' ? connection.credentials?.authKey : null
+    return typeof key === 'string' && key ? crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) : null
+}
+
 export function createReconciler(fastify) {
     const connectionState = new Map()
     const syncCycleCounters = new Map()
@@ -666,7 +673,7 @@ export function createReconciler(fastify) {
         trace('reconciler', 'recordSuccess', { accountId, connectionId: connId })
     }
 
-    const recordFailure = (accountId, connId, error, isAuthError) => {
+    const recordFailure = (accountId, connId, error, isAuthError, keyFingerprint = null) => {
         const prev = getState(accountId, connId)
         const consecutiveFailures = prev.consecutiveFailures + 1
         const status = isAuthError ? 'expired' : (consecutiveFailures >= BACKOFF_THRESHOLD ? 'error' : prev.status)
@@ -679,7 +686,8 @@ export function createReconciler(fastify) {
             lastErrorAt: Date.now(),
             lastSync: prev.lastSync,
             status,
-            skipCyclesRemaining
+            skipCyclesRemaining,
+            failedKey: isAuthError ? keyFingerprint : (prev.failedKey ?? null)
         })
         trace('reconciler', 'recordFailure', { accountId, connectionId: connId, consecutiveFailures, isAuthError, status, error: error.message || String(error) })
     }
@@ -687,11 +695,11 @@ export function createReconciler(fastify) {
     const EXPIRED_RETRY_COOLDOWN_MS = 30 * 60 * 1000 // 30 minutes; Supabase rate-limits auth to 6 req/min per IP. Hammering it gets users banned.
     const NETWORK_ERROR_COOLDOWN_MS = 2 * 60 * 1000  // 2 minutes for transient network issues
 
-    const skipReasonFor = (accountId, connId, owner) => {
+    const skipReasonFor = (accountId, connId, owner, keyFingerprint = null) => {
         // A fresh client collection write means the hub is momentarily behind the platforms.
         if (hasRecentClientCollectionWrite(owner, accountId)) return 'recent-write'
         const state = getState(accountId, connId)
-        if (state.status === 'expired') {
+        if (state.status === 'expired' && !(state.failedKey && keyFingerprint && keyFingerprint !== state.failedKey)) {
             // Auth errors get a LONG cooldown. Supabase bans IPs that hit auth too frequently.
             const timeSinceError = state.lastErrorAt ? Date.now() - state.lastErrorAt : Infinity
             if (timeSinceError < EXPIRED_RETRY_COOLDOWN_MS) return 'auth-cooldown'
@@ -704,7 +712,7 @@ export function createReconciler(fastify) {
         }
         return null
     }
-    const shouldSkip = (accountId, connection) => skipReasonFor(accountId, connection.id, connection.syncUser) !== null
+    const shouldSkip = (accountId, connection) => skipReasonFor(accountId, connection.id, connection.syncUser, stremioKeyFingerprint(connection)) !== null
 
     const tickCycleCounter = (accountId) => {
         evictStaleState()
@@ -753,7 +761,7 @@ export function createReconciler(fastify) {
 
         for (const connection of targetConnections) {
             const connId = connection.id
-            const skipReason = skipReasonFor(accountId, connId, connection.syncUser)
+            const skipReason = skipReasonFor(accountId, connId, connection.syncUser, stremioKeyFingerprint(connection))
             if (skipReason) {
                 outcomes[connId] = { outcome: 'skipped', reason: skipReason }
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): ${skipReason}`)
@@ -816,7 +824,7 @@ export function createReconciler(fastify) {
                 outcomes[connId] = { outcome: needsWrite ? 'written' : 'unchanged' }
             } catch (err) {
                 if (isStateRefusal(err)) throw err
-                recordFailure(accountId, connId, err, err.isAuthError)
+                recordFailure(accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
                 outcomes[connId] = { outcome: 'failed', error: err?.message || String(err) }
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
@@ -958,7 +966,7 @@ export function createReconciler(fastify) {
                 syncedIds.push(connId)
             } catch (err) {
                 if (isStateRefusal(err)) throw err
-                recordFailure(accountId, connId, err, err.isAuthError)
+                recordFailure(accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
         }
@@ -1051,7 +1059,8 @@ export function createReconciler(fastify) {
         const states = {}
         for (const [key, state] of connectionState.entries()) {
             if (key.startsWith(`${accountId}:`)) {
-                states[key.split(':').slice(1).join(':')] = { ...state }
+                const { failedKey: _failedKey, ...visible } = state
+                states[key.split(':').slice(1).join(':')] = visible
             }
         }
         return states
