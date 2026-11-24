@@ -36,6 +36,7 @@ import { useActivityMetadata } from '@/hooks/useActivityMetadata'
 import { enrichActivityItemsByIdentity } from '@/lib/activity-cross-source-enrichment'
 import { planEpisodeBitfieldDelete, verifyEpisodeDeleteReadback } from '@/lib/episode-bitfield-delete'
 import { isEpisodeScopedDelete, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
+import { clearStremioRowHistory } from '@/lib/stremio-history-delete'
 import { UNSAFE_EPISODE_LIST } from '@/lib/stremio-bitfield-guard'
 import { resolveFreshSeriesVideos } from '@/lib/stremio-series-resolver'
 import { watchFingerprint } from '@/lib/watch-state/records'
@@ -698,8 +699,8 @@ export function ActivityPage() {
                         }
 
                         await mapConcurrent(group.items, ACTIVITY_ITEM_DELETE_CONCURRENCY, async (item) => {
-                            const wholeShowDelete = async (beforeDispatch?: () => void) => {
-                                await stremioClient.removeLibraryItem(authKey, item.itemId, ctx, beforeDispatch)
+                            const wholeShowDelete = async () => {
+                                await clearStremioRowHistory(item.itemId, () => stremioClient.getLibraryItemsByIds(authKey, [item.itemId], ctx, true), row => stremioClient.pushLibraryItems(authKey, [row], ctx))
                                 trace('activityDelete', 'stremio.item.ok', { accountId, connectionId: group.connectionId, itemId: item.itemId, mode: 'whole-show' })
                             }
                             try {
@@ -911,7 +912,7 @@ export function ActivityPage() {
                     try {
                         const authKey = await decrypt(sealedKey, encryptionKey)
                         const ctx = entry.sourceConnectionId ? watchContextKey(accountId, entry.sourceConnectionId) : accountId
-                        await stremioClient.removeLibraryItem(authKey, entry.itemId, ctx)
+                        await clearStremioRowHistory(entry.itemId, () => stremioClient.getLibraryItemsByIds(authKey, [entry.itemId], ctx, true), row => stremioClient.pushLibraryItems(authKey, [row], ctx))
                         deleted.push(entry)
                     } catch {
                         // A failed whole-show removal leaves the entry in history for a retry.
