@@ -158,7 +158,7 @@ async function runJob(fastify, jobId) {
         const failed = results.filter(r => !r.ok).length
         fastify.log.info({ category: 'Commands' }, `Job ${jobId} completed: ${results.length - failed} ok, ${failed} failed.`)
 
-        await pruneJobHistory(fastify)
+        await pruneJobHistory(fastify, job.sync_user)
     } catch (err) {
         const failedAt = Date.now()
         fastify.log.error({ category: 'Commands' }, `Job ${jobId} failed: ${err?.message}`)
@@ -169,13 +169,16 @@ async function runJob(fastify, jobId) {
     }
 }
 
-async function pruneJobHistory(fastify) {
+// Only the owner's own finished jobs are pruned; queued and running jobs are never touched.
+async function pruneJobHistory(fastify, syncUser) {
     try {
+        const finished = `sync_user = $1 AND status IN ('completed', 'failed')`
         const cutoff = await db.get(
-            `SELECT updated_at AS ts FROM commands ORDER BY updated_at DESC LIMIT 1 OFFSET ${JOB_HISTORY_LIMIT}`
+            `SELECT updated_at AS ts FROM commands WHERE ${finished} ORDER BY updated_at DESC LIMIT 1 OFFSET ${JOB_HISTORY_LIMIT}`,
+            [syncUser]
         )
         if (cutoff?.ts) {
-            await db.run(`DELETE FROM commands WHERE updated_at <= $1`, [cutoff.ts])
+            await db.run(`DELETE FROM commands WHERE ${finished} AND updated_at <= $2`, [syncUser, cutoff.ts])
         }
     } catch (err) {
         fastify.log.warn({ category: 'Commands' }, `Job history prune failed: ${err?.message}`)
