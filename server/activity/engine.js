@@ -9,6 +9,7 @@ import { trace } from '../utils/trace.js'
 import { createFailureBreaker } from './breaker.js'
 import { runBudgetedScan } from './cycle-runner.js'
 import { assertAccountActive, gateCode } from '../admin/account-state.js'
+import { isAccountTombstoned, withAccountWriteLock } from '../lib/account-tombstones.js'
 
 function envBool(name, fallback = false) {
     const value = process.env[name]
@@ -620,6 +621,14 @@ function scanScopeAccountId(accountId, connectionId) {
     return connectionId ? `${accountId}::${connectionId}` : accountId
 }
 
+// The scan's results are dropped when the workspace or the account was deleted while it ran.
+// KEY SHARE holds off a concurrent workspace delete (FOR UPDATE) without blocking pushes.
+async function accountGone(tx, syncUser, accountId) {
+    const lock = tx.type === 'postgres' ? ' FOR KEY SHARE' : ''
+    const workspace = await tx.get(`SELECT 1 AS live FROM kv_store WHERE key = $1 AND password IS NOT NULL${lock}`, [syncUser])
+    return !workspace || isAccountTombstoned(syncUser, accountId, tx)
+}
+
 async function scanAccount(syncUser, accountId, accountName, authKey, limits, log = null, connectionId = null) {
     const scanStart = Date.now()
     trace('activity', 'scanAccount.start', { accountId, connectionId })
@@ -750,12 +759,18 @@ async function scanAccount(syncUser, accountId, accountName, authKey, limits, lo
         }
     }
 
-    const [eventsWritten, snapshotWrites, snapshotDeletes] = await db.tx(async (tx) => {
+    const written = await withAccountWriteLock(syncUser, [accountId], (conn) => conn.tx(async (tx) => {
+        if (await accountGone(tx, syncUser, accountId)) return null
         const ew = await batchInsertEvents(events, tx)
         const sw = await batchUpsertSnapshots(snapshots, tx)
         const sd = await deleteSnapshots(snapshotsToDelete, tx)
         return [ew, sw, sd]
-    })
+    }))
+    if (!written) {
+        trace('activity', 'scanAccount.complete', { accountId, connectionId, libraryItems: library.length, skipped: true, reason: 'account-deleted', timing: Date.now() - scanStart })
+        return { eventsWritten: 0, snapshotWrites: 0, snapshotDeletes: 0, skippedByHash: true, complete: true, failed: false }
+    }
+    const [eventsWritten, snapshotWrites, snapshotDeletes] = written
 
     if (complete) setCachedLibraryHash(hashKey, libraryHash)
 
