@@ -739,12 +739,12 @@ export async function importAccounts(json: string | Record<string, unknown>, isS
 
         if (data.settings) {
             own.assert()
-            applySyncedSettings(data.settings, mode === 'mirror')
+            applySyncedSettings(data.settings, mode === 'mirror', { protectLocalEdits: accountList === 'sync' })
         }
 
         if (Array.isArray(data.customThemes) && data.customThemes.length > 0) {
             own.assert()
-            applySyncedSettings({ customThemes: data.customThemes }, true)
+            applySyncedSettings({ customThemes: data.customThemes }, true, { protectLocalEdits: accountList === 'sync' })
         }
 
         if (Array.isArray(data.vault) || Array.isArray(data.vaultTombstones)) {
