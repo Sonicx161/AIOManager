@@ -218,6 +218,43 @@ export function portableSidecarField(entries: Record<string, Record<string, Reco
         : {}
 }
 
+// Equal as JSON (undefined fields ignored, key order irrelevant), without serializing.
+function sameJson(a: unknown, b: unknown): boolean {
+    if (a === b) return true
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+    if (Array.isArray(a)) {
+        if (!Array.isArray(b) || a.length !== b.length) return false
+        for (let i = 0; i < a.length; i++) if (!sameJson(a[i], b[i])) return false
+        return true
+    }
+    if (Array.isArray(b)) return false
+    const x = a as Record<string, unknown>
+    const y = b as Record<string, unknown>
+    let fields = 0
+    for (const key in x) {
+        if (x[key] === undefined) continue
+        if (!sameJson(x[key], y[key])) return false
+        fields++
+    }
+    for (const key in y) if (y[key] !== undefined) fields--
+    return fields === 0
+}
+
+// Installs sharing id:version with different names or catalogs each keep their own entry.
+function manifestRef(
+    manifestMap: Record<string, AddonDescriptor['manifest']>,
+    baseKey: string,
+    manifest: AddonDescriptor['manifest'],
+): string {
+    let ref = baseKey
+    for (let n = 1; manifestMap[ref]; n++) {
+        if (sameJson(manifestMap[ref], manifest)) return ref
+        ref = `${baseKey}#${n}`
+    }
+    manifestMap[ref] = manifest
+    return ref
+}
+
 // Sync exports deduplicate manifests in the envelope; manual backups embed them.
 export function shapeExportAddon(    addon: AddonDescriptor,
     manifestMap: Record<string, AddonDescriptor['manifest']>,
@@ -233,8 +270,7 @@ export function shapeExportAddon(    addon: AddonDescriptor,
         }
     }
     const sanitized = sanitizeAddonManifest(restoreKnownManifests([exportAddon])[0].manifest, exportAddon.transportUrl)
-    const key = getManifestKey(sanitized)
-    if (!manifestMap[key]) manifestMap[key] = sanitized
+    const key = manifestRef(manifestMap, getManifestKey(sanitized), sanitized)
     return {
         transportUrl: exportAddon.transportUrl,
         transportName: exportAddon.transportName,
