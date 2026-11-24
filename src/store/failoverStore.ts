@@ -1555,8 +1555,10 @@ export const useFailoverStore = create<FailoverStore>((set, get) => ({
                     })
                 }
             })
-            set({ rules: finalRules })
+            own.assert()
             await localforage.setItem(STORAGE_KEY, finalRules)
+            own.assert()
+            set({ rules: finalRules })
             if (!isSilent) triggerSync()
             return
         }
