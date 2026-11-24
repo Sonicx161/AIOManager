@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import type { CloneMode } from '@/lib/clone-mode'
 import { getCanonicalAddonUrl, normalizeAddonUrl } from '@/lib/utils'
+import { formatReplacePreviewUrl } from './replace-preview-url'
 import type { Account } from '@/types/account'
 import type { AddonDescriptor } from '@/types/addon'
 import type { Profile } from '@/types/profile'
@@ -125,6 +126,7 @@ export type BulkPreviewContext = {
   libraryAddons: SavedAddon[]
   replaceFindText: string
   replaceWithText: string
+  urlPrivacyLevel: number
   installMode: 'profile' | 'tag'
   selectedInstallProfileId: string
   selectedInstallTagName: string
@@ -684,7 +686,7 @@ function buildReplaceUrlPreview(ctx: BulkPreviewContext): BatchPreview {
       const newUrl = replaceUrlFragment(addon.transportUrl, find, ctx.replaceWithText)
       if (normalizeAddonUrl(addon.transportUrl) === normalizeAddonUrl(newUrl)) continue
       changes++
-      previewAddons.push(descriptorToPreview(addon, `New: ...${newUrl.slice(-30)}`, 'success'))
+      previewAddons.push(descriptorToPreview(addon, `New: ${formatReplacePreviewUrl(addon.transportUrl, newUrl, ctx.urlPrivacyLevel)}`, 'success'))
     }
     totalChanges += changes
     return {

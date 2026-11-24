@@ -15,6 +15,7 @@ import { useAddonStore } from '@/store/addonStore'
 import { useAccountStore, getStremioAuthKey } from '@/store/accountStore'
 import { AddonIcon } from '@/components/ui/addon-icon'
 import { useProfileStore } from '@/store/profileStore'
+import { useUIStore } from '@/store/uiStore'
 import { Account } from '@/types/account'
 import type { AddonDescriptor } from '@/types/addon'
 import type { BulkResult } from '@/types/saved-addon'
@@ -179,7 +180,7 @@ function BatchImpactPreview({ preview, accounts }: { preview: BatchPreview; acco
                 <div className="min-w-0">
                   <div className="truncate text-xs font-medium">{addon.name}</div>
                   <div className={cn(
-                    "truncate text-[11px] text-muted-foreground",
+                    "line-clamp-2 break-all text-[11px] text-muted-foreground",
                     addon.tone === 'destructive' && "text-destructive",
                     addon.tone === 'warning' && "text-warning",
                     addon.tone === 'success' && "text-success"
@@ -345,6 +346,7 @@ export function BatchOperationsDialog({
   const [urlList, setUrlList] = useState<string>('')
   const [replaceFindText, setReplaceFindText] = useState<string>('')
   const [replaceWithText, setReplaceWithText] = useState<string>('')
+  const urlPrivacyLevel = useUIStore(s => s.isPrivacyModeEnabled ? s.privacyLevelUrls : 0)
   const [sourceAccountId, setSourceAccountId] = useState<string>('')
   const [overwriteClone, setOverwriteClone] = useState(false)
   const [cloneMode, setCloneMode] = useState<CloneMode>('full-mirror')
@@ -562,6 +564,7 @@ export function BatchOperationsDialog({
       libraryAddons: libraryArray,
       replaceFindText,
       replaceWithText,
+      urlPrivacyLevel,
       installMode,
       selectedInstallProfileId,
       selectedInstallTagName,
@@ -592,6 +595,7 @@ export function BatchOperationsDialog({
     urlEntries,
     replaceFindText,
     replaceWithText,
+    urlPrivacyLevel,
   ])
 
   const toggleSavedAddon = (savedAddonId: string) => {
