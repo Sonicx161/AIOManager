@@ -364,8 +364,8 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
                     ? row.password
                     : (isScryptHash(row.password) ? row.password : await hashSyncPassword(password))
                 const encryptedVal = encrypt(decryptedValueStr, PRIMARY_KEY)
-                db.run('UPDATE kv_store SET password = $1, value = $2, updated_at = $3 WHERE key = $4',
-                    [storedPass, encryptedVal, Date.now(), id]).catch(err => {
+                db.run('UPDATE kv_store SET password = $1, value = $2, updated_at = $3 WHERE key = $4 AND value = $5',
+                    [storedPass, encryptedVal, Date.now(), id, row.value]).catch(err => {
                         fastify.log.error({ category: 'Sync' }, `[${maskContext(id)}] Migration write failed: ${err.message}`)
                     })
             }
