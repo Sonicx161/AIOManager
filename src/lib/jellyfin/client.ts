@@ -64,6 +64,8 @@ const LIBRARY_ALL_MAX_ITEMS = 100_000
 const LIBRARY_PAGE_SIZE = 500
 const FAVORITES_ALL_MAX_ITEMS = 10_000
 
+export type JellyfinSignInRejection = 'pin' | 'credentials'
+
 /**
  * Typed failure for every client operation. `kind` classifies the failure so
  * callers can distinguish credential problems (auth), servers that are not
@@ -73,12 +75,28 @@ const FAVORITES_ALL_MAX_ITEMS = 10_000
 export class JellyfinError extends Error {
     readonly kind: JellyfinErrorKind
     readonly status?: number
-    constructor(kind: JellyfinErrorKind, message: string, info?: { status?: number; cause?: unknown }) {
+    readonly signInRejection?: JellyfinSignInRejection
+    constructor(kind: JellyfinErrorKind, message: string, info?: { status?: number; cause?: unknown; signInRejection?: JellyfinSignInRejection }) {
         super(message, info?.cause !== undefined ? { cause: info.cause } : undefined)
         this.name = 'JellyfinError'
         this.kind = kind
         if (info?.status !== undefined) this.status = info.status
+        if (info?.signInRejection !== undefined) this.signInRejection = info.signInRejection
     }
+}
+
+export function classifySignInRejection(body: string): JellyfinSignInRejection | undefined {
+    let message: unknown
+    try {
+        message = (JSON.parse(body) as { Message?: unknown } | null)?.Message
+    } catch {
+        return undefined
+    }
+    if (typeof message !== 'string') return undefined
+    const normalized = message.trim().toLowerCase()
+    if (normalized === 'pin required') return 'pin'
+    if (normalized === 'invalid username or password') return 'credentials'
+    return undefined
 }
 
 /**
@@ -260,6 +278,7 @@ interface RequestSpec {
     signal?: AbortSignal
     /** Statuses that must be classified as auth failures for this endpoint (e.g. user 404s). */
     authStatuses?: readonly number[]
+    signIn?: boolean
 }
 
 /**
@@ -411,7 +430,8 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
                 else if (status === 408) kind = 'network'
                 else kind = 'server'
                 if (spec.authStatuses?.includes(status)) kind = 'auth'
-                throw new JellyfinError(kind, `Server returned ${status} from ${spec.label}`, { status })
+                const signInRejection = spec.signIn && status === 401 ? classifySignInRejection(text) : undefined
+                throw new JellyfinError(kind, `Server returned ${status} from ${spec.label}`, { status, signInRejection })
             }
             if (text.trim() === '') return null
             try {
@@ -442,6 +462,7 @@ export function createJellyfinClient(baseUrl: string, options?: JellyfinClientOp
             path: '/Users/AuthenticateByName',
             method: 'POST',
             body: { Username: username, Pw: password },
+            signIn: true,
             signal,
         })
         const record = expectRecord(res, 'Sign-in response')
