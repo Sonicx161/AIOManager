@@ -17,7 +17,7 @@ import { QRLinkDialog } from '@/components/qr/QRLinkDialog'
 import type { QRSession } from '@/lib/qr-device-link'
 import { discoverNuvioBackend } from '@/lib/nuvio-discovery'
 import type { NuvioDiscovery } from '@/lib/nuvio-discovery'
-import { nuvioProfileAvatarColor } from '@/lib/nuvio-avatar-color'
+import { nuvioProfileAvatarColor, nuvioAvatarLetterColor } from '@/lib/nuvio-avatar-color'
 import {
     Check,
     Loader2,
@@ -458,8 +458,8 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                         onClick={() => setSelectedProfileId(profile.id)}
                                     >
                                         <div
-                                            className="h-9 w-9 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-                                            style={{ backgroundColor: nuvioProfileAvatarColor(profile) }}
+                                            className="h-9 w-9 rounded-full flex items-center justify-center text-sm font-bold shrink-0"
+                                            style={{ backgroundColor: nuvioProfileAvatarColor(profile), color: nuvioAvatarLetterColor(nuvioProfileAvatarColor(profile)) }}
                                         >
                                             {(profile.name || '?')[0].toUpperCase()}
                                         </div>
@@ -511,7 +511,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                     <span className="min-w-0 break-words">
                                         This Nuvio profile is already connected on <strong className="font-semibold">{maskedAccountLabel(sharedWith[0])}</strong>
                                         {sharedWith.length > 1 && ` and ${sharedWith.length - 1} other ${sharedWith.length === 2 ? 'account' : 'accounts'}`}
-                                        . Both accounts write the same addon list, so the last one to sync wins.
+                                        . {sharedWith.length > 1 ? 'These' : 'Both'} accounts write the same addon list, so the last one to sync wins.
                                     </span>
                                 </div>
                             )}
