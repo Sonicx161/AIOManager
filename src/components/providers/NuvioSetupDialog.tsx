@@ -17,6 +17,7 @@ import { QRLinkDialog } from '@/components/qr/QRLinkDialog'
 import type { QRSession } from '@/lib/qr-device-link'
 import { discoverNuvioBackend } from '@/lib/nuvio-discovery'
 import type { NuvioDiscovery } from '@/lib/nuvio-discovery'
+import { nuvioProfileAvatarColor } from '@/lib/nuvio-avatar-color'
 import {
     Check,
     Loader2,
@@ -38,7 +39,7 @@ type WizardStep = 'login' | 'profile' | 'confirm'
 interface NuvioProfile {
     id: string
     name: string
-    avatarColorHex?: string
+    avatar_color_hex?: unknown
     avatarId?: number
     uses_primary_addons?: boolean
 }
@@ -458,7 +459,7 @@ export function NuvioSetupDialog({ open, onOpenChange, onComplete, initialBacken
                                     >
                                         <div
                                             className="h-9 w-9 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0"
-                                            style={{ backgroundColor: profile.avatarColorHex || '#6366f1' }}
+                                            style={{ backgroundColor: nuvioProfileAvatarColor(profile) }}
                                         >
                                             {(profile.name || '?')[0].toUpperCase()}
                                         </div>
