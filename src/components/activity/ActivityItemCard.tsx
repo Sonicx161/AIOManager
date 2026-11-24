@@ -238,7 +238,7 @@ export const ActivityItemCard = memo(({
 
                             {savedState && isEpisodeLike && !episodeLabel && (
                                 <span className="min-w-0 truncate text-xs font-bold px-1.5 py-0.5 rounded-full bg-black/75 text-white/95">
-                                    {savedCount ? `${savedCount} episodes saved` : 'Saved episodes'}
+                                    {savedCount ? `${savedCount} ${savedCount === 1 ? 'episode' : 'episodes'} saved` : 'Saved episodes'}
                                 </span>
                             )}
 
@@ -449,7 +449,7 @@ export const ActivityItemCard = memo(({
                 {savedState && isEpisodeLike && (
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                         <span className="font-semibold text-foreground/80">
-                            {savedCount ? `${savedCount} episodes saved` : 'Saved episode history'}
+                            {savedCount ? `${savedCount} ${savedCount === 1 ? 'episode' : 'episodes'} saved` : 'Saved episode history'}
                         </span>
                         {savedRanges.length > 0 && (
                             <span className="font-mono font-bold text-muted-foreground/70">

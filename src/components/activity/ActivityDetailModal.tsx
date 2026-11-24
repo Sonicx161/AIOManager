@@ -2538,7 +2538,7 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
                                     <div data-theme-part="panel" className="rounded-xl border border-border/40 bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
                                         <span className="font-semibold text-foreground/80">
                                             {renderItem.savedEpisodes
-                                                ? `${renderItem.savedEpisodes.episodeCount} episodes saved`
+                                                ? `${renderItem.savedEpisodes.episodeCount} ${renderItem.savedEpisodes.episodeCount === 1 ? 'episode' : 'episodes'} saved`
                                                 : 'Saved episode history'}
                                         </span>
                                         {savedEpisodeRanges.length > 0 && (
