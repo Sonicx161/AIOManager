@@ -27,6 +27,7 @@ import { SourceUrlBox } from './SourceUrlBox'
 import { maskSecretUrl } from '@/lib/mask-secret-url'
 import { ManifestJSONEditor } from './ManifestJSONEditor'
 import { AddonCardPreview } from './AddonCardPreview'
+import { destinationRowLabel, destinationState, destinationSummary, destinationPolicyChanged } from './destination-labels'
 
 interface AddonMetadataDialogProps {
     open: boolean
@@ -127,18 +128,16 @@ export function AddonMetadataDialog({
         })
     }
 
-    const platformState = (platform: string) => {
-        const conns = destinationConnections.filter(c => c.platform === platform)
-        const live = conns.filter(c => !draftExcludedConnections.has(c.id))
-        if (draftExcludedPlatforms.has(platform) || live.length === 0) return 'removed'
-        if (!live.some(c => c.enabled)) return 'paused'
-        return live.length < conns.length ? 'partial' : 'sync'
-    }
-    const platformStates = platforms.map(platformState)
-    const syncingPlatforms = platformStates.filter(st => st === 'sync' || st === 'partial').length
-    const pausedPlatforms = platformStates.filter(st => st === 'paused').length
-    const removedPlatforms = platformStates.filter(st => st === 'removed').length
-    const STATE_LABEL = { removed: 'Will be removed on save', paused: 'Sync paused', partial: 'Some logins excluded', sync: 'Will sync' } as const
+    const savedPlatformSet = useMemo(() => new Set(addon.destinations?.excludedPlatforms || []), [addon])
+    const savedConnectionSet = useMemo(() => new Set(addon.destinations?.excludedConnections || []), [addon])
+    const destinationRows = platforms.map(platform => ({
+        draft: destinationState(platform, destinationConnections, draftExcludedPlatforms, draftExcludedConnections),
+        saved: destinationState(platform, destinationConnections, savedPlatformSet, savedConnectionSet),
+        policyChanged: destinationPolicyChanged(platform, destinationConnections,
+            { platforms: draftExcludedPlatforms, connections: draftExcludedConnections },
+            { platforms: savedPlatformSet, connections: savedConnectionSet }),
+    }))
+    const summary = destinationSummary(destinationRows)
 
     const connectionIdentity = (conn: typeof destinationConnections[number]) => {
         const personalName = conn.displayName || conn.credentials?.email
@@ -370,32 +369,41 @@ export function AddonMetadataDialog({
                                 <div data-theme-part="panel" data-testid="destinations-picker" className="rounded-2xl border border-border/40 bg-muted/20 px-4 py-1.5">
                                     {platforms.map((platform, index) => {
                                         const platformConns = destinationConnections.filter(c => c.platform === platform)
-                                        const state = platformStates[index]
+                                        const row = destinationRows[index]
                                         const stateId = `dest-state-${platform}`
+                                        const noteId = `dest-note-${platform}`
+                                        const showNuvioNote = platform === 'nuvio' && row.draft === 'removed'
                                         const platformName = getPlatformEntry(platform)?.name || platform
                                         return (
-                                            <div key={platform} className="flex items-center gap-3 border-b border-border/30 py-2.5 last:border-b-0">
-                                                <PlatformLogo platform={platform} className="h-8 w-8 shrink-0" />
-                                                <div className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3">
-                                                    <div className="min-w-0 sm:flex-1">
-                                                        <p className="truncate text-sm font-semibold">{platformName}</p>
-                                                        {platformConns.map(conn => {
-                                                            const who = connectionIdentity(conn)
-                                                            return who ? (
-                                                                <p key={conn.id} className="break-all text-xs leading-snug text-muted-foreground">{who}</p>
-                                                            ) : null
-                                                        })}
+                                            <div key={platform} className="border-b border-border/30 last:border-b-0">
+                                                <div className="flex items-center gap-3 py-2.5">
+                                                    <PlatformLogo platform={platform} className="h-8 w-8 shrink-0" />
+                                                    <div className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3">
+                                                        <div className="min-w-0 sm:flex-1">
+                                                            <p className="truncate text-sm font-semibold">{platformName}</p>
+                                                            {platformConns.map(conn => {
+                                                                const who = connectionIdentity(conn)
+                                                                return who ? (
+                                                                    <p key={conn.id} className="break-all text-xs leading-snug text-muted-foreground">{who}</p>
+                                                                ) : null
+                                                            })}
+                                                        </div>
+                                                        <span id={stateId} className={`mt-0.5 block text-xs font-medium leading-snug sm:mt-0 sm:shrink-0 sm:text-right sm:text-sm ${row.draft === 'removed' && row.saved !== 'removed' ? 'text-destructive' : 'text-muted-foreground'}`}>
+                                                            {destinationRowLabel(row)}
+                                                        </span>
                                                     </div>
-                                                    <span id={stateId} className={`mt-0.5 block text-xs font-medium leading-snug sm:mt-0 sm:shrink-0 sm:text-right sm:text-sm ${state === 'removed' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                                                        {STATE_LABEL[state]}
-                                                    </span>
+                                                    <Switch
+                                                        checked={row.draft !== 'removed'}
+                                                        aria-describedby={showNuvioNote ? `${stateId} ${noteId}` : stateId}
+                                                        onCheckedChange={(v) => togglePlatform(platform, v)}
+                                                        aria-label={`Sync to ${platformName}`}
+                                                    />
                                                 </div>
-                                                <Switch
-                                                    checked={state !== 'removed'}
-                                                    aria-describedby={stateId}
-                                                    onCheckedChange={(v) => togglePlatform(platform, v)}
-                                                    aria-label={`Sync to ${platformName}`}
-                                                />
+                                                {showNuvioNote && (
+                                                    <p id={noteId} className="-mt-1 pb-2.5 pl-11 text-xs text-muted-foreground">
+                                                        The Nuvio app keeps its own copy. If it shows this addon again, close and reopen the app, then press Refresh here.
+                                                    </p>
+                                                )}
                                             </div>
                                         )
                                     })}
@@ -407,12 +415,12 @@ export function AddonMetadataDialog({
                                     A destination you switch off loses its copy on that platform when you save. The addon stays in your AIOManager library.
                                 </p>
                                 <p data-testid="destinations-summary" className="mt-3 text-sm font-medium">
-                                    {syncingPlatforms} of {platforms.length} platform{platforms.length === 1 ? '' : 's'} will sync
-                                    {pausedPlatforms > 0 && (
-                                        <span className="text-muted-foreground">, {pausedPlatforms} paused</span>
+                                    {summary.main}
+                                    {summary.paused && (
+                                        <span className="text-muted-foreground">{summary.paused}</span>
                                     )}
-                                    {removedPlatforms > 0 && (
-                                        <span className="text-destructive">, {removedPlatforms} will be removed on save</span>
+                                    {summary.removed && (
+                                        <span className="text-destructive">{summary.removed}</span>
                                     )}
                                 </p>
                             </div>
