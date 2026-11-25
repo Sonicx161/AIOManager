@@ -305,9 +305,10 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
 
         async createProfile(accessToken: string, params: { profileIndex: number; name: string; avatarColorHex?: string; avatarId?: string }) {
             const existing = await rpc('sync_pull_profiles', {}, accessToken)
-            const rows: Array<Record<string, unknown>> = Array.isArray(existing) ? existing : []
+            if (!Array.isArray(existing)) throw new Error('Nuvio did not return the profile list. Try again.')
+            const rows: Array<Record<string, unknown>> = existing
+            if (rows.some(r => Number(r.profile_index ?? r.profileIndex) === params.profileIndex)) throw new Error('That profile slot was just taken. Refresh and try again.')
             const p_profiles = rows
-                .filter(r => Number(r.profile_index ?? r.profileIndex) !== params.profileIndex)
                 .map(r => ({
                     profile_index: Number(r.profile_index ?? r.profileIndex),
                     name: r.name,
