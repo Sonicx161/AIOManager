@@ -1,8 +1,8 @@
 import { ExternalLink, Info, RefreshCw, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { SectionCard, WorkspaceError, WorkspaceLoading } from './workspace/SectionCard'
-import type { PremiumStatus } from '@/lib/stremio-premium'
+import { SectionCard, SectionRow, SectionRows, WorkspaceError, WorkspaceLoading } from './workspace/SectionCard'
+import { stremioPlanRows, type PremiumStatus } from '@/lib/stremio-premium'
 import type { NuvioMemberStatus } from '@/lib/nuvio-tier'
 
 const formatPremiumUntil = (expiresAt: number) =>
@@ -75,6 +75,7 @@ export function StremioMembershipCard({ premium, state, onRefresh }: {
     onRefresh?: () => void
 }) {
     const active = premium?.active === true
+    const planRows = stremioPlanRows(premium?.plan, formatPremiumUntil)
     const refresh = onRefresh && state !== 'not-primary' && state !== 'locked' ? (
         <Button variant="outline" size="sm" className="h-11 gap-1.5 text-xs sm:h-8" onClick={onRefresh} disabled={state === 'loading'}>
             <RefreshCw className={cn('h-3.5 w-3.5', state === 'loading' && 'animate-spin')} />
@@ -115,6 +116,11 @@ export function StremioMembershipCard({ premium, state, onRefresh }: {
                                         : 'Supporter access active'}
                         </span>
                     </div>
+                    {planRows.length > 0 && (
+                        <SectionRows>
+                            {planRows.map(row => <SectionRow key={row.label} label={row.label} value={row.value} tone={row.muted ? 'muted' : undefined} />)}
+                        </SectionRows>
+                    )}
                     {active && (
                         <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Users className="h-3.5 w-3.5" />Unlocks Supporters Profiles on the Profiles tab.</p>
                     )}

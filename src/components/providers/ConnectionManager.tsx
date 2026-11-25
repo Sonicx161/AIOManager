@@ -24,7 +24,7 @@ import { getAccountEmail, getAccountById, getStremioAuthKey, getStremioConnectio
 import { maskEmailLevel, maskNameLevel, maskProfileLevel } from '@/lib/utils'
 import { nuvioProfileLabel } from '@/lib/watch-state/sources'
 import { storedNuvioTargetId } from './nuvio-sync-target'
-import { parsePremiumExpire, type PremiumStatus } from '@/lib/stremio-premium'
+import { parseStremioMembership, type PremiumStatus } from '@/lib/stremio-premium'
 import { parseNuvioMemberAccess, type NuvioMemberStatus } from '@/lib/nuvio-tier'
 import { trace } from '@/lib/trace'
 import { cachedRead, isDisplayCacheFresh, peekDisplayCache } from '@/lib/display-read-cache'
@@ -157,7 +157,7 @@ function AccountConnectionManager({ accountId, account, connections = [], onShow
             // Shared GetUser cache (#33): keyed per auth key, 60 s TTL, single-flight.
             // The explicit Test path in runConnectionTest bypasses it.
             const user = await getUserCached(authKey, key => stremioClient.getUser(key))
-            const status = parsePremiumExpire(user.premium_expire)
+            const status = parseStremioMembership(user)
             trace('connections', 'premium.result', { accountId, active: status.active, lifetime: status.lifetime, expiresAt: status.expiresAt, cancelled })
             // Write unconditionally: a cancelled-effect skip would strand the result behind the dedupe marker.
             setPremiumByAccount(prev => new Map(prev).set(accountId, status))

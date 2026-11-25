@@ -12,6 +12,8 @@ export interface CachedStremioUser {
     email: string
     _id: string
     premium_expire?: unknown
+    features?: unknown
+    dateRegistered?: unknown
     premiumPrefs?: {
         userProfiles?: Record<string, { id: string; name: string; avatar?: string }>
     }
