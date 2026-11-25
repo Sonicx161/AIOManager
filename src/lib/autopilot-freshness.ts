@@ -240,7 +240,7 @@ export function autopilotBulkActions(rules: ReadonlyArray<{ isActive: boolean }>
 
 export type AutopilotRuleFix = 'restore' | 'remove' | 'grant-access' | 'reconnect' | 'resume' | 'safe-mode' | 'refresh' | 'edit-chain' | 'retry-conflict'
 
-const AUTH_EXPIRED_TEXT = /\b(401|403)\b|unauthori[sz]ed|session does not exist|session expired|auth key expired|invalid (auth|token|session)/i
+const AUTH_EXPIRED_TEXT = /\b(401|403)\b|unauthori[sz]ed|session does not exist|session expired|auth key expired|invalid or expired auth key|invalid (auth|token|session)/i
 
 export function isAuthExpiredError(error: AutopilotRuleError | null | undefined): boolean {
   if (!error) return false

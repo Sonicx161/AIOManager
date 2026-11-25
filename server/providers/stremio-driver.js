@@ -14,6 +14,7 @@ const sessionGoneError = () => {
     const err = new Error('Invalid or expired auth key')
     err._authExpired = true
     err.isAuthError = true
+    err.code = 'auth_expired'
     return err
 }
 
