@@ -21,6 +21,7 @@ export async function resetAllStores(options: { includeSync?: boolean } = {}): P
     // Display-only read caches (Nuvio tabs, grid membership, avatar catalog,
     // Stremio GetUser): a second user on a shared browser must never see them.
     import('@/lib/display-read-cache').then(({ clearDisplayReadCache }) => clearDisplayReadCache()),
+    import('@/lib/activity-hours').then(({ resetActivityHoursCaches }) => resetActivityHoursCaches()),
     // Activity row pipeline caches: their module roots retain the previous
     // workspace's feed rows and sorted orders until the next Activity visit.
     import('@/components/activity/feed-rows').then(({ resetActivityRowCaches }) => resetActivityRowCaches()),

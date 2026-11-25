@@ -9,8 +9,8 @@ import { WorkspaceTabs } from '@/components/ui/workspace-tabs'
 import { ActivityEmptyState } from '@/components/common/PageEmptyStates'
 import { StatNumber } from '@/components/ui/number-ticker'
 import { activityNowStatuses } from '@/lib/jellyfin/activity'
-import { buildRuntimeIndex, msToHours } from '@/lib/watch-hours'
-import { activityHeaderHoursCached } from '@/lib/activity-hours'
+import { msToHours } from '@/lib/watch-hours'
+import { activityHeaderHoursCached, activityRuntimeIndex } from '@/lib/activity-hours'
 import { localDayToken } from '@/lib/local-time-token'
 import { MIN_PLAUSIBLE_WATCH_MS } from '@/lib/watch-time'
 import {
@@ -178,7 +178,7 @@ export const ActivityFeed = memo(function ActivityFeed({
     const hasMore = feedModel.visibleItemCount < filteredHistory.length
     const itemOrder = useMemo(() => buildItemOrder(feedModel.rows), [feedModel])
 
-    const runtimeIndex = useMemo(() => buildRuntimeIndex(hoursSource), [hoursSource])
+    const runtimeIndex = useMemo(() => activityRuntimeIndex(hoursSource), [hoursSource])
     // Stable identity for the visible-id set (rebuilt only when the filtered feed
     // actually changes) so the cached header-hours computation can hit across feed remounts.
     // A metadata-overlay commit republishes the same rows as replaced copies: same

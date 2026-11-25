@@ -1,6 +1,8 @@
 import { cumulativeWatchKey } from '@/lib/activity-utils'
-import { computeWatchHours, hoursRowFromItem, type RuntimeIndex } from '@/lib/watch-hours'
+import { buildRuntimeIndex, computeWatchHours, hoursRowFromItem, type RuntimeIndex } from '@/lib/watch-hours'
 import { localDayToken } from './local-time-token.ts'
+import { createWorkspaceResetSubscription } from './workspace-reset-subscription.ts'
+import { useAuthStore } from '@/store/authStore'
 import type { ActivityItem } from '@/types/activity'
 
 const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/
@@ -25,6 +27,61 @@ export function activityRowHours(
     return { rows, ...result }
 }
 
+let runtimeIndexes = new WeakMap<object, RuntimeIndex>()
+
+export function activityRuntimeIndex(raw: ReadonlyArray<ActivityItem>): RuntimeIndex {
+    let index = runtimeIndexes.get(raw)
+    if (!index) {
+        workspaceSubscription.ensure()
+        bindLockReset()
+        index = buildRuntimeIndex(raw)
+        runtimeIndexes.set(raw, index)
+    }
+    return index
+}
+
+interface RowHoursCache {
+    raw: ReadonlyArray<ActivityItem>
+    runtimes: RuntimeIndex
+    canonical: ReadonlyMap<string, string | undefined> | undefined
+    scope: ReadonlySet<string> | undefined
+    result: ReturnType<typeof activityRowHours>
+}
+let rowHoursCache: RowHoursCache | null = null
+
+export function resetActivityHoursCaches(): void {
+    runtimeIndexes = new WeakMap()
+    rowHoursCache = null
+    headerHoursCache = null
+    workspaceSubscription.release()
+}
+
+const workspaceSubscription = createWorkspaceResetSubscription(resetActivityHoursCaches, import.meta.hot)
+let lockBound = false
+
+function bindLockReset(): void {
+    if (lockBound) return
+    lockBound = true
+    useAuthStore.subscribe((state, prev) => {
+        if (state.encryptionKey !== prev.encryptionKey) resetActivityHoursCaches()
+    })
+}
+
+function activityRowHoursCached(
+    raw: ReadonlyArray<ActivityItem>,
+    runtimes: RuntimeIndex,
+    canonical: ReadonlyMap<string, string | undefined> | undefined,
+    scope: ReadonlySet<string> | undefined,
+): ReturnType<typeof activityRowHours> {
+    const hit = rowHoursCache
+    if (hit && hit.raw === raw && hit.runtimes === runtimes && hit.canonical === canonical && hit.scope === scope) return hit.result
+    workspaceSubscription.ensure()
+    bindLockReset()
+    const result = activityRowHours(raw, runtimes, canonical, scope)
+    rowHoursCache = { raw, runtimes, canonical, scope, result }
+    return result
+}
+
 /**
  * Header totals for the visible feed. Credit is computed over every row in `scope` (viewer and
  * search) so a counter is never re-seeded by a time window, then summed over `visible` only.
@@ -37,7 +94,7 @@ export function activityHeaderHours(
     scope: ReadonlySet<string> | undefined,
     visible: ReadonlySet<string>,
 ): { totalMs: number; todayMs: number; yesterdayMs: number } {
-    const { rows, rowMs } = activityRowHours(raw, runtimes, canonical, scope)
+    const { rows, rowMs } = activityRowHoursCached(raw, runtimes, canonical, scope)
     let totalMs = 0
     let todayMs = 0
     let yesterdayMs = 0

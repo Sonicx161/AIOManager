@@ -5,6 +5,7 @@ import type { JellyfinItem, JellyfinNowPlayingItem, JellyfinSession } from './ty
 import { metahubPosterUrl } from '../activity-artwork.ts'
 import { jellyfinCanonicalId, jellyfinImdbId, jellyfinTmdbId } from './metadata.ts'
 import { createWorkspaceResetSubscription } from '../workspace-reset-subscription.ts'
+import { useAuthStore } from '@/store/authStore'
 
 export interface MediaAccount { id: string; name: string }
 export interface MediaPlayback {
@@ -542,7 +543,7 @@ interface NowStatusInputs {
 
 // Keyed by the history array identity, so it dies with the feed that produced it and
 // can never leak rows across workspaces or scope changes (a new publication is a new array).
-let nowStatusInputsCache: WeakMap<ActivityItem[], { current: ActivityItem[]; inputs: NowStatusInputs }> | null = null
+let nowStatusInputsCache: WeakMap<ActivityItem[], { current: ActivityItem[]; inputs: NowStatusInputs; own: boolean }> | null = null
 
 // One-step reuse across the metadata-overlay commits: the overlay republishes the
 // feed with items replaced by copies that only differ in display fields. Those
@@ -568,6 +569,16 @@ export function resetNowStatusCaches(): void {
 // first cache use, is released by the reset above, and its HMR dispose keeps
 // superseded module generations from stacking listeners.
 const workspaceSubscription = createWorkspaceResetSubscription(resetNowStatusCaches, import.meta.hot)
+let lockBound = false
+
+// A vault lock drops the scan inputs like a workspace change does; they hold the last feed's rows.
+function bindLockReset(): void {
+    if (lockBound) return
+    lockBound = true
+    useAuthStore.subscribe((state, prev) => {
+        if (state.encryptionKey !== prev.encryptionKey) resetNowStatusCaches()
+    })
+}
 
 /** Cache-shape introspection for tests: whether the retained inputs root is live. */
 export function nowStatusCacheStatsForTests(): { retained: number } {
@@ -593,6 +604,13 @@ function nowStatusInputsReusable(history: ActivityItem[], prev: ActivityItem[]):
             || itemTimeMs(a.timestamp) !== itemTimeMs(b.timestamp)
         ) return false
     }
+    return true
+}
+
+function sameRows(a: ActivityItem[], b: ActivityItem[]): boolean {
+    if (a === b) return true
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
     return true
 }
 
@@ -632,10 +650,12 @@ export function activityNowStatuses(history: ActivityItem[], now = Date.now(), c
     // use; importing or resetting the module without scanning rows must not
     // install a listener.
     workspaceSubscription.ensure()
+    bindLockReset()
     const list = current
     const cache = nowStatusInputsCache ??= new WeakMap()
     let entry = cache.get(history)
-    if (!entry || entry.current !== list || now < entry.inputs.builtAt || now + 60_000 >= entry.inputs.minFutureTime) {
+    // Equal rows in a new current array reuse only inputs scanned from this history, so carried-over inputs never pin old rows.
+    if (!entry || (entry.current !== list && !(entry.own && sameRows(entry.current, list))) || now < entry.inputs.builtAt || now + 60_000 >= entry.inputs.minFutureTime) {
         let inputs: NowStatusInputs | null = null
         const last = lastNowStatusInputs
         if (
@@ -645,8 +665,9 @@ export function activityNowStatuses(history: ActivityItem[], now = Date.now(), c
         ) {
             inputs = last.inputs
         }
+        const own = !inputs
         if (!inputs) inputs = buildNowStatusInputs(history, list, now)
-        entry = { current: list, inputs }
+        entry = { current: list, inputs, own }
         cache.set(history, entry)
     }
     lastNowStatusInputs = { history, current: list, inputs: entry.inputs }
