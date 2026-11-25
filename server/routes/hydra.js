@@ -55,10 +55,12 @@ async function lookupAccountByApiKey(request, reply) {
     }
 
     const keyHash = hashApiKey(rawKey)
-    const row = await db.get(
-        'SELECT account_id, sync_user, last_used_at FROM account_api_keys WHERE api_key_hash = $1',
+    // The schema allows the same hash under two owners; such a key belongs to nobody and is refused.
+    const rows = await db.query(
+        'SELECT account_id, sync_user, last_used_at FROM account_api_keys WHERE api_key_hash = $1 LIMIT 2',
         [keyHash]
     )
+    const row = rows.length === 1 ? rows[0] : null
     if (!row) {
         reply.code(401).send({ error: 'unauthorized', message: 'Invalid API key' })
         return null
@@ -71,8 +73,8 @@ async function lookupAccountByApiKey(request, reply) {
     // A replica never writes, not even best-effort telemetry, against the follower.
     if (!isReadOnlyReplica() && (!row.last_used_at || now - row.last_used_at >= LAST_USED_COALESCE_MS)) {
         db.run(
-            'UPDATE account_api_keys SET last_used_at = $1 WHERE api_key_hash = $2',
-            [now, keyHash]
+            'UPDATE account_api_keys SET last_used_at = $1 WHERE api_key_hash = $2 AND sync_user = $3 AND account_id = $4',
+            [now, keyHash, row.sync_user, row.account_id]
         ).catch(() => {})
     }
 
