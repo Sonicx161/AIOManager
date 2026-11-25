@@ -11,7 +11,10 @@ export const platformKey = (v) => {
 }
 
 // Stable, non-reversible label per account. The full account id never leaves the server.
+let derived = null
+
 export function accountHandle(id) {
-    const key = crypto.createHash('sha256').update(`aiom-dashboard-handle|${PRIMARY_KEY || ''}`).digest()
-    return 'acct-' + crypto.createHmac('sha256', key).update(String(id)).digest('hex').slice(0, 12)
+    const material = PRIMARY_KEY || ''
+    if (derived?.material !== material) derived = { material, key: crypto.createHash('sha256').update(`aiom-dashboard-handle|${material}`).digest() }
+    return 'acct-' + crypto.createHmac('sha256', derived.key).update(String(id)).digest('hex').slice(0, 12)
 }
