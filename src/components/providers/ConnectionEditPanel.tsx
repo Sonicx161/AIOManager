@@ -44,6 +44,7 @@ import { displayStatus, friendlyConnectionError, tokenExpiry, timeAgo } from '@/
 import { cumulativeWatchKey, canonicalStremioConnections } from '@/lib/activity-utils'
 import { computeLibraryStats } from '@/lib/connection-library-stats'
 import { NuvioBackupTab, NuvioPluginsTab, NuvioProfilesTab, NuvioLibraryTab, NuvioCollectionsTab, TabToolbar } from './NuvioWorkspace'
+import { NuvioAppSetupTab } from './NuvioAppSetupTab'
 import { NuvioOverview, useNuvioMembership } from './NuvioOverview'
 import { StremioMembershipCard, StremioSupportersBadge, type StremioMembershipState } from './ConnectionMembershipTab'
 import { ProfileRosterRow } from './ProfileRosterRow'
@@ -1766,6 +1767,9 @@ export function ConnectionEditPanel({
                         </TabsContent>
                         <TabsContent value="collections">
                             <NuvioCollectionsTab accountId={accountId} connection={connection} />
+                        </TabsContent>
+                        <TabsContent value="app-setup">
+                            <NuvioAppSetupTab accountId={accountId} connection={connection} />
                         </TabsContent>
                         <TabsContent value="backup">
                             <NuvioBackupTab accountId={accountId} connection={connection} />

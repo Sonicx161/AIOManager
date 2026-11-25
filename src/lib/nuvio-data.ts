@@ -2,6 +2,7 @@ import type { Connection } from '@/types/connection'
 import type { createNuvioDriver } from '@/lib/drivers/nuvio'
 import type { NuvioAvatar } from './nuvio-avatars.ts'
 import { readAvatarCatalogCached } from './nuvio-avatar-catalog-cache.ts'
+import { isUnsupportedNuvioRead, mapMediaServers, type NuvioAppSetupRead, type NuvioMediaServerView } from './nuvio-app-setup.ts'
 
 type NuvioDriver = ReturnType<typeof createNuvioDriver>
 
@@ -66,6 +67,27 @@ export function readNuvioLibrary(accountId: string, conn: Connection): Promise<N
 
 export function readNuvioCollections(accountId: string, conn: Connection): Promise<NuvioCollection[]> {
     return withNuvio(accountId, conn, (d, t, p) => d.readCollections(t, p)) as Promise<NuvioCollection[]>
+}
+
+// App setup reads are display-only; an older self-hosted backend without the function answers 404.
+async function readAppSetup<T>(read: () => Promise<T[]>): Promise<NuvioAppSetupRead<T>> {
+    try {
+        return { shared: true, items: await read() }
+    } catch (err) {
+        if (isUnsupportedNuvioRead(err)) return { shared: false }
+        throw err
+    }
+}
+
+export function readNuvioMediaServers(accountId: string, conn: Connection): Promise<NuvioAppSetupRead<NuvioMediaServerView>> {
+    return readAppSetup(async () => mapMediaServers(await withNuvio(accountId, conn, (d, t, p) => d.readMediaServers(t, p))))
+}
+
+export function readNuvioHomeLayout(accountId: string, conn: Connection): Promise<NuvioAppSetupRead<unknown>> {
+    return readAppSetup(async () => {
+        const rows = await withNuvio(accountId, conn, (d, t, p) => d.readHomeCatalogSettings(t, p))
+        return Array.isArray(rows) ? rows : []
+    })
 }
 
 export interface NuvioProfileRow {

@@ -45,6 +45,7 @@ export function workspaceTabsFor(kind: WorkspaceKind, options: { supportersProfi
                 { id: 'plugins', label: 'Plugins' },
                 { id: 'library', label: 'Library', readOnly: true },
                 { id: 'collections', label: 'Collections', readOnly: true },
+                { id: 'app-setup', label: 'App setup', readOnly: true },
                 { id: 'backup', label: 'Backup' },
                 connection,
             ]

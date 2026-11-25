@@ -284,6 +284,16 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
             return Array.isArray(list) ? list : []
         },
 
+        async readMediaServers(accessToken: string, profileId?: string | number): Promise<unknown> {
+            const idx = await resolveProfileIndex(accessToken, profileId)
+            return rpc('sync_pull_media_servers', { p_profile_id: idx }, accessToken, { retries: 0 })
+        },
+
+        async readHomeCatalogSettings(accessToken: string, profileId?: string | number): Promise<unknown> {
+            const idx = await resolveProfileIndex(accessToken, profileId)
+            return rpc('sync_pull_home_catalog_settings', { p_profile_id: idx, p_platform: 'home_catalog_shared' }, accessToken, { retries: 0 })
+        },
+
         // Rename via a surgical PostgREST PATCH on the profiles row (by uuid), so it can't touch
         // other profiles the way the sync_push_profiles RPC might.
         async renameProfile(accessToken: string, profileId: string, name: string, avatarId?: string) {
