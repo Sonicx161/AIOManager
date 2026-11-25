@@ -183,7 +183,7 @@ export function registerProviderRoutes(fastify, reconciler) {
                 await reconciler.reconcilePlugins(accountId, conn, { canWrite: ownerCanWriteState })
             }
 
-            const states = reconciler.getConnectionStates(accountId)
+            const states = await reconciler.currentConnectionStates(accountId, authUser)
 
             return {
                 synced: true,
@@ -209,7 +209,7 @@ export function registerProviderRoutes(fastify, reconciler) {
         if (!(await accountBelongsTo(accountId, authUser))) {
             return { connectionStates: {} }
         }
-        const states = reconciler.getConnectionStates(accountId)
+        const states = await reconciler.currentConnectionStates(accountId, authUser)
         return { connectionStates: states }
     })
 

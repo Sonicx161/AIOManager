@@ -1066,6 +1066,21 @@ export function createReconciler(fastify) {
         return states
     }
 
+    // A Stremio expiry recorded for an older key says nothing about the key the owner stores now.
+    const currentConnectionStates = async (accountId, syncUser) => {
+        const states = getConnectionStates(accountId)
+        const keyed = [...connectionState.entries()].filter(([key, state]) => key.startsWith(`${accountId}:`) && state.status === 'expired' && state.failedKey)
+        if (keyed.length === 0 || !syncUser) return states
+        let connections
+        try { connections = await resolveConnections(accountId, syncUser) } catch { return states }
+        for (const [key, state] of keyed) {
+            const connId = key.split(':').slice(1).join(':')
+            const current = stremioKeyFingerprint((connections || []).find(c => c.id === connId))
+            if (current && current !== state.failedKey && states[connId]) states[connId] = { ...states[connId], status: 'active', lastError: null }
+        }
+        return states
+    }
+
     // Dashboard repair helpers: auth-cooldown (status expired) and backoff state are
     // keyed per (account, connection) with no owner on the key, and two owners may
     // share a platform account id. Ownership is resolved to the exact connection
@@ -1133,6 +1148,7 @@ export function createReconciler(fastify) {
         auditConnections,
         resolveConnections,
         getConnectionStates,
+        currentConnectionStates,
         recordSuccess,
         recordFailure,
         getState,
