@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { computeQrPhase, nextPollDelay, type QRPollOutcome, type QRSession } from '@/lib/qr-device-link'
 import { trace } from '@/lib/trace'
-import { AlertCircle, Loader2, QrCode, RefreshCw, X } from 'lucide-react'
+import { AlertCircle, Loader2, RefreshCw, X } from 'lucide-react'
 
 interface QRLinkDialogProps {
     open: boolean
@@ -162,9 +162,6 @@ export function QRLinkDialog({
         <Dialog open={open} onOpenChange={handleOpenChange}>
             <DialogContent hideClose className="max-w-md gap-0 overflow-hidden p-0">
                 <DialogHeader className="items-center px-6 pb-2 pt-7 text-center">
-                    <div data-theme-part="badge" className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/25 bg-primary/10 text-primary shadow-[inset_0_0.5px_0_hsl(0_0%_100%/0.08)]">
-                        <QrCode className="h-6 w-6" />
-                    </div>
                     <DialogTitle className="text-xl tracking-tight">{title}</DialogTitle>
                     {description && (
                         <DialogDescription className="max-w-sm text-pretty text-sm leading-6">

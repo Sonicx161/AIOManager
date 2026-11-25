@@ -83,35 +83,31 @@ export function Toaster() {
               )}
             >
               <div className="flex items-center gap-3 px-4 py-3.5">
-                <div data-theme-part="badge" className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border shadow-sm",
-                  isDestructive
-                    ? "border-destructive/20 bg-destructive/10 text-destructive"
-                    : isWarning || isAttention
-                      ? "border-warning/20 bg-warning/10 text-warning"
-                      : "border-border/40 bg-muted/45 text-foreground"
-                )}>
-                  <Icon className="h-4 w-4" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  {isWarning && (
-                    <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75">
-                      Time Sensitive
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <Icon className={cn(
+                    "h-5 w-5 shrink-0",
+                    isDestructive ? "text-destructive" : isWarning || isAttention ? "text-warning" : "text-foreground/80"
+                  )} />
+                  <div className="flex-1 min-w-0">
+                    {isWarning && (
+                      <p className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/75">
+                        Time Sensitive
+                      </p>
+                    )}
+                    <p className={cn(
+                      "line-clamp-2 text-sm font-semibold leading-snug [overflow-wrap:anywhere]",
+                      isDestructive && "text-destructive",
+                      isAttention && "text-warning"
+                    )}>
+                      {toast.title}
                     </p>
-                  )}
-                  <p className={cn(
-                    "line-clamp-2 text-sm font-semibold leading-snug [overflow-wrap:anywhere]",
-                    isDestructive && "text-destructive",
-                    isAttention && "text-warning"
-                  )}>
-                    {toast.title}
-                  </p>
-                  {toast.description && (
-                    <p className="mt-0.5 line-clamp-3 text-sm leading-snug text-muted-foreground [overflow-wrap:anywhere]">
-                      {toast.description}
-                    </p>
-                  )}
-                  {toast.action && toast.actionBelow && <ToastAction toast={toast} below onDone={() => dismiss(toast.id)} />}
+                    {toast.description && (
+                      <p className="mt-0.5 line-clamp-3 text-sm leading-snug text-muted-foreground [overflow-wrap:anywhere]">
+                        {toast.description}
+                      </p>
+                    )}
+                    {toast.action && toast.actionBelow && <ToastAction toast={toast} below onDone={() => dismiss(toast.id)} />}
+                  </div>
                 </div>
                 {toast.action && !toast.actionBelow && <ToastAction toast={toast} onDone={() => dismiss(toast.id)} />}
                 <button
@@ -125,7 +121,7 @@ export function Toaster() {
                 </button>
               </div>
               {toast.action && Number.isFinite(toast.duration ?? DEFAULT_TOAST_DURATION) && (
-                <div aria-hidden="true" className="-mt-1.5 pb-3.5 pl-[68px] pr-4">
+                <div aria-hidden="true" className="-mt-1.5 pb-3.5 pl-12 pr-4">
                   <div className="h-1 overflow-hidden rounded-full bg-foreground/[0.07]">
                     <motion.div
                       key={toast.createdAt}

@@ -3,7 +3,7 @@ import { apiFetch } from '@/lib/http-client'
 import { useState } from 'react'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import { AlertTriangle, ChevronRight, ShieldAlert, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, ChevronRight } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 import localforage from 'localforage'
 import { useAccountStore } from '@/store/accountStore'
@@ -27,12 +27,11 @@ interface DangerRowProps {
     title: string
     description: string
     count?: number
-    icon?: LucideIcon
     disabled: boolean
     onClick: () => void
 }
 
-function DangerRow({ title, description, count, icon: Icon, disabled, onClick }: DangerRowProps) {
+function DangerRow({ title, description, count, disabled, onClick }: DangerRowProps) {
     return (
         <button
             type="button"
@@ -40,11 +39,6 @@ function DangerRow({ title, description, count, icon: Icon, disabled, onClick }:
             disabled={disabled}
             className="flex min-h-[56px] w-full items-center gap-3 py-3.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 enabled:hover:bg-muted/25"
         >
-            {Icon && (
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-border/40 bg-muted/35">
-                    <Icon className="h-4 w-4 text-muted-foreground" />
-                </span>
-            )}
             <span className="min-w-0 flex-1">
                 <span className="block text-sm font-semibold text-destructive">{title}</span>
                 <span className="block text-xs leading-snug text-muted-foreground">{description}</span>
@@ -301,7 +295,6 @@ export function DangerZone() {
 
                 <div data-theme-part="panel" className="rounded-[1.75rem] border border-border/45 bg-card/80 px-4 shadow-sm">
                     <DangerRow
-                        icon={ShieldAlert}
                         title="Delete all AIOManager data"
                         description="Clears this device and removes the sync account from the server, then reloads the app"
                         disabled={!unsafeMode || isRunning}

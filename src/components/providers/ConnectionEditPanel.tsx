@@ -611,9 +611,6 @@ function AutopilotRulesRemovalDialog({ accountId, connection, rules, open, onOpe
         <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }}>
             <DialogContent className="max-w-sm sm:max-w-sm" hideClose>
                 <DialogHeader className="items-center pr-0 text-center sm:text-center">
-                    <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-warning/30 bg-warning/10 text-warning">
-                        <TriangleAlert className="h-6 w-6" />
-                    </span>
                     <DialogTitle>Autopilot rules use this login</DialogTitle>
                     <DialogDescription className="leading-relaxed">
                         Removing it leaves these rules without a Stremio login:

@@ -8,7 +8,6 @@ import {
   DialogTitle,
 } from "./dialog"
 import { Button } from "./button"
-import { AlertTriangle, Info, ShieldAlert } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 interface ConfirmationDialogProps {
@@ -37,7 +36,6 @@ export function ConfirmationDialog({
   isDestructive = false,
   isLoading = false,
   disabled = false,
-  severity,
   impactItems,
   details,
   onConfirm,
@@ -47,35 +45,11 @@ export function ConfirmationDialog({
   }
 
   const confirmVariant = isDestructive ? "destructive" : "default"
-  const resolvedSeverity = severity || (isDestructive ? "danger" : undefined)
-  const severityConfig = {
-    danger: {
-      icon: ShieldAlert,
-      className: "border-destructive/30 bg-destructive/10 text-destructive",
-    },
-    warning: {
-      icon: AlertTriangle,
-      className: "border-warning/30 bg-warning/10 text-warning",
-    },
-    info: {
-      icon: Info,
-      className: "border-info/30 bg-info/10 text-info",
-    },
-  } as const
-  const Icon = resolvedSeverity ? severityConfig[resolvedSeverity].icon : null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent hideClose className={cn("max-w-md gap-0 overflow-hidden p-0", details && "flex flex-col")}>
         <DialogHeader className={cn("items-center px-6 pb-5 pt-7 text-center", details && "min-h-0 overflow-y-auto")}>
-          {Icon && resolvedSeverity && (
-            <div data-theme-part="badge" className={cn(
-              "mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border shadow-[inset_0_0.5px_0_hsl(0_0%_100%/0.08)]",
-              severityConfig[resolvedSeverity].className
-            )}>
-              <Icon className="h-6 w-6" />
-            </div>
-          )}
           <DialogTitle className="text-xl tracking-tight">{title}</DialogTitle>
           <DialogDescription className="max-w-sm space-y-2 text-pretty text-sm leading-6">
             {description}

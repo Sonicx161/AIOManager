@@ -40,16 +40,11 @@ export function OperationProgress({
 
     const inner = (
         <div className="flex items-center gap-3">
-            <div data-theme-part="badge" className={cn(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-xl',
-                status === 'error' ? 'bg-destructive/10' : 'bg-primary/10',
-            )}>
-                {isRunning
-                    ? <RefreshCw className="h-4 w-4 text-primary animate-spin motion-reduce:animate-none" />
-                    : status === 'error'
-                        ? <AlertCircle className="h-4 w-4 text-destructive" />
-                        : <XCircle className="h-4 w-4 text-muted-foreground" />}
-            </div>
+            {isRunning
+                ? <RefreshCw className="h-5 w-5 shrink-0 text-primary animate-spin motion-reduce:animate-none" />
+                : status === 'error'
+                    ? <AlertCircle className="h-5 w-5 shrink-0 text-destructive" />
+                    : <XCircle className="h-5 w-5 shrink-0 text-muted-foreground" />}
             <div className="min-w-0 flex-1">
                 <div className="text-sm font-semibold">
                     {label ?? defaultLabel}

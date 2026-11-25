@@ -24,15 +24,15 @@ function relTime(at: number): string {
   return `${Math.floor(diff / (24 * HOUR))}d ago`
 }
 
-const ICON: Record<InboxVariant, { Icon: typeof CheckCircle; tile: string }> = {
-  default: { Icon: CheckCircle, tile: 'border-border/40 bg-muted/45 text-foreground' },
-  warning: { Icon: AlertTriangle, tile: 'border-warning/20 bg-warning/10 text-warning' },
-  destructive: { Icon: AlertCircle, tile: 'border-destructive/20 bg-destructive/10 text-destructive' },
+const ICON: Record<InboxVariant, { Icon: typeof CheckCircle; tone: string }> = {
+  default: { Icon: CheckCircle, tone: 'text-foreground/80' },
+  warning: { Icon: AlertTriangle, tone: 'text-warning' },
+  destructive: { Icon: AlertCircle, tone: 'text-destructive' },
 }
 
 function EntryRow({ entry, onOpen }: { entry: InboxEntry; onOpen: () => void }) {
   const navigate = useNavigate()
-  const { Icon, tile } = ICON[entry.variant]
+  const { Icon, tone } = ICON[entry.variant]
   const account = useAccountStore(s => (entry.accountId ? s.accounts.find(a => a.id === entry.accountId) : undefined))
   // Sign-in fix notices keep their action after the toast is gone. An explicit
   // target opens its own connection's sign-in or, if that connection no longer
@@ -62,9 +62,9 @@ function EntryRow({ entry, onOpen }: { entry: InboxEntry; onOpen: () => void }) 
       className={cn('relative flex gap-3 px-4 py-3 transition-colors hover:bg-muted/20', !entry.read && 'bg-muted/10')}
       onClick={() => useInboxStore.getState().markRead(entry.id)}
     >
-      <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border', tile)}>
-        {entry.actionHint === 'signin' ? <KeyRound className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
-      </div>
+      {entry.actionHint === 'signin'
+        ? <KeyRound className={cn('h-[18px] w-[18px] shrink-0', tone)} />
+        : <Icon className={cn('h-[18px] w-[18px] shrink-0', tone)} />}
       <div className="min-w-0 flex-1">
         <div className="flex items-start gap-2">
           <p className={cn('flex-1 text-[13px] font-semibold leading-snug [overflow-wrap:anywhere]', entry.variant === 'destructive' && 'text-destructive', entry.actionHint === 'signin' && 'text-warning')}>
