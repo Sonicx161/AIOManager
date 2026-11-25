@@ -6,6 +6,7 @@ import { isDatedWatchTimestamp, isPlausibleWatchMs } from './watch-time.ts'
 import { partitionReplayHistory } from './replay-history.ts'
 import { buildRuntimeIndex, computeWatchHours, hoursRowFromItem, msToHours, type RuntimeIndex } from '@/lib/watch-hours'
 import { format } from 'date-fns'
+import { localDayKeyOf, localMonthKey } from './local-date-keys.ts'
 
 const GENRE_COLORS: Record<string, string> = {
     'Action': '#ef4444', // Red
@@ -54,7 +55,7 @@ function watchTimeByRow(items: ActivityItem[], runtimes: RuntimeIndex, canonical
     return { times, sumOver }
 }
 
-const localDayKey = (timestamp: Date | string | number) => format(new Date(timestamp), 'yyyy-MM-dd')
+const localDayKey = (timestamp: Date | string | number) => localDayKeyOf(new Date(timestamp))
 
 function localDayNumber(key: string): number {
     const [y, m, d] = key.split('-').map(Number)
@@ -100,7 +101,7 @@ export function computeReplayData(
     const filteredHistory = targetYear === 'all-time'
         ? history
         : isSpecificMonth
-            ? datedHistory.filter(item => format(toDate(item), 'yyyy-MM') === targetYear)
+            ? datedHistory.filter(item => localMonthKey(toDate(item)) === targetYear)
             : datedHistory.filter(item => toDate(item).getFullYear() === targetYear)
 
     const historyBeforeTarget = targetYear === 'all-time'
@@ -163,7 +164,7 @@ export function computeReplayData(
         const hours = (timeByRow.get(item) ?? 0) / 3600000
 
         const uniqueId = item.itemId;
-        const mKey = format(toDate(item), 'yyyy-MM')
+        const mKey = localMonthKey(toDate(item))
         const mData = monthMap.get(mKey) || { titles: new Set(), hours: 0, titleCounts: new Map() }
         mData.titles.add(uniqueId)
         mData.hours += hours
@@ -418,7 +419,7 @@ export function computeReplayData(
         marathonTitles,
         hiddenGems,
         availableYears: Array.from(new Set(datedHistory.map(item => toDate(item).getFullYear()))).sort((a, b) => b - a),
-        availableMonths: Array.from(new Set(datedHistory.map(item => format(toDate(item), 'yyyy-MM')))).sort((a, b) => b.localeCompare(a)),
+        availableMonths: Array.from(new Set(datedHistory.map(item => localMonthKey(toDate(item))))).sort((a, b) => b.localeCompare(a)),
         heroPosterArt,
         persona: persona.name,
         personaDescription: persona.description,

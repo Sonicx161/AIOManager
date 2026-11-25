@@ -26,6 +26,10 @@ export async function resetAllStores(options: { includeSync?: boolean } = {}): P
     import('@/components/activity/feed-rows').then(({ resetActivityRowCaches }) => resetActivityRowCaches()),
     import('@/lib/jellyfin/activity').then(({ resetNowStatusCaches }) => resetNowStatusCaches()),
     import('@/hooks/useWatchHistory').then(({ resetWatchHistoryCaches }) => resetWatchHistoryCaches()),
+    import('@/lib/activity-history-rows').then(({ resetActivityHistoryRows }) => resetActivityHistoryRows()),
+    import('@/lib/utils').then(({ clearSanitizedPosterCache }) => clearSanitizedPosterCache()),
+    import('@/lib/replay-data-cache').then(({ resetReplayDataCache }) => resetReplayDataCache()),
+    import('@/lib/shared-history-rows').then(({ resetSharedHistoryRows }) => resetSharedHistoryRows()),
   ]
 
   if (includeSync) {

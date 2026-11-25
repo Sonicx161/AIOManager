@@ -7,8 +7,9 @@ import { useWatchHistory } from '@/hooks/useWatchHistory'
 import { useAccountStore } from '@/store/accountStore'
 import { useUIStore } from '@/store/uiStore'
 import { maskedDisplayName } from '@/components/common/AccountSwitcher'
-import { computeReplayData, type ReplayDataWithEstimate } from '@/lib/compute-replay-data'
-import { historyEntryToActivityItem, canonicalStremioConnections } from '@/lib/activity-utils'
+import type { ReplayDataWithEstimate } from '@/lib/compute-replay-data'
+import { cachedReplayData, replayItems, replayItemsForAccount, replayViewState } from '@/lib/replay-data-cache'
+import { canonicalStremioConnections } from '@/lib/activity-utils'
 import { ReplayHero } from '@/components/replay/ReplayHero'
 import { ReplayStats } from '@/components/replay/ReplayStats'
 import { ReplayYearInNumbers } from '@/components/replay/ReplayYearInNumbers'
@@ -29,8 +30,9 @@ export function ReplayPage() {
     const navigate = useNavigate()
     const containerRef = useRef<HTMLDivElement>(null)
     const { loading, ensureLoaded } = useLibraryCache()
-    const { history: watchHistory } = useWatchHistory(undefined, true, REPLAY_HISTORY_OPTIONS)
-    const items = useMemo(() => watchHistory.map(historyEntryToActivityItem), [watchHistory])
+    const libraryLoadedOnce = useLibraryCache(s => s.lastFetched > 0)
+    const { history: watchHistory, loading: historyLoading } = useWatchHistory(undefined, true, REPLAY_HISTORY_OPTIONS)
+    const items = useMemo(() => replayItems(watchHistory), [watchHistory])
     const accounts = useAccountStore(s => s.accounts)
     const canonicalConnections = useMemo(() => canonicalStremioConnections(accounts), [accounts])
     const [userSelectedYear, setUserSelectedYear] = useState<number | string | null>(null)
@@ -77,19 +79,24 @@ export function ReplayPage() {
     }, [accounts, items])
 
     const filteredItems = useMemo(() => {
-        if (selectedAccountId === 'all') return items
-        return items.filter(item => item.accountId === selectedAccountId)
+        return replayItemsForAccount(items, selectedAccountId)
     }, [items, selectedAccountId])
 
     const [allTimeData, setAllTimeData] = useState<ReplayDataWithEstimate | null>(null)
     const [replayData, setReplayData] = useState<ReplayDataWithEstimate | null>(null)
 
     useEffect(() => {
-        if (!filteredItems.length) return
+        if (!filteredItems.length) {
+            if (selectedAccountId !== 'all') {
+                setAllTimeData(null)
+                setReplayData(null)
+            }
+            return
+        }
         startTransition(() => {
-            setAllTimeData(computeReplayData(filteredItems, 'all-time', { canonicalConnections }))
+            setAllTimeData(cachedReplayData(filteredItems, 'all-time', canonicalConnections))
         })
-    }, [filteredItems, canonicalConnections])
+    }, [filteredItems, canonicalConnections, selectedAccountId])
 
     const activeSelectedYear = userSelectedYear ?? (allTimeData?.availableYears?.[0] ?? 'all-time')
     const isSpecificMonth = typeof activeSelectedYear === 'string' && activeSelectedYear !== 'all-time' && activeSelectedYear.includes('-')
@@ -97,7 +104,7 @@ export function ReplayPage() {
     useEffect(() => {
         if (!filteredItems.length || !allTimeData) return
         startTransition(() => {
-            setReplayData(computeReplayData(filteredItems, activeSelectedYear, { canonicalConnections }))
+            setReplayData(cachedReplayData(filteredItems, activeSelectedYear, canonicalConnections))
         })
     }, [filteredItems, activeSelectedYear, allTimeData, canonicalConnections])
 
@@ -195,7 +202,9 @@ export function ReplayPage() {
     }
 
 
-    if ((loading && items.length === 0) || !replayData || !allTimeData) {
+    const viewState = replayViewState({ historySettled: !loading && !historyLoading && (libraryLoadedOnce || accounts.length === 0), itemCount: items.length, accountSelected: selectedAccountId !== 'all', selectedCount: filteredItems.length, hasResults: !!replayData && !!allTimeData })
+
+    if (viewState === 'loading') {
         return (
             <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white', minHeight: '100vh' } as React.CSSProperties}>
                 <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
@@ -213,7 +222,7 @@ export function ReplayPage() {
         )
     }
 
-    if (items.length === 0) {
+    if (viewState === 'empty') {
         return (
             <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', background: '#08080f', color: 'white', minHeight: '100vh' } as React.CSSProperties}>
                 <div className="min-h-screen mesh-gradient flex flex-col items-center justify-center p-8 text-center">
@@ -237,6 +246,8 @@ export function ReplayPage() {
             </div>
         )
     }
+
+    if (!replayData || !allTimeData) return null
 
     return (
         <div style={{ '--background': '0 0% 0%', '--foreground': '0 0% 98%', '--card': '0 0% 4%', '--card-foreground': '0 0% 98%', '--popover': '0 0% 4%', '--popover-foreground': '0 0% 98%', '--primary': '45 93% 47%', '--primary-foreground': '0 0% 0%', '--secondary': '0 0% 10%', '--secondary-foreground': '0 0% 98%', '--muted': '0 0% 10%', '--muted-foreground': '0 0% 64%', '--accent': '0 0% 10%', '--accent-foreground': '0 0% 98%', '--destructive': '0 63% 31%', '--destructive-foreground': '0 0% 98%', '--border': '0 0% 15%', '--input': '0 0% 15%', '--ring': '45 93% 47%', position: 'fixed', inset: 0, zIndex: 50, background: '#08080f', backgroundImage: 'none', color: 'white' } as React.CSSProperties}>

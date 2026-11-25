@@ -13,7 +13,7 @@ import { crossLinkWatcherIndex, watcherMatchesItem, type WatcherItemIdentity } f
 import { resolveTrailerAsync, type TrailerResult } from '@/lib/trailer-resolver'
 import { fetchTmdbDetailsAsMeta, fetchTmdbImdbId, proxyFetch, fetchSeasonEpisodes, fetchSeasonsList, pickTmdbIdFromFind, searchCinemeta, type TmdbFindPayload } from '@/api/metadata/adapters/tmdb'
 import { traceAsync } from '@/api/metadata/adapters/shared-fetch'
-import { addToWatchlist, removeFromWatchlist, getWatchlist } from '@/lib/watchlist'
+import { addToWatchlist, removeFromWatchlist, getWatchlist, getWatchlistTargets } from '@/lib/watchlist'
 import { getPmdbRating } from '@/api/metadata/adapters/pmdb'
 import { apiGet } from '@/lib/http-client'
 import { cn, openStremioDetail } from '@/lib/utils'
@@ -1067,17 +1067,25 @@ export function ActivityDetailModal({ open, onOpenChange, item, cwPosterIndex, w
         if (!open || !renderItem?.itemId) return
         let active = true
         const itemId = renderItem.itemId
-        Promise.all([
-            getWatchlist().catch(() => []),
-            ...accounts.map(a => getWatchlist(a.id).catch(() => [] as Awaited<ReturnType<typeof getWatchlist>>))
-        ]).then(([globalList, ...accountLists]) => {
-            if (!active) return
+        getWatchlistTargets(itemId).then(async direct => {
+            if (direct) {
+                const targets = new Set<string>()
+                if (direct.has('')) targets.add('')
+                for (const a of accounts) if (direct.has(a.id)) targets.add(a.id)
+                return targets
+            }
+            const [globalList, ...accountLists] = await Promise.all([
+                getWatchlist().catch(() => []),
+                ...accounts.map(a => getWatchlist(a.id).catch(() => [] as Awaited<ReturnType<typeof getWatchlist>>))
+            ])
             const targets = new Set<string>()
             if (globalList.some(i => i.itemId === itemId)) targets.add('')
             accounts.forEach((a, i) => {
                 if (accountLists[i]?.some(i => i.itemId === itemId)) targets.add(a.id)
             })
-            setWatchlistTargets(targets)
+            return targets
+        }).then(targets => {
+            if (active) setWatchlistTargets(targets)
         }).catch(() => { })
         return () => { active = false }
     }, [open, renderItem?.itemId, accounts])

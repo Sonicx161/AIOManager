@@ -1,5 +1,7 @@
 import { getSyncAuthHeaders } from '@/lib/sync-auth'
 
+const HOUSEHOLD_ACCOUNT_ID = '__household__'
+
 export async function addToWatchlist(itemId: string, type: string, name?: string, poster?: string, accountId?: string): Promise<boolean> {
     try {
         const res = await fetch('/api/watchlist/add', {
@@ -52,5 +54,20 @@ export async function getWatchlist(accountId?: string): Promise<WatchlistItem[]>
         })
     } catch {
         return []
+    }
+}
+
+/** Lists holding one item ('' is the household list), or null when the server predates the itemId lookup. */
+export async function getWatchlistTargets(itemId: string): Promise<Set<string> | null> {
+    try {
+        const res = await fetch(`/api/watchlist?itemId=${encodeURIComponent(itemId)}`, { headers: await getSyncAuthHeaders() })
+        if (!res.ok) return new Set()
+        const json = await res.json()
+        if (!Array.isArray(json?.accountIds)) return null
+        const targets = new Set<string>()
+        for (const id of json.accountIds) if (typeof id === 'string') targets.add(id === HOUSEHOLD_ACCOUNT_ID ? '' : id)
+        return targets
+    } catch {
+        return new Set()
     }
 }

@@ -31,13 +31,18 @@ export function watchContextKey(accountId: string, sourceConnectionId?: string):
     return sourceConnectionId ? `${accountId}::${sourceConnectionId}` : accountId
 }
 
+const canonicalByAccounts = new WeakMap<object, Map<string, string | undefined>>()
+
 /** Canonical native Stremio login per account; its rows share the bare account scope. */
 export function canonicalStremioConnections(accounts: ReadonlyArray<Pick<Account, 'id' | 'connections' | 'primaryConnectionId'>>): Map<string, string | undefined> {
+    const cached = canonicalByAccounts.get(accounts)
+    if (cached) return cached
     const canonical = new Map<string, string | undefined>()
     for (const account of accounts) {
         const native = (account.connections || []).filter(c => c.platform === 'stremio' && (c.connectionType == null || c.connectionType === 'native'))
         canonical.set(account.id, native.find(c => c.id === account.primaryConnectionId)?.id ?? native[0]?.id)
     }
+    canonicalByAccounts.set(accounts, canonical)
     return canonical
 }
 
@@ -483,6 +488,29 @@ export async function transformNuvioProgressToActivityItem(row: NuvioProgressIte
         ...(options?.connectionId ? { sourceConnectionId: options.connectionId } : {}),
         genres,
     }
+}
+
+export interface ActivityRowsMemo {
+    source: ReadonlyArray<HistoryEntry>
+    items: ActivityItem[]
+}
+
+/** historyEntryToActivityItem over a history, reusing the previous row wherever the same entry sits at the same index. */
+export function mapHistoryRows(history: ReadonlyArray<HistoryEntry>, previous: ActivityRowsMemo | null): ActivityRowsMemo {
+    if (previous?.source === history) return previous
+    const prevSource = previous?.source
+    const prevItems = previous?.items
+    let same = !!prevSource && prevSource.length === history.length
+    const items = new Array<ActivityItem>(history.length)
+    for (let i = 0; i < history.length; i++) {
+        const entry = history[i]
+        if (prevSource && prevItems && prevSource[i] === entry) items[i] = prevItems[i]
+        else {
+            items[i] = historyEntryToActivityItem(entry)
+            same = false
+        }
+    }
+    return { source: history, items: same && prevItems ? prevItems : items }
 }
 
 export function historyEntryToActivityItem(entry: HistoryEntry): ActivityItem {

@@ -40,7 +40,8 @@ export function enrichActivityItemsByIdentity(items: ActivityItem[]): ActivityIt
         const name = isUnresolvedActivityName(item.name) ? entry.name : item.name
         const poster = item.poster || entry.poster
         const genres = item.genres?.length ? item.genres : entry.genres
-        if (name === item.name && poster === item.poster && genres === item.genres) return item
+        const sameGenres = genres === item.genres || (genres?.length === 0 && item.genres?.length === 0)
+        if (name === item.name && (!poster || poster === item.poster) && sameGenres) return item
         changed = true
         return { ...item, name, ...(poster ? { poster } : {}), ...(genres ? { genres } : {}) }
     })

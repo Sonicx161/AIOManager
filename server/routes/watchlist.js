@@ -67,6 +67,20 @@ export function registerWatchlistRoutes(fastify) {
         const authUser = await verifyAuth(request)
         if (!authUser) { reply.status(401); return { error: 'Unauthorized' } }
 
+        const itemId = request.query && request.query.itemId
+        if (itemId !== undefined) {
+            if (typeof itemId !== 'string' || !itemId || itemId.length > 512) { reply.status(400); return { error: 'itemId invalid' } }
+            try {
+                const rows = await db.query(
+                    'SELECT account_id FROM watchlist_items WHERE sync_user = $1 AND item_id = $2',
+                    [authUser, itemId]
+                )
+                return { accountIds: (rows || []).map(r => r.account_id) }
+            } catch {
+                return { accountIds: [] }
+            }
+        }
+
         const accountId = (request.query && request.query.accountId) || HOUSEHOLD_ACCOUNT_ID
 
         try {

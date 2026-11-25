@@ -3,7 +3,8 @@ import type { ActivityItem } from '@/types/activity'
 import type { EventRollups } from '@/lib/watch-event-rollups'
 import type { Account } from '@/types/account'
 import type { HistoryEntry } from '@/hooks/useWatchHistory'
-import { canonicalStremioConnections, cumulativeWatchKey, historyEntryToActivityItem } from '@/lib/activity-utils'
+import { canonicalStremioConnections, cumulativeWatchKey, type ActivityRowsMemo } from '@/lib/activity-utils'
+import { sharedHistoryRows, sharedWatchRows } from '@/lib/shared-history-rows'
 import { buildRuntimeIndex, mediaResumePositionMs, runtimeIndexFingerprint, type RuntimeIndex } from '@/lib/watch-hours'
 import { createItemsFingerprintMemo, fnvText } from '@/lib/metrics-fingerprint'
 import { useSyncStore } from '@/store/syncStore'
@@ -427,14 +428,13 @@ function mapRows(rows: ReadonlyArray<ActivityItem>, canonical: ReadonlyMap<strin
     return { mapped, fingerprint }
 }
 
-let historyRowsMemo: { source: ReadonlyArray<HistoryEntry>; rows: ActivityItem[] } | null = null
+let historyRowsMemo: ActivityRowsMemo | null = null
 
 export function metricsHistoryRows(history: ReadonlyArray<HistoryEntry>): ActivityItem[] {
-    if (historyRowsMemo?.source === history) return historyRowsMemo.rows
-    const rows = history.map(historyEntryToActivityItem).filter(item => !item.backfill)
+    const mapped = sharedHistoryRows(history, historyRowsMemo)
     bindMetricsCacheInvalidation()
-    historyRowsMemo = { source: history, rows }
-    return rows
+    historyRowsMemo = mapped
+    return sharedWatchRows(mapped.items)
 }
 
 let canonicalMemo: { accounts: ReadonlyArray<Account>; value: Map<string, string | undefined> } | null = null

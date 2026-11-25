@@ -618,11 +618,26 @@ export function saveUnresolvedImdbIds(unresolved: Record<string, number>): void 
     } catch {}
 }
 
+const sanitizedPosterCache = new Map<string, string | undefined>()
+const SANITIZED_POSTER_CACHE_MAX = 4096
+
 export function sanitizePosterUrl(url: string | undefined): string | undefined {
     if (!url || typeof url !== 'string') return url
     // Direct poster hosts have no wrapper parameters to unwrap. Keep every
     // other URL on the parser path, including queried URLs on these hosts.
     if ((url.startsWith('https://images.metahub.space/') || url.startsWith('https://image.tmdb.org/')) && !url.includes('?')) return url
+    if (sanitizedPosterCache.has(url)) return sanitizedPosterCache.get(url)
+    const value = parsePosterUrl(url)
+    if (sanitizedPosterCache.size >= SANITIZED_POSTER_CACHE_MAX) sanitizedPosterCache.clear()
+    sanitizedPosterCache.set(url, value)
+    return value
+}
+
+export function clearSanitizedPosterCache(): void {
+    sanitizedPosterCache.clear()
+}
+
+function parsePosterUrl(url: string): string | undefined {
     try {
         const parsed = new URL(url)
         const fb = parsed.searchParams.get('fallback')

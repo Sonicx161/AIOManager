@@ -261,9 +261,10 @@ export function applyResolvedMetadataOverlay(
         const name = isUnresolvedActivityName(item.name) ? entry.name || item.name : item.name
         const poster = item.poster || entry.poster
         const genres = item.genres?.length ? item.genres : entry.genres
-        if (name === item.name && poster === item.poster && genres === item.genres) return item
+        const sameGenres = genres === item.genres || (genres?.length === 0 && item.genres?.length === 0)
+        if (name === item.name && (!poster || poster === item.poster) && sameGenres) return item
         const prior = reuse?.get(item)
-        if (prior && prior.name === name && prior.poster === poster && prior.genres === genres) {
+        if (prior && prior.name === name && prior.poster === (poster || item.poster) && prior.genres === (genres || item.genres)) {
             changed = true
             return prior
         }

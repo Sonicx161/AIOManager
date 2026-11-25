@@ -26,14 +26,14 @@ import { useSyncStore } from '@/store/syncStore'
 import { useWatchEventStore } from '@/store/watchEventStore'
 import { useUIStore } from '@/store/uiStore'
 import { ActivityItemSkeleton } from '@/components/ui/skeleton'
-import { historyEntryToActivityItem, nuvioProgressKey, getCachedCinemetaName, watchContextKey, peerLoginLabel, canonicalStremioConnections } from '@/lib/activity-utils'
+import { nuvioProgressKey, getCachedCinemetaName, watchContextKey, peerLoginLabel, canonicalStremioConnections } from '@/lib/activity-utils'
 import { continueWatchingPosterFor, continueWatchingPosterIndex } from '@/lib/activity-cw-poster'
 import { activitySearchHaystack, activityItemTimeMs } from '@/lib/activity-search-cache'
 import { continueWatchingRail } from '@/lib/activity-continue-watching'
 import { rollupMinutes } from '@/lib/activity-hours'
 import { useSettledOnce } from '@/hooks/useSettledSignal'
 import { useActivityMetadata } from '@/hooks/useActivityMetadata'
-import { enrichActivityItemsByIdentity } from '@/lib/activity-cross-source-enrichment'
+import { activityHistoryRows } from '@/lib/activity-history-rows'
 import { planEpisodeBitfieldDelete, verifyEpisodeDeleteReadback } from '@/lib/episode-bitfield-delete'
 import { isEpisodeScopedDelete, hasPendingRemoteDelete } from '@/lib/activity-delete-routing'
 import { clearStremioRowHistory } from '@/lib/stremio-history-delete'
@@ -227,13 +227,8 @@ export function ActivityPage() {
     // is imported SAVED state (bitfield-aggregate series, flagged-only movies): those rows carry no
     // watch dates at all, so they are kept for the dedicated imported group below instead of leaking
     // into the dated chronology as a phantom watch on the import date.
-    const mappedHistory = useMemo(() => watchHistory.map(historyEntryToActivityItem), [watchHistory])
-    const sourceHistory: ActivityItem[] = useMemo(
-        () => enrichActivityItemsByIdentity(mappedHistory.filter(item => !item.backfill || item.importedSavedState)),
-        [mappedHistory]
-    )
-    // Raw watch rows for header hours: the same rows and runtime source Metrics uses.
-    const hoursSource = useMemo(() => mappedHistory.filter(item => !item.backfill), [mappedHistory])
+    // Raw watch rows for header hours (hoursSource) are the same rows and runtime source Metrics uses.
+    const { sourceHistory, hoursSource } = useMemo(() => activityHistoryRows(watchHistory), [watchHistory])
     const history = useActivityMetadata(sourceHistory)
 
     // Split for presentation only: the dated chronology and day metrics see genuinely dated
