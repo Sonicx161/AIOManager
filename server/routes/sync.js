@@ -13,7 +13,7 @@ import { invalidateUserKeys } from '../lib/user-key-cache.js'
 import { metadataCache } from '../lib/metadata-cache.js'
 import { listStremioCredentialedAccountIds } from '../lib/stremio-credentials.js'
 import { hashSyncPassword, isScryptHash, verifySyncPassword, upgradeLegacyPasswordHash, prepareLegacyPasswordUpgrade, applyLegacyPasswordUpgrade } from '../lib/sync-password.js'
-import { isRegistrationsClosed } from '../config.js'
+import { isRegistrationsClosed, isReadOnlyReplica } from '../config.js'
 import { assertAccountActive, assertWritablePrimary, refreshAccountAdminState } from '../admin/account-state.js'
 import { invalidateSyncResponseCache, getSyncResponseCache, getSyncResponseCacheVariant, setSyncResponseCache, negotiateSyncResponseEncoding, syncResponseCacheStats, peekSyncResponseCacheHash } from '../lib/sync-response-cache.js'
 import { decodeCanonicalAddonsV2 } from '../lib/canonical-addons-v2.js'
@@ -357,7 +357,8 @@ export function registerSyncRoutes(fastify, { autopilotEngine = null } = {}) {
             const needsMigration = (row.password && typeof row.password === 'string' && !isScryptHash(row.password)) ||
                 (row.value && typeof row.value === 'string' && !row.value.includes(':'))
 
-            if (needsMigration) {
+            // A read replica never writes, this best-effort upgrade included; the primary upgrades the row on its next pull.
+            if (needsMigration && !isReadOnlyReplica()) {
                 fastify.log.info({ category: 'Sync', fmt: 'sync.zk_upgrade', acct: id, ms: Date.now() - start }, `[${maskContext(id)}] Upgrading sync data to Zero-Knowledge storage.`)
                 // Device-authed requests carry a token in x-sync-password; it must never become the stored account password.
                 const storedPass = request.deviceAuth
