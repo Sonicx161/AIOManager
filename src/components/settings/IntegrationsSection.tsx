@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    Key,
     Trash2,
     Eye,
     EyeOff,
@@ -253,10 +252,6 @@ export function IntegrationsSection() {
             <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 lg:p-6 shadow-sm">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="flex items-start gap-3">
-                        <div className="relative mt-0.5 flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
-                            <SquircleOverlay />
-                            <Key className="relative z-10 h-4 w-4 text-muted-foreground" />
-                        </div>
                         <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="text-sm sm:text-base font-semibold">Metadata Integrations</h3>

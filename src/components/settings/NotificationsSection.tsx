@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowUpRight, Bell } from 'lucide-react'
-import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { AccountSwitcher } from '@/components/common/AccountSwitcher'
 import { getAccountEmail, useAccountStore } from '@/store/accountStore'
 import { SettingsGroup, SettingsGroupFooter, SettingsRow, SettingsRowSeparator } from '@/components/settings/SettingsRows'
@@ -23,10 +22,6 @@ export function NotificationsSection() {
     return (
         <section className="space-y-3">
             <div className="flex items-center gap-3">
-                <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25 sm:h-10 sm:w-10">
-                    <SquircleOverlay />
-                    <Bell className="relative z-10 h-4 w-4 text-muted-foreground" />
-                </div>
                 <div>
                     <h2 className="text-base font-bold">Monitoring &amp; Alerts</h2>
                     <p className="text-sm text-muted-foreground">Webhook notifications are configured per Autopilot rule.</p>

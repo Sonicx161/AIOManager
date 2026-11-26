@@ -14,7 +14,6 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/hooks/use-toast'
 import { useDocumentTitle } from '@/hooks/use-document-title'
-import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import {
     AlertDialog,
     AlertDialogCancel,
@@ -26,7 +25,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import {
     Trash2,
-    Database,
     EyeOff,
     Download,
     Upload,
@@ -36,7 +34,6 @@ import {
     ChevronRight,
     FileJson,
     Activity,
-    Info,
     KeyRound,
     Palette,
     User,
@@ -636,10 +633,6 @@ export function SettingsPage() {
             <div data-settings-anchor="backup-restore" className={sectionAnchorClass('backup-restore')}>
                 <div data-theme-part="panel" className="flex flex-col justify-between gap-4 sm:gap-5 rounded-[1.75rem] border border-border/45 bg-card/80 p-4 sm:p-5 lg:p-6 shadow-sm md:flex-row md:items-center">
                     <div className="flex flex-1 items-start gap-4">
-                        <div className="relative mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
-                            <SquircleOverlay />
-                            <Database className="relative z-10 h-4 w-4 text-muted-foreground" />
-                        </div>
                         <div className="space-y-1">
                             <h3 className="text-base font-semibold">Backup & Restore</h3>
                             <p className="text-sm text-muted-foreground max-w-md">
@@ -670,10 +663,6 @@ export function SettingsPage() {
             <div data-settings-anchor="about" className={sectionAnchorClass('about')}>
                 <div data-theme-part="panel" className="flex flex-col gap-4 rounded-[1.75rem] border border-border/45 bg-card/80 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:p-5 lg:p-6">
                     <div className="flex items-center gap-3">
-                        <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25 sm:h-10 sm:w-10">
-                            <SquircleOverlay />
-                            <Info className="relative z-10 h-4 w-4 text-muted-foreground" />
-                        </div>
                         <div>
                             <h3 className="text-base font-semibold">About</h3>
                             <p className="text-xs lg:text-sm text-muted-foreground">Version & build information</p>

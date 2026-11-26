@@ -237,10 +237,6 @@ export function RepairTools() {
     return (
         <div data-theme-part="panel" className="overflow-hidden rounded-[1.75rem] border border-border/45 bg-card/80 shadow-sm">
             <div className="flex items-center gap-3 p-4">
-                <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
-                    <SquircleOverlay />
-                    <Wrench className="relative z-10 h-4 w-4 text-muted-foreground" />
-                </div>
                 <div>
                     <h3 className="text-sm font-semibold">Repair & Recovery</h3>
                     <p className="text-xs text-muted-foreground">Safe fixes for common issues</p>

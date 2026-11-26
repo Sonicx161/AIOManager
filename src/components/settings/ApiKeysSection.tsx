@@ -5,7 +5,6 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { ConfirmationDialog } from '@/components/ui/confirmation-dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
-import { SquircleOverlay } from '@/components/ui/squircle-overlay'
 import { StatusChip } from '@/components/ui/status-chip'
 import { AccountAvatar } from '@/components/accounts/AccountAvatar'
 import { StremioCredentialRepairNotice } from '@/components/accounts/StremioCredentialRepairNotice'
@@ -171,10 +170,6 @@ export function ApiKeysSection() {
         <section className="space-y-4">
             <div data-theme-part="panel" className="space-y-4 sm:space-y-5 rounded-[1.5rem] sm:rounded-[1.75rem] border border-border/45 bg-card/80 p-3 sm:p-4 md:p-5 lg:p-6 shadow-sm">
                 <div className="flex items-start gap-3">
-                    <div className="relative mt-0.5 flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl border border-border/35 bg-muted/25">
-                        <SquircleOverlay />
-                        <Key className="relative z-10 h-4 w-4 text-muted-foreground" />
-                    </div>
                     <div className="min-w-0 flex-1">
                         <h3 className="text-sm sm:text-base font-semibold">API Keys</h3>
                         <p className="mt-1 text-xs sm:text-sm text-muted-foreground">
