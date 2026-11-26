@@ -6,7 +6,7 @@ import {
 import { getAddonVersionKey, normalizeAddonUrl, mergeAddons } from '@/lib/utils'
 import { addTombstones, restoreAddonDeletions, filterResurrected } from '@/lib/addon-tombstones'
 import { queueAddonActionDeletes, addonDeleteAcks, InstallAbortedError, makeInstallGuard, liftBlockedByInstance, acquireInstallMutex } from './addonActions'
-import { effectiveAddonsFor, normalizeDestinations, stripDestinationsForWire } from '@/lib/addon-destinations'
+import { effectiveAddonsFor, normalizeDestinations } from '@/lib/addon-destinations'
 import { AddonDescriptor } from '@/types/addon'
 import { dedupeAddonsByUrl, findInstallSlot } from '@/lib/addon-dedupe'
 import { resolveRemovalIndex, type RemoveAddonByIndexResult } from '@/lib/addon-removal'
@@ -15,6 +15,7 @@ import { normalizeFailedConnectionState } from '@/lib/sync/push-outcome'
 import { syncManager } from '@/lib/sync/syncManager'
 import { autopilotManager } from '@/lib/autopilot/autopilotManager'
 import { getEffectiveManifest } from '@/lib/addon-utils'
+import { nuvioWireAddons } from '@/lib/nuvio-wire'
 import { getCachedManifest, setCachedManifest } from '@/lib/manifest-cache'
 import { isPlaceholderManifest } from '@/lib/manifest-placeholder'
 import { captureOriginalDetails, planDetailReset, applyDetailReset } from '@/lib/addon-original-details'
@@ -104,7 +105,7 @@ async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId:
     // a separate per-connection list and never carries addon policy.
     // A rejected session heals only through a server-side forced revalidation: one retry, never more.
     try {
-        await driver.writeAddons(token.accessToken, stripDestinationsForWire(addons), profileId)
+        await driver.writeAddons(token.accessToken, nuvioWireAddons(addons), profileId)
     } catch (err) {
         if (!isAuthError(err)) throw err
         assertLive(ownership, signal)
@@ -112,7 +113,7 @@ async function pushNuvio(conn: Connection, addons: AddonDescriptor[], accountId:
         assertLive(ownership, signal)
         setCachedNuvioToken(conn.id, token)
         profileId = resolveNuvioPushProfile(conn, activeProfileId, token.profileId ?? creds.profileIndex ?? creds.profileId)
-        await driver.writeAddons(token.accessToken, stripDestinationsForWire(addons), profileId)
+        await driver.writeAddons(token.accessToken, nuvioWireAddons(addons), profileId)
     }
     ownership?.assert()
 
