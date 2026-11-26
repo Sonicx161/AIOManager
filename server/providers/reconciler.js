@@ -977,12 +977,14 @@ export function createReconciler(fastify) {
 
     // Nuvio instances that reject the optional plugins table; skip after the first 401
     const nuvioPluginsUnsupported = new Set()
+    // Per workspace and connection: another workspace using the same connection id never switches this one's plugins off.
+    const pluginKey = (connection) => JSON.stringify([connection.syncUser ?? null, connection.id])
 
     const reconcilePlugins = async (accountId, connection, opts = {}) => {
         if (connection.platform !== 'nuvio') return
         if (!connection.enabled) return
         if (shouldSkip(accountId, connection)) return
-        if (nuvioPluginsUnsupported.has(connection.id)) return
+        if (nuvioPluginsUnsupported.has(pluginKey(connection))) return
 
         const driver = await loadDriver(connection.platform, connection.credentials || {}, connection)
         if (!driver || !driver.readPlugins) return
@@ -1018,7 +1020,7 @@ export function createReconciler(fastify) {
             if (isStateRefusal(err)) throw err
             if (err.isAuthError) {
                 // Token was just refreshed, so this 401 means plugins aren't offered on this instance
-                nuvioPluginsUnsupported.add(connection.id)
+                nuvioPluginsUnsupported.add(pluginKey(connection))
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Nuvio plugins unavailable on this instance (auth rejected); skipping plugin sync.`)
                 return
             }
