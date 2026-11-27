@@ -15,6 +15,7 @@ import { metaIsUnchanged } from '@/lib/stremio-meta-diff'
 import { reuseActivityItems, reuseDeletedItemIds } from '@/lib/activity-structural-sharing'
 import { historyNoticeCopy } from '@/lib/sync-error-copy'
 import { platformName } from '@/components/addons/PlatformSourceChip'
+import { keepStaleNuvioItems } from '@/lib/nuvio-stale-items'
 
 // v4: v3-era blobs persist transformed ActivityItems from before imported-saved-state
 // tagging; the fresh-TTL restore and identical-meta skip would keep serving that old
@@ -893,14 +894,7 @@ export const useLibraryCache = create<LibraryCacheState>((set, get) => ({
                                         })
                                         const stale = currentItems.filter(item => item.accountId === account.id && item.source === 'nuvio'
                                             && (!multiNuvio || !item.sourceConnectionId || item.sourceConnectionId === conn.id))
-                                        for (const item of stale) {
-                                            const staleKey = originKey(item, true)
-                                            const staleBaseKey = originKey(item, false)
-                                            if (existingKeys.has(staleKey) || existingKeys.has(staleBaseKey)) continue
-                                            accountItems.push(item)
-                                            existingKeys.add(staleBaseKey)
-                                            if (item.uniqueItemId) existingKeys.add(staleKey)
-                                        }
+                                        accountItems.push(...keepStaleNuvioItems(stale, existingKeys, originKey, aliasedKeyHit))
                                         return
                                     }
                                     if (import.meta.env.DEV) console.info(`[LibraryCache] Nuvio fetched ${watched.length} watched + ${progress.length} progress for ${account.name || account.id}`)

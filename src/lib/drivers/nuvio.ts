@@ -12,7 +12,8 @@ import { mapAvatarRows } from '../nuvio-avatars.ts'
 import { resolveProfileIndexWith } from './nuvio-profile.ts'
 import { getNuvioProfiles, invalidateNuvioProfileCache } from '../nuvio-profile-cache.ts'
 import { validateNuvioRows } from '../nuvio-read-validation.ts'
-import { pullNuvioWatchedPages } from '../nuvio-pagination.ts'
+import { NUVIO_READ_LIMIT, NuvioIncompleteReadError, contentRangeTotal, newestFirst, nuvioPageQuery, progressRowKey, pullNuvioPages, watchedRowKey } from '../nuvio-pagination.ts'
+import type { NuvioPageRequest, NuvioPageResult } from '../nuvio-pagination.ts'
 import type { NuvioAvatar } from '../nuvio-avatars.ts'
 
 export interface NuvioWatchedRow {
@@ -122,6 +123,44 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
         throw lastErr
     }
 
+    // History reads only: one page of a pull RPC, keyed by row id, with the count Nuvio reports.
+    const rpcPage = async (fn: string, body: unknown, accessToken: string, page: NuvioPageRequest): Promise<NuvioPageResult> => {
+        let lastErr: unknown
+        for (let attempt = 0; attempt <= 2; attempt++) {
+            let res: Response
+            try {
+                res = await fetch(`${baseUrl}${RPC_PATH}/${fn}?${nuvioPageQuery(page)}`, {
+                    method: 'POST',
+                    headers: { ...makeHeaders(accessToken), Prefer: 'count=exact' },
+                    body: JSON.stringify(body),
+                    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+                })
+            } catch (err) {
+                lastErr = err
+                if (attempt < 2) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue }
+                throw err
+            }
+            if (!res.ok) {
+                const err: NuvioError = new Error(`Nuvio RPC ${fn} returned ${res.status}`)
+                err.status = res.status
+                err.isAuthError = res.status === 401
+                try { err.data = await res.json() } catch {}
+                if (res.status >= 500 && attempt < 2) { lastErr = err; await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue }
+                throw err
+            }
+            let rows: unknown
+            try { rows = await res.json() } catch { throw new NuvioIncompleteReadError(`Nuvio RPC ${fn} answered a page that could not be decoded; refusing an incomplete snapshot`) }
+            return { rows, total: contentRangeTotal(res.headers.get('content-range')) }
+        }
+        throw lastErr
+    }
+
+    const readAllPages = async <T extends object>(fn: string, body: unknown, accessToken: string, keyOf: (row: Record<string, unknown>) => string, timeField: string): Promise<T[]> => {
+        const { rows, complete } = await pullNuvioPages(page => rpcPage(fn, body, accessToken, page), { keyOf })
+        if (!complete) throw new NuvioIncompleteReadError(`Nuvio RPC ${fn} could not be read completely; refusing an incomplete snapshot`)
+        return newestFirst(validateNuvioRows<T>(rows, fn, Number.POSITIVE_INFINITY), timeField, keyOf)
+    }
+
     const getProfiles = async (accessToken: string, fresh = false) =>
         getNuvioProfiles(profileCacheKey(accessToken, fresh), () => rpc('sync_pull_profiles', {}, accessToken))
 
@@ -208,9 +247,7 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
                         p_page: opts.page ?? 1,
                         p_page_size: opts.pageSize ?? NUVIO_SNAPSHOT_LIMIT,
                     }, accessToken), 'sync_pull_watched_items', opts.pageSize === undefined ? NUVIO_SNAPSHOT_LIMIT : Number.POSITIVE_INFINITY)
-                    : await pullNuvioWatchedPages<NuvioWatchedRow>(
-                        (page, pageSize) => rpc('sync_pull_watched_items', { p_profile_id: idx, p_page: page, p_page_size: pageSize }, accessToken),
-                    )
+                    : await readAllPages<NuvioWatchedRow>('sync_pull_watched_items', { p_profile_id: idx, p_page: 1, p_page_size: NUVIO_READ_LIMIT }, accessToken, watchedRowKey, 'watched_at')
                 trace('nuvioDriver', 'readWatchHistory.success', { count: result.length, profileIndex: idx, timing: Date.now() - start })
                 return result
             } catch (err) {
@@ -221,12 +258,7 @@ export function createNuvioDriver(options: { baseUrl?: string; publishableKey?: 
 
         async readWatchProgress(accessToken: string, profileId?: string | number) {
             const idx = await resolveProfileIndex(accessToken, profileId)
-            const rows = await rpc('sync_pull_watch_progress', {
-                p_profile_id: idx,
-                p_since_last_watched: 0,
-                p_limit: NUVIO_SNAPSHOT_LIMIT,
-            }, accessToken)
-            return validateNuvioRows<NuvioProgressRow>(rows, 'sync_pull_watch_progress', NUVIO_SNAPSHOT_LIMIT)
+            return readAllPages<NuvioProgressRow>('sync_pull_watch_progress', { p_profile_id: idx, p_since_last_watched: 0, p_limit: NUVIO_READ_LIMIT }, accessToken, progressRowKey, 'last_watched')
         },
 
         async readPlugins(accessToken: string, profileId?: string | number) {
