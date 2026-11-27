@@ -613,9 +613,12 @@ async function writePlatformAddons(driver, connection, addons, source, prep = nu
     })
 }
 
-function connectionKey(accountId, connectionId) {
-    return `${accountId}:${connectionId}`
-}
+// Health and backoff belong to one workspace's connection: two workspaces may hold the same platform account id.
+// A connection without an owner (a legacy rule) is identified by its rule instead, the same way on write and on read.
+const healthOwner = (connection) => (typeof connection?.syncUser === 'string' && connection.syncUser)
+    || (typeof connection?.healthId === 'string' && connection.healthId)
+    || null
+const stateKey = (owner, accountId) => JSON.stringify([owner || null, accountId])
 
 // A Stremio auth failure is tied to the key that failed: a newly stored key is tried at once.
 function stremioKeyFingerprint(connection) {
@@ -623,12 +626,17 @@ function stremioKeyFingerprint(connection) {
     return typeof key === 'string' && key ? crypto.createHash('sha256').update(key).digest('hex').slice(0, 16) : null
 }
 
+const ownerOf = (connections) => (connections || []).map(healthOwner).find(Boolean) ?? null
+
 export function createReconciler(fastify) {
+    // Indexed by owner and account, then connection: a lookup reads only its own entries.
     const connectionState = new Map()
+    const keyOwner = new Map()
+    const owners = new Map()
     const syncCycleCounters = new Map()
 
-    const getState = (accountId, connId) => {
-        return connectionState.get(connectionKey(accountId, connId)) || {
+    const getState = (owner, accountId, connId) => {
+        return connectionState.get(stateKey(owner, accountId))?.get(connId) || {
             consecutiveFailures: 0,
             lastError: null,
             lastErrorAt: null,
@@ -638,30 +646,74 @@ export function createReconciler(fastify) {
         }
     }
 
-    const setState = (accountId, connId, state) => {
-        connectionState.set(connectionKey(accountId, connId), state)
+    // Healthy entries expire after an hour, failing ones after a day; each workspace is capped and trims only its own, healthy first.
+    const STATE_TTL_MS = 60 * 60 * 1000
+    const FAILING_TTL_MS = 24 * 60 * 60 * 1000
+    const MAX_PER_OWNER = 2000
+    let lastEvictAt = 0
+
+    const deleteState = (key, connId) => {
+        const byConnection = connectionState.get(key)
+        if (!byConnection?.delete(connId)) return false
+        const owner = owners.get(keyOwner.get(key))
+        if (owner) owner.count--
+        if (byConnection.size === 0) {
+            connectionState.delete(key)
+            owner?.keys.delete(key)
+            if (owner && owner.keys.size === 0) owners.delete(keyOwner.get(key))
+            keyOwner.delete(key)
+        }
+        return true
     }
 
-    const STATE_TTL_MS = 60 * 60 * 1000
-    const MAX_ENTRIES = 10000
-    let lastEvictAt = 0
+    const lastSeen = (state) => Math.max(state.lastSync || 0, state.lastErrorAt || 0, state.seenAt || 0)
+    const isFailing = (state) => state.status === 'error' || state.status === 'expired' || (state.consecutiveFailures || 0) > 0
+    const entriesOf = (owner) => {
+        const list = []
+        for (const key of owner.keys) for (const [connId, state] of connectionState.get(key) || []) list.push([key, connId, isFailing(state) ? 1 : 0, lastSeen(state)])
+        return list.sort((a, b) => a[2] - b[2] || a[3] - b[3])
+    }
+
+    const trimOwner = (owner, target) => {
+        for (const [key, connId] of entriesOf(owner)) {
+            if (owner.count <= target) break
+            deleteState(key, connId)
+        }
+    }
+
     const evictStaleState = () => {
         const now = Date.now()
         if (now - lastEvictAt < STATE_TTL_MS) return
         lastEvictAt = now
-        for (const [key, state] of connectionState.entries()) {
-            const lastActivity = Math.max(state.lastSync, state.lastErrorAt || 0)
-            const isStale = lastActivity > 0 && now - lastActivity > STATE_TTL_MS
-            const isFailing = state.status === 'error' || (state.consecutiveFailures || 0) > 0
-            if ((isStale && !isFailing) || (connectionState.size > MAX_ENTRIES && !isFailing)) {
-                connectionState.delete(key)
+        for (const [key, byConnection] of [...connectionState]) {
+            for (const [connId, state] of [...byConnection]) {
+                if (now - lastSeen(state) > (isFailing(state) ? FAILING_TTL_MS : STATE_TTL_MS)) deleteState(key, connId)
             }
         }
     }
 
-    const recordSuccess = (accountId, connId) => {
-        const prev = getState(accountId, connId)
-        setState(accountId, connId, {
+    const setState = (ownerIdentity, accountId, connId, state) => {
+        const key = stateKey(ownerIdentity, accountId)
+        let byConnection = connectionState.get(key)
+        const ownerId = ownerIdentity || ''
+        if (!byConnection) {
+            byConnection = new Map()
+            connectionState.set(key, byConnection)
+            keyOwner.set(key, ownerId)
+            if (!owners.has(ownerId)) owners.set(ownerId, { count: 0, keys: new Set() })
+            owners.get(ownerId).keys.add(key)
+        }
+        const isNew = !byConnection.has(connId)
+        byConnection.set(connId, state)
+        if (!isNew) return
+        const owner = owners.get(ownerId)
+        owner.count++
+        if (owner.count > MAX_PER_OWNER) trimOwner(owner, Math.floor(MAX_PER_OWNER * 0.9))
+    }
+
+    const recordSuccess = (owner, accountId, connId) => {
+        const prev = getState(owner, accountId, connId)
+        setState(owner, accountId, connId, {
             ...prev,
             consecutiveFailures: 0,
             lastError: null,
@@ -673,13 +725,13 @@ export function createReconciler(fastify) {
         trace('reconciler', 'recordSuccess', { accountId, connectionId: connId })
     }
 
-    const recordFailure = (accountId, connId, error, isAuthError, keyFingerprint = null) => {
-        const prev = getState(accountId, connId)
+    const recordFailure = (owner, accountId, connId, error, isAuthError, keyFingerprint = null) => {
+        const prev = getState(owner, accountId, connId)
         const consecutiveFailures = prev.consecutiveFailures + 1
         const status = isAuthError ? 'expired' : (consecutiveFailures >= BACKOFF_THRESHOLD ? 'error' : prev.status)
         const skipCyclesRemaining = getBackoffSkip(consecutiveFailures)
 
-        setState(accountId, connId, {
+        setState(owner, accountId, connId, {
             ...prev,
             consecutiveFailures,
             lastError: error.message || String(error),
@@ -695,10 +747,12 @@ export function createReconciler(fastify) {
     const EXPIRED_RETRY_COOLDOWN_MS = 30 * 60 * 1000 // 30 minutes; Supabase rate-limits auth to 6 req/min per IP. Hammering it gets users banned.
     const NETWORK_ERROR_COOLDOWN_MS = 2 * 60 * 1000  // 2 minutes for transient network issues
 
-    const skipReasonFor = (accountId, connId, owner, keyFingerprint = null) => {
+    const skipReasonFor = (accountId, connId, owner, keyFingerprint = null, stateOwner = owner) => {
         // A fresh client collection write means the hub is momentarily behind the platforms.
         if (hasRecentClientCollectionWrite(owner, accountId)) return 'recent-write'
-        const state = getState(accountId, connId)
+        const stored = connectionState.get(stateKey(stateOwner, accountId))?.get(connId)
+        if (stored) stored.seenAt = Date.now()
+        const state = getState(stateOwner, accountId, connId)
         if (state.status === 'expired' && !(state.failedKey && keyFingerprint && keyFingerprint !== state.failedKey)) {
             // Auth errors get a LONG cooldown. Supabase bans IPs that hit auth too frequently.
             const timeSinceError = state.lastErrorAt ? Date.now() - state.lastErrorAt : Infinity
@@ -706,13 +760,13 @@ export function createReconciler(fastify) {
         }
         if (state.status === 'error' && state.consecutiveFailures >= BACKOFF_THRESHOLD) {
             if (state.skipCyclesRemaining > 0) {
-                setState(accountId, connId, { ...state, skipCyclesRemaining: state.skipCyclesRemaining - 1 })
+                setState(stateOwner, accountId, connId, { ...state, skipCyclesRemaining: state.skipCyclesRemaining - 1 })
                 return 'backoff'
             }
         }
         return null
     }
-    const shouldSkip = (accountId, connection) => skipReasonFor(accountId, connection.id, connection.syncUser, stremioKeyFingerprint(connection)) !== null
+    const shouldSkip = (accountId, connection) => skipReasonFor(accountId, connection.id, connection.syncUser, stremioKeyFingerprint(connection), healthOwner(connection)) !== null
 
     const tickCycleCounter = (accountId) => {
         evictStaleState()
@@ -761,7 +815,7 @@ export function createReconciler(fastify) {
 
         for (const connection of targetConnections) {
             const connId = connection.id
-            const skipReason = skipReasonFor(accountId, connId, connection.syncUser, stremioKeyFingerprint(connection))
+            const skipReason = skipReasonFor(accountId, connId, connection.syncUser, stremioKeyFingerprint(connection), healthOwner(connection))
             if (skipReason) {
                 outcomes[connId] = { outcome: 'skipped', reason: skipReason }
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Skipping ${connection.platform} (${connId}): ${skipReason}`)
@@ -820,11 +874,11 @@ export function createReconciler(fastify) {
                     if (outcome?.skipped) { outcomes[connId] = { outcome: 'skipped', reason: outcome.reason }; continue }
                     changes.push({ type: 'restore', url: '', platform: connection.platform, primary: false })
                 }
-                recordSuccess(accountId, connId)
+                recordSuccess(healthOwner(connection), accountId, connId)
                 outcomes[connId] = { outcome: needsWrite ? 'written' : 'unchanged' }
             } catch (err) {
                 if (isStateRefusal(err)) throw err
-                recordFailure(accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
+                recordFailure(healthOwner(connection), accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
                 outcomes[connId] = { outcome: 'failed', error: err?.message || String(err) }
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
@@ -961,24 +1015,30 @@ export function createReconciler(fastify) {
                         continue
                     }
                 }
-                recordSuccess(accountId, connId)
+                recordSuccess(healthOwner(connection), accountId, connId)
                 synced.push(connection.platform)
                 syncedIds.push(connId)
             } catch (err) {
                 if (isStateRefusal(err)) throw err
-                recordFailure(accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
+                recordFailure(healthOwner(connection), accountId, connId, err, err.isAuthError, stremioKeyFingerprint(connection))
                 fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] ${connection.platform} push failed: ${err.message}`)
             }
         }
 
         trace('reconciler', 'enforceAccount.complete', { accountId, synced, timing: Date.now() - start })
-        return { synced, syncedIds, connectionStates: getConnectionStates(accountId), chainGuardSkipped, recoveredAddons, conflictHolds }
+        return { synced, syncedIds, connectionStates: getConnectionStates(accountId, ownerOf(connections)), chainGuardSkipped, recoveredAddons, conflictHolds }
     }
 
     // Nuvio instances that reject the optional plugins table; skip after the first 401
     const nuvioPluginsUnsupported = new Set()
     // Per workspace and connection: another workspace using the same connection id never switches this one's plugins off.
     const pluginKey = (connection) => JSON.stringify([connection.syncUser ?? null, connection.id])
+    const MAX_PLUGIN_REFUSALS = 10000
+    const rememberPluginRefusal = (key) => {
+        nuvioPluginsUnsupported.delete(key)
+        if (nuvioPluginsUnsupported.size >= MAX_PLUGIN_REFUSALS) nuvioPluginsUnsupported.delete(nuvioPluginsUnsupported.values().next().value)
+        nuvioPluginsUnsupported.add(key)
+    }
 
     const reconcilePlugins = async (accountId, connection, opts = {}) => {
         if (connection.platform !== 'nuvio') return
@@ -1015,16 +1075,16 @@ export function createReconciler(fastify) {
                     connection.credentials.profileId
                 )
             }
-            recordSuccess(accountId, connection.id)
+            recordSuccess(healthOwner(connection), accountId, connection.id)
         } catch (err) {
             if (isStateRefusal(err)) throw err
             if (err.isAuthError) {
                 // Token was just refreshed, so this 401 means plugins aren't offered on this instance
-                nuvioPluginsUnsupported.add(pluginKey(connection))
+                rememberPluginRefusal(pluginKey(connection))
                 fastify.log.debug({ category: 'Reconciler' }, `[${accountId}] Nuvio plugins unavailable on this instance (auth rejected); skipping plugin sync.`)
                 return
             }
-            recordFailure(accountId, connection.id, err, false)
+            recordFailure(healthOwner(connection), accountId, connection.id, err, false)
             fastify.log.warn({ category: 'Reconciler' }, `[${accountId}] Nuvio plugin sync failed: ${err.message}`)
         }
     }
@@ -1057,26 +1117,27 @@ export function createReconciler(fastify) {
         return results
     }
 
-    const getConnectionStates = (accountId) => {
+    const ownedEntries = (owner, accountId) => [...(connectionState.get(stateKey(owner, accountId)) || [])]
+        .map(([connectionId, state]) => ({ connectionId, state }))
+
+    const getConnectionStates = (accountId, owner) => {
         const states = {}
-        for (const [key, state] of connectionState.entries()) {
-            if (key.startsWith(`${accountId}:`)) {
-                const { failedKey: _failedKey, ...visible } = state
-                states[key.split(':').slice(1).join(':')] = visible
-            }
+        for (const { connectionId, state } of ownedEntries(owner, accountId)) {
+            const { failedKey: _failedKey, seenAt: _seenAt, ...visible } = state
+            states[connectionId] = visible
         }
         return states
     }
 
     // A Stremio expiry recorded for an older key says nothing about the key the owner stores now.
     const currentConnectionStates = async (accountId, syncUser) => {
-        const states = getConnectionStates(accountId)
-        const keyed = [...connectionState.entries()].filter(([key, state]) => key.startsWith(`${accountId}:`) && state.status === 'expired' && state.failedKey)
-        if (keyed.length === 0 || !syncUser) return states
+        if (!syncUser) return {}
+        const states = getConnectionStates(accountId, syncUser)
+        const keyed = ownedEntries(syncUser, accountId).filter(({ state }) => state.status === 'expired' && state.failedKey)
+        if (keyed.length === 0) return states
         let connections
         try { connections = await resolveConnections(accountId, syncUser) } catch { return states }
-        for (const [key, state] of keyed) {
-            const connId = key.split(':').slice(1).join(':')
+        for (const { connectionId: connId, state } of keyed) {
             const current = stremioKeyFingerprint((connections || []).find(c => c.id === connId))
             if (current && current !== state.failedKey && states[connId]) states[connId] = { ...states[connId], status: 'active', lastError: null }
         }
@@ -1091,13 +1152,14 @@ export function createReconciler(fastify) {
     // account id alone. One predicate drives the dry run and the run; healthy
     // connection state is preserved. Zero DB writes.
     const ownerConnectionKeys = async (syncUser) => {
-        const keys = new Set()
+        const keys = new Map()
+        const add = (accountId, connId) => keys.set(JSON.stringify([accountId, connId]), { key: stateKey(syncUser, accountId), connId })
         const creds = await db.query('SELECT account_id, connection_id, credential_type FROM server_credentials WHERE sync_user = $1', [syncUser])
         for (const row of creds) {
             if (!row.account_id) continue
             const type = row.credential_type || 'stremio'
             const connId = row.connection_id || `${row.account_id}:${type}`
-            keys.add(`${row.account_id}:${connId}`)
+            add(row.account_id, connId)
         }
         const rules = await db.query('SELECT account_id, connection_id, platform FROM autopilot_rules WHERE owner_sync_user = $1', [syncUser])
         for (const row of rules) {
@@ -1106,10 +1168,10 @@ export function createReconciler(fastify) {
             // rules only (platform stremio, or a legacy row with neither platform nor
             // connection); a connection-scoped rule owns exactly its own connection id.
             const platform = row.platform || 'stremio'
-            if (!row.connection_id && platform === 'stremio') keys.add(`${row.account_id}:${row.account_id}:stremio`)
-            if (row.connection_id) keys.add(`${row.account_id}:${row.connection_id}`)
+            if (!row.connection_id && platform === 'stremio') add(row.account_id, `${row.account_id}:stremio`)
+            if (row.connection_id) add(row.account_id, row.connection_id)
         }
-        return keys
+        return [...keys.values()]
     }
 
     const loginBackoffEntry = (state) => (state.status === 'expired' && state.lastErrorAt != null)
@@ -1121,9 +1183,9 @@ export function createReconciler(fastify) {
         let entries = 0
         let authCooldown = 0
         let backoff = 0
-        for (const [key, state] of connectionState.entries()) {
-            if (!owned.has(key)) continue
-            if (!loginBackoffEntry(state)) continue
+        for (const { key, connId } of owned) {
+            const state = connectionState.get(key)?.get(connId)
+            if (!state || !loginBackoffEntry(state)) continue
             entries++
             if (state.status === 'expired' && state.lastErrorAt != null) authCooldown++
             else backoff++
@@ -1134,10 +1196,10 @@ export function createReconciler(fastify) {
     const resetLoginBackoffForOwner = async (syncUser) => {
         const owned = await ownerConnectionKeys(syncUser)
         let cleared = 0
-        for (const key of [...connectionState.keys()]) {
-            if (!owned.has(key)) continue
-            if (!loginBackoffEntry(connectionState.get(key))) continue
-            connectionState.delete(key)
+        for (const { key, connId } of owned) {
+            const state = connectionState.get(key)?.get(connId)
+            if (!state || !loginBackoffEntry(state)) continue
+            deleteState(key, connId)
             cleared++
         }
         return cleared

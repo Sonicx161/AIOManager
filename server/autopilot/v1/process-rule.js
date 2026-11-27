@@ -22,6 +22,10 @@ import { assertAccountActive, ownerCanWrite, accountBlockedInSnapshot, gateCode,
 const RETRYABLE_RECONCILE = new Set(['failed', 'skipped:backoff', 'skipped:auth-cooldown'])
 const reconcileOutcomeKey = (outcome) => (outcome ? (outcome.outcome === 'skipped' ? `skipped:${outcome.reason}` : outcome.outcome) : null)
 
+// Connection health is keyed by owner; a legacy rule without one is identified by its rule id, on write and on read.
+export const ruleHealthOwner = (rule) => (typeof rule.owner_sync_user === 'string' && rule.owner_sync_user) || `rule:${rule.id}`
+export const ruleStremioConnection = (rule, authKey) => ({ id: `${rule.account_id}:stremio`, platform: 'stremio', accountId: rule.account_id, syncUser: rule.owner_sync_user, healthId: ruleHealthOwner(rule), enabled: true, status: 'active', credentials: { authKey }, capabilities: ['addons'], consecutiveFailures: 0 })
+
 export function createProcessRule({
     fastify, nowMs, reconciler, decryptRuleField, runtimeState, cycleTargets, siblingChainPlans,
     memberStatus, getHealthLatency, isSubstantial, fetchManifestRaw,
@@ -469,7 +473,7 @@ export function createProcessRule({
                     built.canonical = await withCurrentDestinations(built.canonical, rule.account_id, rule.owner_sync_user)
                     reconciledList = built.canonical
 
-                    const stremioConn = { id: `${rule.account_id}:stremio`, platform: 'stremio', accountId: rule.account_id, syncUser: rule.owner_sync_user, enabled: true, status: 'active', credentials: { authKey: decryptedAuthKey }, capabilities: ['addons'], consecutiveFailures: 0 }
+                    const stremioConn = ruleStremioConnection(rule, decryptedAuthKey)
                     const connectionTargets = hasChanged ? (await reconciler.resolveConnections(rule.account_id, rule.owner_sync_user)).filter(c => c.enabled && c.platform !== 'stremio') : []
                     const stremioWriter = async (conn) => {
                         try {
@@ -528,7 +532,7 @@ export function createProcessRule({
                                 const unreached = targets.filter(c => c.enabled && (unreachedIds ? unreachedIds.has(c.id) : RETRYABLE_RECONCILE.has(reconcileOutcomeKey(outcome?.outcomes?.[c.id]))))
                                 confirmedScopes.push(...targets.filter(c => c.enabled && (outcome?.outcomes?.[c.id] ? ['written', 'unchanged'].includes(outcome.outcomes[c.id].outcome) : !unreached.includes(c))).map(c => c.id))
                                 unpushedConnections = unreached.map(c => c.id)
-                                pushedPlatforms = platformResults([stremioTarget, ...targets], { okIds: [stremioTarget.id, ...targets.filter(c => !unreached.includes(c)).map(c => c.id)], states: outcome?.connectionStates ?? reconciler.getConnectionStates?.(rule.account_id), outcomes: outcome?.outcomes, since: pushStartedAt })
+                                pushedPlatforms = platformResults([stremioTarget, ...targets], { okIds: [stremioTarget.id, ...targets.filter(c => !unreached.includes(c)).map(c => c.id)], states: outcome?.connectionStates ?? reconciler.getConnectionStates?.(rule.account_id, ruleHealthOwner(rule)), outcomes: outcome?.outcomes, since: pushStartedAt })
                                 syncedPlatforms.push(...targets.filter(c => !unreached.includes(c)).map(c => c.platform))
                                 failedPlatforms.push(...unreached.map(c => c.platform))
                             }
