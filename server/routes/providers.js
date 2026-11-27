@@ -646,6 +646,7 @@ export function registerProviderRoutes(fastify, reconciler) {
         } catch (err) {
             return mapNuvioLoginError(reply, err, {
                 authMessage: 'Invalid email or password',
+                passwordSignIn: true,
                 timeoutMessage: 'Nuvio login timed out. Supabase may be cold-starting. Please try again in a few seconds.'
             })
         }

@@ -16,6 +16,13 @@ const RPC_DEFAULT_MAX_BYTES = 100 * 1024 * 1024
 
 // GoTrue answers 400 (not 401) for a wrong password or a revoked refresh token.
 const AUTH_REJECTION_CODES = /^(invalid_credentials|invalid_grant|refresh_token_not_found|refresh_token_already_used|session_not_found|session_expired)$/
+export function parseRetryAfterSeconds(value, now = Date.now()) {
+    const raw = typeof value === 'string' ? value.trim() : ''
+    if (!raw) return null
+    const seconds = /^\d+$/.test(raw) ? Number(raw) : Math.ceil((Date.parse(raw) - now) / 1000)
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null
+}
+
 function isNuvioAuthRejection(status, body) {
     if (status !== 400 || !body || typeof body !== 'object') return false
     return AUTH_REJECTION_CODES.test(String(body.error_code || body.error || ''))
@@ -152,6 +159,10 @@ export function createNuvioDriver(options = {}) {
                 if (!res.ok) {
                     const err = new Error(`Nuvio auth failed: ${res.status}`)
                     err.status = res.status
+                    if (res.status === 429) {
+                        const wait = parseRetryAfterSeconds(res.headers.get('retry-after'))
+                        if (wait != null) err.retryAfterSec = wait
+                    }
                     try { err.data = await res.json() } catch { }
                     err.isAuthError = res.status === 401 || res.status === 403 || isNuvioAuthRejection(res.status, err.data)
                     throw err
